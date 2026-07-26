@@ -1,0 +1,57 @@
+# Disclosure Drift — project configuration
+#
+# The cohorts, gates, and seeds sections below MIRROR the frozen research
+# definitions in src/disclosure_drift/cohorts.py. That module is canonical.
+# Loading hard-fails if any value here disagrees with it, and no environment
+# variable can override them. Changing a frozen definition requires an approved
+# decision record and a reviewed code change.
+#
+# Secrets never appear in this file. The SEC user-agent is referenced by
+# environment-variable NAME only; see .env.example.
+
+project:
+  name: disclosure-drift
+  version: 0.1.0
+
+paths:
+  # Keep these relative. Absolute, machine-specific paths belong in the
+  # environment (DISCLOSURE_DRIFT_DATA_ROOT / DISCLOSURE_DRIFT_LOG_DIR).
+  data_root: ./data
+  log_dir: ./logs
+
+logging:
+  level: INFO
+  to_file: false
+  filename: disclosure_drift.log
+
+sec:
+  # Variable NAME only. The value is resolved on demand and never logged.
+  user_agent_env: DISCLOSURE_DRIFT_SEC_USER_AGENT
+  # Conservative placeholder. Milestone 1 implements no network access.
+  requests_per_second: 5.0
+  max_retries: 3
+
+# --- Frozen research definitions (mirrored; see cohorts.py) ---
+cohorts:
+  development:
+    start: 2010-01-01
+    end: 2021-12-31
+  transition:
+    start: 2022-01-01
+    end: 2023-12-31
+  primary_test:
+    start: 2024-01-01
+    end: 2024-12-31
+  prospective:
+    start: 2025-01-01
+    end: 2025-12-31
+  monitoring:
+    start: 2026-01-01
+    end: 2026-12-31
+
+gates:
+  prospective_outcome_cutoff: 2027-03-31
+  monitoring_outcome_cutoff: 2028-03-31
+
+seeds:
+  bootstrap: 20260725

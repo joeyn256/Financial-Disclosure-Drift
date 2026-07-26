@@ -18,5 +18,15 @@ data/raw/
 data/interim/
 data/processed/
 data/publication/
+data/external/
+data/cache/
 
 *.log
+logs/
+
+build/
+dist/
+*.egg-info/
+
+.idea/
+.vscode/

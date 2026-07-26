@@ -9,6 +9,7 @@ import pytest
 from disclosure_drift.errors import RawObjectIntegrityError
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.raw_store import (
+    LINEAGE_SUFFIX,
     RawStore,
     compress_deterministically,
     decompress,
@@ -100,12 +101,16 @@ def test_crash_after_promotion_leaves_a_valid_orphan(store: RawStore) -> None:
         _store(store, fail_after="promotion")
 
     directory = store._tree.accession_directory(CIK, ACCESSION)  # noqa: SLF001
-    promoted = [path for path in directory.iterdir() if not path.name.endswith(".part")]
+    promoted = [
+        path for path in directory.iterdir() if not path.name.endswith((".part", LINEAGE_SUFFIX))
+    ]
     assert len(promoted) == 1
     assert promoted[0].read_bytes() == BODY
 
 
-def test_reconciliation_adopts_orphans_and_quarantines_partials(store: RawStore) -> None:
+def test_catalog_independent_reconciliation_quarantines_unproven_orphans(
+    store: RawStore,
+) -> None:
     with pytest.raises(RawObjectIntegrityError):
         _store(store, fail_after="promotion")
 
@@ -117,9 +122,9 @@ def test_reconciliation_adopts_orphans_and_quarantines_partials(store: RawStore)
         _store(store, filename="other.txt", raise_during_stream=interrupt)
 
     report = store.reconcile(known=[])
-    assert len(report.adopted) == 1
-    assert len(report.quarantined) == 1
-    assert report.quarantined[0].startswith("raw/sec/quarantine/")
+    assert report.adopted == ()
+    assert len(report.quarantined) == 2
+    assert all(path.startswith("raw/sec/quarantine/") for path in report.quarantined)
     assert not report.is_clean
     assert not report.missing_files
 
@@ -161,6 +166,14 @@ def test_identical_content_is_not_treated_as_a_change(store: RawStore) -> None:
     )
     assert again.record.supersedes_observation_id is None
     assert again.record.reason_code is None
+
+
+def test_conflicting_existing_destination_is_never_overwritten(store: RawStore) -> None:
+    first = _store(store)
+    with pytest.raises(RawObjectIntegrityError, match="refusing to overwrite"):
+        _store(store, body=BODY + b"changed", filename=first.absolute_path.name)
+    assert first.absolute_path.read_bytes() == BODY
+    assert list(first.absolute_path.parent.glob("*.part"))
 
 
 def test_verify_detects_local_corruption(store: RawStore) -> None:

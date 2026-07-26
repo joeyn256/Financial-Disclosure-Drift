@@ -102,7 +102,32 @@ Fixtures are synthetic. No test provokes SEC rate restrictions; all responses ar
 | TMP-008b | Ordinary winter time | `20210115143000` | resolves at UTC-05:00 | blocking | yes | D010 §4.3 |
 | TMP-008c | Ordinary summer time | `20210715143000` | resolves at UTC-04:00 | blocking | yes | D010 §4.3 |
 | TMP-008d | Transition-adjacent times | `20210314015900` and `20210314030000` | both ordinary, at UTC-05:00 and UTC-04:00 | high | no | D010 §4.3 |
-| TMP-009 | 2009 support filing | 2009 filing date | `support_2009`, `support_only`, `primary_target_flag = false` | blocking | yes | D008 §3 |
+| TMP-009 | 2009 support filing | 2009 filing date | `official_filing_temporal_cohort = 'support_2009'` (never `NULL`), `support_only`, `primary_target_flag = false` | blocking | yes | D008 §3 |
+| TMP-009a | Out-of-scope date persisted | 2008 or 2027 filing date | `out_of_scope`, never `NULL` and never `unresolved` | blocking | yes | D008 §3, R2.4 |
+| TMP-009b | Unresolved date persisted | absent or unparseable filing date | `unresolved`, distinct from `out_of_scope` | blocking | yes | R2.4 |
+| TMP-009c | Acceptance audit cohort | any resolved acceptance date | same label vocabulary, audit-only, never analysis assignment | blocking | yes | D010 |
+| ACC-001 | Order-independent resolution | same observation set in both ingestion orders | identical canonical values, unresolved statuses, and resolution hash | blocking | yes | D012 §10 |
+| ACC-002 | Equal-authority conflict | two equal-authority sources disagree on a material field | `unresolved`, `ACCESSION_FIELD_CONFLICT_MATERIAL`, downstream use blocked | blocking | yes | D012 §3 |
+| ACC-003 | Correction supersedes | official correction on filing date | `resolved_by_correction`, prior observations preserved, cohort recomputed | blocking | yes | D012 §6 |
+| ACC-004 | 2024 cohort transition | correction entering or exiting `primary_test` | `ACCESSION_2024_COHORT_TRANSITION_REQUIRES_APPROVAL`, blocked until approved | blocking | yes | D012 §6 |
+| ACC-005 | Alias source authority | ticker file observes a filing field | never resolves it; alias sources carry no filing-field authority | blocking | yes | D012 §4 |
+| IDX-001 | Index reconciliation states | index and submissions coverage compared | all six states distinguishable; nothing merged or deleted | blocking | yes | D008, R2.5 |
+| PLAN-001 | Closed quarter required | quarter end on or before as-of date | `required_closed_quarter`; missing blocks completion | blocking | yes | R2.6 |
+| PLAN-002 | Open quarter provisional | quarter containing the as-of date | `provisional_open_quarter`; optional; never finalized | blocking | yes | R2.6 |
+| PLAN-003 | Future quarter excluded | quarter starting after the as-of date | `not_planned`; not missing, not a failure | blocking | yes | R2.6 |
+| PLAN-004 | Deterministic plan hash | same coverage and as-of dates | identical plan hash; any window change alters it | blocking | yes | R2.6 |
+| PLAN-005 | No implicit as-of date | coverage arguments partially supplied | refused; never completed from today's date | blocking | yes | R2.6 |
+| PLAN-006 | Open-quarter failure isolation | open quarter not retrieved | closed-quarter coverage still complete; provisional coverage empty | blocking | yes | R2.6 |
+| RES-001 | Resolver owns canonical fields | observations persisted then resolved | canonical values written only from the persisted resolution | blocking | yes | D012, R2.6 |
+| RES-002 | Order independence through the catalog | same observations in both orders | identical canonical values, statuses, reason codes, and hashes | blocking | yes | D012 §10 |
+| RES-003 | Restart mid-ingestion | restart between observations | resolution rebuilt from the catalog; deterministic rebuild matches | blocking | yes | D012, R2.6 |
+| RES-004 | Index cannot override submissions | full-index and entity-submissions disagree | entity submissions wins; no conflict raised | blocking | yes | D012 §4 |
+| RES-005 | Unresolved blocks cohort use | equal-authority filing-date conflict | canonical filing date `NULL`, cohort `unresolved`, completion blocked | blocking | yes | D012 §3 |
+| IDX-002 | Missing required index instance | planned instance absent | `INDEX_REQUIRED_INSTANCE_MISSING`, completion blocked | blocking | yes | R2.5 |
+| IDX-003 | No document URL construction | index file-name column parsed | accession extracted as metadata only; no URL built or followed | blocking | yes | M2.2 boundary |
+| CAL-010 | Annual calendar target year | plan supplies explicit year | only that year's identified holiday rows assert; other years contextual | blocking | yes | D011, R2.2 |
+| CAL-011 | Missing target year | no year supplied | nothing asserted, `REVIEW_CALENDAR_TARGET_YEAR_ABSENT`, source blocked | blocking | yes | D011, R2.2 |
+| CAL-012 | Unrecognized calendar structure | page redesign | `indeterminate`, not a valid empty holiday list; source blocked | blocking | yes | D011, R2.2 |
 | TMP-010 | No pre-2009 expansion | 2008 filing date | not auto-included; missing stays missing | high | yes | D008 §3 |
 | TMP-011 | Amendment cohort independence | amendment in a later cohort | own cohorts; original unchanged | blocking | yes | D010 §7 |
 | TMP-012 | Frozen windows unchanged | config mirror mutation | `FrozenDefinitionMismatchError` | blocking | yes | D003, D010 §1 |
@@ -121,7 +146,7 @@ Fixtures are synthetic. No test provokes SEC rate restrictions; all responses ar
 |---|---|---|---|---|---|
 | RAW-001 | Partial download | `.part` never promoted; never catalogued as complete | blocking | yes | D009 §7 |
 | RAW-002 | Local checksum mismatch | quarantined and preserved; `RAW_FILE_CHECKSUM_MISMATCH` | blocking | yes | D009 §6 |
-| RAW-003 | Remote content change | new observation with `REMOTE_CONTENT_CHANGED`; prior observation intact | blocking | yes | D009 §6 |
+| RAW-003 | Living metadata content update | new immutable observation with neutral `SOURCE_CONTENT_UPDATED`; prior observation intact | high | no | D009 §6; M2.2 source-update rule |
 | RAW-004 | Deterministic gzip round trip | decompression reproduces `content_sha256` | blocking | yes | D009 §5 |
 | RAW-005 | Crash before promotion | no catalog row; `.part` retained for reconciliation | blocking | yes | D009 §7 |
 | RAW-006 | Crash after promotion before commit | reconciliation adopts the valid orphan; nothing deleted | blocking | yes | D009 §7 |

@@ -31,6 +31,12 @@ STATIC_FORBIDDEN_IMPORTS = frozenset(
     }
 )
 
+#: The one module allowed to import the approved HTTP client, so network access is
+#: confined to a single auditable adapter (Stage M2.2). Retrieval *policy* lives in
+#: ``sec/http_client.py``, which imports no HTTP library at all.
+HTTP_CLIENT_ALLOWLIST = frozenset({"httpx_transport.py"})
+ALLOWED_HTTP_LIBRARIES = frozenset({"httpx"})
+
 #: Third-party HTTP clients that must not appear in ``sys.modules`` after import.
 #: Standard-library modules are deliberately excluded: ``socket`` and friends can be
 #: loaded transitively by a dependency, which is not evidence of network activity.
@@ -85,17 +91,38 @@ def _is_forbidden(module: str) -> bool:
 
 
 def test_static_check_no_networking_client_imported() -> None:
-    """No package module imports a socket or HTTP client directly."""
+    """Only the allowlisted adapter may import an HTTP client; nothing imports sockets."""
     sources = sorted(PACKAGE_DIR.rglob("*.py"))
     assert sources, "expected package sources to scan"
 
     offenders: dict[str, set[str]] = {}
     for source in sources:
         found = {module for module in _imported_modules(source) if _is_forbidden(module)}
+        if source.name in HTTP_CLIENT_ALLOWLIST:
+            found -= ALLOWED_HTTP_LIBRARIES
         if found:
             offenders[source.name] = found
 
     assert offenders == {}, f"networking imports found: {offenders}"
+
+
+def test_http_client_library_is_confined_to_one_module() -> None:
+    """Exactly the allowlisted adapter imports httpx, and it does import it."""
+    importers = {
+        source.name
+        for source in sorted(PACKAGE_DIR.rglob("*.py"))
+        if ALLOWED_HTTP_LIBRARIES & _imported_modules(source)
+    }
+    assert importers == set(HTTP_CLIENT_ALLOWLIST)
+
+
+def test_retrieval_policy_module_imports_no_http_library() -> None:
+    """``sec/http_client.py`` holds the policy and must stay transport-agnostic."""
+    policy_module = PACKAGE_DIR / "sec" / "http_client.py"
+    imported = _imported_modules(policy_module)
+    assert policy_module.is_file()
+    assert not (imported & ALLOWED_HTTP_LIBRARIES)
+    assert not any(_is_forbidden(module) for module in imported)
 
 
 def test_static_audit_detects_a_forbidden_import() -> None:

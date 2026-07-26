@@ -29,8 +29,83 @@ Conventions used throughout:
 | `public_availability_date_proxy` | TEXT | no | Derived | Date-level proxy for public availability |
 | `availability_precision` | TEXT | no | Derived | `timestamp` or `date` |
 | `availability_basis` | TEXT | no | Derived | `same_day_acceptance`, `later_official_filing_date`, `filing_date_only` |
-| `official_filing_temporal_cohort` | TEXT | no | `cohort_for(filing_date_sec)` | **Authoritative.** One of the five frozen cohorts, or `support_2009`, or `out_of_scope` |
-| `accepted_temporal_cohort` | TEXT | yes | `cohort_for(acceptance_date_sec)` | **Audit only.** Never used for analysis assignment |
+| `official_filing_temporal_cohort` | TEXT | no | `cohort_label_for_value(filing_date_sec)` | **Authoritative.** Always one of: the five frozen cohorts, `support_2009`, `out_of_scope`, or `unresolved`. Never `NULL` for a valid date |
+| `accepted_temporal_cohort` | TEXT | no | `cohort_label_for_value(acceptance_date_sec)` | **Audit only.** Same label vocabulary; never used for analysis assignment |
+
+### Cohort label vocabulary (Stage M2.2-R2.4)
+
+Four meanings are kept distinct. Collapsing any of them into `NULL` would make a known
+exclusion indistinguishable from an unknown date, so persistence uses
+`disclosure_drift.sec.temporal.cohort_label_for_value` and never writes `NULL`.
+
+| Label | Meaning | Analysis membership |
+|---|---|---|
+| `support_2009` | A valid 2009 filing date | Support only, never analysis |
+| `development`, `transition`, `primary_test`, `prospective`, `monitoring` | Inside a frozen window | Eligible under that cohort's frozen role |
+| `out_of_scope` | A valid, resolved date outside every supported window | None; the exclusion is *known* |
+| `unresolved` | The date itself is absent, unparseable, or unresolved | None; the date is *unknown* |
+
+`out_of_scope` and `unresolved` are never interchangeable. The first is evidence of
+exclusion; the second is absence of evidence.
+
+### Quarterly index-instance policy (Stage M2.2-R2.6)
+
+The quarterly company index is the required reconciliation unit. Planning inputs are
+explicit and persisted: `coverage_start`, `coverage_end`, `as_of_date`, and the policy
+version `quarterly-index-instances/1.0`. **The as-of date is never read from the clock**
+in planning or parsing, so the same request reproduces the same plan on any later day.
+
+| Instance kind | Condition | Required | Completion effect |
+|---|---|---|---|
+| `required_closed_quarter` | quarter end ≤ `as_of_date` | yes | Missing, failed, malformed, unavailable, or unreconciled blocks completion |
+| `provisional_open_quarter` | quarter contains `as_of_date` | optional | Retrieved only when explicitly included; reported separately; never finalized; failure never fails closed-quarter completion |
+| `not_planned` | quarter starts after `as_of_date` | no | Not requested, not missing, not a failure |
+
+A partial intersection with the coverage window still plans the whole quarter, because
+the index instance is published per quarter and cannot be requested in part. An annual
+index is never a substitute for a missing required quarterly instance; any future annual
+support is an additional reconciliation layer only.
+
+Coverage is reported with finalized and provisional parts kept apart: required closed
+quarters planned, successful, and failed or unavailable; the provisional open quarter and
+whether it was retrieved; future quarters not planned; and separate `finalized` and
+`provisional` reconciliation coverage lists. `completed=True` requires every required
+closed-quarter instance and every other required source to satisfy the R1 completion
+contract, and never claims the open quarter or a future period is finalized.
+`coverage_start`, `coverage_end`, `as_of_date`, and the exact instance list are all
+included in the deterministic census-plan hash.
+
+### Accession field resolution (Decision 012)
+
+Canonical accession fields in `census_accessions` are **derived views** over immutable
+observations, resolved per field by `census_accession_field_resolutions`. Resolution is
+deterministic and independent of ingestion order; recency alone is never authority; equal
+authority with conflicting values stays `unresolved`. See
+`Docs/Decisions/decision_012_accession_observation_resolution.md` for the authority
+hierarchy, materiality, correction handling, and the persisted resolution output.
+
+**How observations reach canonical fields.** Three layers, in order, with no shortcut:
+
+1. **Immutable source-native observations** — `_normalize_accession` writes one row per
+   source field into `census_accession_observations`, keyed by source observation and
+   parsed record. The insert into `census_accessions` at this point only *seeds* the row
+   so foreign keys resolve; its canonical values are placeholders.
+2. **Deterministic field-level resolution** — `CensusCatalog.resolve_persisted_accessions`
+   reads the observations back **from the catalog**, maps source-native names to canonical
+   names via `CANONICAL_FIELD_BY_SOURCE_FIELD`, filters to `RESOLVABLE_SOURCE_IDS`, and
+   calls `resolve_accession`. Results are written to
+   `census_accession_field_resolutions` and `census_accession_cohort_resolutions` with
+   their resolution hashes.
+3. **Canonical derived projection** — `_project_canonical` is the *only* writer of
+   canonical values, and it writes solely from the persisted resolution. An unresolved
+   material field projects as `NULL` with the `unresolved` cohort label.
+
+Because step 2 reads persisted observations rather than the current parse, a rerun or a
+restart rebuilds the identical resolution. An identity-alias source is excluded at both
+step 2's filter and Decision 012 level 4, so it cannot contribute even a competing value
+for a filing field. A `sec_full_index_company` observation may corroborate or conflict but
+never overrides an entity-submissions observation outside the Decision 012 correction
+rules.
 | `date_divergence` | INTEGER | no | Derived | 1 when the dates differ, even inside one cohort |
 | `cohort_boundary_crossing` | INTEGER | no | Derived | 1 when both dates map and the cohort names differ |
 | `coverage_boundary_divergence` | INTEGER | no | Derived | 1 when one date maps and the other is unresolved or outside supported coverage; requires review and blocks freezing |
@@ -89,7 +164,7 @@ Conventions used throughout:
 | Field | Type | Null | Notes |
 |---|---|---|---|
 | `job_id`, `job_kind`, `job_state` | TEXT | no | `ops_ingestion_jobs`; states `pending`, `running`, `stopped`, `completed`, `failed`, `cooldown` |
-| `writer_lease_id`, `writer_pid`, `lease_expires_at_utc` | TEXT / INTEGER | no | `ops_writer_leases`; enforces the single logical writer |
+| `writer_lease_id`, `writer_pid`, `lease_expires_at_utc` | TEXT / INTEGER | no | Diagnostic metadata only. Process-lifetime exclusivity is enforced by a held non-blocking OS advisory lock; timestamps never authorize takeover. |
 | `attempt_state` | TEXT | no | `started`, `succeeded`, `failed`, `quarantined`, `abandoned` |
 | `http_status`, `retry_after_seconds`, `action_taken` | INTEGER / TEXT | yes | `raw_http_responses`; `action_taken` from the response policy |
 | `checkpoint_key`, `checkpoint_value` | TEXT | no | `ops_checkpoints`; supports resumable acquisition |
@@ -107,6 +182,35 @@ Conventions used throughout:
 | `relative_file_path`, `file_sha256`, `file_size_bytes` | TEXT / INTEGER | no | Relative paths only |
 | `gate_name`, `gate_result`, `blocks_release` | TEXT / INTEGER | no | `release_acceptance_results` |
 | `diff_kind` | TEXT | no | `added`, `removed`, `changed`, `cohort_reassigned` |
+
+## 6A. M2.2 source-observation and census layers
+
+The M2.2 catalog preserves three non-interchangeable layers:
+
+1. `census_source_observations` and `census_archive_members` retain immutable raw
+   observation provenance and archive-to-member lineage.
+2. `census_parser_runs`, `census_parsed_records`, and
+   `census_quarantined_records` retain source-native payloads, parser identity and
+   version, deterministic record hashes, source locations, unknown fields,
+   warnings, duplicate/conflict indicators, and quarantine details.
+3. `census_registrants`, `census_registrant_observations`, and
+   `census_accessions` contain normalized census observations derived from layer 2.
+   Raw SEC JSON is never written directly into these tables.
+
+| Field / table | Notes |
+|---|---|
+| `transport_sha256` | Hash of decoded HTTP entity bytes delivered by the transport |
+| `stored_sha256` | Hash of the exact local storage representation |
+| `logical_sha256` / `content_sha256` | Hash of the parser input; archive-member hashes remain separate |
+| `request_identity` | Registered source plus normalized URL and template parameters; bounds `304` reuse |
+| `validators_sent_json` | Validators actually sent; required to reconcile a `304` |
+| `headers_json` | Redacted response provenance headers only; the contact identity is never stored |
+| `census_historical_references` | Source-named overflow metadata with explicit retrieval status |
+| `census_registrant_observations` | Name, former-name, ticker, exchange, SIC, fiscal-year-end, entity-type, and official status history |
+| `census_candidate_lineage_edges` | Candidate-only shared-alias evidence. It never merges CIK identities |
+| `census_accession_observations` | Every source-native accession field observation, including conflicts |
+| `census_calendar_days` | Tri-state day status with observation lineage and derivation version |
+| `census_qa_metrics` | Deterministic QA values with explicit `value`, `zero`, `unavailable`, `failed`, `blocked`, `unknown`, or `not_retrieved` status |
 
 ## 7. Reference tables
 

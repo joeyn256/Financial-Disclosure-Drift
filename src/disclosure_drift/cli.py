@@ -1,10 +1,10 @@
 """Command-line interface for Disclosure Drift.
 
 Milestone 1 commands (``validate-config``, ``show-cohorts``) are offline and
-read-only. The Milestone 2 ``sec`` group is registered here; during Stage M2.1
-every command that would need the network or the operational catalog refuses with
-a stage exit code instead of acting. Nothing in this module downloads filings,
-processes data, or opens a network connection.
+read-only. Stage M2.2 enables the bounded ``sec census`` workflow only when the
+configuration explicitly enables network access and the SEC contact identity is
+valid. The census retrieves approved metadata sources; filing bodies and packages
+remain prohibited.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import argparse
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import date
 from logging import Logger
 from pathlib import Path
 from typing import Final
@@ -30,6 +31,7 @@ from disclosure_drift.errors import DisclosureDriftError, SecUserAgentError
 from disclosure_drift.logging_config import configure_logging, get_logger
 from disclosure_drift.paths import PathPolicyError
 from disclosure_drift.reasons import REASON_CODES, release_blocking_codes
+from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
 from disclosure_drift.storage.catalog import CatalogWriter
 
 __all__ = ["build_parser", "main", "run"]
@@ -102,8 +104,106 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         child = sec_subparsers.add_parser(name, help=help_text)
         _add_config_argument(child)
+        if name == "census":
+            child.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="Validate and print the approved retrieval plan; make no requests.",
+            )
+            child.add_argument(
+                "--calendar-year",
+                type=int,
+                default=None,
+                metavar="YEAR",
+                help=(
+                    "Year the annual EDGAR calendar instance must cover. Required for a "
+                    "complete census: the year is never inferred from today's date."
+                ),
+            )
+            child.add_argument(
+                "--coverage-start",
+                type=_iso_date,
+                default=None,
+                metavar="YYYY-MM-DD",
+                help="First date of the requested coverage window (for example 2009-01-01).",
+            )
+            child.add_argument(
+                "--coverage-end",
+                type=_iso_date,
+                default=None,
+                metavar="YYYY-MM-DD",
+                help="Last date of the requested coverage window.",
+            )
+            child.add_argument(
+                "--as-of",
+                type=_iso_date,
+                default=None,
+                metavar="YYYY-MM-DD",
+                help=(
+                    "Date the plan is evaluated against. Decides which quarters are "
+                    "closed and required. Never defaults to today: a plan must be "
+                    "reproducible on any later day."
+                ),
+            )
+            child.add_argument(
+                "--include-open-quarter",
+                action="store_true",
+                help=(
+                    "Also retrieve the provisional open quarter containing the as-of "
+                    "date. It is still reported as provisional, never finalized."
+                ),
+            )
 
     return parser
+
+
+def _iso_date(text: str) -> date:
+    """Parse an explicit ISO date, refusing anything ambiguous.
+
+    Coverage and as-of dates are always supplied. Nothing here reads the clock.
+    """
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        message = f"expected an ISO date such as 2009-01-01, received {text!r}"
+        raise argparse.ArgumentTypeError(message) from exc
+
+
+def _coverage_from_args(args: argparse.Namespace) -> CoverageWindow | None:
+    """Build the coverage window once, at the command boundary.
+
+    All three of coverage start, coverage end, and as-of date must be supplied together.
+    A partial window is refused rather than completed from today's date, and the three
+    values are narrowed to concrete :class:`~datetime.date` objects before the window is
+    constructed, so nothing downstream has to re-derive or re-validate them.
+
+    Returns:
+        The validated window, or ``None`` when no coverage argument was supplied at all.
+
+    Raises:
+        argparse.ArgumentTypeError: only some of the three dates were supplied.
+    """
+    start = getattr(args, "coverage_start", None)
+    end = getattr(args, "coverage_end", None)
+    as_of = getattr(args, "as_of", None)
+    if start is None and end is None and as_of is None:
+        return None
+    if start is None or end is None or as_of is None:
+        message = (
+            "--coverage-start, --coverage-end, and --as-of must be supplied together; "
+            "a missing value is never filled in from today's date"
+        )
+        raise argparse.ArgumentTypeError(message)
+    # Narrowed above: each value is a concrete date parsed by _iso_date.
+    coverage_start: date = start
+    coverage_end: date = end
+    as_of_date: date = as_of
+    return CoverageWindow(
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        as_of_date=as_of_date,
+        include_open_quarter=bool(getattr(args, "include_open_quarter", False)),
+    )
 
 
 def _add_config_argument(parser: argparse.ArgumentParser) -> None:
@@ -144,7 +244,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "validate-sec-config":
         return _validate_sec_config_command(config, logger)
     if args.command == "sec":
-        return _sec_command(str(args.sec_command), config, logger)
+        try:
+            coverage = _coverage_from_args(args)
+        except (argparse.ArgumentTypeError, ValueError) as exc:
+            print(f"invalid coverage plan: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        return _sec_command(
+            str(args.sec_command),
+            config,
+            logger,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            calendar_year=getattr(args, "calendar_year", None),
+            coverage=coverage,
+        )
 
     parser.print_help(sys.stderr)  # pragma: no cover - argparse rejects earlier
     return EXIT_USAGE
@@ -221,7 +333,7 @@ def _validate_sec_config_command(config: ProjectConfig, logger: Logger) -> int:
         ("catalog path", tree.relative(tree.catalog_database)),
         ("audit directory", tree.relative(tree.audit)),
         ("backup root", backup.detail),
-        ("network", "enabled" if config.network.enabled else "disabled (Stage M2.1)"),
+        ("network", "enabled" if config.network.enabled else "disabled (safe default)"),
         (
             "companyfacts",
             "enabled" if config.companyfacts.enabled else "disabled (reconciliation only)",
@@ -316,7 +428,15 @@ def _stage_refusal(command: str, stage: str, detail: str, logger: Logger) -> int
     return EXIT_STAGE_NOT_ENABLED
 
 
-def _sec_command(command: str, config: ProjectConfig, logger: Logger) -> int:
+def _sec_command(
+    command: str,
+    config: ProjectConfig,
+    logger: Logger,
+    *,
+    dry_run: bool = False,
+    calendar_year: int | None = None,
+    coverage: CoverageWindow | None = None,
+) -> int:
     network_commands = {"census", "ingest-pilot"}
     if command in network_commands:
         try:
@@ -325,6 +445,8 @@ def _sec_command(command: str, config: ProjectConfig, logger: Logger) -> int:
             print(f"SEC contact identity invalid: {exc}", file=sys.stderr)
             logger.error("refused sec %s before request construction", command)
             return EXIT_CONFIG_ERROR
+        if command == "census" and dry_run:
+            return _census_dry_run(config, logger, calendar_year=calendar_year, coverage=coverage)
         if not config.network.enabled:
             return _stage_refusal(
                 command,
@@ -336,8 +458,10 @@ def _sec_command(command: str, config: ProjectConfig, logger: Logger) -> int:
     if command == "validate-inventory":
         return _validate_inventory_command(config, logger)
 
+    if command == "census":
+        return _census_command(config, logger, calendar_year=calendar_year, coverage=coverage)
+
     refusals = {
-        "census": (_STAGE_M2_2, "the SEC client is not implemented in Stage M2.1"),
         "select-pilot": (_STAGE_M2_3, "no metadata census exists yet"),
         "show-pilot": (_STAGE_M2_3, "no frozen pilot manifest exists yet"),
         "ingest-pilot": (_STAGE_M2_5, "no approved pilot manifest exists yet"),
@@ -364,6 +488,189 @@ def _sec_command(command: str, config: ProjectConfig, logger: Logger) -> int:
 
     print(f"unknown sec command: {command}", file=sys.stderr)  # pragma: no cover
     return EXIT_USAGE  # pragma: no cover
+
+
+def _census_dry_run(
+    config: ProjectConfig,
+    logger: Logger,
+    *,
+    calendar_year: int | None = None,
+    coverage: CoverageWindow | None = None,
+) -> int:
+    """Print the bounded M2.2 plan without constructing a transport.
+
+    Args:
+        config: Validated project configuration.
+        logger: Command logger.
+        calendar_year: Explicit annual-calendar year from the command boundary.
+        coverage: The coverage window already parsed and validated at the command
+            boundary. It is used as given: this helper never rebuilds it from argparse
+            values and never substitutes today's date.
+    """
+    from disclosure_drift.sec.source_registry import SOURCES  # noqa: PLC0415
+
+    tree = config.data_tree()
+    print("SEC metadata census dry run valid.")
+    print("  requests made          : 0")
+    print("  census completed       : no (planning mode)")
+    print(f"  data root              : {tree.data_root}")
+    print("  approved initial sources:")
+    for source_id in (
+        "sec_bulk_submissions",
+        "sec_company_tickers_exchange",
+        "sec_company_tickers",
+        "sec_sic_code_list",
+        "sec_edgar_filing_calendar",
+    ):
+        source = SOURCES[source_id]
+        print(f"    {source.source_id}: {source.expected_content}, {source.retrieval_method}")
+    if calendar_year is None:
+        print("  annual calendar year   : NOT SUPPLIED — the calendar source will be")
+        print("                           blocked; pass --calendar-year YEAR. The year is")
+        print("                           never inferred from today's date.")
+    else:
+        print(f"  annual calendar year   : {calendar_year} (explicit plan input)")
+    _print_coverage_plan(coverage)
+    print("  historical submissions : source-referenced metadata only")
+    print("  prohibited             : filing bodies, primary documents, accession indexes,")
+    print("                           complete submissions, and XBRL packages")
+    logger.info("validated M2.2 census plan; no request was made")
+    return EXIT_OK
+
+
+def _print_coverage_plan(coverage: CoverageWindow | None) -> None:
+    """Print the explicit coverage window and the exact quarterly instance plan."""
+    if coverage is None:
+        print("  coverage window        : NOT SUPPLIED — no quarterly index instance is")
+        print("                           planned and no reconciliation coverage is")
+        print("                           claimed. Pass --coverage-start, --coverage-end,")
+        print("                           and --as-of together.")
+        return
+    plan = plan_index_instances(coverage)
+    open_instance = plan.provisional_open
+    print(
+        f"  coverage window        : {coverage.coverage_start.isoformat()} to "
+        f"{coverage.coverage_end.isoformat()}"
+    )
+    print(f"  as-of date             : {coverage.as_of_date.isoformat()} (explicit, never today)")
+    print(f"  required closed quarters: {len(plan.required_closed)}")
+    if open_instance is None:
+        print("  provisional open quarter: none in the requested window")
+    else:
+        state = "included" if open_instance.required else "excluded by default"
+        print(f"  provisional open quarter: {open_instance.instance_key} ({state}, provisional)")
+    excluded = ", ".join(plan.excluded_future_quarters) or "none"
+    print(f"  future quarters excluded: {excluded}")
+    print("  satisfied required inst.: 0 (dry run inspects no catalog state)")
+    print(f"  remaining required inst.: {len(plan.required_closed)}")
+    print(f"  logical retrieval budget: {len(plan.required_keys)} (one per unsatisfied instance)")
+    print("  logical retrievals      : 0 (dry run)")
+    print("  actual HTTP attempts    : 0 (dry run)")
+    print("  retries                 : 0 (dry run)")
+    print("  finalized coverage      : none until required closed quarters are satisfied")
+    print("  provisional coverage    : none in a dry run")
+    print(f"  planned index instances : {len(plan.instances)}")
+    for item in plan.instances:
+        marker = "required" if item.required else "optional"
+        print(f"    {item.instance_key}: {item.kind} ({marker})")
+    print(f"  census plan hash       : {plan.plan_hash()}")
+
+
+def _census_command(
+    config: ProjectConfig,
+    logger: Logger,
+    *,
+    calendar_year: int | None = None,
+    coverage: CoverageWindow | None = None,
+) -> int:
+    """Execute the restartable Stage M2.2 census.
+
+    Args:
+        config: Validated project configuration.
+        logger: Command logger.
+        calendar_year: Explicit annual-calendar year from the command boundary.
+        coverage: The coverage window already parsed and validated at the command
+            boundary, passed straight to the orchestrator. Never reconstructed here, and
+            never defaulted to today.
+    """
+    from disclosure_drift.sec.census_orchestrator import CensusOrchestrator  # noqa: PLC0415
+
+    try:
+        report = CensusOrchestrator(
+            config,
+            calendar_target_year=calendar_year,
+            coverage=coverage,
+        ).run()
+    except (DisclosureDriftError, sqlite3.Error, OSError, ValueError) as exc:
+        print(f"SEC census failed: {exc}", file=sys.stderr)
+        logger.error("Stage M2.2 census failed: %s", type(exc).__name__)
+        return EXIT_GATE_FAILURE
+    print("SEC metadata census run finished.")
+    print(f"  run id                         : {report.census_run_id}")
+    print(f"  census completed               : {'yes' if report.completed else 'no'}")
+    print(f"  source observations            : {report.source_observations}")
+    print(f"  parsed source records          : {report.parsed_records}")
+    print(f"  quarantined parsed records     : {report.quarantined_records}")
+    print(f"  historical references retrieved: {report.historical_references_retrieved}")
+    print(f"  QA summary                     : {config.data_tree().relative(report.audit_path)}")
+    print(f"  accession resolutions          : {report.accession_resolutions}")
+    if report.unresolved_accession_fields:
+        print(f"  unresolved accession fields    : {len(report.unresolved_accession_fields)}")
+        for item in report.unresolved_accession_fields[:5]:
+            print(f"    {item}")
+    coverage_report = report.index_coverage
+    if coverage_report.get("index_planning") == "not_requested":
+        print("  index reconciliation           : not requested (no coverage window)")
+    else:
+        print(
+            "  required closed quarters       : "
+            f"{coverage_report.get('required_closed_quarters_successful')} of "
+            f"{coverage_report.get('required_closed_quarters_planned')} successful"
+        )
+        print(
+            "  finalized coverage             : "
+            f"{coverage_report.get('finalized_reconciliation_coverage')}"
+        )
+        print(
+            "  provisional coverage           : "
+            f"{coverage_report.get('provisional_reconciliation_coverage')} "
+            "(never finalized)"
+        )
+        print(
+            "  future quarters not planned    : "
+            f"{coverage_report.get('future_quarters_not_planned')}"
+        )
+        accounting = report.index_accounting
+        if accounting:
+            print(f"  index instances planned        : {accounting.get('instances_planned')}")
+            print(
+                "  already satisfied (reused)     : "
+                f"{accounting.get('instances_already_satisfied')}"
+            )
+            print(f"  logical retrieval budget       : {accounting.get('logical_budget')}")
+            print(
+                "  logical retrievals initiated   : "
+                f"{accounting.get('logical_retrievals_initiated')}"
+            )
+            print(f"  actual HTTP attempts           : {accounting.get('http_attempts')}")
+            print(f"  retries                        : {accounting.get('retries')}")
+            print(f"  instances successful           : {accounting.get('instances_successful')}")
+            print(f"  instances failed               : {accounting.get('instances_failed')}")
+            print(f"  instances remaining            : {accounting.get('instances_remaining')}")
+            if accounting.get("stopped_early"):
+                print(f"  loop stopped early             : {accounting.get('stop_reason')}")
+        print(f"  census plan hash               : {coverage_report.get('plan_sha256')}")
+    print(f"  status                         : {report.detail}")
+    if report.completion.incomplete_required_sources:
+        print("  incomplete required sources:")
+        for source in report.completion.incomplete_required_sources:
+            reasons = ", ".join(source.unresolved_blocking_reasons) or "terminal state incomplete"
+            print(
+                f"    {source.source_id} [{source.instance_id}] "
+                f"retrieval={source.retrieval_state} parser={source.parser_state} "
+                f"catalog={source.catalog_state}: {reasons}"
+            )
+    return EXIT_OK if report.completed else EXIT_GATE_FAILURE
 
 
 def run() -> None:

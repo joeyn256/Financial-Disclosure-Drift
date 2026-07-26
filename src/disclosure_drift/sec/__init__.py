@@ -1,9 +1,10 @@
 """SEC universe, inventory, and ingestion support (Milestone 2).
 
-Stage M2.1 contains offline logic only: identity parsing, temporal policy,
-availability comparison, response classification, rate limiting, source
-addressing, schema-drift policy, and the CompanyFacts guard. No module in this
-package imports an HTTP client or opens a socket during Stage M2.1.
+Stage M2.2 adds the approved-source registry, isolated optional HTTP adapter,
+immutable source observations, defensive archive handling, source-native parsers,
+transactional registrant census, restart recovery, and deterministic QA. Ordinary
+package imports remain network-free; only an explicit enabled census command can
+construct the isolated transport.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 Guarantees implemented here:
 
 * a ``.part`` file is never treated as complete;
-* promotion is atomic (``Path.replace``) and the parent directory is fsynced;
+* promotion is an atomic, no-overwrite hard link and the parent directory is fsynced;
 * ``content_sha256`` covers decoded entity bytes and is the integrity anchor;
 * text-like payloads use deterministic gzip whose round trip must reproduce
   ``content_sha256``;
@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,7 @@ from disclosure_drift.paths import DataTree, relative_to_root
 
 __all__ = [
     "GZIP_COMPRESSION_LEVEL",
+    "LINEAGE_SUFFIX",
     "Compression",
     "RawObjectRecord",
     "RawStore",
@@ -42,6 +44,7 @@ __all__ = [
 GZIP_COMPRESSION_LEVEL: Final = 6
 _PART_SUFFIX: Final = ".part"
 _GZIP_SUFFIX: Final = ".gz"
+LINEAGE_SUFFIX: Final = ".lineage.json"
 Compression = Literal["none", "gzip"]
 
 
@@ -133,6 +136,7 @@ class RawStore:
         content_encoding_received: str | None = None,
         compress: bool = False,
         known_observations: Iterable[RawObjectRecord] = (),
+        recovery_context: Mapping[str, object] | None = None,
         fail_after: Literal["promotion", "none"] = "none",
         raise_during_stream: Callable[[], None] | None = None,
     ) -> StoredObject:
@@ -181,9 +185,38 @@ class RawStore:
             raise RawObjectIntegrityError(message)
 
         superseded = self._superseded_observation(known_observations, content_sha256)
-        # Same-filesystem atomic promotion; the staging file sits in the destination
-        # directory, so this rename cannot cross a filesystem boundary.
-        part_path.replace(destination)
+        # A hard-link promotion is same-filesystem, atomic, and cannot overwrite an
+        # existing object. If the destination already exists, deduplication is allowed
+        # only after its exact stored hash verifies.
+        try:
+            os.link(part_path, destination)
+        except FileExistsError:
+            existing_hash = sha256_of(destination.read_bytes()) if destination.is_file() else None
+            if existing_hash != stored_sha256:
+                message = (
+                    f"refusing to overwrite existing raw object {destination}: its stored "
+                    "hash does not match the object being promoted"
+                )
+                raise RawObjectIntegrityError(message) from None
+            part_path.unlink()
+        else:
+            part_path.unlink()
+
+        if recovery_context is not None:
+            self._write_lineage_intent(
+                destination,
+                {
+                    **recovery_context,
+                    "manifest_version": "raw-object-lineage/1.0",
+                    "relative_storage_path": relative_to_root(destination, self._tree.data_root),
+                    "stored_sha256": stored_sha256,
+                    "stored_size_bytes": len(stored_bytes),
+                    "content_sha256": content_sha256,
+                    "logical_sha256": content_sha256,
+                    "content_size_bytes": content_size,
+                    "storage_representation": ("deterministic_gzip" if compress else "identical"),
+                },
+            )
         self._fsync_directory(directory)
 
         if fail_after == "promotion":
@@ -212,6 +245,34 @@ class RawStore:
         )
         return StoredObject(record=record, absolute_path=destination)
 
+    @staticmethod
+    def lineage_path(path: Path) -> Path:
+        """Return the durable recovery-intent path for a promoted object."""
+        return path.with_name(path.name + LINEAGE_SUFFIX)
+
+    def _write_lineage_intent(
+        self,
+        destination: Path,
+        payload: Mapping[str, object],
+    ) -> None:
+        """Create recovery lineage without replacing an existing owner's intent."""
+        lineage = self.lineage_path(destination)
+        encoded = (json.dumps(dict(payload), sort_keys=True) + "\n").encode("utf-8")
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(lineage, flags, 0o600)
+        except FileExistsError:
+            # A deduplicated object may already carry the original observation's
+            # recovery intent. Never rewrite that evidence.
+            return
+        try:
+            os.write(descriptor, encoded)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     # -- verification and quarantine ---------------------------------------- #
     def verify(self, record: RawObjectRecord) -> bool:
         """Return whether the stored bytes still match the recorded content hash."""
@@ -234,8 +295,11 @@ class RawStore:
     def reconcile(self, known: Iterable[RawObjectRecord]) -> ReconciliationReport:
         """Reconcile the filesystem with the catalog after an interrupted run.
 
-        Permitted actions are adopting a valid final file that has no catalog row
-        and quarantining a partial file. Nothing is deleted.
+        This catalog-independent helper cannot prove a source registry identity or
+        request lineage, so it quarantines every unrecorded object. Verified adoption
+        is performed only by :func:`disclosure_drift.sec.observation_catalog.reconcile`,
+        which has the authoritative catalog and durable lineage intent. Nothing is
+        deleted.
         """
         recorded_paths = {record.relative_storage_path for record in known}
         adopted: list[str] = []
@@ -261,7 +325,16 @@ class RawStore:
                 )
                 continue
             if relative not in recorded_paths:
-                adopted.append(relative)
+                quarantined.append(
+                    relative_to_root(
+                        self.quarantine(
+                            path,
+                            "RAW_FILE_CHECKSUM_MISMATCH",
+                            "unrecorded raw object lacks catalog context for verified adoption",
+                        ),
+                        self._tree.data_root,
+                    )
+                )
 
         return ReconciliationReport(
             adopted=tuple(adopted),
@@ -274,7 +347,11 @@ class RawStore:
         for root in (self._tree.raw_filings, self._tree.raw_bulk, self._tree.raw_indexes):
             if root.is_dir():
                 for path in root.rglob("*"):
-                    if path.is_file() and not path.name.endswith(".reason"):
+                    if (
+                        path.is_file()
+                        and not path.name.endswith(".reason")
+                        and not path.name.endswith(LINEAGE_SUFFIX)
+                    ):
                         yield path
 
     def _directory_for(

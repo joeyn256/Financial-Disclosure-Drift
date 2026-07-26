@@ -102,7 +102,7 @@ def test_validate_sec_config_reports_policy_values(repo_root: Path) -> None:
     assert "connect 10.0s" in normalized
     assert "5 transient retries" in normalized
     assert "cooldown 600.0s" in normalized
-    assert "network : disabled (Stage M2.1)" in normalized
+    assert "network : disabled (safe default)" in normalized
     assert "companyfacts : disabled (reconciliation only)" in normalized
 
 
@@ -121,6 +121,19 @@ def test_network_commands_refuse_while_network_is_disabled(repo_root: Path) -> N
         assert result.returncode == EXIT_STAGE_NOT_ENABLED
         assert stage in result.stderr
         assert "network access is disabled" in result.stderr
+
+
+def test_census_dry_run_is_truthful_and_makes_no_census_claim(repo_root: Path) -> None:
+    result = _run(
+        ["sec", "census", "--dry-run"],
+        repo_root,
+        env={SEC_USER_AGENT_ENV: VALID_USER_AGENT},
+    )
+    normalized = " ".join(result.stdout.split())
+    assert result.returncode == 0, result.stderr
+    assert "requests made : 0" in normalized
+    assert "census completed : no (planning mode)" in normalized
+    assert "filing bodies" in normalized
 
 
 @pytest.mark.parametrize(
@@ -189,13 +202,18 @@ def test_validate_inventory_is_idempotent(repo_root: Path, tmp_path: Path) -> No
     assert "migrations applied : none pending" in " ".join(second.stdout.split())
 
 
-def test_validate_inventory_leaves_no_writer_lease_behind(repo_root: Path, tmp_path: Path) -> None:
+def test_validate_inventory_releases_writer_lock_and_marks_metadata(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
     _run(
         ["sec", "validate-inventory"],
         repo_root,
         env={"DISCLOSURE_DRIFT_DATA_ROOT": str(tmp_path)},
     )
-    assert not (tmp_path / "locks" / "catalog_writer.lease").exists()
+    metadata = (tmp_path / "locks" / "catalog_writer.lease").read_text(encoding="utf-8")
+    assert '"state": "released"' in metadata
+    assert '"released_at_utc":' in metadata
 
 
 def test_show_cohorts_states_the_authoritative_date_source(repo_root: Path) -> None:

@@ -8,12 +8,13 @@ corrupting state.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sqlite3
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,6 +32,11 @@ from disclosure_drift.storage.sqlite import (
     transaction,
     utc_now,
 )
+
+try:
+    fcntl: Any = importlib.import_module("fcntl")
+except ImportError:  # pragma: no cover - supported CI and production platforms are Unix
+    fcntl = None
 
 __all__ = [
     "DEFAULT_LEASE_SECONDS",
@@ -93,6 +99,7 @@ class CatalogWriter:
         self._lock_path = lock_directory / _LEASE_FILENAME
         self._lease_seconds = lease_seconds
         self._lease: WriterLease | None = None
+        self._lock_descriptor: int | None = None
         self._connection: sqlite3.Connection | None = None
         self._context: AbstractContextManager[sqlite3.Connection] | None = None
 
@@ -100,8 +107,14 @@ class CatalogWriter:
     def __enter__(self) -> CatalogWriter:
         """Acquire the writer lease and open the writing connection."""
         self._lease = self._acquire_lease()
-        self._context = connect(self._database_path, writer=True)
-        self._connection = self._context.__enter__()
+        try:
+            self._context = connect(self._database_path, writer=True)
+            self._connection = self._context.__enter__()
+        except BaseException:
+            self._context = None
+            self._connection = None
+            self._release_lease()
+            raise
         return self
 
     def __exit__(
@@ -134,6 +147,12 @@ class CatalogWriter:
         return self._lease
 
     def _acquire_lease(self) -> WriterLease:
+        if fcntl is None:
+            message = (
+                "catalog writes require operating-system advisory locking, but fcntl.flock "
+                "is unavailable on this platform; refusing to fall back to timestamp ownership"
+            )
+            raise CatalogWriteError(message)
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now(UTC)
         expires = now + timedelta(seconds=self._lease_seconds)
@@ -147,22 +166,41 @@ class CatalogWriter:
             "host_fingerprint": _host_fingerprint(),
             "acquired_at_utc": acquired_at_utc,
             "expires_at_utc": expires_at_utc,
+            "state": "held",
         }
         try:
-            descriptor = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            descriptor = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            message = f"unable to open catalog writer lock {self._lock_path}: {exc}"
+            raise CatalogWriteError(message) from exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
             existing = self._read_lease_file()
-            if existing is not None and not self._is_expired(existing):
-                message = (
-                    f"another catalog writer holds the lease (pid {existing.get('writer_pid')}, "
-                    f"expires {existing.get('expires_at_utc')})\n"
-                    "Fix: wait for it to finish. Only one logical writer may write."
-                )
-                raise SingleWriterViolationError(message) from None
-            self._lock_path.write_text(json.dumps(payload), encoding="utf-8")
-        else:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload))
+            os.close(descriptor)
+            message = (
+                "another catalog writer holds the process-lifetime advisory lock "
+                f"(pid {(existing or {}).get('writer_pid', 'unknown')}, "
+                f"acquired {(existing or {}).get('acquired_at_utc', 'unknown')})\n"
+                "Fix: wait for it to finish. Elapsed time never permits takeover."
+            )
+            raise SingleWriterViolationError(message) from None
+        except OSError as exc:
+            os.close(descriptor)
+            message = f"unable to acquire catalog writer advisory lock: {exc}"
+            raise CatalogWriteError(message) from exc
+
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        try:
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.write(descriptor, encoded)
+            os.fsync(descriptor)
+        except BaseException:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+            raise
+        self._lock_descriptor = descriptor
         return WriterLease(
             lease_id=lease_id,
             path=self._lock_path,
@@ -178,23 +216,43 @@ class CatalogWriter:
             return None
         return loaded if isinstance(loaded, dict) else None
 
-    @staticmethod
-    def _is_expired(payload: Mapping[str, Any]) -> bool:
-        raw = payload.get("expires_at_utc")
-        if not isinstance(raw, str):
-            return True
-        try:
-            expires = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            return True
-        return expires <= datetime.now(UTC)
-
     def _release_lease(self) -> None:
-        if self._lease is None:
+        descriptor = self._lock_descriptor
+        lease = self._lease
+        if descriptor is None or lease is None:
+            self._lock_descriptor = None
+            self._lease = None
             return
-        with suppress(OSError):  # pragma: no cover - best effort
-            self._lock_path.unlink()
+        if fcntl is None:  # pragma: no cover - acquisition already fails closed
+            os.close(descriptor)
+            self._lock_descriptor = None
+            self._lease = None
+            return
+        try:
+            persisted = self._read_locked_metadata(descriptor)
+            if persisted.get("lease_id") == lease.lease_id:
+                persisted["state"] = "released"
+                persisted["released_at_utc"] = utc_now()
+                encoded = json.dumps(persisted, sort_keys=True).encode("utf-8")
+                os.ftruncate(descriptor, 0)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, encoded)
+                os.fsync(descriptor)
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+            self._lock_descriptor = None
         self._lease = None
+
+    @staticmethod
+    def _read_locked_metadata(descriptor: int) -> dict[str, Any]:
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            raw = os.read(descriptor, 64 * 1024)
+            loaded = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return {}
+        return dict(loaded) if isinstance(loaded, dict) else {}
 
     # -- schema and seeds --------------------------------------------------- #
     def migrate(self) -> tuple[str, ...]:

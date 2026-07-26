@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from disclosure_drift.errors import GateFailureError, SingleWriterViolationError
+from disclosure_drift.errors import CatalogWriteError, GateFailureError, SingleWriterViolationError
 from disclosure_drift.reasons import REASON_CODES
+from disclosure_drift.storage import catalog as catalog_module
 from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
 from disclosure_drift.storage.sqlite import (
     REQUIRED_SQLITE_VERSION,
@@ -57,6 +62,21 @@ REQUIRED_TABLES = {
     "reference_sic_codes",
     "reference_cohort_definitions",
     "reference_policy_versions",
+    "census_source_observations",
+    "census_archive_members",
+    "census_parser_runs",
+    "census_parsed_records",
+    "census_quarantined_records",
+    "census_historical_references",
+    "census_registrants",
+    "census_registrant_observations",
+    "census_candidate_lineage_edges",
+    "census_accessions",
+    "census_accession_observations",
+    "census_calendar_days",
+    "census_qa_metrics",
+    "census_plan_sources",
+    "census_recovery_states",
 }
 
 
@@ -76,6 +96,27 @@ def test_version_floor_matches_strict_table_requirement() -> None:
     assert REQUIRED_SQLITE_VERSION == (3, 37)
 
 
+EXPECTED_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, "initial"),
+    (2, "source_observations"),
+    (3, "census_catalog"),
+    (4, "m22_r1_safety"),
+    (5, "r2_structural_evidence"),
+    (6, "r2_resolution_and_reconciliation"),
+    (7, "r2_index_retrieval"),
+)
+"""The canonical migration chain, asserted by exact version and name.
+
+Checking the ordered versions and names rather than only a count means adding,
+renaming, reordering, or skipping a migration all fail loudly.
+"""
+
+
+def test_the_packaged_migration_chain_is_exactly_as_expected() -> None:
+    discovered = tuple((item.version, item.name) for item in available_migrations())
+    assert discovered == EXPECTED_MIGRATIONS
+
+
 def test_migration_creates_every_required_logical_table(writer: CatalogWriter) -> None:
     with writer as catalog:
         applied = catalog.migrate()
@@ -83,7 +124,7 @@ def test_migration_creates_every_required_logical_table(writer: CatalogWriter) -
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     names = {row["name"] for row in rows}
-    assert applied == ("initial",)
+    assert applied == tuple(name for _, name in EXPECTED_MIGRATIONS)
     assert names >= REQUIRED_TABLES
 
 
@@ -95,15 +136,17 @@ def test_migrations_are_idempotent(writer: CatalogWriter) -> None:
         assert catalog.migrate() == ()
 
 
-def test_migration_checksums_are_recorded(writer: CatalogWriter) -> None:
+def test_every_migration_version_and_checksum_is_recorded(writer: CatalogWriter) -> None:
     with writer as catalog:
         catalog.migrate()
-        row = catalog.connection.execute(
-            "SELECT version, checksum_sha256 FROM ops_schema_migrations"
-        ).fetchone()
-    expected = available_migrations()[0].checksum_sha256
-    assert row["version"] == 1
-    assert row["checksum_sha256"] == expected
+        rows = catalog.connection.execute(
+            "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
+        ).fetchall()
+    recorded = tuple((int(row["version"]), str(row["name"])) for row in rows)
+    assert recorded == EXPECTED_MIGRATIONS
+    expected_checksums = {item.version: item.checksum_sha256 for item in available_migrations()}
+    for row in rows:
+        assert row["checksum_sha256"] == expected_checksums[int(row["version"])]
 
 
 def test_foreign_keys_are_enforced_on_every_connection(writer: CatalogWriter) -> None:
@@ -232,14 +275,159 @@ def test_lease_is_released_and_reusable(tmp_path: Path) -> None:
         assert catalog.lease.lease_id
 
 
-def test_expired_lease_may_be_taken_over(tmp_path: Path) -> None:
+def test_elapsed_timestamp_never_allows_takeover_of_active_writer(tmp_path: Path) -> None:
     path = tmp_path / "catalog" / "sec.sqlite3"
-    stale = CatalogWriter(path, tmp_path / "locks", lease_seconds=-1)
-    with stale as catalog:
+    active = CatalogWriter(path, tmp_path / "locks", lease_seconds=-1)
+    with active as catalog:
         catalog.migrate()
         successor = CatalogWriter(path, tmp_path / "locks")
-        with successor as taken_over:
-            assert taken_over.lease.lease_id != catalog.lease.lease_id
+        with pytest.raises(SingleWriterViolationError, match="Elapsed time never"):
+            successor.__enter__()
+
+
+def test_writer_fails_closed_when_advisory_locking_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(catalog_module, "fcntl", None)
+    with pytest.raises(CatalogWriteError, match="refusing to fall back"):
+        CatalogWriter(
+            tmp_path / "catalog" / "sec.sqlite3",
+            tmp_path / "locks",
+        ).__enter__()
+
+
+def test_released_metadata_is_diagnostic_and_recoverable(tmp_path: Path) -> None:
+    path = tmp_path / "catalog" / "sec.sqlite3"
+    lock_path = tmp_path / "locks" / "catalog_writer.lease"
+    with CatalogWriter(path, tmp_path / "locks") as first:
+        first.migrate()
+        first_id = first.lease.lease_id
+    released = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert released["lease_id"] == first_id
+    assert released["state"] == "released"
+    assert released["released_at_utc"]
+
+    with CatalogWriter(path, tmp_path / "locks") as successor:
+        assert successor.lease.lease_id != first_id
+
+
+def test_old_metadata_without_a_held_lock_is_safely_recovered(tmp_path: Path) -> None:
+    path = tmp_path / "catalog" / "sec.sqlite3"
+    lock_path = tmp_path / "locks" / "catalog_writer.lease"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "lease_id": "old-owner",
+                "writer_pid": 1,
+                "acquired_at_utc": "2000-01-01T00:00:00Z",
+                "expires_at_utc": "2000-01-01T00:15:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with CatalogWriter(path, tmp_path / "locks") as catalog:
+        catalog.migrate()
+        assert catalog.lease.lease_id != "old-owner"
+
+
+def test_non_owner_release_cannot_change_active_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "catalog" / "sec.sqlite3"
+    lock_path = tmp_path / "locks" / "catalog_writer.lease"
+    owner = CatalogWriter(path, tmp_path / "locks")
+    intruder = CatalogWriter(path, tmp_path / "locks")
+    with owner:
+        before = lock_path.read_text(encoding="utf-8")
+        intruder._release_lease()  # noqa: SLF001 - exercise non-owner release boundary
+        assert lock_path.read_text(encoding="utf-8") == before
+
+
+def _wait_for(path: Path, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            message = f"timed out waiting for {path}"
+            raise AssertionError(message)
+        time.sleep(0.01)
+
+
+def test_process_termination_releases_the_advisory_lock(tmp_path: Path) -> None:
+    database = tmp_path / "catalog" / "sec.sqlite3"
+    locks = tmp_path / "locks"
+    ready = tmp_path / "ready"
+    program = (
+        "import sys,time;"
+        "from pathlib import Path;"
+        "from disclosure_drift.storage.catalog import CatalogWriter;"
+        "writer=CatalogWriter(Path(sys.argv[1]),Path(sys.argv[2]));"
+        "writer.__enter__();"
+        "writer.migrate();"
+        "Path(sys.argv[3]).write_text('ready');"
+        "time.sleep(60)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", program, str(database), str(locks), str(ready)]
+    )
+    try:
+        _wait_for(ready)
+        with pytest.raises(SingleWriterViolationError):
+            CatalogWriter(database, locks).__enter__()
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+    with CatalogWriter(database, locks) as recovered:
+        assert recovered.lease.lease_id
+
+
+def test_simultaneous_process_acquisition_has_exactly_one_winner(tmp_path: Path) -> None:
+    database = tmp_path / "catalog" / "sec.sqlite3"
+    locks = tmp_path / "locks"
+    start = tmp_path / "start"
+    release = tmp_path / "release"
+    results = [tmp_path / "result-1", tmp_path / "result-2"]
+    program = (
+        "import sys,time;"
+        "from pathlib import Path;"
+        "from disclosure_drift.errors import SingleWriterViolationError;"
+        "from disclosure_drift.storage.catalog import CatalogWriter;"
+        "start=Path(sys.argv[3]);release=Path(sys.argv[4]);result=Path(sys.argv[5]);"
+        "\nwhile not start.exists(): time.sleep(0.01)\n"
+        "try:\n"
+        "  with CatalogWriter(Path(sys.argv[1]),Path(sys.argv[2])):\n"
+        "    result.write_text('acquired')\n"
+        "    while not release.exists(): time.sleep(0.01)\n"
+        "except SingleWriterViolationError:\n"
+        "  result.write_text('blocked')\n"
+    )
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                program,
+                str(database),
+                str(locks),
+                str(start),
+                str(release),
+                str(result),
+            ]
+        )
+        for result in results
+    ]
+    start.write_text("go", encoding="utf-8")
+    try:
+        for result in results:
+            _wait_for(result)
+        assert sorted(result.read_text(encoding="utf-8") for result in results) == [
+            "acquired",
+            "blocked",
+        ]
+    finally:
+        release.write_text("release", encoding="utf-8")
+        for process in processes:
+            process.wait(timeout=5)
 
 
 def test_integrity_gates_pass_on_a_fresh_catalog(writer: CatalogWriter) -> None:
@@ -270,6 +458,17 @@ def test_reader_connection_cannot_be_confused_with_the_writer(writer: CatalogWri
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] in {"wal", "delete"}
 
 
+def test_read_only_connection_remains_available_while_writer_holds_lock(
+    writer: CatalogWriter,
+) -> None:
+    with writer as catalog:
+        catalog.migrate()
+        with read_only_connection(writer._database_path) as connection:  # noqa: SLF001
+            assert connection.execute("SELECT COUNT(*) FROM ops_schema_migrations").fetchone()[
+                0
+            ] == len(EXPECTED_MIGRATIONS)
+
+
 def test_backup_uses_the_sqlite_backup_api(tmp_path: Path) -> None:
     source = tmp_path / "catalog" / "sec.sqlite3"
     with CatalogWriter(source, tmp_path / "locks") as catalog:
@@ -289,4 +488,6 @@ def test_backup_uses_the_sqlite_backup_api(tmp_path: Path) -> None:
 def test_apply_migrations_on_a_bare_connection(tmp_path: Path) -> None:
     with connect(tmp_path / "bare.sqlite3", writer=True) as connection, transaction(connection):
         applied = apply_migrations(connection)
-    assert [migration.version for migration in applied] == [1]
+    assert [migration.version for migration in applied] == [
+        version for version, _ in EXPECTED_MIGRATIONS
+    ]

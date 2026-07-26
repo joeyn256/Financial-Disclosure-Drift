@@ -3,10 +3,11 @@
 A preregistered temporal-reliability study of U.S. Form 10-K disclosure narratives.
 
 **Status:** Milestone 0 (novelty audit, preregistration, definition freeze) and Milestone 1
-(reproducible engineering foundation) are complete. Milestone 2 is in progress at **Stage M2.1**,
-which is documentation and offline foundation only: SEC policy modules, temporal and availability
-policy, reason codes, path policy, and CLI skeletons. **No SEC data has been downloaded, no HTTP
-client is installed, and no research code exists.**
+(reproducible engineering foundation) are complete. Milestone 2 has completed **Stage M2.2**:
+approved-source retrieval policy, immutable source observations, defensive bulk-archive handling,
+source-native parsers, the transactional registrant census, restart recovery, and deterministic QA
+are implemented. **No SEC data has been downloaded, no filing body is permitted at this stage, and
+no modeling or outcome code exists.**
 
 ## Research question
 
@@ -73,6 +74,8 @@ Requires Python 3.12 (see `.python-version`).
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
+# SEC-enabled acceptance environment only:
+python -m pip install -e ".[dev,sec]"
 cp .env.example .env    # optional offline; required before any SEC request
 ```
 
@@ -108,10 +111,38 @@ python -m disclosure_drift validate-sec-config
 python -m disclosure_drift sec --help
 ```
 
-Every command is offline and read-only. None downloads filings or processes data. Milestone 2
-commands that would need the network refuse before request construction when
-`DISCLOSURE_DRIFT_SEC_USER_AGENT` is missing or invalid, and exit 3 while their stage is not enabled.
-Exit codes: 0 success, 1 configuration error, 2 usage, 3 stage not enabled, 4 gate failure.
+The default configuration keeps network access disabled. `sec census --dry-run` validates and
+prints the approved metadata plan while making zero requests. An actual `sec census` run requires
+the `[sec]` extra, an explicit configuration with `network.enabled: true`, and a valid
+`DISCLOSURE_DRIFT_SEC_USER_AGENT`; it still refuses filing bodies, primary documents, accession
+indexes, complete submissions, and XBRL packages. Exit codes: 0 success, 1 configuration error,
+2 usage, 3 stage not enabled, 4 gate failure.
+
+### Census plan inputs
+
+Every plan input is explicit. Nothing is inferred from today's date, so a plan is
+reproducible on any later day:
+
+```bash
+python -m disclosure_drift sec census --dry-run \
+  --coverage-start 2009-01-01 --coverage-end 2024-12-31 --as-of 2025-01-15 \
+  --calendar-year 2024
+```
+
+| Argument | Meaning |
+|---|---|
+| `--coverage-start` | First date of the requested coverage window |
+| `--coverage-end` | Last date of the requested coverage window |
+| `--as-of` | Date the plan is evaluated against; decides which quarters are closed |
+| `--include-open-quarter` | Also retrieve the provisional open quarter; it stays provisional |
+| `--calendar-year` | Year the annual EDGAR calendar instance must cover |
+| `--dry-run` | Print the plan and make zero requests |
+
+`--coverage-start`, `--coverage-end`, and `--as-of` must be supplied together; a partial
+window is refused rather than completed from the clock. Quarters ending on or before the
+as-of date are required and block completion when missing; the quarter containing the
+as-of date is provisional and optional; quarters starting after it are not planned at all.
+See the quarterly index-instance policy in `Docs/sec_data_dictionary.md`.
 
 ## Test, lint, and type-check commands
 

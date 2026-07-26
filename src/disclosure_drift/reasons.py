@@ -31,7 +31,15 @@ ReasonCategory = Literal[
     "review",
     "integrity",
     "temporal",
+    "provenance",
 ]
+"""Reason categories.
+
+``provenance`` records a neutral, expected fact about a source's lifecycle, such as
+a living official dataset being updated. A provenance code never blocks a release
+and never requires manual review: it exists so that ordinary change is recorded
+rather than treated as an anomaly.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +77,8 @@ _D007: Final = "Docs/Decisions/decision_007_sec_universe.md"
 _D008: Final = "Docs/Decisions/decision_008_filing_inventory.md"
 _D009: Final = "Docs/Decisions/decision_009_raw_data_governance.md"
 _D010: Final = "Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md"
+_D011: Final = "Docs/Decisions/decision_011_edgar_operating_calendar_provenance.md"
+_D012: Final = "Docs/Decisions/decision_012_accession_observation_resolution.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -296,6 +306,24 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         decision_reference=_D010,
     ),
     _code(
+        "REVIEW_CALENDAR_EVIDENCE_CONFLICT",
+        "review",
+        "Official calendar evidence disagrees for a date; every observation is preserved and "
+        "the date resolves to unknown rather than being settled by source order.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
+        "REVIEW_CALENDAR_DATE_UNKNOWN",
+        "review",
+        "No sufficient official SEC evidence establishes whether EDGAR operated on a date, so "
+        "automated rollover classification is blocked.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
         "OPERATING_CALENDAR_UNAVAILABLE",
         "temporal",
         "No EDGAR operating calendar covered the dates, so rollover could not be established.",
@@ -303,7 +331,384 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         requires_manual_review=True,
         decision_reference=_D010,
     ),
+    # --- provenance: expected source lifecycle ------------------------------ #
+    _code(
+        "SOURCE_CONTENT_UPDATED",
+        "provenance",
+        "A living official source changed at the same identity, which is expected. The "
+        "changed bytes become a new immutable observation, the prior observation is "
+        "preserved, and the new observation supersedes it for future census runs.",
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_CONTENT_UNCHANGED",
+        "provenance",
+        "A repeat retrieval returned bytes identical to the preserved object, so the "
+        "stored payload is reused and the retrieval is still recorded.",
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_SNAPSHOT_REUSED",
+        "provenance",
+        "A conditional request returned 304 and every reuse precondition held, so the "
+        "verified preserved snapshot is reused.",
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_CORRECTION_EXPLAINED",
+        "provenance",
+        "A dated artifact changed and an official SEC correction observation explains "
+        "the change, so the update is recorded as expected rather than as a mutation.",
+        decision_reference=_D009,
+    ),
+    _code(
+        "PARSER_STRUCTURE_VALID_EMPTY",
+        "provenance",
+        "A nested source region was present, correctly typed, and genuinely empty, so "
+        "zero records is a real observation rather than an absence of evidence.",
+        decision_reference=_D008,
+    ),
+    # --- structural integrity of nested source regions ---------------------- #
+    _code(
+        "PARSER_STRUCTURE_ABSENT",
+        "integrity",
+        "A nested source region the schema requires was absent, so record counts derived "
+        "from it are unknown and must never be reported as a genuine zero.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "PARSER_STRUCTURE_NULL",
+        "integrity",
+        "A nested source region was present but null, which is not an empty table; the "
+        "raw payload is retained and the count stays unknown.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "PARSER_STRUCTURE_WRONG_TYPE",
+        "integrity",
+        "A nested source region carried an unexpected type, so it cannot be read as the "
+        "structure the schema declares and its record count stays unknown.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "PARSER_STRUCTURE_MALFORMED",
+        "integrity",
+        "A nested source region was correctly typed but internally inconsistent, for "
+        "example parallel columns of differing length; nothing is truncated or inferred.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "PARSER_STRUCTURE_INDETERMINATE",
+        "integrity",
+        "A nested source region could not be classified as valid, absent, or malformed, so "
+        "it resolves to indeterminate rather than to any count.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "CALENDAR_CONTEXTUAL_DATE_RETAINED",
+        "provenance",
+        "A visible date was retained as contextual evidence only. A publication date, "
+        "page-update date, filing deadline, example, navigation label, or date from "
+        "another year asserts no EDGAR operating status.",
+        decision_reference=_D011,
+    ),
+    _code(
+        "REVIEW_CALENDAR_EVIDENCE_UNSUPPORTED",
+        "review",
+        "A reviewed manifest date is not supported by the retrieved document, so the date "
+        "resolves to unknown rather than inheriting the manifest's asserted status.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
+        "REVIEW_CALENDAR_EVIDENCE_AMBIGUOUS",
+        "review",
+        "The prose surrounding an affected date does not determine an operating status, so "
+        "the date resolves to unknown rather than being read either way.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
+        "REVIEW_CALENDAR_UNEXPECTED_AFFECTED_DATE",
+        "review",
+        "A document appears to assert an operating status for a date the reviewed manifest "
+        "does not name; the observation is preserved and no status is applied.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
+        "REVIEW_CALENDAR_STRUCTURE_UNRECOGNIZED",
+        "review",
+        "No official holiday table, caption, or heading was recognized on a calendar page, "
+        "so no date was asserted; absence of a recognized structure is not absence of "
+        "holidays.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    # --- full-index coverage reconciliation --------------------------------- #
+    _code(
+        "INDEX_ACCESSION_NOT_IN_SUBMISSIONS",
+        "review",
+        "The official quarterly index lists an accession that submissions metadata does "
+        "not; both sides are retained and neither record is removed.",
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "SUBMISSIONS_ACCESSION_NOT_IN_INDEX",
+        "review",
+        "Submissions metadata lists an accession the official quarterly index does not; "
+        "both sides are retained and neither record is removed.",
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "INDEX_SUBMISSIONS_FIELD_CONFLICT",
+        "review",
+        "The quarterly index and submissions metadata disagree on a compared field for "
+        "one accession; both observations are preserved and neither is replaced.",
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "INDEX_INSTANCE_UNAVAILABLE",
+        "integrity",
+        "A required quarterly index instance was not retrieved or not usably parsed, so "
+        "coverage for that period cannot be confirmed.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "INDEX_REQUIRED_INSTANCE_MISSING",
+        "integrity",
+        "The census plan requires a quarterly index instance that is absent, so the "
+        "census may not claim completion.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "INDEX_RECONCILIATION_INDETERMINATE",
+        "review",
+        "An index row or submissions record was malformed, so the comparison could not be "
+        "made; the raw evidence is retained on both sides.",
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    # --- accession field resolution (Decision 012) -------------------------- #
+    _code(
+        "ACCESSION_FIELD_RESOLVED",
+        "provenance",
+        "A canonical accession field was resolved to a single authoritative value from "
+        "the preserved observation set, deterministically and independently of order.",
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_FIELD_RESOLVED_BY_CORRECTION",
+        "provenance",
+        "An explicitly identified official SEC correction superseded an earlier value; "
+        "every prior observation is preserved.",
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_FIELD_UNRESOLVED_EQUAL_AUTHORITY",
+        "integrity",
+        "Observations of equal authority disagree on a canonical field, so it stays "
+        "unresolved rather than being settled by retrieval time or ingestion order.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_FIELD_CONFLICT_MATERIAL",
+        "integrity",
+        "A material canonical field is unresolved, so downstream use depending on that "
+        "field is blocked.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_FIELD_CONFLICT_NON_MATERIAL",
+        "review",
+        "A non-material canonical field is unresolved. It does not block cohort "
+        "assignment, but it is recorded and reviewed rather than silently settled.",
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_COHORT_BOUNDARY_CROSSED",
+        "review",
+        "A resolved filing-date correction moved an accession across a frozen cohort "
+        "boundary; prior cohort observations are retained.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_2024_COHORT_TRANSITION_REQUIRES_APPROVAL",
+        "review",
+        "Entry into or exit from the untouched 2024 primary-test cohort requires explicit "
+        "approval; the transition is recorded and blocked until it is approved.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_REGISTRANT_CONFLICT_PRESERVED",
+        "integrity",
+        "Registrant CIK observations disagree for one accession. Every observation is "
+        "preserved and no CIK identities are merged.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "ACCESSION_SUBMITTER_DIFFERS_FROM_REGISTRANT",
+        "review",
+        "The submitter CIK differs from the registrant CIK, retained as a review signal "
+        "for possible multi-registrant or agent-filed submissions.",
+        requires_manual_review=True,
+        decision_reference=_D012,
+    ),
+    _code(
+        "REVIEW_CALENDAR_TARGET_YEAR_ABSENT",
+        "review",
+        "An annual-calendar instance carried no explicitly requested target year. The "
+        "year is never inferred from the current date or the retrieval timestamp, so no "
+        "operating status may be asserted from the snapshot.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
+        "REVIEW_CALENDAR_TARGET_YEAR_UNSUPPORTED",
+        "review",
+        "A recognized official holiday structure asserts nothing for the requested year, "
+        "so coverage for that year is unknown rather than empty.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D011,
+    ),
+    _code(
+        "PARSER_HISTORICAL_REFERENCE_MALFORMED",
+        "integrity",
+        "A historical submissions reference lacked a usable name or carried unusable "
+        "metadata; it is preserved as source evidence and never silently skipped.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
     # --- integrity ---------------------------------------------------------- #
+    _code(
+        "SOURCE_IMMUTABLE_IDENTITY_MUTATED",
+        "integrity",
+        "A source defined as immutable changed its content at the same official "
+        "identity; both observations are preserved and the census stops for review.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_DATED_ARTIFACT_CHANGED",
+        "integrity",
+        "A dated historical artifact changed with no explained SEC correction, or its "
+        "period closure could not be established; the change is not accepted silently.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_VALIDATOR_CONTRADICTION",
+        "integrity",
+        "The same ETag or Last-Modified validator yielded different bytes, so the "
+        "source's own cache validators cannot be trusted for this identity.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_HASH_DISAGREEMENT",
+        "integrity",
+        "Transport bytes and stored bytes do not reconcile under the recorded storage "
+        "representation, so the stored object cannot be trusted as evidence.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D009,
+    ),
+    _code(
+        "SOURCE_SNAPSHOT_REUSE_UNRECONCILED",
+        "integrity",
+        "A 304 reuse could not be reconciled with a recorded prior observation, so the "
+        "response is failed closed and never read as an empty or new dataset.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D009,
+    ),
+    _code(
+        "SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",
+        "integrity",
+        "A redirect hop or final URL left the registered source's permitted URL family, "
+        "changed host, downgraded the scheme, or entered a prohibited filing path.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D007,
+    ),
+    _code(
+        "SEC_REDIRECT_DEPTH_EXCEEDED",
+        "integrity",
+        "A redirect chain looped or exceeded the permitted depth, so the retrieval is "
+        "abandoned rather than followed further.",
+        blocks_release=True,
+        decision_reference=_D007,
+    ),
+    _code(
+        "RAW_ARCHIVE_MEMBER_REFUSED",
+        "integrity",
+        "An archive member violated a canonicalization or expansion rule; the archive is "
+        "preserved and quarantined rather than partially trusted.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D009,
+    ),
+    _code(
+        "PARSER_SCHEMA_DRIFT_OBSERVED",
+        "integrity",
+        "A parsed source record carried unknown fields or a changed shape; the record is "
+        "retained with its unknown fields for review rather than silently narrowed.",
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "PARSER_DUPLICATE_SOURCE_RECORD",
+        "integrity",
+        "A source document contained duplicate records for the same native identity; "
+        "every observation is retained and none is chosen silently.",
+        requires_manual_review=True,
+        decision_reference=_D008,
+    ),
+    _code(
+        "AUDIT_PROJECTION_INCOMPLETE",
+        "integrity",
+        "The append-only audit projection is behind the authoritative catalog rows and "
+        "must be rebuilt from them; the observations themselves remain recorded.",
+        decision_reference=_D009,
+    ),
     _code(
         "RAW_FILE_CHECKSUM_MISMATCH",
         "integrity",

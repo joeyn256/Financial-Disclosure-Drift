@@ -44,6 +44,8 @@ __all__ = [
     "classify_date_divergence",
     "is_mapped_cohort",
     "OUT_OF_SCOPE_COHORT",
+    "UNRESOLVED_COHORT",
+    "cohort_label_for_value",
     "SEC_TIMEZONE_NAME",
     "SUPPORT_2009_COHORT",
     "AcceptanceTimestamps",
@@ -84,6 +86,12 @@ _PRECEDENCE: Final[dict[str, int]] = {
 SEC_TIMEZONE_NAME: Final = "America/New_York"
 SUPPORT_2009_COHORT: Final = "support_2009"
 OUT_OF_SCOPE_COHORT: Final = "out_of_scope"
+UNRESOLVED_COHORT: Final = "unresolved"
+"""Label for a date that could not be resolved at all.
+
+Distinct from ``out_of_scope``, which is a resolved date outside every supported
+window. Confusing the two would let an unknown date masquerade as a known exclusion.
+"""
 _ACCEPTANCE_PATTERN: Final = re.compile(r"^\d{14}$")
 
 DateDivergenceReason = Literal[
@@ -415,6 +423,31 @@ def cohort_name_for(day: date) -> str:
         return SUPPORT_2009_COHORT
     window = cohort_for(day)
     return window.name if window is not None else OUT_OF_SCOPE_COHORT
+
+
+def cohort_label_for_value(value: str | date | None) -> str:
+    """Return the persisted cohort label for a possibly unresolved date.
+
+    This is the single helper every persistence path uses, so the four meanings stay
+    distinct in the catalog:
+
+    * ``support_2009`` — a valid 2009 date, support-only and never analysis membership;
+    * one of the five frozen cohort names — eligible under that cohort's frozen role;
+    * ``out_of_scope`` — a valid, resolved date outside every supported window;
+    * ``unresolved`` — the date itself is absent, unparseable, or unresolved.
+
+    A valid date is never persisted as ``NULL`` merely for falling outside the five
+    analysis cohorts: that would make an out-of-scope filing indistinguishable from one
+    whose date could not be established.
+    """
+    if value is None:
+        return UNRESOLVED_COHORT
+    if isinstance(value, date):
+        return cohort_name_for(value)
+    try:
+        return cohort_name_for(date.fromisoformat(value.strip()))
+    except (TypeError, ValueError):
+        return UNRESOLVED_COHORT
 
 
 @dataclass(frozen=True, slots=True)

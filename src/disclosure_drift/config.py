@@ -204,7 +204,7 @@ class SecSection(_Section):
 
 
 class NetworkSection(_Section):
-    """Network posture. Disabled by default; Stage M2.1 makes no request."""
+    """Network posture. Disabled by default; M2.2 requires explicit enablement."""
 
     enabled: bool = False
 
@@ -314,8 +314,8 @@ class ProjectConfig(_Section):
         if not self.network.enabled:
             message = (
                 "network access is disabled in configuration\n"
-                "Fix: enable network.enabled only in a milestone stage that authorizes "
-                "SEC requests. Stage M2.1 makes no request."
+                "Fix: enable network.enabled only for an authorized Stage M2.2 metadata "
+                "census. The default configuration makes no request."
             )
             raise NetworkDisabledError(message)
 

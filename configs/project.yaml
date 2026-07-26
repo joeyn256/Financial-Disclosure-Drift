@@ -40,7 +40,7 @@ sec:
   cooldown_seconds: 600.0
 
 network:
-  # Stage M2.1 makes no SEC request. Enable only in a stage that authorizes it.
+  # Safe default. Stage M2.2 code runs only when an operator explicitly enables it.
   enabled: false
 
 companyfacts:

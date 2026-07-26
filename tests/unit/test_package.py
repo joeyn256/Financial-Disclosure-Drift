@@ -86,7 +86,7 @@ def _is_forbidden(module: str) -> bool:
 
 def test_static_check_no_networking_client_imported() -> None:
     """No package module imports a socket or HTTP client directly."""
-    sources = sorted(PACKAGE_DIR.glob("*.py"))
+    sources = sorted(PACKAGE_DIR.rglob("*.py"))
     assert sources, "expected package sources to scan"
 
     offenders: dict[str, set[str]] = {}

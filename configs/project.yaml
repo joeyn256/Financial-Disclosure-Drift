@@ -27,9 +27,27 @@ logging:
 sec:
   # Variable NAME only. The value is resolved on demand and never logged.
   user_agent_env: DISCLOSURE_DRIFT_SEC_USER_AGENT
-  # Conservative placeholder. Milestone 1 implements no network access.
-  requests_per_second: 5.0
-  max_retries: 3
+  # One shared aggregate limiter across all SEC hosts. Default 4, maximum 8.
+  # The published SEC ceiling of 10 per second is not the project target.
+  requests_per_second: 4.0
+  burst: 1
+  max_retries: 5
+  connect_timeout_seconds: 10.0
+  read_timeout_seconds: 60.0
+  bulk_read_timeout_seconds: 180.0
+  backoff_ceiling_seconds: 60.0
+  # Minimum halt after a 403 or an unqualified 429, applied to aggregate traffic.
+  cooldown_seconds: 600.0
+
+network:
+  # Stage M2.1 makes no SEC request. Enable only in a stage that authorizes it.
+  enabled: false
+
+companyfacts:
+  # Reconciliation and QA only, and never for outcome construction.
+  enabled: false
+  documented_need: null
+  approved_by: null
 
 # --- Frozen research definitions (mirrored; see cohorts.py) ---
 cohorts:

@@ -28,6 +28,11 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
 ]
+# Declared now, installed later. Stage M2.1 imports neither.
+# sec: SEC HTTP client, introduced in Stage M2.2 and confined to one auditable module.
+sec = ["httpx>=0.27,<1"]
+# release: deterministic Parquet writer, introduced in Stage M2.7.
+release = ["pyarrow>=17"]
 
 [project.scripts]
 disclosure-drift = "disclosure_drift.cli:run"
@@ -38,6 +43,8 @@ path = "src/disclosure_drift/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/disclosure_drift"]
+# Versioned migrations ship as package data and are read with importlib.resources.
+artifacts = ["src/disclosure_drift/storage/migrations/*.sql"]
 
 [tool.ruff]
 line-length = 100

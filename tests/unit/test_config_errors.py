@@ -94,7 +94,10 @@ def test_unknown_top_level_section_is_rejected(
         ("logging", "filename", "", "logging.filename"),
         ("sec", "requests_per_second", 0, "sec.requests_per_second"),
         ("sec", "requests_per_second", -1.5, "sec.requests_per_second"),
+        ("sec", "requests_per_second", 9.0, "sec.requests_per_second"),
         ("sec", "requests_per_second", 25, "sec.requests_per_second"),
+        ("sec", "burst", 0, "sec.burst"),
+        ("sec", "cooldown_seconds", 60, "sec.cooldown_seconds"),
         ("sec", "max_retries", -1, "sec.max_retries"),
         ("sec", "user_agent_env", "SOME_OTHER_VARIABLE", "sec.user_agent_env"),
         ("project", "name", "", "project.name"),
@@ -151,6 +154,7 @@ def test_impossible_date_literal_is_reported_as_invalid_yaml(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "value",
+    # hygiene-scan: allow - synthetic paths that must be rejected by the loader
     ["/Users/someone/Projects/data", "/home/someone/data", "~/Projects/data", "/root/data"],
 )
 def test_machine_specific_path_in_file_is_rejected(

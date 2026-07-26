@@ -6,8 +6,16 @@ frozen research definition transcribed from the approved Milestone 0 record:
 
 * ``Docs/Decisions/decision_003_temporal_split.md`` — cohort windows
 * ``Docs/Decisions/decision_005_2025_2026_recency_extension.md`` — maturity gates
+* ``Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md`` — the
+  date source used for assignment
 * ``Docs/preregistration.md`` section 8 — temporal design
 * ``Docs/preregistration.md`` section 15.1 — bootstrap seed
+* ``Docs/preregistration.md`` section 25.1 — Deviation D001
+
+The windows are **date-source agnostic**. Decision 010 makes the official SEC
+filing date the authoritative assignment date and keeps the acceptance date as a
+separate audit-only cohort; both are produced by calling :func:`cohort_for` twice.
+Nothing in this module selects a date source.
 
 These constants must never be changed by configuration files, environment
 variables, or command-line flags. ``configs/project.yaml`` mirrors them for
@@ -27,7 +35,7 @@ from typing import Final
 
 @dataclass(frozen=True, slots=True)
 class CohortWindow:
-    """An inclusive SEC acceptance-date window for one study cohort."""
+    """An inclusive cohort-assignment-date window for one study cohort."""
 
     name: str
     start: date
@@ -35,7 +43,11 @@ class CohortWindow:
     role: str
 
     def contains(self, moment: date) -> bool:
-        """Return ``True`` when ``moment`` falls inside the inclusive window."""
+        """Return ``True`` when ``moment`` falls inside the inclusive window.
+
+        ``moment`` may be any cohort-assignment date. The caller chooses the date
+        source; this method never does.
+        """
         return self.start <= moment <= self.end
 
     @property
@@ -114,14 +126,16 @@ FROZEN_SOURCE_RECORDS: Final[tuple[str, ...]] = (
     "Docs/Decisions/decision_005_2025_2026_recency_extension.md",
     "Docs/preregistration.md (section 8, temporal design)",
     "Docs/preregistration.md (section 15.1, bootstrap)",
+    "Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md",
+    "Docs/preregistration.md (section 25.1, Deviation D001)",
 )
 """Governing research records for every constant in this module."""
 
 STUDY_START: Final[date] = date(2010, 1, 1)
-"""First acceptance date covered by the cohort design."""
+"""First cohort-assignment date covered by the design."""
 
 STUDY_END: Final[date] = date(2026, 12, 31)
-"""Last acceptance date covered by the cohort design."""
+"""Last cohort-assignment date covered by the design."""
 
 
 def cohort_for(moment: date) -> CohortWindow | None:

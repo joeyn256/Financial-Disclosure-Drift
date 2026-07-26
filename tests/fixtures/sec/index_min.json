@@ -1,0 +1,11 @@
+{
+  "directory": {
+    "name": "/Archives/edgar/data/1/000000000124000001",
+    "item": [
+      {"name": "syn-20231231.htm", "type": "10-K", "size": "482913"},
+      {"name": "syn-20231231.xsd", "type": "EX-101.SCH", "size": "12043"},
+      {"name": "syn-20231231_lab.xml", "type": "EX-101.LAB", "size": "80211"},
+      {"name": "ex-21-1.htm", "type": "EX-21.1", "size": "3120"}
+    ]
+  }
+}

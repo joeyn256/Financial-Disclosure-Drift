@@ -2,9 +2,11 @@
 
 A preregistered temporal-reliability study of U.S. Form 10-K disclosure narratives.
 
-**Status:** Milestone 0 (novelty audit, preregistration, definition freeze) is complete. Milestone 1
-delivers the reproducible engineering foundation only — packaging, typed configuration, logging, an
-offline CLI, tests, and CI. No SEC data has been downloaded and no research code exists yet.
+**Status:** Milestone 0 (novelty audit, preregistration, definition freeze) and Milestone 1
+(reproducible engineering foundation) are complete. Milestone 2 is in progress at **Stage M2.1**,
+which is documentation and offline foundation only: SEC policy modules, temporal and availability
+policy, reason codes, path policy, and CLI skeletons. **No SEC data has been downloaded, no HTTP
+client is installed, and no research code exists.**
 
 ## Research question
 
@@ -27,9 +29,9 @@ Quoted from `Docs/Decisions/decision_006_final_contribution.md`, which is frozen
 
 ## Temporal cohorts
 
-Cohorts are assigned by the SEC acceptance date of the original Form 10-K.
+Cohorts are assigned by the official SEC filing date of the original Form 10-K (Decision 010).
 
-| Cohort | Acceptance dates | Role |
+| Cohort | Cohort-assignment dates | Role |
 |---|---|---|
 | Development | 2010-01-01 to 2021-12-31 | Feature development, estimator and hyperparameter selection, rolling-origin selection |
 | Transition evaluation | 2022-01-01 to 2023-12-31 | Locked evaluation; no predictive-model tuning |
@@ -42,6 +44,13 @@ definitions**. They live in `src/disclosure_drift/cohorts.py`, which is the cano
 truth. `configs/project.yaml` mirrors them and configuration loading hard-fails on any disagreement.
 No environment variable can override them. Changing one requires an approved decision record in
 `Docs/Decisions/` plus a reviewed code change.
+
+**Cohort assignment uses the official SEC filing date** per
+`Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md`, recorded as Deviation
+D001 in `Docs/preregistration.md` section 25.1. The SEC acceptance date produces a separate
+audit-only cohort that never determines analysis membership, and the point-in-time cutoff uses the
+approved public-availability boundary with a tri-state comparison
+(`eligible` / `ineligible` / `indeterminate`).
 
 ## What this project does not claim
 
@@ -64,7 +73,7 @@ Requires Python 3.12 (see `.python-version`).
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-cp .env.example .env    # optional in Milestone 1
+cp .env.example .env    # optional offline; required before any SEC request
 ```
 
 `make install` performs the same install into `.venv`.
@@ -76,12 +85,15 @@ a typo never passes silently.
 
 | Variable | Purpose |
 |---|---|
-| `DISCLOSURE_DRIFT_SEC_USER_AGENT` | Recognized secret. Resolved on demand, never logged or printed. Optional in Milestone 1; mandatory before Milestone 2 ingestion. |
+| `DISCLOSURE_DRIFT_SEC_USER_AGENT` | Recognized secret. Resolved on demand, never logged or printed. Optional for offline commands; mandatory at the network boundary, which validates it before any request. |
 | `DISCLOSURE_DRIFT_DATA_ROOT` | Override the data root. May be an absolute path. |
 | `DISCLOSURE_DRIFT_LOG_DIR` | Override the log directory. May be an absolute path. |
 | `DISCLOSURE_DRIFT_LOG_LEVEL` | Override the log level. |
 | `DISCLOSURE_DRIFT_LOG_TO_FILE` | Enable or disable file logging. |
+| `DISCLOSURE_DRIFT_BACKUP_ROOT` | Backup root for Milestone 2 backup and restore. May be absolute. Optional offline; validated by any command that needs it. |
 | `DISCLOSURE_DRIFT_CONFIG` | Use an alternate configuration file. |
+
+The audit directory is always `{data_root}/audit/sec` and is not separately configurable.
 
 The tracked configuration contains no absolute or machine-specific path; loading rejects one if it
 ever appears there.
@@ -92,9 +104,14 @@ ever appears there.
 python -m disclosure_drift --help
 python -m disclosure_drift validate-config
 python -m disclosure_drift show-cohorts
+python -m disclosure_drift validate-sec-config
+python -m disclosure_drift sec --help
 ```
 
-Every command is offline and read-only. None downloads filings or processes data.
+Every command is offline and read-only. None downloads filings or processes data. Milestone 2
+commands that would need the network refuse before request construction when
+`DISCLOSURE_DRIFT_SEC_USER_AGENT` is missing or invalid, and exit 3 while their stage is not enabled.
+Exit codes: 0 success, 1 configuration error, 2 usage, 3 stage not enabled, 4 gate failure.
 
 ## Test, lint, and type-check commands
 
@@ -104,6 +121,7 @@ ruff format --check .
 mypy src
 pytest
 python scripts/check_no_secrets.py
+python scripts/check_repo_hygiene.py
 ```
 
 `make check` runs all of the above plus both CLI validation commands. CI runs the same sequence on
@@ -112,11 +130,13 @@ pull requests and pushes to `main`.
 ## Repository structure
 
 ```text
-Docs/                    Frozen research record: preregistration, registers, Decisions 001-006
+Docs/                    Research record: preregistration, registers, Decisions 001-010, SEC dictionary
 Literature/              Literature matrix, search log, bibliography, competitor audit
 Milestones/              Milestone specifications and completion records
 configs/project.yaml     Project configuration; mirrors the frozen definitions
-src/disclosure_drift/    Package: cohorts (canonical constants), config, logging, CLI
+data/                    Generated, git-ignored except data/README.md (Decision 009)
+src/disclosure_drift/    Package: cohorts, config, logging, paths, reasons, errors, CLI
+src/disclosure_drift/sec/  SEC identity, temporal, availability, response, and source policy
 tests/unit/              Configuration, cohort-integrity, and logging tests
 tests/integration/       CLI and offline-behaviour tests
 scripts/                 Repository maintenance checks
@@ -124,12 +144,15 @@ scripts/                 Repository maintenance checks
 ```
 
 `Docs/`, `Literature/`, and `Milestones/` are the research record. Engineering milestones do not
-modify them; their version-suffixed files are retained history.
+modify them, with two explicitly authorized Milestone 2 exceptions: the new Milestone 2 documents,
+and the append-only Deviation D001 entry in `Docs/preregistration.md` section 25.1. Existing protocol
+wording and Decisions 001-006 are unchanged; version-suffixed files are retained history.
 
 ## Data governance
 
-- Raw and generated SEC corpora are **never** committed. `data/raw`, `data/interim`,
-  `data/processed`, `data/publication`, `data/external`, and `logs/` are git-ignored.
+- Raw and generated SEC corpora are **never** committed. Everything under `data/` is git-ignored
+  except `data/README.md`, and `*.sqlite3`, `*-wal`, `*-shm`, `*.parquet`, `*.part`, and `logs/`
+  are ignored everywhere. `scripts/check_repo_hygiene.py` enforces this.
 - Secrets are never committed. `.env` is ignored; placeholder values live only in `.env.example`,
   which uses reserved `example.com` addresses.
 - The point-in-time source of truth is the SEC filing and its SEC metadata. External corpora may be

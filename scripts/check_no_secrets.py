@@ -64,6 +64,7 @@ PLACEHOLDER_DOMAIN_SUFFIXES: Final[tuple[str, ...]] = (
     ".test",
     ".localhost",
 )
+TEMPLATE_DOMAIN_PREFIXES: Final[tuple[str, ...]] = ("your-", "your.", "yourdomain", "yourorg")
 
 _ASSIGNMENT = re.compile(  # secret-scan: allow
     r"(?i)\b(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?key|"
@@ -117,8 +118,15 @@ def tracked_files(root: Path) -> list[str]:
 
 
 def _is_placeholder_email(address: str) -> bool:
+    """Whether an address is documentation rather than a real contact.
+
+    Two families are recognized: RFC 2606 reserved domains, and template domains
+    of the ``your-something`` form used in instructions and test fixtures.
+    """
     domain = address.rsplit("@", 1)[-1].lower()
-    return domain.endswith(PLACEHOLDER_DOMAIN_SUFFIXES)
+    if domain.endswith(PLACEHOLDER_DOMAIN_SUFFIXES):
+        return True
+    return domain.startswith(TEMPLATE_DOMAIN_PREFIXES)
 
 
 def _is_placeholder_value(value: str) -> bool:

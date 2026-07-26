@@ -822,6 +822,41 @@ Every deviation must record:
 
 Silently changing a definition is prohibited.
 
+### 25.1 Deviation register
+
+This register is append-only. Entries are added under the procedure in section 25; no existing
+protocol wording is rewritten when an entry is added.
+
+#### Deviation D001 — cohort-assignment date source and point-in-time boundary
+
+| Required field | Entry |
+|---|---|
+| **Date** | 2026-07-25 |
+| **Decision owner** | Joey Nihill, project owner |
+| **Governing record** | `Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md` |
+| **Affected hypothesis or analysis** | None of H1–H5 is redefined. The change affects cohort *membership* only for filings whose SEC acceptance date and official SEC filing date fall on opposite sides of a frozen window boundary, and it affects the point-in-time cutoff used by every predictor. |
+| **Reason** | Official SEC filing and dissemination mechanics. A Form 10-K accepted after the SEC daily cutoff receives the next business day's official filing date and is not publicly disseminated until that date. Assigning cohorts by acceptance date would place such a filing in a cohort before the date on which the market could observe it. |
+| **Whether any transition or final-test metric had been viewed** | No. No SEC filing, no outcome value, no transition-cohort metric, and no final-test metric was inspected before or during this decision. The change is prospective and outcome-blind. |
+| **Expected direction of impact** | Expected to be very small in magnitude and of unknown sign. Only filings accepted after the daily cutoff on the last business day of a December can change cohort, and such a filing can only move later. The change strengthens point-in-time validity by aligning the predictor cutoff with public availability. |
+| **New version number** | Deviation D001. The frozen protocol text remains Stage 1 v0.2 and is unaltered; deviation register version 0.1. |
+| **Confirmatory or exploratory** | Confirmatory. The deviation is prospective, outcome-blind, and recorded before any filing was retrieved. |
+
+Substance of the deviation:
+
+1. Decision 010 is a narrow, prospective, outcome-blind deviation.
+2. The frozen cohort date windows in section 8 remain unchanged.
+3. The **official SEC filing date** now determines the authoritative temporal cohort.
+4. The **SEC acceptance date** determines a separate, audit-only temporal cohort that is retained
+   alongside the authoritative cohort and never replaces it.
+5. The point-in-time cutoff uses the approved **public-availability boundary** rather than the raw
+   acceptance timestamp.
+6. No SEC filings, outcomes, transition metrics, or final-test metrics were inspected before this
+   decision was made.
+7. The change was motivated solely by official SEC filing and dissemination mechanics.
+8. Decision 003 remains preserved in full and is superseded **only** for its cohort date-source rule.
+   Every other element of Decision 003, including the windows, the maturity gates, and the holdout
+   protections, remains in force.
+
 ---
 
 ## 26. Reporting framework

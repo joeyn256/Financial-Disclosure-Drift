@@ -14,12 +14,20 @@ __pycache__/
 .coverage
 htmlcov/
 
-data/raw/
-data/interim/
-data/processed/
-data/publication/
-data/external/
-data/cache/
+# Data governance (Decision 009): nothing under data/ is tracked except its README.
+data/**
+!data/
+!data/README.md
+
+# Operational catalog, releases, and transfer artifacts must never be tracked.
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.parquet
+*.part
 
 *.log
 logs/

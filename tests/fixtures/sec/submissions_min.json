@@ -1,0 +1,15 @@
+{
+  "cik": "0000000001",
+  "name": "SYNTHETIC OPERATING COMPANY ONE",
+  "sic": "7372",
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0000000001-24-000001"],
+      "form": ["10-K"],
+      "filingDate": ["2024-02-15"],
+      "acceptanceDateTime": ["2024-02-15T16:15:00.000Z"],
+      "reportDate": ["2023-12-31"],
+      "primaryDocument": ["syn-20231231.htm"]
+    }
+  }
+}

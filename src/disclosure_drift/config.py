@@ -22,6 +22,7 @@ This module performs no network access and imports no HTTP client.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
@@ -38,23 +39,31 @@ from disclosure_drift.cohorts import (
     FROZEN_MATURITY_GATES,
     FROZEN_SOURCE_RECORDS,
 )
+from disclosure_drift.errors import NetworkDisabledError, SecUserAgentError
+from disclosure_drift.paths import BackupRootStatus, DataTree, backup_root_status
 
 __all__ = [
+    "BACKUP_ROOT_ENV",
     "CONFIG_PATH_ENV",
     "ENV_OVERRIDES",
     "ENV_PREFIX",
     "FROZEN_CONFIG_SECTIONS",
+    "PLACEHOLDER_CONTACT_DOMAINS",
     "RECOGNIZED_ENV_VARS",
+    "RUNTIME_ROOT_ENV_VARS",
     "SECRET_ENV_VARS",
     "SEC_USER_AGENT_ENV",
+    "CompanyFactsSection",
     "ConfigError",
     "ConfigFileNotFoundError",
     "ConfigValidationError",
     "FrozenDefinitionMismatchError",
+    "NetworkSection",
     "ProjectConfig",
     "UnknownEnvironmentOverrideError",
     "default_config_path",
     "load_config",
+    "validate_sec_user_agent",
 ]
 
 
@@ -88,8 +97,18 @@ ENV_PREFIX: Final = "DISCLOSURE_DRIFT_"
 CONFIG_PATH_ENV: Final = "DISCLOSURE_DRIFT_CONFIG"
 SEC_USER_AGENT_ENV: Final = "DISCLOSURE_DRIFT_SEC_USER_AGENT"
 
+BACKUP_ROOT_ENV: Final = "DISCLOSURE_DRIFT_BACKUP_ROOT"
+
 SECRET_ENV_VARS: Final[frozenset[str]] = frozenset({SEC_USER_AGENT_ENV})
 """Recognized secret variables: resolved on demand, never stored or logged."""
+
+RUNTIME_ROOT_ENV_VARS: Final[frozenset[str]] = frozenset({BACKUP_ROOT_ENV})
+"""Runtime roots that may be absolute machine-local paths and are not config overrides.
+
+The backup root deliberately has no entry in tracked YAML (Decision 009 section 2):
+a fabricated relative destination would be worse than an unset one. It may remain
+unset during offline work; commands that back up or restore validate it.
+"""
 
 ENV_OVERRIDES: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     {
@@ -102,7 +121,7 @@ ENV_OVERRIDES: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
 """The only environment variables that may change configuration values."""
 
 RECOGNIZED_ENV_VARS: Final[frozenset[str]] = (
-    frozenset(ENV_OVERRIDES) | SECRET_ENV_VARS | {CONFIG_PATH_ENV}
+    frozenset(ENV_OVERRIDES) | SECRET_ENV_VARS | RUNTIME_ROOT_ENV_VARS | {CONFIG_PATH_ENV}
 )
 """Every ``DISCLOSURE_DRIFT_*`` variable this package accepts."""
 
@@ -155,11 +174,21 @@ class LoggingSection(_Section):
 
 
 class SecSection(_Section):
-    """SEC client placeholders. No network code exists in Milestone 1."""
+    """SEC client policy (assignment section 6, Decision 009 section 8).
+
+    Default 4 requests per second with a configurable maximum of 8. The published
+    SEC ceiling of 10 requests per second is not the project target.
+    """
 
     user_agent_env: str = Field(min_length=1)
-    requests_per_second: float = Field(gt=0, le=10)
+    requests_per_second: float = Field(gt=0, le=8)
     max_retries: int = Field(ge=0, le=10)
+    burst: int = Field(default=1, ge=1, le=4)
+    connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    read_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    bulk_read_timeout_seconds: float = Field(default=180.0, gt=0, le=1800)
+    backoff_ceiling_seconds: float = Field(default=60.0, gt=0, le=600)
+    cooldown_seconds: float = Field(default=600.0, ge=600, le=7200)
 
     @field_validator("user_agent_env")
     @classmethod
@@ -172,6 +201,20 @@ class SecSection(_Section):
             )
             raise ValueError(message)
         return value
+
+
+class NetworkSection(_Section):
+    """Network posture. Disabled by default; Stage M2.1 makes no request."""
+
+    enabled: bool = False
+
+
+class CompanyFactsSection(_Section):
+    """CompanyFacts posture. Disabled by default; reconciliation and QA only."""
+
+    enabled: bool = False
+    documented_need: str | None = None
+    approved_by: str | None = None
 
 
 class CohortWindowSpec(_Section):
@@ -212,6 +255,8 @@ class ProjectConfig(_Section):
     gates: GatesSection
     seeds: SeedsSection
     config_path: Path
+    network: NetworkSection = NetworkSection()
+    companyfacts: CompanyFactsSection = CompanyFactsSection()
 
     def resolve_sec_user_agent(self, env: Mapping[str, str] | None = None) -> str | None:
         """Read the SEC user-agent on demand; return ``None`` when unset or blank.
@@ -238,10 +283,110 @@ class ProjectConfig(_Section):
         """Return cohort names in frozen chronological order."""
         return COHORT_ORDER
 
+    # -- Milestone 2 runtime helpers --------------------------------------- #
+    def data_tree(self) -> DataTree:
+        """Return the resolved data tree for the configured data root."""
+        return DataTree.from_root(self.paths.data_root)
+
+    def backup_root(self, env: Mapping[str, str] | None = None) -> BackupRootStatus:
+        """Report the backup-root state; never required for offline work."""
+        source: Mapping[str, str] = os.environ if env is None else env
+        return backup_root_status(source.get(BACKUP_ROOT_ENV))
+
+    def require_sec_user_agent(self, env: Mapping[str, str] | None = None) -> str:
+        """Return a validated SEC contact identity or raise before any request.
+
+        Raises:
+            SecUserAgentError: the value is absent, blank, a placeholder, or lacks
+                a project identity or an administrative contact.
+        """
+        return validate_sec_user_agent(
+            self.resolve_sec_user_agent(env),
+            variable=self.sec.user_agent_env,
+        )
+
+    def require_network(self) -> None:
+        """Raise unless network access is enabled in configuration.
+
+        Raises:
+            NetworkDisabledError: network access is disabled.
+        """
+        if not self.network.enabled:
+            message = (
+                "network access is disabled in configuration\n"
+                "Fix: enable network.enabled only in a milestone stage that authorizes "
+                "SEC requests. Stage M2.1 makes no request."
+            )
+            raise NetworkDisabledError(message)
+
 
 # --------------------------------------------------------------------------- #
 # Loader
 # --------------------------------------------------------------------------- #
+PLACEHOLDER_CONTACT_DOMAINS: Final[tuple[str, ...]] = (
+    "example.com",
+    "example.org",
+    "example.net",
+    "example.edu",
+    ".example",
+    ".invalid",
+    ".test",
+    ".localhost",
+)
+"""RFC-reserved domains that identify a placeholder rather than a real contact."""
+
+_CONTACT_PATTERN: Final = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[A-Za-z]{2,}")
+_IDENTITY_PATTERN: Final = re.compile(r"[A-Za-z]{2,}")
+
+
+def validate_sec_user_agent(value: str | None, variable: str = SEC_USER_AGENT_ENV) -> str:
+    """Validate an SEC contact identity at the network boundary.
+
+    Rejects absent, blank, unchanged-example, and RFC-reserved-placeholder values,
+    values with no project or organization identity, and values with no email-like
+    administrative contact. No personal-name format and no arbitrary total-length
+    threshold are imposed beyond what is needed to reject invalid values.
+
+    The value is returned for immediate use in a request header. Callers must not
+    log it, store it, or write it into a manifest.
+
+    Raises:
+        SecUserAgentError: the value is unusable.
+    """
+    fix = (
+        f"Fix: export {variable} as your project or organization identity followed by a "
+        "real administrative contact address, for example "
+        '"Financial Disclosure Drift research@your-institution.edu".'
+    )
+    if value is None or not value.strip():
+        message = f"{variable} is not set or is blank.\n{fix}"
+        raise SecUserAgentError(message)
+
+    candidate = " ".join(value.split())
+    contact = _CONTACT_PATTERN.search(candidate)
+    if contact is None:
+        message = f"{variable} contains no email-like administrative contact.\n{fix}"
+        raise SecUserAgentError(message)
+
+    address = contact.group(0)
+    domain = address.rsplit("@", 1)[-1].lower()
+    if domain.endswith(PLACEHOLDER_CONTACT_DOMAINS):
+        message = (
+            f"{variable} uses the reserved placeholder domain {domain!r}, so it is either the "
+            f"unchanged example or an invalid contact.\n{fix}"
+        )
+        raise SecUserAgentError(message)
+
+    remainder = candidate.replace(address, " ")
+    if _IDENTITY_PATTERN.search(remainder) is None:
+        message = (
+            f"{variable} carries a contact address but no project or organization identity.\n{fix}"
+        )
+        raise SecUserAgentError(message)
+
+    return candidate
+
+
 def default_config_path(start: Path | None = None) -> Path:
     """Locate ``configs/project.yaml`` in ``start`` or its parents.
 

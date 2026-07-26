@@ -35,7 +35,10 @@ def test_loads_the_tracked_configuration(shipped_config: Path) -> None:
     assert config.logging.level == "INFO"
     assert config.logging.to_file is False
     assert config.sec.user_agent_env == SEC_USER_AGENT_ENV
-    assert config.sec.requests_per_second == 5.0
+    assert config.sec.requests_per_second == 4.0
+    assert config.sec.burst == 1
+    assert config.sec.max_retries == 5
+    assert config.sec.cooldown_seconds >= 600.0
     assert config.seeds.bootstrap == FROZEN_BOOTSTRAP_SEED
     assert config.config_path == shipped_config
 

@@ -1,0 +1,27 @@
+{
+  "package": "milestone_00_preregistration_draft",
+  "date": "2026-07-25",
+  "status": "draft_pending_project_owner_approval",
+  "files": {
+    "preregistration_v0_1.md": {
+      "sha256": "facbf2ec384b4a14e848bae69826938bd125ce65ee1d74545396f4226f78d6ea",
+      "bytes": 29039
+    },
+    "decision_002_primary_outcome.md": {
+      "sha256": "9d58f7a3f50f3f4337ef50d047ec01b9488b5918185fbfd6e7c6da8dffcac2d3",
+      "bytes": 2678
+    },
+    "decision_003_temporal_split.md": {
+      "sha256": "7067cb8d9fed7426f02c8bba6f2c132613cc6b1f96c6c11d568fe77d21c9bf32",
+      "bytes": 2052
+    },
+    "decision_004_evaluation_protocol.md": {
+      "sha256": "d26cd3f6193960602d1edb1df8c57494bd198bf7e59929d11e9cd70694cdb81c",
+      "bytes": 2659
+    },
+    "milestone_00_research_charter_v0_4.md": {
+      "sha256": "51ab3828ca96246fcae8572c7ca3563a78e5cd671cbb1557d036d733d624d747",
+      "bytes": 8092
+    }
+  }
+}

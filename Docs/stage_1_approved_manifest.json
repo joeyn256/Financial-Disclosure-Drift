@@ -1,0 +1,27 @@
+{
+  "package": "milestone_00_stage1_approved_v0_2",
+  "date": "2026-07-25",
+  "status": "approved_pending_local_commit",
+  "files": {
+    "preregistration_v0_2.md": {
+      "sha256": "5abc1f7438b2de38cfe7e5d53afbf74a1da02b1166d52f15c357a828932cab50",
+      "bytes": 31221
+    },
+    "decision_003_temporal_split_v0_2.md": {
+      "sha256": "d5d13af074a41a65b34645107c480a97b29181a31a6ec4ac10cb032303aada0c",
+      "bytes": 2075
+    },
+    "decision_005_2025_2026_recency_extension.md": {
+      "sha256": "b09c5750c2f818b6d8d8823ef352e8796d37362ca2bbe5d158b7ee34c25e1677",
+      "bytes": 1430
+    },
+    "milestone_00_research_charter_v0_5.md": {
+      "sha256": "2a467577bed8713664e7d94541268aa5ee773fc8b01167a1ac3f6b25205b0d54",
+      "bytes": 8462
+    },
+    "stage_1_approval_record.md": {
+      "sha256": "36a677be123597775994db99185b21697abb5ab5cb542a89d09499482156f855",
+      "bytes": 659
+    }
+  }
+}

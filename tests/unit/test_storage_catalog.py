@@ -76,6 +76,7 @@ REQUIRED_TABLES = {
     "census_calendar_days",
     "census_qa_metrics",
     "census_plan_sources",
+    "census_projection_recovery_events",
     "census_recovery_states",
 }
 
@@ -104,6 +105,7 @@ EXPECTED_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (5, "r2_structural_evidence"),
     (6, "r2_resolution_and_reconciliation"),
     (7, "r2_index_retrieval"),
+    (8, "r3_durability_and_lineage"),
 )
 """The canonical migration chain, asserted by exact version and name.
 

@@ -102,6 +102,24 @@ deleted. A new source version or an explicit refresh creates a new observation a
 reconciliation result under the existing versioning policy; a previous snapshot is never
 silently mutated.
 
+Before retrieval begins, startup verifies the exact applied migration chain against the
+packaged SQL and reconciles the JSONL observation projection against authoritative
+SQLite. Projection validation is identity- and content-based rather than flag-based:
+missing, truncated, malformed, prefix-only, duplicate, unknown, modified, reordered, or
+garbage-appended files are rebuilt deterministically. The replacement is not accepted
+until its temporary file and destination directory have both been `fsync`ed. The
+detected condition and rebuild hash remain in projection-recovery history. An unresolved
+failure is release-blocking and prevents census completion; a verified rebuild resolves
+the block without altering any immutable observation.
+
+Conditional and byte-identical reuse verify the prior object, authoritative storage
+representation, hashes, sizes, parser compatibility, source/request identity, and
+object-owner lineage before sharing it. Verification uses bounded streaming reads and
+rejects absolute, traversing, or symlinked catalog paths. Complete metadata and
+archive-member lineage are copied to the new retrieval observation. A reusable stream is explicitly owned:
+callers exhaust it or close it (directly or through a context manager), and any iteration
+failure closes the local spool.
+
 ## 6. Failure continuation and global stop conditions
 
 An ordinary per-instance failure persists its terminal evidence, keeps the census
@@ -133,7 +151,47 @@ A run never claims finalized coverage through the open quarter or any future per
 included in the deterministic census-plan hash, so two plans agree only when they
 requested exactly the same thing.
 
-## 8. Dry run
+## 8. Bulk stream size: an intentional nondecision
+
+**No maximum transport size is imposed on legitimate SEC bulk metadata sources.** This is
+a deliberate nondecision, recorded so that its absence is understood as a choice rather
+than an oversight.
+
+The reasoning is that a byte ceiling invented without evidence is not a safety control.
+The bulk submissions archive is large by nature and grows over time, so a guessed cap
+would eventually refuse or truncate exactly the legitimate source the census depends on,
+and it would do so as an apparent integrity failure rather than as the configuration
+mistake it actually was. A limit that fails honest data while a malicious response is
+already contained by other means adds risk instead of removing it.
+
+Containment therefore comes from mechanisms that do not depend on knowing the size in
+advance, all of which remain in force:
+
+- **bounded-memory disk spooling** — a streamed response is written to a local spool and
+  read in bounded chunks; response size never dictates resident memory;
+- **archive protections** — per-member and cumulative expansion limits, an expansion-ratio
+  guard, a member-count limit, and refusal of corrupt archives;
+- **validation before trust** — content-type, source-family, URL-containment, redirect
+  boundary, block-page, and parser checks;
+- **deterministic cleanup and explicit stream closure** — the spool closes on exhaustion,
+  explicit close, context exit, and iteration failure, idempotently.
+
+Two limits that do exist are unaffected and are not size policy for a source. The
+in-memory ceiling for a *buffered* payload still requires large responses to stream rather
+than be held in memory, and the same ceiling bounds how much of a rejected payload is
+materialized as quarantined evidence, with any truncation recorded.
+
+**Spooling successfully is not acceptance.** A large source that spools must still satisfy
+every integrity, storage-representation, archive, parser, reconciliation, and QA gate; one
+that fails any of them is failed or quarantined with its evidence preserved. This
+nondecision grants no permission for an unbounded in-memory read.
+
+Introducing a source-specific byte ceiling later is a separate, documented decision. It
+requires an evidence basis — observed sizes for the specific official source — and a
+compatibility review against legitimate SEC source sizes across the covered period, so
+that the limit cannot silently exclude valid data.
+
+## 9. Dry run
 
 `sec census --dry-run` prints the coverage window, the as-of date, required closed-quarter
 count, satisfied and remaining required instances, the included or excluded open quarter,

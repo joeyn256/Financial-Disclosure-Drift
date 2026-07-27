@@ -258,8 +258,9 @@ class CatalogWriter:
     def migrate(self) -> tuple[str, ...]:
         """Apply pending migrations and return their names.
 
-        Migration scripts commit implicitly, so this does not wrap them in an
-        outer transaction; :func:`apply_migrations` is idempotent instead.
+        :func:`apply_migrations` commits each schema script and its immutable
+        name/checksum provenance row atomically. It also verifies the applied
+        chain before and after pending migrations.
         """
         applied = apply_migrations(self.connection)
         return tuple(migration.name for migration in applied)

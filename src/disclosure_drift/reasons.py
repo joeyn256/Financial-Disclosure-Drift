@@ -740,6 +740,14 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         decision_reference=_D008,
     ),
     _code(
+        "SEC_RETRIES_EXHAUSTED",
+        "integrity",
+        "A transient failure persisted through the whole retry budget. The retrieval is "
+        "terminal and is never reported as an empty or successful result.",
+        blocks_release=True,
+        decision_reference=_D009,
+    ),
+    _code(
         "SEC_RESPONSE_EMPTY",
         "integrity",
         "SEC returned an empty body; a failure never becomes a valid empty result.",

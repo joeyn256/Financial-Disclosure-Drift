@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.response_policy import (
     COOLDOWN_SECONDS,
     MAX_TRANSIENT_RETRIES,
@@ -145,6 +146,10 @@ def test_transport_failures_retry_then_fail(kind: TransportFailure) -> None:
     assert retry.retryable
     exhausted = classify_transport_failure(kind, attempt=MAX_TRANSIENT_RETRIES)
     assert exhausted.kind == "fail"
+    # Terminal, so it must name a registered reason; a codeless failure is
+    # indistinguishable downstream from a valid empty result.
+    assert exhausted.reason_code in REASON_CODES
+    assert REASON_CODES[exhausted.reason_code].blocks_release
 
 
 def test_interrupted_stream_records_a_partial_download_reason() -> None:

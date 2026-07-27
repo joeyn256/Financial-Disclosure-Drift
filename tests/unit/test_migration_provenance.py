@@ -1,0 +1,179 @@
+"""Applied migration metadata is immutable, ordered provenance."""
+
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from importlib import resources
+from pathlib import Path
+
+import pytest
+
+from disclosure_drift.errors import GateFailureError
+from disclosure_drift.storage import sqlite as sqlite_module
+from disclosure_drift.storage.sqlite import (
+    MIGRATIONS_PACKAGE,
+    Migration,
+    apply_migrations,
+    available_migrations,
+    connect,
+    verify_applied_migrations,
+)
+
+
+def _migrated_database(tmp_path: Path) -> Path:
+    path = tmp_path / "catalog.sqlite3"
+    with connect(path, writer=True) as connection:
+        apply_migrations(connection)
+    return path
+
+
+def _tamper(path: Path, sql: str, parameters: tuple[object, ...] = ()) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(sql, parameters)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_valid_unchanged_chain_reopens_successfully(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        assert verify_applied_migrations(connection) == tuple(
+            migration.version for migration in available_migrations()
+        )
+
+
+def test_second_normal_application_is_idempotent(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        assert apply_migrations(connection) == ()
+
+
+def test_packaged_checksums_cover_exact_sql_bytes() -> None:
+    packaged = {
+        entry.name: hashlib.sha256(entry.read_bytes()).hexdigest()
+        for entry in resources.files(MIGRATIONS_PACKAGE).iterdir()
+        if entry.name.endswith(".sql")
+    }
+    for migration in available_migrations():
+        filename = f"{migration.version:04d}_{migration.name}.sql"
+        assert migration.checksum_sha256 == packaged[filename]
+    assert (
+        Migration(1, "fixture", "SELECT 1;\n").checksum_sha256
+        != Migration(
+            1,
+            "fixture",
+            "SELECT 1;\r\n",
+        ).checksum_sha256
+    )
+
+
+def test_changed_packaged_sql_blocks_reopen_without_rewriting_checksum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _migrated_database(tmp_path)
+    inventory = list(available_migrations())
+    original = inventory[2]
+    inventory[2] = Migration(
+        version=original.version,
+        name=original.name,
+        sql=original.sql + "\n-- altered fixture\n",
+    )
+    raw = sqlite3.connect(path)
+    recorded_before = raw.execute(
+        "SELECT checksum_sha256 FROM ops_schema_migrations WHERE version = 3"
+    ).fetchone()[0]
+    raw.close()
+
+    monkeypatch.setattr(sqlite_module, "available_migrations", lambda: tuple(inventory))
+    with pytest.raises(GateFailureError, match="checksum mismatch"), connect(path, writer=True):
+        pass
+
+    raw = sqlite3.connect(path)
+    recorded_after = raw.execute(
+        "SELECT checksum_sha256 FROM ops_schema_migrations WHERE version = 3"
+    ).fetchone()[0]
+    raw.close()
+    assert recorded_after == recorded_before
+
+
+def test_renamed_packaged_migration_is_rejected(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    inventory = list(available_migrations())
+    original = inventory[3]
+    inventory[3] = Migration(original.version, "renamed_fixture", original.sql)
+    with connect(path) as connection, pytest.raises(GateFailureError, match="name mismatch"):
+        verify_applied_migrations(connection, tuple(inventory))
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    (
+        ("name", "renamed_in_catalog", "name mismatch"),
+        ("checksum_sha256", "0" * 64, "checksum mismatch"),
+    ),
+)
+def test_altered_stored_provenance_blocks_reopen(
+    tmp_path: Path,
+    column: str,
+    value: str,
+    message: str,
+) -> None:
+    path = _migrated_database(tmp_path)
+    _tamper(
+        path,
+        f"UPDATE ops_schema_migrations SET {column} = ? WHERE version = 4",  # noqa: S608
+        (value,),
+    )
+    with pytest.raises(GateFailureError, match=message), connect(path, writer=True):
+        pass
+
+
+def test_unknown_applied_version_blocks_reopen(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    _tamper(
+        path,
+        "INSERT INTO ops_schema_migrations "
+        "(version, name, checksum_sha256, applied_at_utc) VALUES (99, 'unknown', ?, 'now')",
+        ("f" * 64,),
+    )
+    with pytest.raises(GateFailureError, match="absent from the packaged inventory"), connect(path):
+        pass
+
+
+def test_applied_chain_gap_blocks_reopen(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    _tamper(path, "DELETE FROM ops_schema_migrations WHERE version = 4")
+    with pytest.raises(GateFailureError, match="has a gap"), connect(path, writer=True):
+        pass
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    (
+        (
+            Migration(1, "first", "SELECT 1;"),
+            Migration(1, "duplicate", "SELECT 2;"),
+        ),
+        (
+            Migration(2, "second", "SELECT 2;"),
+            Migration(1, "first", "SELECT 1;"),
+        ),
+        (
+            Migration(1, "first", "SELECT 1;"),
+            Migration(3, "third", "SELECT 3;"),
+        ),
+    ),
+)
+def test_duplicate_reordered_or_gapped_injected_inventory_is_rejected(
+    tmp_path: Path,
+    inventory: tuple[Migration, ...],
+) -> None:
+    with (
+        connect(tmp_path / "empty.sqlite3", writer=True) as connection,
+        pytest.raises(GateFailureError, match="unique, ordered, and contiguous"),
+    ):
+        verify_applied_migrations(connection, inventory)

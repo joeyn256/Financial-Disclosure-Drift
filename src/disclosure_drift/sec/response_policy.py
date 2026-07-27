@@ -121,10 +121,19 @@ def _looks_like_html(body_prefix: str) -> bool:
 def classify_transport_failure(kind: TransportFailure, attempt: int = 1) -> ResponseAction:
     """Classify a transport-level failure with no HTTP status."""
     if attempt >= MAX_TRANSIENT_RETRIES:
+        # Terminal, so it must name a registered reason, exactly as the retryable-status
+        # path does. A connection error, connect timeout, or read timeout that survives
+        # the whole budget has no more specific code, so it reports the generic
+        # retry-exhaustion reason rather than no reason at all. Without one the caller
+        # records a failure downstream cannot distinguish from a valid empty result.
         return ResponseAction(
             kind="fail",
             reason=f"{kind} persisted through {attempt} attempts",
-            reason_code="SEC_RESPONSE_MALFORMED" if kind == "stream_interrupted" else None,
+            reason_code=(
+                "SEC_RESPONSE_MALFORMED"
+                if kind == "stream_interrupted"
+                else "SEC_RETRIES_EXHAUSTED"
+            ),
         )
     reason_code = "RAW_PARTIAL_DOWNLOAD" if kind == "stream_interrupted" else None
     return ResponseAction(
@@ -185,9 +194,13 @@ def classify_response(
 
     if status in RETRYABLE_STATUSES:
         if attempt >= MAX_TRANSIENT_RETRIES:
+            # Terminal, so it must name a registered reason. Without one the caller
+            # records a failure with no code, which downstream cannot distinguish from
+            # a successful empty result.
             return ResponseAction(
                 kind="fail",
                 reason=f"status {status} persisted through {attempt} attempts",
+                reason_code="SEC_RETRIES_EXHAUSTED",
             )
         return ResponseAction(
             kind="retry",

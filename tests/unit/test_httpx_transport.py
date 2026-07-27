@@ -8,7 +8,9 @@ in the core CI environment and a failure in the SEC-enabled one — see
 
 from __future__ import annotations
 
+import gc
 import inspect
+import os
 from typing import Any
 
 import pytest
@@ -20,7 +22,11 @@ httpx = pytest.importorskip(
 
 from disclosure_drift.sec import httpx_transport as transport_module  # noqa: E402
 from disclosure_drift.sec.httpx_transport import HttpxTransport, httpx_is_available  # noqa: E402
-from disclosure_drift.sec.transport import SecRequest, TransportResponse  # noqa: E402
+from disclosure_drift.sec.transport import (  # noqa: E402
+    CloseableByteStream,
+    SecRequest,
+    TransportResponse,
+)
 
 URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 JSON_BODY = b'{"0":{"cik_str":1,"ticker":"SYN","title":"SYNTHETIC ONE","exchange":"Nasdaq"}}'
@@ -48,6 +54,61 @@ def transport_with(handler: Any) -> HttpxTransport:
         max_redirects=5,
     )
     return adapter
+
+
+class TrackedSpool:
+    """Proxy used to prove exact close and file-descriptor ownership."""
+
+    def __init__(self, handle: Any, *, fail_on_read: int | None = None) -> None:
+        self._handle = handle
+        self._fail_on_read = fail_on_read
+        self.read_calls = 0
+        self.close_calls = 0
+
+    @property
+    def closed(self) -> bool:
+        return bool(self._handle.closed)
+
+    def write(self, data: bytes) -> int:
+        return int(self._handle.write(data))
+
+    def seek(self, offset: int) -> int:
+        return int(self._handle.seek(offset))
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_calls += 1
+        if self._fail_on_read == self.read_calls:
+            message = "synthetic local spool read failure"
+            raise OSError(message)
+        return bytes(self._handle.read(size))
+
+    def fileno(self) -> int:
+        return int(self._handle.fileno())
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._handle.close()
+
+
+def tracked_spools(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_on_read: int | None = None,
+) -> list[TrackedSpool]:
+    """Patch temporary-file creation and return every owned spool."""
+    spools: list[TrackedSpool] = []
+    real_temporary_file = transport_module.tempfile.TemporaryFile
+
+    def tracked_temporary_file(*args: Any, **kwargs: Any) -> TrackedSpool:
+        spool = TrackedSpool(
+            real_temporary_file(*args, **kwargs),
+            fail_on_read=fail_on_read,
+        )
+        spools.append(spool)
+        return spool
+
+    monkeypatch.setattr(transport_module.tempfile, "TemporaryFile", tracked_temporary_file)
+    return spools
 
 
 def test_extra_is_available_when_this_module_runs() -> None:
@@ -164,15 +225,7 @@ def test_streamed_response_yields_chunks_and_closes_resources(
 ) -> None:
     payload = b"PK\x03\x04" + b"member-bytes" * 64
     served: list[httpx.Response] = []
-    spools: list[Any] = []
-    real_temporary_file = transport_module.tempfile.TemporaryFile
-
-    def tracked_temporary_file(*args: Any, **kwargs: Any) -> Any:
-        handle = real_temporary_file(*args, **kwargs)
-        spools.append(handle)
-        return handle
-
-    monkeypatch.setattr(transport_module.tempfile, "TemporaryFile", tracked_temporary_file)
+    spools = tracked_spools(monkeypatch)
 
     def handler(_: httpx.Request) -> httpx.Response:
         response = httpx.Response(
@@ -188,26 +241,221 @@ def test_streamed_response_yields_chunks_and_closes_resources(
         assert served[0].is_closed
         assert not spools[0].closed
         assert response.chunks is not None
+        assert isinstance(response.chunks, CloseableByteStream)
         assert b"".join(response.chunks) == payload
         assert spools[0].closed
+        assert spools[0].close_calls == 1
 
     assert response.body == b""
     assert isinstance(response.elapsed_seconds, float)
     assert response.elapsed_seconds >= 0.0
 
 
-def test_streamed_error_status_is_read_and_mapped() -> None:
+def test_partial_stream_consumption_can_be_closed_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"PK\x03\x04" + b"member-bytes" * 64
+    spools = tracked_spools(monkeypatch)
+
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, content=b"unavailable", headers={"Content-Type": "text/plain"})
+        return httpx.Response(200, content=payload)
+
+    with transport_with(handler) as adapter:
+        response = adapter.send(request(stream=True))
+        assert response.chunks is not None
+        assert next(response.chunks) == payload
+        assert not spools[0].closed
+        response.close()
+
+    assert response.chunks.closed
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_zero_stream_consumption_can_be_closed_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+
+    with transport_with(lambda _: httpx.Response(200, content=b"PK\x03\x04payload")) as adapter:
+        response = adapter.send(request(stream=True))
+        assert response.chunks is not None
+        response.chunks.close()
+
+    assert response.chunks.closed
+    assert spools[0].closed
+    assert spools[0].read_calls == 0
+    assert spools[0].close_calls == 1
+
+
+def test_streamed_response_context_closes_after_partial_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+
+    with (
+        transport_with(lambda _: httpx.Response(200, content=b"PK\x03\x04payload")) as adapter,
+        adapter.send(request(stream=True)) as response,
+    ):
+        assert response.chunks is not None
+        assert next(response.chunks) == b"PK\x03\x04payload"
+        assert not response.chunks.closed
+
+    assert response.chunks.closed
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_stream_context_closes_after_partial_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+
+    with transport_with(lambda _: httpx.Response(200, content=b"PK\x03\x04payload")) as adapter:
+        response = adapter.send(request(stream=True))
+        assert response.chunks is not None
+        with response.chunks as chunks:
+            assert next(chunks) == b"PK\x03\x04payload"
+
+    assert response.chunks.closed
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_stream_iteration_exception_closes_spool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"x" * (transport_module._STREAM_CHUNK_BYTES + 1)  # noqa: SLF001
+    spools = tracked_spools(monkeypatch, fail_on_read=2)
+
+    with transport_with(lambda _: httpx.Response(200, content=payload)) as adapter:
+        response = adapter.send(request(stream=True))
+        assert response.chunks is not None
+        chunk_bytes = transport_module._STREAM_CHUNK_BYTES  # noqa: SLF001
+        assert next(response.chunks) == payload[:chunk_bytes]
+        with pytest.raises(OSError, match="synthetic local spool read failure"):
+            next(response.chunks)
+
+    assert response.chunks.closed
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_network_stream_exception_closes_httpx_response_and_spool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+    served: list[httpx.Response] = []
+
+    class InterruptedBody(httpx.SyncByteStream):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def __iter__(self) -> Any:
+            yield b"PK\x03\x04"
+            message = "synthetic peer interruption"
+            raise httpx.RemoteProtocolError(message)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    body = InterruptedBody()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        response = httpx.Response(200, stream=body)
+        served.append(response)
+        return response
 
     with transport_with(handler) as adapter:
         response = adapter.send(request(stream=True))
 
+    assert response.failure == "stream_interrupted"
+    assert served[0].is_closed
+    assert body.close_calls == 1
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_repeated_stream_close_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+
+    with transport_with(lambda _: httpx.Response(200, content=b"PK\x03\x04payload")) as adapter:
+        response = adapter.send(request(stream=True))
+        assert response.chunks is not None
+        response.chunks.close()
+        response.chunks.close()
+        response.close()
+
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_stream_close_releases_temporary_file_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+
+    with transport_with(lambda _: httpx.Response(200, content=b"PK\x03\x04payload")) as adapter:
+        response = adapter.send(request(stream=True))
+        descriptor = spools[0].fileno()
+        os.fstat(descriptor)
+        response.close()
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    assert spools[0].close_calls == 1
+
+
+def test_abandoned_stream_has_garbage_collection_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = tracked_spools(monkeypatch)
+
+    with transport_with(lambda _: httpx.Response(200, content=b"PK\x03\x04payload")) as adapter:
+        response = adapter.send(request(stream=True))
+        assert response.chunks is not None
+        del response
+        gc.collect()
+
+    assert spools[0].closed
+    assert spools[0].close_calls == 1
+
+
+def test_streamed_error_status_is_read_and_mapped() -> None:
+    served: list[httpx.Response] = []
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        response = httpx.Response(
+            503,
+            content=b"unavailable",
+            headers={"Content-Type": "text/plain"},
+        )
+        served.append(response)
+        return response
+
+    with transport_with(handler) as adapter:
+        response = adapter.send(request(stream=True))
+
+    assert served[0].is_closed
     assert response.status == 503
     assert response.chunks is None
     assert response.body == b"unavailable"
     assert isinstance(response.elapsed_seconds, float)
     assert response.elapsed_seconds >= 0.0
+
+
+def test_explicit_monotonic_clock_supplies_elapsed_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readings = iter([150.0, 150.375])
+    monkeypatch.setattr(transport_module.time, "monotonic", lambda: next(readings))
+
+    with transport_with(lambda _: httpx.Response(200, content=JSON_BODY)) as adapter:
+        response = adapter.send(request())
+
+    assert response.elapsed_seconds == 0.375
 
 
 def test_mapping_does_not_depend_on_httpx_elapsed_state() -> None:

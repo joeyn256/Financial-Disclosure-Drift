@@ -284,12 +284,25 @@ class RawStore:
         return sha256_of(decoded) == record.content_sha256
 
     def quarantine(self, path: Path, reason_code: str, detail: str) -> Path:
-        """Move a damaged or partial file into quarantine, preserving it."""
+        """Durably move a damaged or partial file into quarantine, preserving it."""
         self._tree.quarantine.mkdir(parents=True, exist_ok=True)
+        source_directory = path.parent
         target = self._tree.quarantine / f"{uuid.uuid4().hex}__{path.name}"
         path.replace(target)
+        with target.open("rb") as handle:
+            os.fsync(handle.fileno())
+        self._fsync_directory(source_directory)
+        if source_directory != self._tree.quarantine:
+            self._fsync_directory(self._tree.quarantine)
+
         marker = target.with_suffix(target.suffix + ".reason")
-        marker.write_text(f"{reason_code}\n{detail}\n", encoding="utf-8")
+        marker_part = marker.with_name(f"{marker.name}.{uuid.uuid4().hex}{_PART_SUFFIX}")
+        with marker_part.open("xb") as handle:
+            handle.write(f"{reason_code}\n{detail}\n".encode())
+            handle.flush()
+            os.fsync(handle.fileno())
+        marker_part.replace(marker)
+        self._fsync_directory(self._tree.quarantine)
         return target
 
     def reconcile(self, known: Iterable[RawObjectRecord]) -> ReconciliationReport:

@@ -5,14 +5,16 @@ Authority is explicit and single:
 * **SQLite** rows in ``census_source_observations`` are the operational source of
   truth for what has been retrieved.
 * **Immutable raw objects** on disk are the evidence those rows point at.
-* **JSONL** is an append-only audit projection. It is derived, must be
-  reconstructible from the catalog, and a failed append never makes a committed
-  observation appear unrecorded: the row is marked unprojected and rebuilt later.
+* **JSONL** is a deterministic audit projection. Normal writes append, while repair
+  reconstructs it by durable atomic replacement from SQLite. A failed append never
+  makes a committed observation appear unrecorded: stable identities and canonical
+  payload bytes are reconciled instead of trusting the projected flag.
 
 Each observation is written inside one transaction together with its reason codes
 and archive-member lineage, so a crash leaves either the whole observation or none of
-it. The projection flag is set in a second transaction *after* the JSONL append
-succeeds, which is what makes an interrupted append recoverable rather than lossy.
+it. The projection flag is set in a second transaction only after the JSONL file and
+required directory metadata have passed explicit ``fsync`` barriers, which is what
+makes an interrupted append recoverable rather than lossy.
 
 Writes are serialized by the existing catalog writer lease, so two concurrent census
 processes cannot interleave source-observation state.
@@ -34,13 +36,15 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import stat
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from typing import BinaryIO, Final, Literal, Protocol
 from urllib.parse import urlsplit
 
 from disclosure_drift.errors import CatalogWriteError
@@ -64,6 +68,9 @@ from disclosure_drift.storage.sqlite import transaction, utc_now
 __all__ = [
     "OBSERVATION_COLUMNS",
     "ObservationRecorder",
+    "ProjectionFaultHook",
+    "ProjectionFaultPoint",
+    "ProjectionValidation",
     "RecoveryEvent",
     "RecoveryReport",
     "RecoveryResolution",
@@ -72,6 +79,7 @@ __all__ = [
     "rebuild_audit_projection",
     "reconcile",
     "record_recovery_events",
+    "validate_audit_projection",
 ]
 
 RecoveryScenario = Literal[
@@ -85,6 +93,33 @@ RecoveryScenario = Literal[
     "quarantined_response",
 ]
 RecoveryResolution = Literal["resolved", "blocked"]
+ProjectionFaultPoint = Literal[
+    "after_append_durable_before_flag",
+    "after_rebuild_temporary_durable_before_replace",
+    "after_rebuild_replace_before_directory_fsync",
+    "after_rebuild_directory_fsync_before_catalog_update",
+]
+ProjectionFaultHook = Callable[[ProjectionFaultPoint], None]
+ProjectionCondition = Literal[
+    "unsafe_projection_path",
+    "missing_projection_file",
+    "empty_file_with_projected_rows",
+    "truncated_final_line",
+    "malformed_json",
+    "malformed_middle_line",
+    "malformed_final_line",
+    "duplicate_observation_identity",
+    "missing_observation_identity",
+    "unknown_observation_identity",
+    "payload_hash_mismatch",
+    "wrong_row_count",
+    "incorrect_ordering",
+    "valid_prefix_only",
+    "extra_appended_garbage",
+    "sqlite_projection_flag_stale",
+    "unresolved_recovery_event",
+    "projected_flags_claim_damaged_file",
+]
 
 OBSERVATION_COLUMNS: Final[tuple[str, ...]] = (
     "observation_id",
@@ -128,6 +163,33 @@ _HISTORICAL_PATH: Final = re.compile(r"^/submissions/(CIK[0-9]{10}-submissions-[
 _FULL_INDEX_PATH: Final = re.compile(
     r"^/Archives/edgar/full-index/([0-9]{4})/QTR([1-4])/company\.idx$"
 )
+_MAX_PROJECTION_LINE_BYTES: Final = 8 * 1024 * 1024
+_PROJECTION_CONDITION_ORDER: Final[tuple[ProjectionCondition, ...]] = (
+    "unsafe_projection_path",
+    "missing_projection_file",
+    "empty_file_with_projected_rows",
+    "truncated_final_line",
+    "malformed_json",
+    "malformed_middle_line",
+    "malformed_final_line",
+    "duplicate_observation_identity",
+    "missing_observation_identity",
+    "unknown_observation_identity",
+    "payload_hash_mismatch",
+    "wrong_row_count",
+    "incorrect_ordering",
+    "valid_prefix_only",
+    "extra_appended_garbage",
+    "sqlite_projection_flag_stale",
+    "unresolved_recovery_event",
+    "projected_flags_claim_damaged_file",
+)
+_PROJECTION_TEMP_NAME = re.compile(r"^\.(?P<destination>.+)\.[0-9a-f]{32}\.tmp$")
+
+
+class _Digest(Protocol):
+    def update(self, data: bytes) -> object:
+        """Add bytes to the digest."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,16 +205,63 @@ class RecoveryEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectionValidation:
+    """Byte-for-byte comparison of the JSONL projection with SQLite authority."""
+
+    projection_path: str
+    expected_count: int
+    observed_count: int | None
+    expected_sha256: str
+    observed_sha256: str | None
+    conditions: tuple[ProjectionCondition, ...] = ()
+    valid_prefix_count: int = 0
+
+    @property
+    def is_valid(self) -> bool:
+        """Whether the projection and every SQLite projection flag agree."""
+        return not self.conditions
+
+    @property
+    def requires_recovery(self) -> bool:
+        """Whether startup must durably reconstruct or reconcile the projection."""
+        return not self.is_valid
+
+    @property
+    def detail(self) -> str:
+        """Stable machine-readable recovery evidence."""
+        return json.dumps(
+            {
+                "conditions": list(self.conditions),
+                "expected_count": self.expected_count,
+                "expected_sha256": self.expected_sha256,
+                "observed_count": self.observed_count,
+                "observed_sha256": self.observed_sha256,
+                "projection_path": self.projection_path,
+                "valid_prefix_count": self.valid_prefix_count,
+            },
+            sort_keys=True,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryReport:
     """Outcome of restart reconciliation."""
 
     events: tuple[RecoveryEvent, ...] = ()
     unprojected_observations: tuple[str, ...] = ()
+    projection_validation: ProjectionValidation | None = None
 
     @property
     def is_clean(self) -> bool:
         """Whether nothing needed recovery."""
         return not (self.events or self.unprojected_observations)
+
+    @property
+    def projection_recovery_required(self) -> bool:
+        """Whether the canonical audit projection needs durable recovery."""
+        return bool(
+            self.projection_validation is not None and self.projection_validation.requires_recovery
+        )
 
     def by_scenario(self) -> Mapping[str, int]:
         """Count events by scenario for the QA report."""
@@ -181,6 +290,7 @@ class ObservationRecorder:
     writer: CatalogWriter
     tree: DataTree
     audit_filename: str = "census_source_observations.jsonl"
+    fault_hook: ProjectionFaultHook | None = field(default=None, repr=False)
     _pending_projection: list[SourceObservation] = field(default_factory=list)
 
     # -- authoritative write ------------------------------------------------- #
@@ -212,6 +322,7 @@ class ObservationRecorder:
             )
             raise CatalogWriteError(message)
 
+        member_rows = self._archive_member_rows(observation, members)
         now = utc_now()
         with transaction(self.writer.connection) as connection:
             connection.execute(
@@ -227,8 +338,7 @@ class ObservationRecorder:
                     "VALUES (?, ?, ?, ?)",
                     (observation.observation_id, code, observation.detail or None, now),
                 )
-            for member in members:
-                lineage = member.lineage()
+            for member_row in member_rows:
                 connection.execute(
                     "INSERT OR IGNORE INTO census_archive_members "
                     "(observation_id, member_index, member_name, member_sha256, "
@@ -237,13 +347,7 @@ class ObservationRecorder:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         observation.observation_id,
-                        lineage["member_index"],
-                        lineage["member_name"],
-                        lineage["member_sha256"],
-                        lineage["member_compressed_size_bytes"],
-                        lineage["member_uncompressed_size_bytes"],
-                        lineage["archive_relative_path"],
-                        lineage["archive_sha256"],
+                        *member_row,
                         now,
                     ),
                 )
@@ -257,18 +361,53 @@ class ObservationRecorder:
             The number of rows appended and the identifiers still unprojected. A
             failure here leaves the rows committed and unprojected, never lost.
         """
-        if not self._pending_projection:
-            return 0, self.unprojected()
         path = self.audit_path()
+        observations = load_observations(self.writer.connection)
+        validation = validate_audit_projection(self.writer.connection, path)
+        if validation.is_valid:
+            self._drop_projected_pending(observations)
+            return 0, self.unprojected()
+
+        expected_lines = tuple(_serialize_observation(item) for item in observations)
+        can_append = _can_append_canonical_suffix(
+            validation,
+            self.writer.connection,
+            observations,
+        )
+        if not can_append:
+            rebuild_audit_projection(self.writer.connection, path)
+            self._drop_projected_pending(observations)
+            return 0, self.unprojected()
+
         path.parent.mkdir(parents=True, exist_ok=True)
-        written = 0
-        with path.open("a", encoding="utf-8") as handle:
-            for observation in list(self._pending_projection):
-                handle.write(json.dumps(observation.as_record(), sort_keys=True) + "\n")
-                handle.flush()
+        if validation.valid_prefix_count:
+            _fsync_projection_and_directory(path)
+            for observation in observations[: validation.valid_prefix_count]:
                 self._mark_projected(observation.observation_id)
-                self._pending_projection.remove(observation)
-                written += 1
+                self._drop_projected_pending((observation,))
+
+        written = 0
+        for observation, encoded in zip(
+            observations[validation.valid_prefix_count :],
+            expected_lines[validation.valid_prefix_count :],
+            strict=True,
+        ):
+            _require_safe_projection_location(path)
+            descriptor = _open_no_follow(
+                path,
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+                mode=0o600,
+            )
+            with os.fdopen(descriptor, "ab") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _fsync_directory(path.parent)
+            if self.fault_hook is not None:
+                self.fault_hook("after_append_durable_before_flag")
+            self._mark_projected(observation.observation_id)
+            self._drop_projected_pending((observation,))
+            written += 1
         return written, self.unprojected()
 
     def audit_path(self) -> Path:
@@ -293,11 +432,83 @@ class ObservationRecorder:
 
     def _mark_projected(self, observation_id: str) -> None:
         with transaction(self.writer.connection) as connection:
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE census_source_observations SET projected_to_audit = 1 "
                 "WHERE observation_id = ?",
                 (observation_id,),
             )
+            if cursor.rowcount != 1:
+                message = (
+                    f"cannot mark unknown observation {observation_id} projected; "
+                    "SQLite remains authoritative"
+                )
+                raise CatalogWriteError(message)
+
+    def _drop_projected_pending(
+        self,
+        observations: Sequence[SourceObservation],
+    ) -> None:
+        projected = {item.observation_id for item in observations}
+        self._pending_projection[:] = [
+            item for item in self._pending_projection if item.observation_id not in projected
+        ]
+
+    def _archive_member_rows(
+        self,
+        observation: SourceObservation,
+        members: Sequence[ArchiveMember],
+    ) -> tuple[tuple[object, ...], ...]:
+        explicit = tuple(
+            sorted(
+                (
+                    lineage["member_index"],
+                    lineage["member_name"],
+                    lineage["member_sha256"],
+                    lineage["member_compressed_size_bytes"],
+                    lineage["member_uncompressed_size_bytes"],
+                    lineage["archive_relative_path"],
+                    lineage["archive_sha256"],
+                )
+                for lineage in (member.lineage() for member in members)
+            )
+        )
+        reused = observation.reused_observation_id
+        if reused is None:
+            return explicit
+        prior = tuple(
+            tuple(row)
+            for row in self.writer.connection.execute(
+                "SELECT member_index, member_name, member_sha256, "
+                "member_compressed_size_bytes, member_uncompressed_size_bytes, "
+                "archive_relative_path, archive_sha256 "
+                "FROM census_archive_members WHERE observation_id = ? "
+                "ORDER BY member_index, member_name",
+                (reused,),
+            ).fetchall()
+        )
+        spec = require_registered(observation.source_id)
+        if spec.expected_content == "zip" and not prior:
+            message = (
+                f"archive reuse {observation.observation_id} cannot be completed because "
+                f"object owner {reused} has no preserved archive-member lineage"
+            )
+            raise CatalogWriteError(message)
+        if spec.expected_content == "zip" and any(
+            row[5] != observation.relative_storage_path or row[6] != observation.logical_sha256
+            for row in prior
+        ):
+            message = (
+                f"archive-member lineage for reused observation {reused} does not "
+                "identify the verified shared archive object"
+            )
+            raise CatalogWriteError(message)
+        if explicit and explicit != prior:
+            message = (
+                f"archive-member lineage for reused observation {reused} does not "
+                "match the prior immutable evidence"
+            )
+            raise CatalogWriteError(message)
+        return prior
 
     @staticmethod
     def _row(observation: SourceObservation, now: str) -> tuple[object, ...]:
@@ -359,19 +570,503 @@ def load_observations(connection: sqlite3.Connection) -> tuple[SourceObservation
 def rebuild_audit_projection(
     connection: sqlite3.Connection,
     destination: Path,
+    *,
+    fault_hook: ProjectionFaultHook | None = None,
+    census_run_id: str | None = None,
 ) -> int:
-    """Rewrite the JSONL projection from the catalog and return the row count.
+    """Atomically reconstruct the JSONL projection and return the row count.
 
-    This proves the projection is derived: it can always be regenerated from the
-    authoritative rows, so an interrupted append is a recoverable inconvenience
-    rather than a loss of evidence.
+    The replacement becomes authoritative as a projection only after its temporary
+    file and destination-directory entry are durable. SQLite flags and any blocked
+    projection-recovery event are updated in one transaction *after* those barriers.
+    A fault before then leaves immutable observations untouched and recovery blocked.
+    """
+    initial_validation = validate_audit_projection(connection, destination)
+    if initial_validation.requires_recovery:
+        _persist_projection_recovery_detection(connection, initial_validation)
+    observations = load_observations(connection)
+    _require_safe_projection_location(destination, allow_symlink_destination=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _require_safe_projection_location(destination, allow_symlink_destination=True)
+    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    digest = hashlib.sha256()
+    expected_size = 0
+    with temporary.open("xb") as handle:
+        for observation in observations:
+            encoded = _serialize_observation(observation)
+            handle.write(encoded)
+            digest.update(encoded)
+            expected_size += len(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if fault_hook is not None:
+        fault_hook("after_rebuild_temporary_durable_before_replace")
+    temporary.replace(destination)
+    if fault_hook is not None:
+        fault_hook("after_rebuild_replace_before_directory_fsync")
+    _fsync_directory(destination.parent)
+
+    now = utc_now()
+    path_identity = _projection_path_identity(destination)
+    projection_sha256 = digest.hexdigest()
+    stored_sha256, stored_size = _digest_projection_path(destination)
+    if stored_sha256 != projection_sha256 or stored_size != expected_size:
+        message = (
+            "atomically replaced audit projection does not match the durable temporary "
+            "file; SQLite projection status remains unchanged"
+        )
+        raise CatalogWriteError(message)
+    _remove_stale_projection_temporaries(destination)
+    if fault_hook is not None:
+        fault_hook("after_rebuild_directory_fsync_before_catalog_update")
+    with transaction(connection) as writable:
+        writable.execute("UPDATE census_source_observations SET projected_to_audit = 1")
+        if _table_exists(writable, "census_projection_recovery_events"):
+            writable.execute(
+                "UPDATE census_projection_recovery_events "
+                "SET projection_sha256 = ?, resolution_state = 'resolved', "
+                "resolved_at_utc = ?, detail = detail || ? "
+                "WHERE projection_path = ? AND resolution_state = 'blocked'",
+                (
+                    projection_sha256,
+                    now,
+                    "; deterministic atomic rebuild completed and parent directory fsynced",
+                    path_identity,
+                ),
+            )
+        if census_run_id is not None and _table_exists(writable, "census_recovery_states"):
+            writable.execute(
+                "UPDATE census_recovery_states SET resolution_state = 'resolved', "
+                "action_taken = 'projection_rebuilt', "
+                "detail = detail || '; projection rebuilt from authoritative catalog' "
+                "WHERE census_run_id = ? AND "
+                "scenario = 'audit_projection_interrupted' AND "
+                "resolution_state = 'blocked'",
+                (census_run_id,),
+            )
+    return len(observations)
+
+
+def validate_audit_projection(
+    connection: sqlite3.Connection,
+    destination: Path,
+) -> ProjectionValidation:
+    """Validate the complete JSONL projection against immutable SQLite rows.
+
+    Validation never trusts ``projected_to_audit``. Stable observation identifiers,
+    deterministic line bytes, canonical ordering, and the full-file digest are checked
+    independently. The flags are then compared as an additional reconciliation signal.
     """
     observations = load_observations(connection)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8") as handle:
-        for observation in observations:
-            handle.write(json.dumps(observation.as_record(), sort_keys=True) + "\n")
-    return len(observations)
+    expected_lines = tuple(_serialize_observation(item) for item in observations)
+    expected_ids = tuple(item.observation_id for item in observations)
+    expected_by_id = dict(zip(expected_ids, expected_lines, strict=True))
+    expected_sha256 = _digest_chunks(expected_lines)
+    path_identity = _projection_path_identity(destination)
+    flags = {
+        str(row["observation_id"]): int(row["projected_to_audit"])
+        for row in connection.execute(
+            "SELECT observation_id, projected_to_audit FROM census_source_observations"
+        ).fetchall()
+    }
+    unsafe_detail = _projection_location_failure(destination)
+    if unsafe_detail is not None:
+        unsafe_conditions: set[ProjectionCondition] = {"unsafe_projection_path"}
+        if expected_ids and all(flags[item] == 1 for item in expected_ids):
+            unsafe_conditions.add("projected_flags_claim_damaged_file")
+        if _has_unresolved_projection_recovery(connection, path_identity):
+            unsafe_conditions.add("unresolved_recovery_event")
+        return ProjectionValidation(
+            projection_path=path_identity,
+            expected_count=len(expected_ids),
+            observed_count=None,
+            expected_sha256=expected_sha256,
+            observed_sha256=None,
+            conditions=_ordered_projection_conditions(unsafe_conditions),
+        )
+    if not destination.is_file():
+        missing_conditions: set[ProjectionCondition] = {"missing_projection_file"}
+        if expected_ids and all(flags[item] == 1 for item in expected_ids):
+            missing_conditions.add("projected_flags_claim_damaged_file")
+        if _has_unresolved_projection_recovery(connection, path_identity):
+            missing_conditions.add("unresolved_recovery_event")
+        return ProjectionValidation(
+            projection_path=path_identity,
+            expected_count=len(expected_ids),
+            observed_count=None,
+            expected_sha256=expected_sha256,
+            observed_sha256=None,
+            conditions=_ordered_projection_conditions(missing_conditions),
+        )
+
+    conditions: set[ProjectionCondition] = set()
+    observed_digest = hashlib.sha256()
+    raw_lines: list[bytes] = []
+    parsed_ids: list[str] = []
+    malformed_lines: list[int] = []
+    line_limit = max(
+        _MAX_PROJECTION_LINE_BYTES,
+        max((len(line) for line in expected_lines), default=0),
+    )
+    descriptor = _open_no_follow(destination, os.O_RDONLY)
+    with os.fdopen(descriptor, "rb") as handle:
+        while True:
+            raw_line = handle.readline(line_limit + 1)
+            if not raw_line:
+                break
+            raw_lines.append(raw_line)
+            observed_digest.update(raw_line)
+            line_number = len(raw_lines)
+            if len(raw_line) > line_limit:
+                conditions.add("extra_appended_garbage")
+                malformed_lines.append(line_number)
+                _consume_projection_remainder(handle, observed_digest)
+                break
+            if not raw_line.endswith(b"\n"):
+                conditions.add("truncated_final_line")
+            try:
+                payload = json.loads(raw_line)
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                conditions.add("malformed_json")
+                malformed_lines.append(line_number)
+                continue
+            if not isinstance(payload, dict):
+                conditions.add("malformed_json")
+                malformed_lines.append(line_number)
+                continue
+            observation_id = payload.get("observation_id")
+            if not isinstance(observation_id, str) or not observation_id:
+                conditions.add("missing_observation_identity")
+                continue
+            parsed_ids.append(observation_id)
+            expected_line = expected_by_id.get(observation_id)
+            if expected_line is None:
+                conditions.add("unknown_observation_identity")
+            elif raw_line != expected_line:
+                conditions.add("payload_hash_mismatch")
+
+    observed_count = len(raw_lines)
+    if not raw_lines and expected_ids and any(flags[item] == 1 for item in expected_ids):
+        conditions.add("empty_file_with_projected_rows")
+    if malformed_lines:
+        final_line_number = len(raw_lines)
+        if final_line_number in malformed_lines:
+            conditions.add("malformed_final_line")
+        if any(line_number < final_line_number for line_number in malformed_lines):
+            conditions.add("malformed_middle_line")
+    if len(set(parsed_ids)) != len(parsed_ids):
+        conditions.add("duplicate_observation_identity")
+    if observed_count != len(expected_ids):
+        conditions.add("wrong_row_count")
+    missing_expected = set(expected_ids).difference(parsed_ids)
+    if missing_expected:
+        conditions.add("missing_observation_identity")
+    if (
+        len(parsed_ids) == len(expected_ids)
+        and set(parsed_ids) == set(expected_ids)
+        and tuple(parsed_ids) != expected_ids
+    ):
+        conditions.add("incorrect_ordering")
+
+    valid_prefix_count = 0
+    for raw_line, expected_line in zip(raw_lines, expected_lines, strict=False):
+        if raw_line != expected_line:
+            break
+        valid_prefix_count += 1
+    if valid_prefix_count == observed_count and observed_count < len(expected_ids):
+        conditions.add("valid_prefix_only")
+    if observed_count > len(expected_ids) or (
+        malformed_lines and min(malformed_lines) > len(expected_ids)
+    ):
+        conditions.add("extra_appended_garbage")
+
+    byte_conditions = set(conditions)
+    if not byte_conditions and any(flags[item] == 0 for item in expected_ids):
+        conditions.add("sqlite_projection_flag_stale")
+    elif byte_conditions and expected_ids and all(flags[item] == 1 for item in expected_ids):
+        conditions.add("projected_flags_claim_damaged_file")
+    if _has_unresolved_projection_recovery(connection, path_identity):
+        conditions.add("unresolved_recovery_event")
+
+    return ProjectionValidation(
+        projection_path=path_identity,
+        expected_count=len(expected_ids),
+        observed_count=observed_count,
+        expected_sha256=expected_sha256,
+        observed_sha256=observed_digest.hexdigest(),
+        conditions=_ordered_projection_conditions(conditions),
+        valid_prefix_count=valid_prefix_count,
+    )
+
+
+def _serialize_observation(observation: SourceObservation) -> bytes:
+    """Return the one canonical UTF-8 JSONL record for an observation."""
+    return (
+        json.dumps(
+            observation.as_record(),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _digest_chunks(chunks: Iterable[bytes]) -> str:
+    digest = hashlib.sha256()
+    for chunk in chunks:
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ordered_projection_conditions(
+    conditions: set[ProjectionCondition],
+) -> tuple[ProjectionCondition, ...]:
+    return tuple(condition for condition in _PROJECTION_CONDITION_ORDER if condition in conditions)
+
+
+def _consume_projection_remainder(handle: BinaryIO, digest: _Digest) -> None:
+    """Hash the rest of an oversized damaged projection without retaining it."""
+    while chunk := handle.read(1024 * 1024):
+        digest.update(chunk)
+
+
+def _projection_location_failure(
+    path: Path,
+    *,
+    allow_symlink_destination: bool = False,
+) -> str | None:
+    """Return why the managed audit path is unsafe without following its links.
+
+    The configured data root may itself be reached through a machine-local alias
+    (macOS ``/tmp`` is a symlink to ``/private/tmp``). That is outside the managed
+    audit subtree. The components this module owns are ``audit``, ``sec``, and the
+    final projection entry, so only those components are rejected when linked.
+    """
+    managed_parents = [path.parent]
+    if path.parent.name == "sec" and path.parent.parent.name == "audit":
+        managed_parents.append(path.parent.parent)
+    for parent in managed_parents:
+        try:
+            metadata = parent.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"projection parent {parent} cannot be inspected: {exc}"
+        if stat.S_ISLNK(metadata.st_mode):
+            return f"projection parent {parent} is a symbolic link"
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"projection path {path} cannot be inspected: {exc}"
+    if stat.S_ISLNK(metadata.st_mode):
+        return None if allow_symlink_destination else "projection path is a symbolic link"
+    if not stat.S_ISREG(metadata.st_mode):
+        return "projection path exists but is not a regular file"
+    return None
+
+
+def _require_safe_projection_location(
+    path: Path,
+    *,
+    allow_symlink_destination: bool = False,
+) -> None:
+    failure = _projection_location_failure(
+        path,
+        allow_symlink_destination=allow_symlink_destination,
+    )
+    if failure is not None:
+        message = f"{failure}; refusing unsafe projection filesystem access"
+        raise CatalogWriteError(message)
+
+
+def _open_no_follow(path: Path, flags: int, *, mode: int = 0o600) -> int:
+    """Open one safe projection file without following its final component."""
+    _require_safe_projection_location(path)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        return os.open(path, flags, mode)
+    except OSError as exc:
+        message = f"cannot safely open audit projection {path}: {exc}"
+        raise CatalogWriteError(message) from exc
+
+
+def _fsync_projection_and_directory(path: Path) -> None:
+    descriptor = _open_no_follow(path, os.O_RDONLY)
+    with os.fdopen(descriptor, "rb") as handle:
+        os.fsync(handle.fileno())
+    _fsync_directory(path.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    parent_failure = _projection_location_failure(directory / ".projection-safety-check")
+    if parent_failure is not None:
+        message = f"{parent_failure}; cannot durably persist the projection directory"
+        raise CatalogWriteError(message)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as exc:
+        message = f"cannot open projection directory for durability barrier {directory}: {exc}"
+        raise CatalogWriteError(message) from exc
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        message = f"cannot fsync projection directory {directory}: {exc}"
+        raise CatalogWriteError(message) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _digest_projection_path(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    descriptor = _open_no_follow(path, os.O_RDONLY)
+    with os.fdopen(descriptor, "rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _remove_stale_projection_temporaries(destination: Path) -> int:
+    """Remove only this projection's strictly named derived rebuild artifacts."""
+    _require_safe_projection_location(destination, allow_symlink_destination=True)
+    removed = 0
+    try:
+        candidates = tuple(destination.parent.iterdir())
+    except OSError as exc:
+        message = f"cannot inspect projection rebuild artifacts in {destination.parent}: {exc}"
+        raise CatalogWriteError(message) from exc
+    for candidate in sorted(candidates):
+        match = _PROJECTION_TEMP_NAME.fullmatch(candidate.name)
+        if match is None or match.group("destination") != destination.name:
+            continue
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+            message = (
+                f"projection rebuild artifact {candidate.name} is not a regular file "
+                "or symlink; refusing ambiguous cleanup"
+            )
+            raise CatalogWriteError(message)
+        try:
+            candidate.unlink()
+        except OSError as exc:
+            message = f"cannot remove stale projection rebuild artifact {candidate}: {exc}"
+            raise CatalogWriteError(message) from exc
+        removed += 1
+    if removed:
+        _fsync_directory(destination.parent)
+    return removed
+
+
+def _projection_path_identity(destination: Path) -> str:
+    parts = destination.parts
+    for index in range(len(parts) - 1):
+        if parts[index : index + 2] == ("audit", "sec"):
+            return Path(*parts[index:]).as_posix()
+    return destination.name
+
+
+def _can_append_canonical_suffix(
+    validation: ProjectionValidation,
+    connection: sqlite3.Connection,
+    observations: Sequence[SourceObservation],
+) -> bool:
+    """Return whether append/replay can proceed without replacing damaged bytes."""
+    if not observations and "missing_projection_file" in validation.conditions:
+        return False
+    append_only_conditions: set[ProjectionCondition] = {
+        "missing_projection_file",
+        "missing_observation_identity",
+        "wrong_row_count",
+        "valid_prefix_only",
+        "sqlite_projection_flag_stale",
+    }
+    if not set(validation.conditions).issubset(append_only_conditions):
+        return False
+    if "missing_projection_file" not in validation.conditions and validation.valid_prefix_count != (
+        validation.observed_count or 0
+    ):
+        return False
+    tail_ids = tuple(item.observation_id for item in observations[validation.valid_prefix_count :])
+    if not tail_ids:
+        return True
+    already_projected = {
+        str(row["observation_id"])
+        for row in connection.execute(
+            "SELECT observation_id FROM census_source_observations WHERE projected_to_audit = 1"
+        ).fetchall()
+    }
+    return already_projected.isdisjoint(tail_ids)
+
+
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _has_unresolved_projection_recovery(
+    connection: sqlite3.Connection,
+    projection_path: str,
+) -> bool:
+    if not _table_exists(connection, "census_projection_recovery_events"):
+        return False
+    row = connection.execute(
+        "SELECT 1 FROM census_projection_recovery_events "
+        "WHERE projection_path = ? AND resolution_state = 'blocked' LIMIT 1",
+        (projection_path,),
+    ).fetchone()
+    return row is not None
+
+
+def _persist_projection_recovery_detection(
+    connection: sqlite3.Connection,
+    validation: ProjectionValidation,
+) -> None:
+    """Persist one unresolved projection incident before attempting reconstruction."""
+    if not _table_exists(connection, "census_projection_recovery_events"):
+        return
+    existing = connection.execute(
+        "SELECT event_id FROM census_projection_recovery_events "
+        "WHERE projection_path = ? AND resolution_state = 'blocked' "
+        "ORDER BY detected_at_utc DESC LIMIT 1",
+        (validation.projection_path,),
+    ).fetchone()
+    if existing is not None:
+        return
+    with transaction(connection) as writable:
+        writable.execute(
+            "INSERT INTO census_projection_recovery_events "
+            "(event_id, detected_condition, projection_path, expected_count, "
+            "observed_count, rebuild_identity, projection_sha256, resolution_state, "
+            "release_blocking_before_resolution, detected_at_utc, resolved_at_utc, "
+            "detail) VALUES (?, ?, ?, ?, ?, ?, NULL, 'blocked', 1, ?, NULL, ?)",
+            (
+                uuid.uuid4().hex,
+                ",".join(validation.conditions),
+                validation.projection_path,
+                validation.expected_count,
+                validation.observed_count,
+                uuid.uuid4().hex,
+                utc_now(),
+                validation.detail,
+            ),
+        )
 
 
 def reconcile(
@@ -397,8 +1092,9 @@ def reconcile(
         outcome = str(row["outcome"])
         if relative:
             recorded_paths.add(str(relative))
-            path = tree.data_root / str(relative)
-            failure = _catalog_object_failure(row, path)
+            path, failure = _safe_catalog_object_path(tree, str(relative))
+            if failure is None and path is not None:
+                failure = _catalog_object_failure(row, path)
             if failure is not None:
                 events.append(
                     RecoveryEvent(
@@ -476,27 +1172,70 @@ def reconcile(
             )
         )
 
-    unprojected = tuple(
+    flag_unprojected = tuple(
         str(row["observation_id"])
         for row in connection.execute(
             "SELECT observation_id FROM census_source_observations "
             "WHERE projected_to_audit = 0 ORDER BY observation_id"
         ).fetchall()
     )
-    if unprojected:
+    projection_path = tree.audit / "census_source_observations.jsonl"
+    projection_validation = validate_audit_projection(connection, projection_path)
+    if projection_validation.requires_recovery:
+        expected_ids = tuple(
+            str(row["observation_id"])
+            for row in connection.execute(
+                "SELECT observation_id FROM census_source_observations "
+                "ORDER BY retrieved_at_utc, recorded_at_utc, observation_id"
+            ).fetchall()
+        )
+        unprojected = expected_ids or flag_unprojected
+        _persist_projection_recovery_detection(connection, projection_validation)
         events.append(
             RecoveryEvent(
                 scenario="audit_projection_interrupted",
                 action_taken="projection_rebuild_required",
-                detail=(
-                    f"{len(unprojected)} committed observations are absent from the audit "
-                    "projection; the projection is derived and will be rebuilt from the "
-                    "catalog. The observations themselves remain recorded."
-                ),
+                detail=projection_validation.detail,
+                relative_path=projection_validation.projection_path,
                 resolution_state="blocked",
             )
         )
-    return RecoveryReport(events=tuple(events), unprojected_observations=unprojected)
+    else:
+        unprojected = flag_unprojected
+    return RecoveryReport(
+        events=tuple(events),
+        unprojected_observations=unprojected,
+        projection_validation=projection_validation,
+    )
+
+
+def _safe_catalog_object_path(tree: DataTree, relative_path: str) -> tuple[Path | None, str | None]:
+    """Resolve recorded evidence without traversing outside managed raw storage."""
+    relative = Path(relative_path)
+    approved_roots = {
+        ("raw", "sec", "bulk"),
+        ("raw", "sec", "filings"),
+        ("raw", "sec", "indexes"),
+        ("raw", "sec", "quarantine"),
+    }
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or tuple(relative.parts[:3]) not in approved_roots
+    ):
+        return None, "catalog observation has an unsafe or non-raw relative storage path"
+    candidate = tree.data_root / relative
+    current = tree.data_root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return None, "catalog observation path traverses a symbolic link"
+    try:
+        root = tree.data_root.resolve(strict=True)
+        candidate.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError):
+        return None, "catalog observation path escapes the configured data root"
+    return candidate, None
 
 
 def _catalog_object_failure(

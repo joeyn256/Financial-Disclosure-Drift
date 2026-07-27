@@ -19,6 +19,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, BinaryIO, Final
 
 from disclosure_drift.sec.transport import (
+    CloseableByteStream,
     SecRequest,
     TransportFailureKind,
     TransportResponse,
@@ -90,7 +91,7 @@ class HttpxTransport:
             write=request.timeout_read,
             pool=request.timeout_connect,
         )
-        started_at = time.perf_counter()
+        started_at = time.monotonic()
         try:
             if request.stream:
                 return self._send_streamed(request, timeout, started_at)
@@ -102,7 +103,7 @@ class HttpxTransport:
             )
             try:
                 body = response.content
-                elapsed_seconds = time.perf_counter() - started_at
+                elapsed_seconds = time.monotonic() - started_at
                 return self._map(response, body=body, elapsed_seconds=elapsed_seconds)
             finally:
                 response.close()
@@ -111,28 +112,28 @@ class HttpxTransport:
                 request,
                 "connect_timeout",
                 exc,
-                elapsed_seconds=time.perf_counter() - started_at,
+                elapsed_seconds=time.monotonic() - started_at,
             )
         except httpx.ReadTimeout as exc:
             return self._failure(
                 request,
                 "read_timeout",
                 exc,
-                elapsed_seconds=time.perf_counter() - started_at,
+                elapsed_seconds=time.monotonic() - started_at,
             )
         except httpx.RemoteProtocolError as exc:
             return self._failure(
                 request,
                 "stream_interrupted",
                 exc,
-                elapsed_seconds=time.perf_counter() - started_at,
+                elapsed_seconds=time.monotonic() - started_at,
             )
         except httpx.HTTPError as exc:
             return self._failure(
                 request,
                 "connection_error",
                 exc,
-                elapsed_seconds=time.perf_counter() - started_at,
+                elapsed_seconds=time.monotonic() - started_at,
             )
 
     # -- internals ---------------------------------------------------------- #
@@ -152,7 +153,7 @@ class HttpxTransport:
         ) as response:
             if response.status_code != 200:
                 response.read()
-                elapsed_seconds = time.perf_counter() - started_at
+                elapsed_seconds = time.monotonic() - started_at
                 return self._map(
                     response,
                     body=response.content,
@@ -170,7 +171,7 @@ class HttpxTransport:
             except BaseException:
                 spool.close()
                 raise
-        elapsed_seconds = time.perf_counter() - started_at
+        elapsed_seconds = time.monotonic() - started_at
         try:
             return self._map(
                 response,
@@ -183,13 +184,14 @@ class HttpxTransport:
             raise
 
     @staticmethod
-    def _spooled_chunks(handle: BinaryIO) -> Iterator[bytes]:
-        """Yield a disk-spooled response and close it after consumption."""
-        try:
+    def _spooled_chunks(handle: BinaryIO) -> CloseableByteStream:
+        """Return an explicitly owned iterator over a disk-spooled response."""
+
+        def read_chunks() -> Iterator[bytes]:
             while chunk := handle.read(_STREAM_CHUNK_BYTES):
                 yield chunk
-        finally:
-            handle.close()
+
+        return CloseableByteStream(read_chunks(), close_callback=handle.close)
 
     @property
     def follows_redirects(self) -> bool:
@@ -202,7 +204,7 @@ class HttpxTransport:
         *,
         body: bytes,
         elapsed_seconds: float,
-        chunks: Iterator[bytes] | None = None,
+        chunks: CloseableByteStream | None = None,
     ) -> TransportResponse:
         status = int(getattr(response, "status_code", 0))
         headers = {

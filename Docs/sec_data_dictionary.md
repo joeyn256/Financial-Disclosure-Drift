@@ -1,7 +1,7 @@
 # SEC Data Dictionary
 
-**Version:** 0.1 (Stage M2.1)
-**Governing records:** Decisions 007–010
+**Version:** 0.2 (Stage M2.2-R3)
+**Governing records:** Decisions 007–012
 **Scope:** the operational SQLite catalog and the frozen Parquet release tables
 
 Conventions used throughout:
@@ -211,6 +211,36 @@ The M2.2 catalog preserves three non-interchangeable layers:
 | `census_accession_observations` | Every source-native accession field observation, including conflicts |
 | `census_calendar_days` | Tri-state day status with observation lineage and derivation version |
 | `census_qa_metrics` | Deterministic QA values with explicit `value`, `zero`, `unavailable`, `failed`, `blocked`, `unknown`, or `not_retrieved` status |
+
+### 6B. R3 durability and provenance enforcement
+
+SQLite is authoritative; `audit/sec/census_source_observations.jsonl` is a
+reconstructible projection. A canonical line is the deterministic, sorted-key
+serialization of one SQLite observation, ordered by retrieval time, catalog-recording
+time, and observation identity. A normal append is flushed and file-`fsync`ed before
+`projected_to_audit` is set. A rebuild is written and `fsync`ed in a temporary file in
+the destination directory, atomically replaces the projection, and `fsync`s that
+directory before projection flags are updated.
+
+Startup validation compares the complete projection to SQLite by observation identity,
+canonical payload hash, row count, and order. Missing files, valid prefixes, truncated or
+malformed lines, duplicate or unknown identities, modified payloads, reordering, and
+trailing garbage cause deterministic reconstruction. Recovery history is retained in
+`census_projection_recovery_events`, including the detected condition, relative
+projection path, expected and observed counts, rebuild identity and hash, resolution
+state, timestamps, and whether the condition blocked release before resolution.
+
+Migration 0008 rebuilds `census_source_observations` with deferred, restrictive
+self-foreign keys for `reused_observation_id` and `supersedes_observation_id`. Additional
+validation rejects dangling, self-referential, cyclic, source-incompatible, or
+request-identity-incompatible lineage before commit. Reuse points to a verified
+object-owning observation and preserves the shared object's storage representation,
+stored, logical and applicable transport hashes, sizes, relative path, parser version,
+archive-member lineage, and response-encoding provenance. The new retrieval remains its
+own immutable observation.
+`storage_representation` describes the shared raw object; declared content type and
+`content_encoding` remain response provenance (and a `304` inherits them from the
+verified evidence response because it has no new entity body).
 
 ## 7. Reference tables
 

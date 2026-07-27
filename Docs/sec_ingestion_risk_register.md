@@ -1,8 +1,8 @@
 # SEC Ingestion Risk Register
 
-**Version:** 0.1 (Stage M2.1)
+**Version:** 0.2 (Stage M2.2-R3)
 **Governing records:** `Docs/leakage_register.md` (L01–L18),
-`Docs/research_risk_register.md`, Decisions 007–010
+`Docs/research_risk_register.md`, Decisions 007–012
 
 ## 1. Leakage-register mapping
 
@@ -36,6 +36,12 @@
 | **I18** | Cutoff drift through configuration | The 17:30 America/New_York cutoff is frozen in code for `10-K`, `10-K/A`, `10-KT`, `10-KT/A`; no YAML key and no environment variable exists, asserted by test; changes need a versioned methodological update supported by official SEC documentation | `unit` |
 | **I19** | Weekend or holiday acceptance treated as ordinary after-hours behaviour | A purported acceptance on a non-operating day is preserved, classified `unexplained_date_divergence` with `REVIEW_ACCEPTANCE_ON_NON_OPERATING_DAY`, blocked from automatic rollover, and held for reconciliation | `unit`, `manual_review` |
 | **I17** | A correction is silently recorded as after-hours behaviour | Correction is evaluated **before** rollover; `post_acceptance_date_correction` retains preserved observations and requires review when cohort assignment changes | `unit`, `manual_review` |
+| **I20** | Derived JSONL falsely appears complete after a torn or corrupted write | SQLite remains authoritative; append file-`fsync` precedes the projection flag; startup validates identity, canonical hash, count, and order; damaged projections rebuild through a durable temporary file, atomic replace, and directory `fsync`; recovery history is retained and unresolved damage blocks completion | `unit`, `integration` |
+| **I21** | Applied migration history is rewritten or no longer matches packaged SQL | Startup verifies the exact contiguous version/name/checksum chain before writable operations and never repairs stored checksums silently; unknown, missing, renamed, reordered, or changed migrations fail closed | `unit` |
+| **I22** | Reuse or supersession points to missing, cyclic, incompatible, escaped, or damaged evidence | Migration 0008 adds restrictive self-foreign keys; semantic validation rejects self-links, cycles, and source/request mismatches; bounded-stream reuse verification rejects unsafe or symlinked paths, proves the object owner, and copies complete immutable-object and archive-member metadata | `unit`, `integration` |
+| **I23** | Partially consumed streamed responses leak temporary files or descriptors | Stream ownership is explicit and closeable; exhaustion, explicit close, context exit, and iteration failure close the spool idempotently; the HTTPX response closes before local consumption and timing uses an explicit monotonic clock | `unit` |
+| **I24** | An arbitrary transport byte ceiling silently truncates or refuses a legitimate SEC bulk source | **Intentional nondecision:** no maximum transport size is imposed on approved SEC bulk metadata sources without a separately approved, source-specific policy. Containment comes from bounded-memory disk spooling, archive expansion, member-count and decompression limits, content-type, source-family, URL-containment, and parser validation, deterministic cleanup, and explicit stream closure — not from a guessed byte cap. A size ceiling invented without evidence would fail exactly the large, legitimate sources the census depends on | `unit`, `integration` |
+| **I25** | "It spooled successfully" is mistaken for "it is acceptable evidence" | Spooling is transport containment only. Every integrity, storage-representation, archive, parser, reconciliation, and QA gate still applies to a large source, and a source that spools but fails any of them is failed or quarantined with its evidence preserved. Bounded-memory spooling is never permission for an unbounded in-memory read | `unit`, `integration` |
 
 ## 3. Stop conditions for Milestone 2
 

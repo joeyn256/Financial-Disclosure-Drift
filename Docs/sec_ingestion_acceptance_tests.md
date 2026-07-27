@@ -1,7 +1,7 @@
 # SEC Ingestion Acceptance Tests
 
-**Version:** 0.1 (Stage M2.1)
-**Governing records:** Decisions 007–010, `Docs/sec_ingestion_risk_register.md`
+**Version:** 0.2 (Stage M2.2-R3)
+**Governing records:** Decisions 007–012, `Docs/sec_ingestion_risk_register.md`
 
 Every specification carries `test_id`, `requirement`, `level`, `fixture_or_input`, `procedure`,
 `expected_result`, `failure_severity`, `blocks_release`, `evidence_artifact`, and
@@ -154,6 +154,16 @@ Fixtures are synthetic. No test provokes SEC rate restrictions; all responses ar
 | RAW-008 | No normalization | bytes unchanged for line endings, whitespace, encoding, HTML, SGML, JSON | blocking | yes | D009 §5 |
 | RAW-009 | No deletion on parser failure | raw object retained; failure recorded | blocking | yes | D009 §6 |
 | RAW-010 | Relative paths only | no absolute path persisted | blocking | yes | D009 §2 |
+| RAW-011 | Durable JSONL append | line flushed and file-`fsync`ed before SQLite projection flag | blocking | yes | D009 §7; R3.1 |
+| RAW-012 | Projection damage matrix | missing, empty, truncated, malformed, prefix-only, duplicate, unknown, modified, reordered, or garbage-appended projection is detected and rebuilt from SQLite | blocking | yes | D009 §7; R3.1 |
+| RAW-013 | Atomic deterministic rebuild | temporary file `fsync`, atomic replace, directory `fsync`; repeated rebuild is byte-identical with the same hash | blocking | yes | D009 §7; R3.1 |
+| RAW-014 | Projection recovery history | condition, counts, path, rebuild hash, resolution, and pre-resolution block are retained; unresolved state blocks completion | blocking | yes | D009 §7; R3.1 |
+| RAW-015 | Complete reuse metadata | byte-identical and `304` reuse retain verified storage/logical/transport metadata, sizes, encoding, parser version, path, evidence owner, and archive members | blocking | yes | D009 §6; R3.4 |
+| RAW-016 | Invalid reuse evidence | missing/tampered object, incomplete/incompatible representation, size or parser mismatch, invalid owner chain, incompatible content kind, or unsafe path refuses reuse; verification is bounded-memory | blocking | yes | D009 §6; R3.4 |
+| RAW-017 | Closeable streamed response | exhaustion, partial/zero consumption close, context exit, iteration error, and repeated close release the spool exactly once; HTTPX response is already closed | blocking | yes | D009 §7; R3.5 |
+| RAW-018 | Malformed streamed evidence preserved | a streamed response rejected after spooling is quarantined with its complete bytes, declared content type, encoding, and provenance headers; never an empty body; the spool closes and no temporary file or descriptor leaks | blocking | yes | D009 §6; R3.3B |
+| RAW-019 | No arbitrary transport byte ceiling | no maximum transport size is imposed on approved SEC bulk sources; a large legitimate source is neither refused nor truncated for size alone, while bounded-memory spooling, archive expansion/member/ratio limits, content-type, source-family, URL-containment, and parser gates all still apply | blocking | yes | Census plan §8; R3.4 |
+| RAW-020 | Spooling is not acceptance | a large source that spools but fails any integrity, representation, archive, parser, or QA gate is failed or quarantined with evidence preserved; spooling never authorizes an unbounded in-memory read | blocking | yes | Census plan §8; R3.4 |
 
 ## E. SQLite (`unit`)
 
@@ -167,6 +177,10 @@ Fixtures are synthetic. No test provokes SEC rate restrictions; all responses ar
 | SQL-006 | Integrity gates | `quick_check`, `integrity_check`, `foreign_key_check` all run; release requires ok and zero rows | blocking | yes |
 | SQL-007 | Migration compatibility | migrations idempotent and versioned | blocking | yes |
 | SQL-008 | Consistent backup | SQLite backup API used; naïve WAL copy rejected | blocking | yes |
+| SQL-009 | Applied-migration provenance | every applied version, name, order, and packaged SQL checksum matches before writes | blocking | yes |
+| SQL-010 | Provenance tamper refusal | changed packaged SQL/name/checksum, unknown version, duplicate metadata, or chain gap fails loudly and is never rewritten | blocking | yes |
+| SQL-011 | Observation lineage FKs | migration 0008 preserves valid rows and rejects dangling reuse/supersession, self-links, and deletion of referenced evidence | blocking | yes |
+| SQL-012 | Observation lineage semantics | cycles and incompatible source/request identities fail before commit; valid restart passes foreign-key integrity | blocking | yes |
 
 ## F. Idempotency, drift, release, privacy, backup, forecast
 

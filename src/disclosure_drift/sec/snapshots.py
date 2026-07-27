@@ -46,6 +46,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
+import stat
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -55,7 +57,7 @@ from typing import Final, Literal, Protocol
 
 from disclosure_drift.errors import RawObjectIntegrityError
 from disclosure_drift.paths import DataTree, relative_to_root
-from disclosure_drift.sec.http_client import FetchResult
+from disclosure_drift.sec.http_client import ACCEPTABLE_CONTENT_TYPES, FetchResult
 from disclosure_drift.sec.mutation import PriorContent, classify_content_change
 from disclosure_drift.sec.parsers.versions import versions_agree
 from disclosure_drift.sec.raw_store import RawStore, decompress, sha256_of
@@ -173,6 +175,7 @@ class SourceObservation:
             "last_modified": self.last_modified,
             "validators_sent": dict(sorted(self.validators_sent.items())),
             "declared_content_type": self.declared_content_type,
+            "observed_content_kind": self.observed_content_kind,
             "content_encoding": self.content_encoding,
             "transport_sha256": self.transport_sha256,
             "stored_sha256": self.stored_sha256,
@@ -201,26 +204,28 @@ class SnapshotIndex:
 
     source_id: str
     identity: str
-    observation_id: str | None
-    logical_sha256: str | None
-    stored_sha256: str | None
-    etag: str | None
-    last_modified: str | None
-    parser_version: str | None
-    relative_storage_path: str | None
+    observation_id: str | None = None
+    logical_sha256: str | None = None
+    content_sha256: str | None = None
+    stored_sha256: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+    parser_version: str | None = None
+    relative_storage_path: str | None = None
+    transport_sha256: str | None = None
+    transport_size_bytes: int | None = None
     content_size_bytes: int | None = None
     stored_size_bytes: int | None = None
     storage_representation: StorageRepresentation | None = None
+    content_encoding: str | None = None
+    declared_content_type: str | None = None
+    observed_content_kind: str | None = None
+    evidence_observation_id: str | None = None
 
     @property
     def has_snapshot(self) -> bool:
         """Whether a prior payload exists to reuse or compare against."""
         return self.logical_sha256 is not None and self.relative_storage_path is not None
-
-    @property
-    def content_sha256(self) -> str | None:
-        """Decision 009 integrity anchor of the preserved object."""
-        return self.logical_sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,23 +280,81 @@ class SnapshotStore:
                 continue
             if not observation.is_usable:
                 continue
-            if resolved and observation.identity and observation.identity != resolved:
+            if resolved and observation.identity != resolved:
                 continue
+            owner = self._evidence_owner(observation)
             return SnapshotIndex(
                 source_id=source_id,
                 identity=observation.identity,
                 observation_id=observation.observation_id,
                 logical_sha256=observation.logical_sha256,
+                content_sha256=observation.content_sha256,
                 stored_sha256=observation.stored_sha256,
                 etag=observation.etag,
                 last_modified=observation.last_modified,
                 parser_version=observation.parser_version,
                 relative_storage_path=observation.relative_storage_path,
+                transport_sha256=observation.transport_sha256,
+                transport_size_bytes=observation.transport_size_bytes,
                 content_size_bytes=observation.content_size_bytes,
                 stored_size_bytes=observation.stored_size_bytes,
                 storage_representation=observation.storage_representation,
+                content_encoding=observation.content_encoding,
+                declared_content_type=observation.declared_content_type,
+                observed_content_kind=observation.observed_content_kind,
+                evidence_observation_id=(owner.observation_id if owner is not None else None),
             )
-        return SnapshotIndex(source_id, resolved, None, None, None, None, None, None, None)
+        return SnapshotIndex(source_id=source_id, identity=resolved)
+
+    def _evidence_owner(self, observation: SourceObservation) -> SourceObservation | None:
+        """Resolve and validate every hop to the observation owning the raw object."""
+        by_id = {item.observation_id: item for item in self._observations}
+        current = observation
+        visited: set[str] = set()
+        while current.reused_observation_id is not None:
+            if current.observation_id in visited or current.outcome not in {
+                "unchanged_content",
+                "reused_snapshot",
+            }:
+                return None
+            visited.add(current.observation_id)
+            owner = by_id.get(current.reused_observation_id)
+            if owner is None or not self._reuse_edge_is_compatible(current, owner):
+                return None
+            current = owner
+        if current.observation_id in visited or current.outcome not in {
+            "stored_new",
+            "superseded",
+        }:
+            return None
+        return current
+
+    @staticmethod
+    def _reuse_edge_is_compatible(
+        observation: SourceObservation,
+        target: SourceObservation,
+    ) -> bool:
+        """Require one reuse edge to preserve the complete shared-object identity."""
+        if (
+            observation.source_id != target.source_id
+            or observation.identity != target.identity
+            or target.retrieved_at_utc > observation.retrieved_at_utc
+        ):
+            return False
+        fields = (
+            "relative_storage_path",
+            "stored_sha256",
+            "logical_sha256",
+            "content_sha256",
+            "transport_sha256",
+            "stored_size_bytes",
+            "content_size_bytes",
+            "transport_size_bytes",
+            "storage_representation",
+            "parser_version",
+            "observed_content_kind",
+        )
+        return all(getattr(observation, field) == getattr(target, field) for field in fields)
 
     def payload_path(self, observation: SourceObservation) -> Path:
         """Return the absolute local path for a stored observation.
@@ -301,7 +364,51 @@ class SnapshotStore:
         if observation.relative_storage_path is None:
             message = f"observation {observation.observation_id} stored no payload"
             raise RawObjectIntegrityError(message)
-        return self._tree.data_root / observation.relative_storage_path
+        return self._trusted_raw_path(
+            observation.relative_storage_path,
+            observation_id=observation.observation_id,
+        )
+
+    def _trusted_raw_path(self, relative_path: str, *, observation_id: str) -> Path:
+        """Resolve a catalog path without permitting traversal or symlink escape."""
+        relative = Path(relative_path)
+        approved_roots = {
+            ("raw", "sec", "bulk"),
+            ("raw", "sec", "filings"),
+            ("raw", "sec", "indexes"),
+            ("raw", "sec", "quarantine"),
+        }
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or tuple(relative.parts[:3]) not in approved_roots
+        ):
+            message = (
+                f"stored object for {observation_id} has an unsafe catalog path {relative_path!r}"
+            )
+            raise RawObjectIntegrityError(message)
+
+        root = self._tree.data_root
+        candidate = root / relative
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                message = (
+                    f"stored object for {observation_id} traverses a symbolic link at {current}"
+                )
+                raise RawObjectIntegrityError(message)
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved_candidate = candidate.resolve(strict=False)
+            resolved_candidate.relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            message = (
+                f"stored object for {observation_id} cannot be safely resolved "
+                "beneath the configured data root"
+            )
+            raise RawObjectIntegrityError(message) from exc
+        return candidate
 
     def load_payload(self, observation: SourceObservation) -> bytes:
         """Read a stored payload, verifying both stored and logical hashes.
@@ -437,23 +544,10 @@ class SnapshotStore:
         validators taken from that observation, the prior raw object still exists, its
         stored hash verifies, and its parser compatibility is known.
         """
-        checks: list[tuple[str, bool]] = []
-        notes: list[str] = []
-
-        has_prior = previous.has_snapshot and previous.observation_id is not None
-        checks.append(("prior_successful_observation", has_prior))
-        if not has_prior:
-            notes.append("no prior successful observation exists for this request identity")
-
         wanted = identity or result.identity or ""
-        same_identity = (
-            previous.source_id == spec.source_id
-            and bool(previous.identity)
-            and previous.identity == wanted
-        )
-        checks.append(("same_source_and_request_identity", same_identity))
-        if not same_identity:
-            notes.append(f"prior identity {previous.identity!r} does not match {wanted!r}")
+        shared = self._evaluate_shared_object(spec, previous, wanted)
+        checks = list(shared.checks)
+        notes = [] if shared.permitted else [shared.detail]
 
         sent_from_prior = result.sent_any_validator and (
             (result.sent_etag is None or result.sent_etag == previous.etag)
@@ -468,54 +562,108 @@ class SnapshotStore:
                 "the conditional request did not send validators drawn from the prior observation"
             )
 
-        exists = False
-        verified = False
-        if has_prior and previous.relative_storage_path is not None:
-            path = self._tree.data_root / previous.relative_storage_path
-            exists = path.is_file()
-            if (
-                exists
-                and previous.stored_sha256 is not None
-                and previous.storage_representation in {"identical", "deterministic_gzip"}
-            ):
-                stored = path.read_bytes()
-                representation_matches = (
-                    previous.storage_representation == "deterministic_gzip"
-                ) == (path.suffix == ".gz")
-                try:
-                    logical = (
-                        decompress(stored)
-                        if previous.storage_representation == "deterministic_gzip"
-                        else stored
-                    )
-                except (OSError, EOFError):
-                    logical = b""
-                verified = (
-                    representation_matches
-                    and sha256_of(stored) == previous.stored_sha256
-                    and sha256_of(logical) == previous.logical_sha256
-                    and (
-                        previous.stored_size_bytes is None
-                        or len(stored) == previous.stored_size_bytes
-                    )
-                    and (
-                        previous.content_size_bytes is None
-                        or len(logical) == previous.content_size_bytes
-                    )
+        permitted = all(passed for _, passed in checks)
+        detail = (
+            "every 304 reuse precondition held for the verified preserved snapshot"
+            if permitted
+            else "; ".join(notes)
+        )
+        return ReuseDecision(permitted=permitted, checks=tuple(checks), detail=detail)
+
+    def _evaluate_shared_object(
+        self,
+        spec: SourceSpec,
+        previous: SnapshotIndex,
+        identity: str,
+    ) -> ReuseDecision:
+        """Verify every immutable-object field before any form of reuse."""
+        checks: list[tuple[str, bool]] = []
+        notes: list[str] = []
+
+        has_prior = previous.has_snapshot and previous.observation_id is not None
+        checks.append(("prior_successful_observation", has_prior))
+        if not has_prior:
+            notes.append("no prior successful observation exists for this request identity")
+
+        same_identity = (
+            previous.source_id == spec.source_id
+            and bool(previous.identity)
+            and previous.identity == identity
+        )
+        checks.append(("same_source_and_request_identity", same_identity))
+        if not same_identity:
+            notes.append(f"prior identity {previous.identity!r} does not match {identity!r}")
+
+        metadata_complete = all(
+            value is not None
+            for value in (
+                previous.logical_sha256,
+                previous.content_sha256,
+                previous.stored_sha256,
+                previous.transport_sha256,
+                previous.transport_size_bytes,
+                previous.content_size_bytes,
+                previous.stored_size_bytes,
+                previous.storage_representation,
+                previous.relative_storage_path,
+                previous.parser_version,
+                previous.observed_content_kind,
+                previous.evidence_observation_id,
+            )
+        )
+        checks.append(("prior_object_metadata_complete", metadata_complete))
+        if not metadata_complete:
+            notes.append("the prior observation lacks complete immutable-object metadata")
+
+        transport_consistent = (
+            previous.transport_sha256 is not None
+            and previous.logical_sha256 is not None
+            and previous.content_sha256 == previous.logical_sha256
+            and previous.transport_sha256 == previous.logical_sha256
+            and previous.transport_size_bytes is not None
+            and previous.content_size_bytes is not None
+            and previous.transport_size_bytes == previous.content_size_bytes
+        )
+        checks.append(("prior_transport_metadata_consistent", transport_consistent))
+        if not transport_consistent:
+            notes.append("the prior transport hash or size disagrees with its logical content")
+
+        content_kind_compatible = previous.observed_content_kind == spec.expected_content
+        checks.append(("observed_content_kind_compatible", content_kind_compatible))
+        if not content_kind_compatible:
+            notes.append(
+                f"prior observed content kind {previous.observed_content_kind!r} does not "
+                f"match registered kind {spec.expected_content!r}"
+            )
+        declared = previous.declared_content_type
+        declared_compatible = declared is None or (
+            declared.split(";", 1)[0].strip().lower()
+            in ACCEPTABLE_CONTENT_TYPES[spec.expected_content]
+        )
+        checks.append(("declared_content_type_compatible", declared_compatible))
+        if not declared_compatible:
+            notes.append(
+                f"prior declared content type {declared!r} is incompatible with "
+                f"registered kind {spec.expected_content!r}"
+            )
+
+        path: Path | None = None
+        path_contained = False
+        if previous.relative_storage_path is not None:
+            try:
+                path = self._trusted_raw_path(
+                    previous.relative_storage_path,
+                    observation_id=previous.observation_id or "unknown",
                 )
-            elif exists:
-                verified = False
-                notes.append("the prior observation lacks a stored hash or storage representation")
+                path_contained = True
+            except RawObjectIntegrityError as exc:
+                notes.append(str(exc))
+        checks.append(("prior_raw_path_contained", path_contained))
+        exists = path_contained and path is not None and path.is_file()
         checks.append(("prior_raw_object_present", exists))
         if has_prior and not exists:
             notes.append("the prior raw object is missing from the store")
-        checks.append(("prior_stored_hash_verifies", verified))
-        if exists and not verified:
-            notes.append("the prior raw object did not verify against its stored hash")
 
-        # The authoritative version comes from the parser implementation, not from a
-        # separately maintained registry string, so a result parsed by an older
-        # implementation is never silently reused under the current version's name.
         compatible = versions_agree(spec.parser_id, previous.parser_version)
         checks.append(("parser_compatibility_known", compatible))
         if not compatible:
@@ -525,13 +673,58 @@ class SnapshotStore:
                 "so compatibility is unknown and the result must be reparsed"
             )
 
-        permitted = all(passed for _, passed in checks)
-        detail = (
-            "every 304 reuse precondition held for the verified preserved snapshot"
-            if permitted
-            else "; ".join(notes)
+        indexed = next(
+            (item for item in self._observations if item.observation_id == previous.observation_id),
+            None,
         )
-        return ReuseDecision(permitted=permitted, checks=tuple(checks), detail=detail)
+        owner = self._evidence_owner(indexed) if indexed is not None else None
+        owner_verified = (
+            owner is not None
+            and owner.outcome in {"stored_new", "superseded"}
+            and owner.reused_observation_id is None
+            and owner.observation_id == previous.evidence_observation_id
+            and owner.source_id == previous.source_id
+            and owner.identity == previous.identity
+            and owner.relative_storage_path == previous.relative_storage_path
+            and owner.stored_sha256 == previous.stored_sha256
+            and owner.logical_sha256 == previous.logical_sha256
+            and owner.content_sha256 == previous.content_sha256
+            and owner.transport_sha256 == previous.transport_sha256
+            and owner.stored_size_bytes == previous.stored_size_bytes
+            and owner.content_size_bytes == previous.content_size_bytes
+            and owner.transport_size_bytes == previous.transport_size_bytes
+            and owner.storage_representation == previous.storage_representation
+            and owner.parser_version == previous.parser_version
+            and owner.observed_content_kind == previous.observed_content_kind
+        )
+        checks.append(("evidence_owner_verified", owner_verified))
+        if not owner_verified:
+            notes.append(
+                "the reused object does not resolve to a compatible object-owning observation"
+            )
+
+        verified = False
+        if exists and metadata_complete and owner_verified and owner is not None:
+            try:
+                self.verify_payload(owner)
+            except RawObjectIntegrityError as exc:
+                notes.append(str(exc))
+            else:
+                verified = True
+        checks.append(("prior_stored_hash_verifies", verified))
+        if exists and not verified:
+            notes.append("the prior raw object, representation, hash, or size did not verify")
+
+        permitted = all(passed for _, passed in checks)
+        return ReuseDecision(
+            permitted=permitted,
+            checks=tuple(checks),
+            detail=(
+                "complete immutable-object metadata and evidence ownership verified"
+                if permitted
+                else "; ".join(notes)
+            ),
+        )
 
     def _record_reuse(
         self,
@@ -560,14 +753,21 @@ class SnapshotStore:
         return self._append_values(
             base
             | {
+                "etag": result.etag or previous.etag,
+                "last_modified": result.last_modified or previous.last_modified,
+                "declared_content_type": previous.declared_content_type,
+                "observed_content_kind": previous.observed_content_kind,
+                "content_encoding": previous.content_encoding,
+                "transport_sha256": previous.transport_sha256,
+                "transport_size_bytes": previous.transport_size_bytes,
                 "logical_sha256": previous.logical_sha256,
-                "content_sha256": previous.logical_sha256,
+                "content_sha256": previous.content_sha256,
                 "content_size_bytes": previous.content_size_bytes,
                 "stored_sha256": previous.stored_sha256,
                 "stored_size_bytes": previous.stored_size_bytes,
                 "storage_representation": previous.storage_representation,
                 "relative_storage_path": previous.relative_storage_path,
-                "reused_observation_id": previous.observation_id,
+                "reused_observation_id": previous.evidence_observation_id,
                 "reason_codes": ("SOURCE_SNAPSHOT_REUSED",),
                 "detail": (
                     f"conditional request confirmed the preserved snapshot; {decision.detail}"
@@ -586,10 +786,12 @@ class SnapshotStore:
         outcome: ObservationOutcome = "quarantined" if result.outcome == "quarantined" else "failed"
         quarantined_path: str | None = None
         evidence: dict[str, object] = {}
-        if outcome == "quarantined" and result.body:
-            quarantined_path = self._quarantine_payload(spec, result, timestamp)
-            evidence_hash = sha256_of(result.body)
-            evidence_size = len(result.body)
+        if outcome == "quarantined" and (result.body or result.chunks is not None):
+            quarantined_path, evidence_hash, evidence_size = self._quarantine_payload(
+                spec,
+                result,
+                timestamp,
+            )
             evidence = {
                 "transport_sha256": evidence_hash,
                 "stored_sha256": evidence_hash,
@@ -645,26 +847,31 @@ class SnapshotStore:
             "content_size_bytes": transport_size,
         }
 
+        refused_identical_reuse: ReuseDecision | None = None
         if previous.has_snapshot and previous.logical_sha256 == logical_hash:
-            if stream_part is not None:
-                stream_part.unlink()
-            return self._append_values(
-                base
-                | {
-                    "outcome": "unchanged_content",
-                    "stored_sha256": previous.stored_sha256,
-                    "stored_size_bytes": previous.stored_size_bytes,
-                    "storage_representation": previous.storage_representation,
-                    "content_size_bytes": previous.content_size_bytes,
-                    "relative_storage_path": previous.relative_storage_path,
-                    "reused_observation_id": previous.observation_id,
-                    "reason_codes": ("SOURCE_CONTENT_UNCHANGED",),
-                    "detail": (
-                        "official content is byte-identical to the preserved object; the "
-                        "prior payload is reused and this retrieval is still recorded"
-                    ),
-                }
-            )
+            identical_reuse = self._evaluate_shared_object(spec, previous, identity)
+            if identical_reuse.permitted:
+                if stream_part is not None:
+                    stream_part.unlink()
+                return self._append_values(
+                    base
+                    | {
+                        "outcome": "unchanged_content",
+                        "stored_sha256": previous.stored_sha256,
+                        "stored_size_bytes": previous.stored_size_bytes,
+                        "storage_representation": previous.storage_representation,
+                        "content_size_bytes": previous.content_size_bytes,
+                        "relative_storage_path": previous.relative_storage_path,
+                        "reused_observation_id": previous.evidence_observation_id,
+                        "reason_codes": ("SOURCE_CONTENT_UNCHANGED",),
+                        "detail": (
+                            "official content is byte-identical to the preserved object; "
+                            f"{identical_reuse.detail}; the prior payload is reused and "
+                            "this retrieval is still recorded"
+                        ),
+                    }
+                )
+            refused_identical_reuse = identical_reuse
 
         compress = spec.expected_content in _TEXT_LIKE
         stored = self._raw.store(
@@ -719,6 +926,18 @@ class SnapshotStore:
                 | stored_values
                 | {"detail": "first preserved snapshot for this request identity"}
             )
+        if refused_identical_reuse is not None:
+            return self._append_values(
+                base
+                | stored_values
+                | {
+                    "detail": (
+                        "the response matched the prior logical hash, but reuse was "
+                        f"refused ({refused_identical_reuse.detail}); current bytes were "
+                        "persisted and will be parsed as a fresh observation"
+                    )
+                }
+            )
 
         verdict = classify_content_change(
             spec,
@@ -753,11 +972,16 @@ class SnapshotStore:
         stored_sha256: str,
     ) -> str | None:
         """Return a message when transport and stored bytes cannot be reconciled."""
-        on_disk = stored_path.read_bytes()
-        if sha256_of(on_disk) != stored_sha256:
+        with stored_path.open("rb") as handle:
+            on_disk_sha256, _ = self._stream_digest(handle)
+        if on_disk_sha256 != stored_sha256:
             return "the bytes on disk do not match the stored hash recorded by the raw store"
-        recovered = decompress(on_disk) if representation == "deterministic_gzip" else on_disk
-        if sha256_of(recovered) != transport_sha256:
+        if representation == "deterministic_gzip":
+            with gzip.open(stored_path, "rb") as handle:
+                recovered_sha256, _ = self._stream_digest(handle)
+        else:
+            recovered_sha256 = on_disk_sha256
+        if recovered_sha256 != transport_sha256:
             return (
                 f"stored representation {representation!r} does not reproduce the transport "
                 "bytes, so the stored object cannot stand as evidence for this response"
@@ -774,11 +998,16 @@ class SnapshotStore:
         part = self._tree.staging / f"{source_id}-{uuid.uuid4().hex}.part"
         digest = hashlib.sha256()
         size = 0
-        with part.open("wb") as handle:
-            for chunk in chunks:
-                digest.update(chunk)
-                size += len(chunk)
-                handle.write(chunk)
+        close = getattr(chunks, "close", None)
+        try:
+            with part.open("wb") as handle:
+                for chunk in chunks:
+                    digest.update(chunk)
+                    size += len(chunk)
+                    handle.write(chunk)
+        finally:
+            if callable(close):
+                close()
         return part, digest.hexdigest(), size
 
     @staticmethod
@@ -799,12 +1028,136 @@ class SnapshotStore:
         The projection is derived, not authoritative: it can always be rebuilt from the
         catalog rows, so a failure here never makes a recorded observation disappear.
         """
-        self._tree.audit.mkdir(parents=True, exist_ok=True)
+        if (
+            not filename
+            or filename in {".", ".."}
+            or "\x00" in filename
+            or Path(filename).name != filename
+        ):
+            message = f"refusing unsafe audit-log filename {filename!r}"
+            raise RawObjectIntegrityError(message)
+
         path = self._tree.audit / filename
-        with path.open("a", encoding="utf-8") as handle:
-            for observation in observations if observations is not None else (self._observations):
-                handle.write(json.dumps(observation.as_record(), sort_keys=True) + "\n")
+        selected = observations if observations is not None else self._observations
+        directory_descriptor = self._open_audit_directory()
+        try:
+            descriptor, created = self._open_audit_append(directory_descriptor, filename)
+            try:
+                with os.fdopen(descriptor, "ab", closefd=False) as handle:
+                    for observation in selected:
+                        encoded = (
+                            json.dumps(
+                                observation.as_record(),
+                                ensure_ascii=True,
+                                allow_nan=False,
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                        handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                os.close(descriptor)
+            if created:
+                os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
         return path
+
+    def _open_audit_directory(self) -> int:
+        """Open ``audit/sec`` without following either managed path component."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if not isinstance(no_follow, int) or not isinstance(directory, int):
+            message = "this platform cannot safely open audit paths without following links"
+            raise RawObjectIntegrityError(message)
+
+        self._tree.data_root.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDONLY | directory | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(self._tree.data_root, flags)
+        except OSError as exc:
+            message = "the configured data root cannot be opened as a directory"
+            raise RawObjectIntegrityError(message) from exc
+
+        managed_flags = flags | no_follow
+        try:
+            for component in ("audit", "sec"):
+                next_descriptor = self._open_or_create_audit_component(
+                    descriptor,
+                    component,
+                    managed_flags,
+                )
+                os.close(descriptor)
+                descriptor = next_descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    @staticmethod
+    def _open_or_create_audit_component(
+        parent_descriptor: int,
+        component: str,
+        flags: int,
+    ) -> int:
+        """Open one managed directory component and reject links or non-directories."""
+        try:
+            os.mkdir(component, mode=0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            message = f"audit path component {component!r} could not be created safely"
+            raise RawObjectIntegrityError(message) from exc
+        else:
+            os.fsync(parent_descriptor)
+
+        try:
+            return os.open(component, flags, dir_fd=parent_descriptor)
+        except OSError as exc:
+            message = f"audit path component {component!r} is not a safe, non-linked directory"
+            raise RawObjectIntegrityError(message) from exc
+
+    @staticmethod
+    def _open_audit_append(directory_descriptor: int, filename: str) -> tuple[int, bool]:
+        """Open one regular audit file for append without following symbolic links."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if not isinstance(no_follow, int):
+            message = "this platform cannot safely append audit logs without following links"
+            raise RawObjectIntegrityError(message)
+
+        flags = os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | no_follow | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(
+                filename,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+            created = True
+        except FileExistsError:
+            try:
+                descriptor = os.open(filename, flags, dir_fd=directory_descriptor)
+            except OSError as exc:
+                message = f"audit log {filename!r} is not a safe, non-linked regular file"
+                raise RawObjectIntegrityError(message) from exc
+            created = False
+        except OSError as exc:
+            message = f"audit log {filename!r} could not be created safely"
+            raise RawObjectIntegrityError(message) from exc
+
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError as exc:
+            os.close(descriptor)
+            message = f"audit log {filename!r} could not be verified after opening"
+            raise RawObjectIntegrityError(message) from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            os.close(descriptor)
+            message = f"audit log {filename!r} is not a singly linked regular file"
+            raise RawObjectIntegrityError(message)
+        return descriptor, created
 
     def iter_usable(self) -> Iterator[SourceObservation]:
         """Yield observations whose payloads may be parsed."""
@@ -883,18 +1236,35 @@ class SnapshotStore:
         ]
         return f"{spec.source_id}-{content_hash[:16]}{suffix}"
 
-    def _quarantine_payload(self, spec: SourceSpec, result: FetchResult, timestamp: str) -> str:
+    def _quarantine_payload(
+        self,
+        spec: SourceSpec,
+        result: FetchResult,
+        timestamp: str,
+    ) -> tuple[str, str, int]:
+        """Durably spool malformed evidence, transfer it to quarantine, and hash it."""
         staging = self._tree.staging
         staging.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(result.body).hexdigest()[:16]
-        temporary = staging / f"{spec.source_id}-{digest}.rejected"
-        temporary.write_bytes(result.body)
+        temporary = staging / f"{spec.source_id}-{uuid.uuid4().hex}.rejected"
+        digest = hashlib.sha256()
+        size = 0
+        chunks: Iterable[bytes] = result.chunks if result.chunks is not None else (result.body,)
+        try:
+            with temporary.open("xb") as handle:
+                for chunk in chunks:
+                    digest.update(chunk)
+                    size += len(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            result.close()
         target = self._raw.quarantine(
             temporary,
             result.reason_code or "SEC_RESPONSE_MALFORMED",
             f"{spec.source_id} rejected at {timestamp}: {result.detail}",
         )
-        return relative_to_root(target, self._tree.data_root)
+        return relative_to_root(target, self._tree.data_root), digest.hexdigest(), size
 
     @staticmethod
     def _decode(stored: bytes, observation: SourceObservation, path: Path) -> bytes:

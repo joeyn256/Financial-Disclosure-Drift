@@ -227,3 +227,24 @@ def test_storage_representation_mismatch_blocks_recovery(tmp_path: Path) -> None
         report = reconcile(writer.connection, tree)
     assert report.blocking_reasons()
     assert any("representation" in event.detail for event in report.events)
+
+
+def test_unsafe_catalog_object_path_blocks_recovery_without_external_read(
+    tmp_path: Path,
+) -> None:
+    tree = DataTree.from_root(tmp_path)
+    tree.ensure_tree()
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.migrate()
+        item = observation(tree)
+        ObservationRecorder(writer, tree).record(item)
+        assert item.relative_storage_path is not None
+        absolute = str(tree.data_root / item.relative_storage_path)
+        writer.connection.execute(
+            "UPDATE census_source_observations SET relative_storage_path = ? "
+            "WHERE observation_id = ?",
+            (absolute, item.observation_id),
+        )
+        report = reconcile(writer.connection, tree)
+    assert report.blocking_reasons()
+    assert any("unsafe" in event.detail for event in report.events)

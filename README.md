@@ -5,9 +5,9 @@ A preregistered temporal-reliability study of U.S. Form 10-K disclosure narrativ
 **Status:** Milestone 0 (novelty audit, preregistration, definition freeze) and Milestone 1
 (reproducible engineering foundation) are complete. Milestone 2 has completed **Stage M2.2**:
 approved-source retrieval policy, immutable source observations, defensive bulk-archive handling,
-source-native parsers, the transactional registrant census, restart recovery, and deterministic QA
-are implemented. **No SEC data has been downloaded, no filing body is permitted at this stage, and
-no modeling or outcome code exists.**
+source-native parsers, the transactional registrant census, restart recovery, deterministic QA,
+and R3 durability and provenance hardening are implemented. **No SEC data has been downloaded, no
+filing body is permitted at this stage, and no modeling or outcome code exists.**
 
 ## Research question
 
@@ -189,6 +189,19 @@ wording and Decisions 001-006 are unchanged; version-suffixed files are retained
 - The point-in-time source of truth is the SEC filing and its SEC metadata. External corpora may be
   used only for validation, per `Docs/preregistration.md` section 5.
 - Raw data is never deleted or silently reprocessed; lineage and row-count changes are reported.
+- SQLite is the authoritative observation catalog. Its JSONL file is a deterministic audit
+  projection: appends are file-`fsync`ed before SQLite is marked projected, rebuilds use a
+  temporary file plus atomic replacement and parent-directory `fsync`, and startup validates and
+  reconstructs any missing, truncated, malformed, reordered, duplicated, or altered projection.
+- Every applied migration is checked against the exact packaged name and SQL checksum before
+  further writes. Migration 0008 adds enforced reuse and supersession lineage; dangling,
+  self-referential, cyclic, or identity-incompatible links fail closed.
+- Reused snapshots retain and verify the complete shared-object representation, hashes, sizes,
+  encoding, parser version, path, and evidence-owner lineage. A conditional response cannot turn
+  incomplete or damaged prior evidence into a usable observation.
+- Streamed transports return an explicitly closeable byte stream. Exhaustion, explicit `close()`,
+  context-manager exit, and iteration failure release the local spool exactly once; the HTTP
+  response is already closed before the caller receives that stream.
 
 ## License
 

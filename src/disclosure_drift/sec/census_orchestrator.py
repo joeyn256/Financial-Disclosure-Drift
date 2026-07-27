@@ -58,10 +58,12 @@ from disclosure_drift.sec.index_retrieval import (
 )
 from disclosure_drift.sec.observation_catalog import (
     ObservationRecorder,
+    RecoveryEvent,
     load_observations,
     rebuild_audit_projection,
     reconcile,
     record_recovery_events,
+    validate_audit_projection,
 )
 from disclosure_drift.sec.parsers.base import (
     ParseOutcome,
@@ -214,23 +216,12 @@ class CensusOrchestrator:
                     census_run_id=census_run_id,
                 )
             projection_rebuilt = False
-            if recovery.unprojected_observations:
+            if recovery.projection_recovery_required:
                 rebuild_audit_projection(
                     writer.connection,
                     tree.audit / "census_source_observations.jsonl",
+                    census_run_id=census_run_id,
                 )
-                with transaction(writer.connection) as connection:
-                    connection.execute(
-                        "UPDATE census_source_observations SET projected_to_audit = 1"
-                    )
-                    connection.execute(
-                        "UPDATE census_recovery_states SET resolution_state = 'resolved', "
-                        "action_taken = 'projection_rebuilt', "
-                        "detail = detail || '; projection rebuilt from authoritative catalog' "
-                        "WHERE census_run_id = ? AND "
-                        "scenario = 'audit_projection_interrupted'",
-                        (census_run_id,),
-                    )
                 projection_rebuilt = True
 
             snapshot_store = SnapshotStore(tree)
@@ -378,6 +369,35 @@ class CensusOrchestrator:
                 )
 
                 _, unprojected = recorder.flush_projection()
+                projection_path = tree.audit / "census_source_observations.jsonl"
+                projection_validation = validate_audit_projection(
+                    writer.connection,
+                    projection_path,
+                )
+                if projection_validation.requires_recovery:
+                    record_recovery_events(
+                        writer,
+                        (
+                            RecoveryEvent(
+                                scenario="audit_projection_interrupted",
+                                action_taken="projection_rebuild_required",
+                                detail=projection_validation.detail,
+                                relative_path=projection_validation.projection_path,
+                                resolution_state="blocked",
+                            ),
+                        ),
+                        census_run_id=census_run_id,
+                    )
+                    rebuild_audit_projection(
+                        writer.connection,
+                        projection_path,
+                        census_run_id=census_run_id,
+                    )
+                    unprojected = recorder.unprojected()
+                    projection_validation = validate_audit_projection(
+                        writer.connection,
+                        projection_path,
+                    )
                 metrics = catalog.qa_metrics(census_run_id)
                 integrity = writer.integrity()
                 release_blocking_count = self._release_blocking_count(tuple(plan.values()))
@@ -394,7 +414,7 @@ class CensusOrchestrator:
                     sqlite_integrity_passed=integrity.passed,
                     release_blocking_reason_count=release_blocking_count,
                     qa_report_written=True,
-                    audit_projection_complete=not unprojected,
+                    audit_projection_complete=(not unprojected and projection_validation.is_valid),
                 )
                 audit_path = self._write_qa(
                     tree,

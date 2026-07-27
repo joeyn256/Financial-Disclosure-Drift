@@ -28,7 +28,7 @@ from __future__ import annotations
 import itertools
 import re
 import time as _time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
@@ -51,6 +51,7 @@ from disclosure_drift.sec.source_registry import (
 )
 from disclosure_drift.sec.transport import (
     MAX_IN_MEMORY_BYTES,
+    CloseableByteStream,
     SecRequest,
     Transport,
     TransportResponse,
@@ -148,7 +149,7 @@ class FetchResult:
     purpose: str
     status: int | None = None
     body: bytes = b""
-    chunks: Iterator[bytes] | None = None
+    chunks: CloseableByteStream | None = None
     etag: str | None = None
     last_modified: str | None = None
     declared_content_type: str | None = None
@@ -164,6 +165,28 @@ class FetchResult:
     reason_code: str | None = None
     detail: str = ""
     actions: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        """Wrap legacy iterator inputs in the explicit ownership contract."""
+        object.__setattr__(self, "chunks", CloseableByteStream.coerce(self.chunks))
+
+    def __enter__(self) -> FetchResult:
+        """Return the result while retaining ownership of any stream."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> None:
+        """Close any streamed body when leaving the result scope."""
+        self.close()
+
+    def close(self) -> None:
+        """Close the streamed body, if present; safe to call repeatedly."""
+        if self.chunks is not None:
+            self.chunks.close()
 
     @property
     def is_usable(self) -> bool:
@@ -197,7 +220,8 @@ class _Attempt:
     identity: str
     sent_etag: str | None
     sent_last_modified: str | None
-    attempt: int = 1
+    retry_ordinal: int = 1
+    http_attempts: int = 0
     hops: list[RedirectHop] = field(default_factory=list)
     chain: tuple[str, ...] = ()
     actions: list[str] = field(default_factory=list)
@@ -451,11 +475,14 @@ class SecClient:
                 )
             self._limiter.acquire()
             self._request_count += 1
+            state.http_attempts += 1
             self._logger.info(
-                "sec request source=%s url=%s attempt=%d hop=%d stream=%s purpose=%s headers=%s",
+                "sec request source=%s url=%s request=%d retry_ordinal=%d "
+                "hop=%d stream=%s purpose=%s headers=%s",
                 spec.source_id,
                 state.current_url,
-                state.attempt,
+                state.http_attempts,
+                state.retry_ordinal,
                 len(state.hops),
                 stream,
                 purpose,
@@ -490,6 +517,7 @@ class SecClient:
                 except RedirectBoundaryError as exc:
                     state.actions.append("redirect_refused")
                     return self._boundary_failure(state, response, exc)
+                response.close()
                 state.record_hop(response.status, next_url)
                 self._logger.info(
                     "sec redirect source=%s status=%d to=%s",
@@ -509,8 +537,27 @@ class SecClient:
 
             if response.succeeded_at_transport_level:
                 try:
-                    reported_final = response.final_url or state.current_url
-                    if normalize_url(reported_final) != normalize_url(state.current_url):
+                    if not response.final_url.strip():
+                        message = (
+                            "transport did not report a terminal URL for a successful response"
+                        )
+                        raise RedirectBoundaryError(
+                            message,
+                            "SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",
+                        )
+                    reported_final = validate_url(
+                        response.final_url,
+                        spec,
+                        role="final URL",
+                        identity_url=state.requested_url,
+                    )
+                    validated_current = validate_url(
+                        state.current_url,
+                        spec,
+                        role="request",
+                        identity_url=state.requested_url,
+                    )
+                    if reported_final != validated_current:
                         message = (
                             "transport reported a terminal URL different from the "
                             "policy-validated request without exposing its redirect hop"
@@ -531,6 +578,7 @@ class SecClient:
 
             if response.succeeded_at_transport_level and response.status == 304:
                 state.actions.append("not_modified")
+                response.close()
                 return FetchResult(
                     outcome="not_modified",
                     source_id=spec.source_id,
@@ -546,7 +594,7 @@ class SecClient:
                     identity=identity,
                     sent_etag=state.sent_etag,
                     sent_last_modified=state.sent_last_modified,
-                    attempts=state.attempt,
+                    attempts=state.http_attempts,
                     detail="official content unchanged; the preserved snapshot is reused",
                     actions=tuple(state.actions),
                 )
@@ -555,18 +603,26 @@ class SecClient:
 
             if not response.succeeded_at_transport_level:
                 action = classify_transport_failure(
-                    response.failure or "connection_error", attempt=state.attempt
+                    response.failure or "connection_error", attempt=state.retry_ordinal
                 )
             else:
                 action = self._classify(
-                    spec, response, attempt=state.attempt, first_chunk=first_chunk
+                    spec, response, attempt=state.retry_ordinal, first_chunk=first_chunk
                 )
             state.actions.append(action.kind)
 
             if action.kind == "proceed":
                 return self._retrieved(state, response, rebuilt_chunks)
             if action.kind == "quarantine":
-                return self._terminal("quarantined", state, response, action)
+                return self._terminal(
+                    "quarantined",
+                    state,
+                    response,
+                    action,
+                    chunks=rebuilt_chunks,
+                )
+            if rebuilt_chunks is not None:
+                rebuilt_chunks.close()
             if action.kind == "fail":
                 return self._terminal("failed", state, response, action)
 
@@ -581,15 +637,41 @@ class SecClient:
                     action.reason,
                 )
                 self._limiter.halt(delay)
-                state.attempt = 1
                 continue
 
             # retry or retry_after
-            if state.attempt >= self._policy.max_transient_retries:
-                return self._terminal("failed", state, response, action)
+            if cooldowns >= 1:
+                # Refusing the retry ends the retrieval, and a retry action carries no
+                # reason code while it is still retryable. The terminal result must name
+                # a registered reason for the same purpose as the exhaustion branch
+                # below: no consumer may read this failure as an empty dataset.
+                state.actions.append("post_cooldown_retry_refused")
+                terminal_action = ResponseAction(
+                    kind="fail",
+                    reason=(
+                        f"{action.reason}; the one controlled post-cooldown request "
+                        "was terminal, so no further request was issued"
+                    ),
+                    reason_code=action.reason_code or "SEC_RETRIES_EXHAUSTED",
+                )
+                return self._terminal("failed", state, response, terminal_action)
+            if state.retry_ordinal >= self._policy.max_transient_retries:
+                # A retry action carries no reason code while it is still retryable.
+                # Exhausting the budget makes it terminal, and a terminal failure must
+                # always name a registered reason so no consumer can read it as an
+                # empty dataset.
+                state.actions.append("retry_budget_exhausted")
+                exhausted = ResponseAction(
+                    kind="fail",
+                    reason=(
+                        f"{action.reason}; retries exhausted after {state.http_attempts} attempts"
+                    ),
+                    reason_code=action.reason_code or "SEC_RETRIES_EXHAUSTED",
+                )
+                return self._terminal("failed", state, response, exhausted)
             if action.delay_seconds > 0:
                 self._sleeper(action.delay_seconds)
-            state.attempt += 1
+            state.retry_ordinal += 1
 
     def _classify(
         self,
@@ -638,20 +720,27 @@ class SecClient:
         return body[:BODY_PREFIX_BYTES].decode("utf-8", errors="replace")
 
     @staticmethod
-    def _peek(chunks: Iterator[bytes] | None) -> tuple[bytes | None, Iterator[bytes] | None]:
+    def _peek(
+        chunks: CloseableByteStream | None,
+    ) -> tuple[bytes | None, CloseableByteStream | None]:
         """Read the first chunk for validation and hand back an intact iterator."""
         if chunks is None:
             return None, None
         first = next(chunks, b"")
         if not first:
-            return b"", iter(())
-        return first, itertools.chain([first], chunks)
+            chunks.close()
+            return b"", None
+        rebuilt = CloseableByteStream(
+            itertools.chain([first], chunks),
+            close_callback=chunks.close,
+        )
+        return first, rebuilt
 
     def _retrieved(
         self,
         state: _Attempt,
         response: TransportResponse,
-        chunks: Iterator[bytes] | None = None,
+        chunks: CloseableByteStream | None = None,
     ) -> FetchResult:
         if state.hops:
             self._logger.info(
@@ -678,7 +767,7 @@ class SecClient:
             identity=state.identity,
             sent_etag=state.sent_etag,
             sent_last_modified=state.sent_last_modified,
-            attempts=state.attempt,
+            attempts=state.http_attempts,
             detail="retrieved",
             actions=tuple(state.actions),
         )
@@ -689,6 +778,8 @@ class SecClient:
         state: _Attempt,
         response: TransportResponse,
         action: ResponseAction,
+        *,
+        chunks: CloseableByteStream | None = None,
     ) -> FetchResult:
         self._logger.error(
             "sec retrieval %s source=%s status=%s reason=%s",
@@ -697,14 +788,28 @@ class SecClient:
             response.status if response.succeeded_at_transport_level else "transport-failure",
             action.reason,
         )
+        body = b"" if outcome == "failed" else response.body
+        preserved_chunks = chunks
+        if outcome == "quarantined" and chunks is not None:
+            # A streamed payload lives in the spool, not in ``response.body``. Recording
+            # the empty body here would destroy the very evidence quarantine exists to
+            # keep, so the spool is drained into the body and then closed. The stream is
+            # not handed on: it has already been consumed, and a half-read iterator would
+            # be a second owner of a closed resource.
+            body = self._drain_for_quarantine(state, chunks)
+            preserved_chunks = None
         return FetchResult(
             outcome=outcome,
             source_id=state.spec.source_id,
             url=state.requested_url,
             purpose=state.purpose,
             status=response.status if response.succeeded_at_transport_level else None,
-            body=b"" if outcome == "failed" else response.body,
+            body=body,
+            chunks=preserved_chunks,
+            etag=response.etag,
+            last_modified=response.last_modified,
             declared_content_type=response.content_type,
+            content_encoding=response.content_encoding,
             provenance_headers=self._selected_headers(response),
             redirects=state.chain,
             redirect_hops=tuple(state.hops),
@@ -712,11 +817,50 @@ class SecClient:
             identity=state.identity,
             sent_etag=state.sent_etag,
             sent_last_modified=state.sent_last_modified,
-            attempts=state.attempt,
+            attempts=state.http_attempts,
             reason_code=action.reason_code,
             detail=action.reason,
             actions=tuple(state.actions),
         )
+
+    def _drain_for_quarantine(
+        self,
+        state: _Attempt,
+        chunks: CloseableByteStream,
+    ) -> bytes:
+        """Materialize a spooled payload so quarantined evidence is preserved.
+
+        Reading is bounded by the same in-memory ceiling the buffered path uses, so a
+        pathological response cannot be pulled entirely into memory just because it was
+        rejected. When the bound is reached the prefix already read is kept: a truncated
+        artifact is still evidence, and it is marked as such in the log. The spool is
+        closed on every path, including an iteration failure.
+        """
+        collected = bytearray()
+        truncated = False
+        try:
+            for chunk in chunks:
+                remaining = MAX_IN_MEMORY_BYTES - len(collected)
+                if remaining <= 0:
+                    truncated = True
+                    break
+                collected.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated = True
+                    break
+        except OSError as exc:
+            self._logger.error(
+                "sec quarantine spool read failed source=%s: %s", state.spec.source_id, exc
+            )
+        finally:
+            chunks.close()
+        if truncated:
+            self._logger.warning(
+                "sec quarantine evidence truncated at %d bytes source=%s",
+                MAX_IN_MEMORY_BYTES,
+                state.spec.source_id,
+            )
+        return bytes(collected)
 
     @staticmethod
     def _selected_headers(response: TransportResponse) -> Mapping[str, str]:
@@ -744,6 +888,7 @@ class SecClient:
         self._logger.error(
             "sec redirect boundary refused source=%s reason=%s", state.spec.source_id, exc
         )
+        response.close()
         return FetchResult(
             outcome="failed",
             source_id=state.spec.source_id,
@@ -756,7 +901,7 @@ class SecClient:
             identity=state.identity,
             sent_etag=state.sent_etag,
             sent_last_modified=state.sent_last_modified,
-            attempts=state.attempt,
+            attempts=state.http_attempts,
             reason_code=exc.reason_code,
             detail=str(exc),
             actions=tuple(state.actions),

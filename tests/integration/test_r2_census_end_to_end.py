@@ -31,6 +31,10 @@ from disclosure_drift.config import (
 )
 from disclosure_drift.sec.census_orchestrator import CensusOrchestrator
 from disclosure_drift.sec.index_plan import CoverageWindow
+from disclosure_drift.sec.observation_catalog import (
+    ObservationRecorder,
+    validate_audit_projection,
+)
 from disclosure_drift.sec.transport import SecRequest, TransportResponse
 
 VALID_AGENT = "Financial Disclosure Drift research@your-institution.edu"
@@ -459,6 +463,49 @@ def test_lifecycle_events_were_appended_for_every_instance(
     assert states == {"2024QTR1", "2024QTR2", "2024QTR3"}
     assert "retrieval_started" in {str(row["lifecycle_state"]) for row in rows}
     assert "satisfied" in {str(row["lifecycle_state"]) for row in rows}
+
+
+def test_final_validation_repairs_projection_corrupted_immediately_after_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completion is withheld until deterministic post-flush damage is repaired."""
+    config = network_config(tmp_path, monkeypatch)
+    original_flush = ObservationRecorder.flush_projection
+    injected_paths: list[Path] = []
+
+    def flush_then_corrupt(
+        recorder: ObservationRecorder,
+    ) -> tuple[int, tuple[str, ...]]:
+        result = original_flush(recorder)
+        projection_path = recorder.audit_path()
+        projection_path.write_bytes(b'{"truncated":')
+        injected_paths.append(projection_path)
+        return result
+
+    monkeypatch.setattr(ObservationRecorder, "flush_projection", flush_then_corrupt)
+    report = run_census(config, ScriptedTransport(), COVERAGE_WITH_OPEN)
+
+    assert injected_paths == [config.data_tree().audit / "census_source_observations.jsonl"]
+    assert report.completed  # type: ignore[attr-defined]
+
+    with catalog(config) as connection:
+        validation = validate_audit_projection(connection, injected_paths[0])
+        projection_events = connection.execute(
+            "SELECT detected_condition, resolution_state FROM census_projection_recovery_events"
+        ).fetchall()
+        run_recovery_states = connection.execute(
+            "SELECT resolution_state FROM census_recovery_states "
+            "WHERE census_run_id = ? AND scenario = 'audit_projection_interrupted'",
+            (report.census_run_id,),  # type: ignore[attr-defined]
+        ).fetchall()
+
+    assert validation.is_valid
+    assert projection_events
+    assert any("malformed_json" in str(row["detected_condition"]) for row in projection_events)
+    assert {str(row["resolution_state"]) for row in projection_events} == {"resolved"}
+    assert run_recovery_states
+    assert {str(row["resolution_state"]) for row in run_recovery_states} == {"resolved"}
 
 
 # --------------------------------------------------------------------------- #

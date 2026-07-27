@@ -1,4 +1,49 @@
-# Disclosure Drift
+# Financial Disclosure Drift
+
+<!-- BEGIN FRIENDLY PROJECT OVERVIEW -->
+
+## Did the rise of generative AI change how informative corporate annual reports are?
+
+Public companies use Form 10-K filings to explain their financial condition, business risks,
+strategy, and recent performance. Investors rely on these reports to understand not only what has
+already happened, but also whether management's discussion reflects the company's underlying
+operating condition.
+
+Generative AI and AI-assisted writing tools may have changed how companies prepare these
+disclosures. Annual reports may now be clearer and more consistent—or they may become more polished,
+standardized, and less revealing about company-specific risks.
+
+**Financial Disclosure Drift** investigates whether the language in corporate 10-K filings became
+more or less aligned with companies' subsequent operating performance during the generative-AI era.
+
+> **Central research question:** Have companies' 10-K disclosures become more or less aligned with
+> their subsequent operating performance as generative AI and AI-assisted writing tools have become
+> widely available?
+
+The project compares filings across carefully separated historical periods, measures changes in
+disclosure language, and tests whether those disclosures remain informative about later
+operating-margin outcomes.
+
+### What does “disclosure drift” mean?
+
+Disclosure drift is a change in the relationship between what a company says in its annual report
+and what happens to the business afterward.
+
+For example, a filing may become more polished, cautious, repetitive, or optimistic without becoming
+more informative about the company's underlying financial direction. This project tests whether
+those changes make 10-K disclosures better or worse at reflecting subsequent operating performance.
+
+### What this project can—and cannot—claim
+
+This study evaluates changes associated with the generative-AI adoption period. It does not assume
+that every company used AI, and it does not treat the timing of generative AI adoption alone as proof
+that AI caused a change in disclosure quality.
+
+Instead, the project tests whether measurable changes in 10-K language—and in its relationship with
+subsequent operating performance—occurred across preregistered historical periods.
+
+<!-- END FRIENDLY PROJECT OVERVIEW -->
+
 
 A preregistered temporal-reliability study of U.S. Form 10-K disclosure narratives.
 
@@ -9,7 +54,7 @@ source-native parsers, the transactional registrant census, restart recovery, de
 and R3 durability and provenance hardening are implemented. **No SEC data has been downloaded, no
 filing body is permitted at this stage, and no modeling or outcome code exists.**
 
-## Research question
+## Formal preregistered research question
 
 Do models developed exclusively on pre-2022 Form 10-K disclosures lose predictive accuracy or
 calibration when applied to 2024-era filings, and are evidence-grounded models more robust than

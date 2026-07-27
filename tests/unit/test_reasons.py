@@ -2,24 +2,24 @@
 
 Decisions 013-016 froze exactly sixteen new reason codes for the M2.3 pilot. These tests prove the
 addition is exact (no more, no fewer, no renames) and that every pre-existing code from the accepted
-S3.0 governance baseline (commit ``0cd5e1ee9eb475724fc5be3d93271b078d847077``) is unchanged.
+S3.0 governance baseline is unchanged.
+
+Tests are hermetic: the pre-S3.1 baseline is not reloaded from Git history (a CI checkout may be
+shallow and lack that historical commit). Instead, a canonical SHA-256 fingerprint of the 87
+pre-S3.1 codes was computed once, offline, and is frozen here as a literal expected value.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib
-import subprocess
-import sys
+import json
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
-import pytest
-
 from disclosure_drift import reasons
-from disclosure_drift.reasons import REASON_CODES, ReasonCode
+from disclosure_drift.reasons import REASON_CODES
 
-_BASELINE_COMMIT = "0cd5e1ee9eb475724fc5be3d93271b078d847077"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _NEW_CODES: dict[str, dict[str, Any]] = {
@@ -133,43 +133,50 @@ _NEW_CODES: dict[str, dict[str, Any]] = {
     },
 }
 
+_PRE_S3_1_CODE_COUNT = 87
+_PRE_S3_1_TOTAL_COUNT = 103
 
-def _load_baseline_reason_codes() -> dict[str, ReasonCode]:
-    """Load ``REASON_CODES`` exactly as committed at the accepted S3.0 governance baseline."""
-    result = subprocess.run(
-        ["git", "show", f"{_BASELINE_COMMIT}:src/disclosure_drift/reasons.py"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    module_name = "disclosure_drift._reasons_s3_0_baseline"
-    module = ModuleType(module_name)
-    sys.modules[module_name] = module
-    try:
-        exec(compile(result.stdout, "<baseline reasons.py>", "exec"), module.__dict__)  # noqa: S102
-        baseline: dict[str, ReasonCode] = dict(module.__dict__["REASON_CODES"])
-    finally:
-        del sys.modules[module_name]
-    return baseline
+# Computed once, offline, from the accepted S3.0 governance baseline (the 87 reason codes that
+# existed before the M2.3 S3.1 addition): sort the pre-S3.1 codes by their ``code`` string, render
+# each as a JSON object with keys ``code``, ``category``, ``description``, ``blocks_release``,
+# ``requires_manual_review``, ``decision_reference``, serialize the ordered list with
+# ``json.dumps(records, sort_keys=True, separators=(",", ":"))``, and SHA-256 the UTF-8 bytes. This
+# literal must never be recomputed from Git history at test time.
+_PRE_S3_1_FINGERPRINT_SHA256 = "65c94cf2e10eb5854b2c00034c13f4f9de746bef39673ec420f7ee3125bd1c1b"
 
 
-@pytest.fixture(scope="module")
-def baseline_codes() -> dict[str, ReasonCode]:
-    """The reason-code registry as it stood at the accepted S3.0 baseline commit."""
-    return _load_baseline_reason_codes()
+def _pre_s3_1_codes() -> dict[str, Any]:
+    return {code: entry for code, entry in REASON_CODES.items() if code not in _NEW_CODES}
 
 
-def test_exactly_sixteen_new_codes_were_added(baseline_codes: dict[str, ReasonCode]) -> None:
-    added = set(REASON_CODES) - set(baseline_codes)
+def _fingerprint(codes: dict[str, Any]) -> str:
+    records = [
+        {
+            "code": entry.code,
+            "category": entry.category,
+            "description": entry.description,
+            "blocks_release": entry.blocks_release,
+            "requires_manual_review": entry.requires_manual_review,
+            "decision_reference": entry.decision_reference,
+        }
+        for _, entry in sorted(codes.items())
+    ]
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def test_exactly_sixteen_new_codes_were_added() -> None:
+    added = set(REASON_CODES) - set(_pre_s3_1_codes())
     assert added == set(_NEW_CODES)
     assert len(added) == 16
 
 
-def test_registry_count_increased_by_exactly_sixteen(
-    baseline_codes: dict[str, ReasonCode],
-) -> None:
-    assert len(REASON_CODES) == len(baseline_codes) + 16
+def test_registry_count_is_exactly_one_hundred_three() -> None:
+    assert len(REASON_CODES) == _PRE_S3_1_TOTAL_COUNT
+
+
+def test_removing_new_codes_leaves_exactly_the_pre_s3_1_count() -> None:
+    assert len(_pre_s3_1_codes()) == _PRE_S3_1_CODE_COUNT
 
 
 def test_new_codes_carry_the_approved_metadata() -> None:
@@ -202,16 +209,13 @@ def test_registry_validation_still_passes() -> None:
     importlib.reload(reasons)
 
 
-def test_pre_s3_1_codes_remain_present_and_unchanged(
-    baseline_codes: dict[str, ReasonCode],
-) -> None:
-    for code, baseline_entry in baseline_codes.items():
-        current_entry = REASON_CODES[code]
-        assert current_entry.category == baseline_entry.category
-        assert current_entry.description == baseline_entry.description
-        assert current_entry.blocks_release == baseline_entry.blocks_release
-        assert current_entry.requires_manual_review == baseline_entry.requires_manual_review
-        assert current_entry.decision_reference == baseline_entry.decision_reference
+def test_pre_s3_1_codes_match_the_frozen_baseline_fingerprint() -> None:
+    """Prove the 87 pre-S3.1 codes and their metadata are byte-for-byte unchanged.
+
+    The comparison is against a fingerprint frozen offline from the accepted S3.0 baseline,
+    not against Git history, so this test has no dependency on checkout depth or repository state.
+    """
+    assert _fingerprint(_pre_s3_1_codes()) == _PRE_S3_1_FINGERPRINT_SHA256
 
 
 def test_new_decision_reference_paths_exist_in_the_repository() -> None:

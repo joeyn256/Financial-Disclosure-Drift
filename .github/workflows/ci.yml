@@ -15,6 +15,15 @@ concurrency:
 # Every job builds a fresh virtual environment before installing anything. The
 # core job's "httpx must be absent" assertion is only meaningful in an isolated
 # interpreter, so the hosted runner's global package state is never relied upon.
+#
+# The environments live under RUNNER_TEMP, never inside the checkout. The secret
+# and hygiene gates enumerate work through
+# `git ls-files --cached --others --exclude-standard`, so any directory created
+# inside the checkout that is not ignored is in scope. A virtual environment
+# there means the gates read thousands of installed third-party files and report
+# their maintainer addresses and fixture credentials as findings. Keeping the
+# environment outside the repository removes the cause instead of excluding the
+# files, so the scanners keep their full, unweakened scope over project sources.
 
 jobs:
   # ------------------------------------------------------------------------- #
@@ -33,11 +42,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Create an isolated virtual environment
+      - name: Create an isolated virtual environment outside the checkout
         run: |
-          python -m venv --clear .venv-core
-          echo "$PWD/.venv-core/bin" >> "$GITHUB_PATH"
-          echo "VIRTUAL_ENV=$PWD/.venv-core" >> "$GITHUB_ENV"
+          test -n "$RUNNER_TEMP" || {
+            echo "RUNNER_TEMP is unset; refusing to create a virtual environment"
+            echo "inside the repository checkout, which the secret and hygiene"
+            echo "gates would then scan." >&2
+            exit 1
+          }
+          python -m venv --clear "$RUNNER_TEMP/venv-core"
+          echo "$RUNNER_TEMP/venv-core/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv-core" >> "$GITHUB_ENV"
 
       - name: Confirm isolation before installing anything
         run: |
@@ -124,11 +139,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Create an isolated virtual environment
+      - name: Create an isolated virtual environment outside the checkout
         run: |
-          python -m venv --clear .venv-sec
-          echo "$PWD/.venv-sec/bin" >> "$GITHUB_PATH"
-          echo "VIRTUAL_ENV=$PWD/.venv-sec" >> "$GITHUB_ENV"
+          test -n "$RUNNER_TEMP" || {
+            echo "RUNNER_TEMP is unset; refusing to create a virtual environment"
+            echo "inside the repository checkout, which the secret and hygiene"
+            echo "gates would then scan." >&2
+            exit 1
+          }
+          python -m venv --clear "$RUNNER_TEMP/venv-sec"
+          echo "$RUNNER_TEMP/venv-sec/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv-sec" >> "$GITHUB_ENV"
 
       - name: Confirm isolation before installing anything
         run: |

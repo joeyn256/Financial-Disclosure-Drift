@@ -3,7 +3,12 @@
 .env.*
 !.env.example
 
+# Virtual environments. CI builds its environments under RUNNER_TEMP, outside the
+# checkout; these entries are defense in depth, so an environment created inside
+# the repository can never be enumerated by the secret or hygiene gates.
 .venv/
+.venv-core/
+.venv-sec/
 venv/
 __pycache__/
 *.py[cod]

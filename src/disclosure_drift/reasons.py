@@ -79,6 +79,11 @@ _D009: Final = "Docs/Decisions/decision_009_raw_data_governance.md"
 _D010: Final = "Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md"
 _D011: Final = "Docs/Decisions/decision_011_edgar_operating_calendar_provenance.md"
 _D012: Final = "Docs/Decisions/decision_012_accession_observation_resolution.md"
+_D002: Final = "Docs/Decisions/decision_002_primary_outcome.md"
+_D013: Final = "Docs/Decisions/decision_013_pilot_selection_mechanics.md"
+_D014: Final = "Docs/Decisions/decision_014_pilot_evidence_and_classification_policy.md"
+_D015: Final = "Docs/Decisions/decision_015_pilot_use_prohibition.md"
+_D016: Final = "Docs/Decisions/decision_016_m23_schema_and_artifact_architecture.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -779,6 +784,118 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "integrity",
         "Parser failed; the failure is recorded and raw evidence is retained.",
         decision_reference=_D009,
+    ),
+    # --- M2.3 pilot: snapshot, cohort, and universe provenance (Decisions 002, 014, 016) ---- #
+    _code(
+        "PILOT_CANDIDATE_SNAPSHOT_FROZEN",
+        "provenance",
+        "The immutable pilot candidate snapshot was frozen with its deterministic hashes.",
+        decision_reference=_D016,
+    ),
+    _code(
+        "PILOT_CANDIDATE_SNAPSHOT_INVALIDATED",
+        "provenance",
+        "The pilot candidate snapshot was invalidated and cannot seed a selection run.",
+        decision_reference=_D016,
+    ),
+    _code(
+        "PILOT_PROVISIONAL_COHORT_PRECEDENCE_2",
+        "temporal",
+        "The cohort uses precedence-2 metadata and requires M2.5 verification.",
+        decision_reference=_D014,
+    ),
+    _code(
+        "PILOT_ENTITY_NOT_PRIMARY_UNIVERSE_ELIGIBLE",
+        "excluded",
+        "The entity is excluded from the primary research universe.",
+        decision_reference=_D002,
+    ),
+    _code(
+        "PILOT_ENGINEERING_ONLY_STRESS_CASE",
+        "provenance",
+        "The entity is retained only for engineering-coverage stress testing.",
+        decision_reference=_D002,
+    ),
+    # --- M2.3 pilot: candidate-classification review states (Decisions 013, 014) ----------- #
+    _code(
+        "REVIEW_PILOT_SIZE_CATEGORY_UNAVAILABLE",
+        "review",
+        "The provisional filer-size category is missing, conflicting, or unresolved.",
+        requires_manual_review=True,
+        decision_reference=_D014,
+    ),
+    _code(
+        "REVIEW_PILOT_SIC_UNMAPPED",
+        "review",
+        "The SIC does not map to an affirmative frozen industry family.",
+        requires_manual_review=True,
+        decision_reference=_D014,
+    ),
+    _code(
+        "REVIEW_PILOT_SIC_ENGINEERING_ONLY",
+        "review",
+        "The SIC classification is review-required and cannot satisfy an affirmative industry "
+        "quota.",
+        requires_manual_review=True,
+        decision_reference=_D014,
+    ),
+    _code(
+        "REVIEW_PILOT_HISTORY_EVIDENCE_INSUFFICIENT",
+        "review",
+        "Available metadata cannot support an affirmative stable/eventful classification.",
+        requires_manual_review=True,
+        decision_reference=_D014,
+    ),
+    _code(
+        "REVIEW_PILOT_AMENDMENT_PURPOSE_UNPROVEN",
+        "review",
+        "Amendment purpose is unproven from authorized M2.3 metadata.",
+        requires_manual_review=True,
+        decision_reference=_D014,
+    ),
+    _code(
+        "REVIEW_PILOT_MULTI_REGISTRANT_INCOMPLETE",
+        "review",
+        "Authorized metadata does not fully establish the accession's registrant set.",
+        requires_manual_review=True,
+        decision_reference=_D013,
+    ),
+    # --- M2.3 pilot: selection, reserve, and manifest integrity (Decisions 013, 016) -------- #
+    _code(
+        "PILOT_SELECTION_INFEASIBLE",
+        "integrity",
+        "Deterministic search proved that the frozen quotas cannot be satisfied.",
+        blocks_release=True,
+        decision_reference=_D013,
+    ),
+    _code(
+        "PILOT_SELECTION_INFEASIBLE_OR_UNPROVEN",
+        "integrity",
+        "Deterministic search exhausted its node limit without proving feasibility or "
+        "infeasibility.",
+        blocks_release=True,
+        decision_reference=_D013,
+    ),
+    _code(
+        "PILOT_RESERVE_SIGNATURE_INCOMPATIBLE",
+        "integrity",
+        "A reserve package does not preserve the complete replacement-compatibility signature.",
+        blocks_release=True,
+        decision_reference=_D016,
+    ),
+    _code(
+        "PILOT_RESERVE_UNAVAILABLE",
+        "integrity",
+        "No deterministic compatible reserve package is available.",
+        blocks_release=True,
+        decision_reference=_D013,
+    ),
+    _code(
+        "PILOT_MANIFEST_HASH_NOT_APPROVED",
+        "integrity",
+        "The exact proposed pilot manifest root hash has not received owner approval.",
+        blocks_release=True,
+        decision_reference=_D013,
     ),
 )
 

@@ -6,6 +6,14 @@
 **Status:** Approved by project owner  
 **Supersedes:** Decision 003 draft version dated 2026-07-25
 
+> **Superseded in part — see Decision 010.** `Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md`
+> (approved 2026-07-25) supersedes **only** the cohort date-source rule below: the authoritative
+> temporal cohort is now assigned by the **official SEC filing date**, not the acceptance date. The
+> frozen cohort windows, the 2025/2026 maturity-gate provisions, and every other part of this record
+> are unchanged and remain in force. See `Docs/Decisions/decision_registry.md` for the controlling
+> record on any given topic. This banner was added during the M2.3 governance-repair exception
+> (Decision 010 §1 item 5; audit finding C9).
+
 ## Decision
 
 Assign cohorts by the SEC acceptance date of the original Form 10-K:

@@ -11,7 +11,9 @@ design is frozen. Engineering work implements that design; it never redefines it
 Authoritative records, in precedence order:
 
 1. `Docs/preregistration.md`
-2. `Docs/Decisions/decision_001..006`
+2. `Docs/Decisions/decision_001..016` — see `Docs/Decisions/decision_registry.md` for status, and
+   for which record controls when two decisions address the same topic (e.g. Decision 010 controls
+   the cohort date-source rule; Decision 003 controls everything else about the temporal split)
 3. `Docs/leakage_register.md` and `Docs/research_risk_register.md`
 4. `Milestones/milestone_XX_*.md` — the active milestone specification
 

@@ -1,0 +1,71 @@
+# Decision Registry — Disclosure Drift
+
+**Purpose:** a single index of every record in `Docs/Decisions/`, its current status, and any
+supersession relationship between records. This registry does not itself change any frozen
+definition. It reports what the existing decision records already say.
+
+**Created:** 2026-07-27, during the M2.3 governance-repair exception (Decision 010 audit finding
+C10: "No decision registry exists"; corrected-plan §7.5). Authority for creating this file is the
+scoped documentation exception described in `Milestones/milestone_2_3_pilot_selection_plan.md`
+§"Documentation authorization note".
+
+**How to use this registry:** when two records appear to address the same topic, the record with
+the later **Supersedes**/**Superseded by** relationship controls for the specific point it names.
+A supersession is always partial unless the superseding record says otherwise — it never implies
+the earlier record is wrong or withdrawn on any point it does not name.
+
+## Index
+
+| ID | Title | Date | Status | Supersedes | Superseded by | Governs |
+|---|---|---|---|---|---|---|
+| 001 | Milestone 0 Novelty Boundary | 2026-07-25 | Accepted working decision; final literature refresh still required | — | — | Milestone 0 |
+| 002 | Primary Outcome and Company Universe | 2026-07-25 (approved and clarified 2026-07-27) | Approved by project owner, with a 2026-07-27 primary-universe-boundary clarification (`primary_universe_eligible` flag, engineering-only financial pilot entities, XBRL concept-hierarchy freezing rule) | — | — | Primary outcome definition |
+| 003 (v0.1, archived) | Temporal Split and Holdout Protection | 2026-07-25 | Proposed freeze pending project-owner approval (draft; superseded by v0.2) | — | 003 (v0.2, live) | — |
+| 003 (v0.2, live — `decision_003_temporal_split.md`) | Temporal Split and Holdout Protection | 2026-07-25 | Approved by project owner; **cohort date-source rule superseded in part** | 003 draft v0.1 | 010 (date-source rule only) | Cohort windows, maturity gates |
+| 003 (v0.2, archived duplicate — `decision_003_temporal_split_v0_2.md`) | Temporal Split and Holdout Protection | 2026-07-25 | Unmodified historical snapshot — identical to the live 003 record as it stood before the 2026-07-27 governance-repair banner was added; left untouched by that repair | — | 010 (date-source rule only, via live 003) | — |
+| 004 | Evaluation, Inference, and Rewrite Protocol | 2026-07-25 | Proposed freeze pending project-owner approval | — | — | Evaluation protocol |
+| 005 | 2025 and 2026 Recency Extension | 2026-07-25 | Approved by project owner | — | — | Recency-cohort evaluation timing |
+| 006 | Final Contribution Boundary | 2026-07-25 | Approved for Milestone 0 completion | Provisional contribution language in earlier charter versions | — | Milestone 0 completion |
+| 007 | SEC Universe and Issuer Identity | 2026-07-25 | Approved by project owner | — | — | Milestone 2 onward |
+| 008 | Filing Inventory and Amendment Policy | 2026-07-25 | Approved by project owner | — | — | Milestone 2 onward |
+| 009 | Raw-Data Governance and Storage Architecture | 2026-07-25 | Approved by project owner | — | — | Milestone 2 onward |
+| **010** | **Temporal Availability and Cohort Assignment** | 2026-07-25 | Approved by project owner | 003 (date-source rule only) | — | Milestone 2 onward — **controlling record for cohort date-source assignment (`official_filing_temporal_cohort`)** |
+| 011 | EDGAR Operating-Calendar Provenance | 2026-07-26 | Approved by project owner | — | — | Stage M2.2 onward |
+| 012 | Accession Observation Resolution | 2026-07-26 | Approved | nothing (extends 008, 010, 011) | — | Milestone 2, Stage M2.2-R2.3 |
+| 013 | M2.3 Pilot Selection Mechanics (as-of cutoff, candidate storage, counting units, multi-registrant accounting, selector policy, reserves/substitution, manifest hashing, approval semantics) | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3 onward |
+| 014 | M2.3 Pilot Evidence Levels and Classification Policy (evidence-level taxonomy, filer-size classification, industry assignment and SIC-family mapping, stable/eventful history, amendment-purpose categories, provisional cohort assignment) | 2026-07-27 | Approved by project owner. §4 (SIC-to-industry-family mapping) was approved as a draft pending owner review on 2026-07-27 and was frozen as `sic-family-mapping/0.2` on 2026-07-27 during the same-day governance-repair correction pass. | — | — | Milestone 2.3 onward |
+| 015 | M2.3 Pilot-Use Prohibition | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3 onward; see `Docs/leakage_register.md` L19 |
+| 016 | M2.3 Schema and Artifact Architecture (Stage S3 candidate/selection/manifest table family, ID scheme, lifecycle rules, integrity constraints, reserve-package signature model, hash boundaries) | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3, Stage S3 onward (design only; no implementation authorized) |
+
+## Controlling record by topic (quick lookup)
+
+| Topic | Controlling record |
+|---|---|
+| Cohort windows, maturity gates, bootstrap seed | Decision 003 (v0.2, live), cohort windows unchanged by Decision 010 |
+| **Cohort date-source rule** (which date assigns `official_filing_temporal_cohort`) | **Decision 010** — official SEC filing date, not acceptance date |
+| Primary outcome formula | Decision 002 — approved by project owner (2026-07-27 clarification, corrected 2026-07-27, corrected again 2026-07-27 fourth pass: `primary_universe_eligible` is not a SIC-alone flag — it requires an eligible, non-control candidate, sufficiently resolved required evidence, SIC outside 6000–6999, and no other Decision 002 exclusion; the M2.3 pilot's **eight** primary-universe-ineligible entities — four boundary controls plus four operating-financial-institutions quota entities — are engineering-only and never enter primary outcome construction) |
+| SEC universe, canonical CIK identity | Decision 007 |
+| Filing inventory, amendment handling | Decision 008 |
+| Raw-data storage architecture | Decision 009 |
+| EDGAR operating-calendar provenance | Decision 011 |
+| Accession observation field resolution | Decision 012 |
+| M2.3 pilot selection mechanics | Decision 013 |
+| M2.3 pilot evidence levels and classification | Decision 014 |
+| M2.3 pilot-use prohibition | Decision 015 |
+| M2.3 Stage S3 schema and artifact architecture | Decision 016 |
+
+## Open items this registry surfaces but does not resolve
+
+- As of 2026-07-27: Decision 001 remains "Accepted working decision; final literature refresh still
+  required" and Decision 004 remains "Proposed freeze pending project-owner approval" in their own
+  files. This registry reports that status verbatim; it does not grant or withhold approval on
+  their behalf. Decision 002 was approved and clarified on 2026-07-27 (see Index) and is no longer
+  in this pending set. Anyone relying on Decision 004 (evaluation protocol) as *approved* should
+  confirm current status directly, since this registry is a point-in-time index and the decision
+  files are the source of truth.
+- `decision_003_temporal_split.md` (unsuffixed, live) and `decision_003_temporal_split_v0_2.md`
+  (archived) held byte-identical Decision 003 v0.2 content **before** the 2026-07-27
+  governance-repair pass. Only the live file was then given the Decision 010 supersession banner,
+  since it is the file named without a version suffix and is therefore treated as the live record.
+  The archived `_v0_2` copy was left untouched and remains the unmodified historical snapshot of
+  what the live file said before that banner was added.

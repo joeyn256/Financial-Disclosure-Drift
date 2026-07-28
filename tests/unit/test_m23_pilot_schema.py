@@ -265,10 +265,10 @@ def _insert_selection_run(
 # --------------------------------------------------------------------------
 
 
-def test_migration_inventory_is_contiguous_through_0009() -> None:
+def test_migration_inventory_is_contiguous_through_0010() -> None:
     versions = tuple(migration.version for migration in available_migrations())
-    assert versions == tuple(range(1, 10))
-    assert versions[-1] == 9
+    assert versions == tuple(range(1, 11))
+    assert versions[-1] == 10
 
 
 def test_migration_0009_contains_no_forbidden_statements() -> None:
@@ -330,12 +330,12 @@ def test_migration_0009_raise_messages_are_string_literals() -> None:
     assert checked == 79, f"expected 79 RAISE invocations in migration 0009, found {checked}"
 
 
-def test_fresh_database_applies_migrations_through_0009(tmp_path: Path) -> None:
+def test_fresh_database_applies_migrations_through_0010(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:
         cursor = connection.execute("SELECT version FROM ops_schema_migrations ORDER BY version")
         versions = tuple(row["version"] for row in cursor.fetchall())
-    assert versions == tuple(range(1, 10))
+    assert versions == tuple(range(1, 11))
 
 
 def test_second_migration_pass_is_idempotent(tmp_path: Path) -> None:
@@ -356,6 +356,73 @@ def test_migration_provenance_records_0009_correctly(tmp_path: Path) -> None:
     assert row["version"] == 9
     assert row["name"] == "m23_pilot_schema"
     assert row["checksum_sha256"] == migration_0009.checksum_sha256
+
+
+def test_migration_0009_is_byte_identical_to_the_committed_s4_baseline() -> None:
+    """Locks migration 0009's exact content: S4 (Decision 017, migration 0010) must
+    never modify it, only add an additive migration on top (governing S4 repair
+    instructions; `git diff` against the committed baseline confirms the same thing
+    at review time, but this test catches any future accidental edit too)."""
+    sql = (_MIGRATIONS_DIR / "0009_m23_pilot_schema.sql").read_bytes()
+    assert (
+        hashlib.sha256(sql).hexdigest()
+        == "119d9d9536b11c61325412991e5818d4b03ebee8538c38d05cacb5218b956cda"
+    )
+
+
+def test_migration_provenance_records_0010_correctly(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    inventory = available_migrations()
+    migration_0010 = next(m for m in inventory if m.version == 10)
+    assert migration_0010.name == "m23_quota_policy_reference"
+    with connect(path, writer=True) as connection:
+        row = connection.execute(
+            "SELECT version, name, checksum_sha256 FROM ops_schema_migrations WHERE version = 10"
+        ).fetchone()
+    assert row["version"] == 10
+    assert row["name"] == "m23_quota_policy_reference"
+    assert row["checksum_sha256"] == migration_0010.checksum_sha256
+
+
+def test_migration_0010_seeds_the_frozen_quota_policy_version(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    assert pilot_policy.PILOT_QUOTA_POLICY_VERSION == "m23-pilot-quota-policy-v1"
+    with connect(path, writer=True) as connection:
+        row = connection.execute(
+            "SELECT policy_version, decision_record FROM reference_policy_versions "
+            "WHERE policy_key = 'pilot_quota'"
+        ).fetchone()
+    assert row is not None
+    assert row["policy_version"] == pilot_policy.PILOT_QUOTA_POLICY_VERSION
+    assert row["decision_record"] == (
+        "Docs/Decisions/decision_017_s4_quota_policy_and_control_evidence.md"
+    )
+
+
+def test_migration_0010_is_additive_only() -> None:
+    sql = (_MIGRATIONS_DIR / "0010_m23_quota_policy_reference.sql").read_text(encoding="utf-8")
+    stripped_lines = [line for line in sql.splitlines() if not line.strip().startswith("--")]
+    body = "\n".join(stripped_lines)
+    assert re.search(r"\bBEGIN\s*;", body) is None
+    assert re.search(r"\bBEGIN\s+(IMMEDIATE|DEFERRED|EXCLUSIVE|TRANSACTION)\b", body) is None
+    assert "COMMIT" not in body.upper()
+    assert "PRAGMA" not in body.upper()
+    assert not re.search(r"\bDROP\s+TABLE\b", body, re.IGNORECASE)
+    assert not re.search(r"\bALTER\s+TABLE\b", body, re.IGNORECASE)
+    assert not re.search(r"\bCREATE\s+TABLE\b", body, re.IGNORECASE)
+    assert not re.search(r"\bDELETE\s+FROM\b", body, re.IGNORECASE)
+    assert "INSERT OR REPLACE INTO reference_policy_versions" in body
+
+
+def test_migration_0010_seed_is_idempotent_under_the_runner(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        assert apply_migrations(connection) == ()
+        row = connection.execute(
+            "SELECT COUNT(*) AS rows FROM reference_policy_versions "
+            "WHERE policy_key = 'pilot_quota'"
+        ).fetchone()
+    assert row["rows"] == 1
 
 
 def test_exactly_twenty_one_pilot_tables_exist(tmp_path: Path) -> None:
@@ -413,6 +480,7 @@ def test_policy_version_rows_match_pilot_policy_constants(tmp_path: Path) -> Non
         "pilot_replacement_signature": pilot_policy.PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION,
         "pilot_manifest_hash": pilot_policy.PILOT_MANIFEST_HASH_POLICY_VERSION,
         "pilot_primary_universe_boundary": pilot_policy.PILOT_PRIMARY_UNIVERSE_BOUNDARY_VERSION,
+        "pilot_quota": pilot_policy.PILOT_QUOTA_POLICY_VERSION,
     }
     with connect(path, writer=True) as connection:
         rows = connection.execute(

@@ -36,6 +36,7 @@ the earlier record is wrong or withdrawn on any point it does not name.
 | 014 | M2.3 Pilot Evidence Levels and Classification Policy (evidence-level taxonomy, filer-size classification, industry assignment and SIC-family mapping, stable/eventful history, amendment-purpose categories, provisional cohort assignment) | 2026-07-27 | Approved by project owner. §4 (SIC-to-industry-family mapping) was approved as a draft pending owner review on 2026-07-27 and was frozen as `sic-family-mapping/0.2` on 2026-07-27 during the same-day governance-repair correction pass. | — | — | Milestone 2.3 onward |
 | 015 | M2.3 Pilot-Use Prohibition | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3 onward; see `Docs/leakage_register.md` L19 |
 | 016 | M2.3 Schema and Artifact Architecture (Stage S3 candidate/selection/manifest table family, ID scheme, lifecycle rules, integrity constraints, reserve-package signature model, hash boundaries) | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3, Stage S3 onward (design only; no implementation authorized) |
+| 017 | S4 Quota Policy Version and Boundary-Control Evidence Interpretation (frozen `PILOT_QUOTA_POLICY_VERSION`, `excluded_pool_count` definition, boundary-control structural-evidence interpretation, confirms Decision 013's objective is unchanged) | 2026-07-28 | Approved by project owner | — | — | Milestone 2.3, Stage S4 onward |
 
 ## Controlling record by topic (quick lookup)
 
@@ -53,6 +54,7 @@ the earlier record is wrong or withdrawn on any point it does not name.
 | M2.3 pilot evidence levels and classification | Decision 014 |
 | M2.3 pilot-use prohibition | Decision 015 |
 | M2.3 Stage S3 schema and artifact architecture | Decision 016 |
+| M2.3 Stage S4 quota-policy version, `excluded_pool_count`, boundary-control evidence interpretation | Decision 017 |
 
 ## Open items this registry surfaces but does not resolve
 

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 
 import pytest
 
 from disclosure_drift.errors import GateFailureError
+from disclosure_drift.sec.entity_selector import OPERATING_FINANCIAL_INDUSTRY
 from disclosure_drift.sec.pilot import (
     CONTROL_QUOTAS,
     INDUSTRY_QUOTAS,
@@ -27,11 +29,19 @@ INDUSTRIES = tuple(INDUSTRY_QUOTAS)
 
 
 def build_pool(per_bucket: int = 4) -> list[Candidate]:
-    """Build a synthetic candidate pool covering every quota bucket."""
+    """Build a synthetic candidate pool covering every quota bucket.
+
+    Every field the S4.1 fail-closed eligibility gate reads is set explicitly:
+    provisional evidence on every dimension, and the industry-linked
+    primary-universe/engineering-only split from Decision 002 (the four
+    ``operating_financial_institutions`` entities are engineering-only and
+    primary-universe-ineligible; every other operating entity is the opposite).
+    """
     candidates: list[Candidate] = []
     counter = 1
     for size in SIZES:
         for industry in INDUSTRIES:
+            is_financial = industry == OPERATING_FINANCIAL_INDUSTRY
             for history in ("stable", "eventful"):
                 for index in range(per_bucket):
                     candidates.append(
@@ -39,9 +49,15 @@ def build_pool(per_bucket: int = 4) -> list[Candidate]:
                             cik_padded=f"{counter:010d}",
                             filing_time_name=f"Synthetic Issuer {counter}",
                             category="operating",
+                            primary_universe_eligible=not is_financial,
+                            engineering_only_stress=is_financial,
                             size_stratum=size,
+                            size_evidence_level="provisional",
                             industry_group=industry,
+                            industry_evidence_level="provisional",
+                            industry_quota_eligible=True,
                             history_class=history,
+                            history_evidence_level="provisional",
                             currently_inactive=history == "eventful" and index % 2 == 0,
                         )
                     )
@@ -52,6 +68,7 @@ def build_pool(per_bucket: int = 4) -> list[Candidate]:
                 cik_padded=f"{counter:010d}",
                 filing_time_name=f"Synthetic Control {kind}",
                 category="control",
+                primary_universe_eligible=False,
                 control_kind=kind,
             )
         )
@@ -152,19 +169,7 @@ def test_missing_control_stops_selection() -> None:
 
 
 def test_insufficient_inactive_eventful_pool_stops_selection() -> None:
-    pool = [
-        Candidate(
-            cik_padded=item.cik_padded,
-            filing_time_name=item.filing_time_name,
-            category=item.category,
-            size_stratum=item.size_stratum,
-            industry_group=item.industry_group,
-            history_class=item.history_class,
-            currently_inactive=False,
-            control_kind=item.control_kind,
-        )
-        for item in build_pool()
-    ]
+    pool = [dataclasses.replace(item, currently_inactive=False) for item in build_pool()]
     with pytest.raises(GateFailureError, match="history_status.eventful_currently_inactive"):
         select_pilot(pool)
 

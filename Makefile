@@ -5,7 +5,7 @@ BIN := $(VENV)/bin
 .DEFAULT_GOAL := help
 .PHONY: help venv install lint lint-changed format format-check typecheck typecheck-fast \
 	typecheck-stop test test-parallel test-cov validate cohorts \
-	secrets hygiene sqlite-check sec-validate sec-help check fast clean
+	secrets hygiene sqlite-check sec-validate sec-help check fast context clean
 
 # Extra arguments for the pytest targets, e.g.
 #   make test PYTEST_ARGS="tests/unit/test_cohorts.py -k frozen"
@@ -87,6 +87,9 @@ check: lint format-check typecheck test secrets hygiene validate cohorts sec-hel
 	@# Gates run sequentially and in a fixed order so a failure is attributable to one
 	@# named gate. Running them concurrently measured 0.46s -> 0.21s, which does not
 	@# justify interleaving their output.
+
+context: ## Print a fast, read-only repository/state snapshot (branch, HEAD, stage, blocker)
+	./scripts/context_snapshot.sh
 
 clean: ## Remove caches and build artifacts
 	-$(BIN)/dmypy stop 2>/dev/null || true

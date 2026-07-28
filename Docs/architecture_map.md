@@ -130,10 +130,14 @@ solver plus S4.2 persistence adapter.
   `test_pilot_selection.py`.
 - **Status:** **accepted and checkpointed** — tag `m2.3-s4-complete` (`e7157aa`). Persists an
   **entity-only running draft**: `run_state` stays `running`, never `feasible`, because
-  accession-level objective terms (§6 below) can still change the joint optimum. See "Lifecycle
-  notes" below.
+  accession-level objective terms (§6 below) can still change the joint optimum. That draft's
+  disposition is now frozen by
+  [018](Decisions/decision_018_m23_s5_accession_selection_policy.md) §6 — it remains unchanged, stays
+  `running`, is non-publishable, and is never mutated, deleted, promoted, or used as a manifest
+  source. Decision 018 §3.3 confirms it does not retrofit or alter the accepted S4 selector or any S4
+  persisted artifact. See "Lifecycle notes" below.
 
-## 6. Accession selection — pending Decision 018
+## 6. Accession selection — policy approved (Decision 018), not implemented
 
 **Purpose (intended, not implemented):** joint entity-accession selection so both quota families are
 solved as one assignment problem.
@@ -143,17 +147,27 @@ solved as one assignment problem.
   **provisional, unauthorized proposal name**, not a claim that the module exists.
 - **Decisions:** entity-level counting units and the entity-side objective are frozen
   ([013](Decisions/decision_013_pilot_selection_mechanics.md) §3–§5). The accession-specific
-  interpretation is **Pending — required before S5.1** (Decision 018 — does not exist yet). See
+  interpretation is now frozen by
+  [018](Decisions/decision_018_m23_s5_accession_selection_policy.md) — roles (§7), caps (§8), entity
+  accession floors (§9), the applicability-aware evidence penalty within the unchanged Decision 013
+  §5 order (§3), canonical dashed accession identity and the tie-break formula (§5), the
+  deterministic `selected_order` rule (§4), families and linked-amendment coverage (§10),
+  cross-cutting quota operationalization (§11–§16), node-limit and failure semantics (§17), the
+  retry prohibition (§18), and the S5.1/S5.2 methodological boundary (§19). See
   [`Docs/decision_index.md`](decision_index.md) and
   [`Milestones/contracts/m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md).
 - **Persistence:** schema exists ahead of its writer —
   `pilot_candidate_accessions`, `pilot_candidate_accession_registrants`,
   `pilot_selected_accessions`, `pilot_selected_accession_quota_contributions` (migration `0009`).
-  No code writes to any of these tables.
+  No code writes to any of these tables. Decision 018 requires **no schema change** (§25); the
+  `PILOT_JOINT_SELECTOR_POLICY_VERSION` constant and additive migration `0011` it approves (§20) are
+  **future Stage S5.2 work and do not exist** — `pilot_policy.py` and
+  `storage/migrations/` are unchanged, and migrations still end at `0010`.
 - **Tests:** none exist for accession selection logic (there is no implementation to test).
-- **Status:** **BLOCKED_PENDING_DECISION_018.** Architecture preflight for this stage is complete
-  (concluded no migration-`0009` schema contradiction blocks it), but implementation has not begun
-  and is not authorized until Decision 018 is approved.
+- **Status:** **policy approved, implementation not started and not yet authorized.** Architecture
+  preflight for this stage is complete (concluded no migration-`0009` schema contradiction blocks
+  it) and Decision 018 is approved, but no S5 code has been written. Decision 018 authorizes no
+  implementation on its own; the stage contract governs the next bounded step.
 
 ## 7. Reserve packages
 
@@ -213,23 +227,25 @@ already used for non-pilot releases, and (b) the pilot-specific manifest that St
 
 ## Lifecycle notes: S4 drafts, the planned S5 joint run, and the S6 manifest boundary
 
-This section states existing lifecycle semantics as already defined by Decision 016 §5 and the S4
-implementation; it does not introduce any new state or transition.
+This section states lifecycle semantics as defined by Decision 016 §5, Decision 018 §6/§27, and the
+S4 implementation; it does not introduce any new state or transition.
 
 - **S4 entity-only running drafts.** A Stage-S4 selection run persists entity selections and quota
   results, but its `pilot_selection_runs.run_state` is deliberately never advanced past `running`
   by S4 code. `feasible` requires the accession-level objective terms to also be solved, which S4
-  does not attempt. Treat any S4 run row as a draft, not a completed selection.
-- **The planned S5 joint entity-accession run — proposal, not accepted design.** The read-only S5
-  preflight *recommended* that S5 produce a **distinct, content-derived** joint-selection run rather
-  than editing the S4 draft in place. **That recommendation is pending Decision 018 and is not
-  accepted design.** This map does not freeze the S5 run-identity rule and does not freeze the S4
-  draft's disposition — it does not assume disposal, supersession, reuse, or in-place rewrite. Both
-  questions are Decision 018's to settle (see
-  [`Milestones/contracts/m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md), "S4 draft disposition").
-  What *is* already accepted is Decision 016 §5's `pilot_selection_runs` lifecycle
+  does not attempt. Treat any S4 run row as a draft, not a completed selection. A permanently-
+  `running` S4 draft is expected residue, not an abandoned run
+  ([018](Decisions/decision_018_m23_s5_accession_selection_policy.md) §27).
+- **The S5 joint entity-accession run — accepted design (Decision 018 §6).** S5 produces a
+  **distinct, content-derived** joint-selection run rather than editing the S4 draft in place. The
+  S4 draft remains unchanged, remains in `running`, is non-publishable, and is never mutated,
+  deleted, promoted, or used as a manifest source. **Only the S5 joint run may advance toward
+  publication.** This was previously an S5 preflight proposal; Decision 018 froze it, and it is no
+  longer an open question. Decision 016 §5's `pilot_selection_runs` lifecycle
   (`planned -> running -> {feasible, infeasible, infeasible_or_unproven}`, `failed -> running` only
-  via an explicit recorded retry event), which applies to whatever run row S5 eventually produces.
+  via an explicit recorded retry event) is unchanged and applies to the S5 run row; Decision 018 §18
+  additionally prohibits any automatic retry and authorizes no S5 retry entry point, so
+  `failed -> running` is exercised by no S5 module.
 - **S6 is the final-manifest boundary.** Manifest serialization, hashing, and owner-approval
   workflow (Decision 013 §7–§8) are Stage S6 and have not started. S6 depends on a `feasible` S5
   selection run existing first; it is not reachable from the current S4-only state.

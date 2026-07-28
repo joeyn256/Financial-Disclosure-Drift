@@ -37,6 +37,7 @@ the earlier record is wrong or withdrawn on any point it does not name.
 | 015 | M2.3 Pilot-Use Prohibition | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3 onward; see `Docs/leakage_register.md` L19 |
 | 016 | M2.3 Schema and Artifact Architecture (Stage S3 candidate/selection/manifest table family, ID scheme, lifecycle rules, integrity constraints, reserve-package signature model, hash boundaries) | 2026-07-27 | Approved by project owner | — | — | Milestone 2.3, Stage S3 onward (design only; no implementation authorized) |
 | 017 | S4 Quota Policy Version and Boundary-Control Evidence Interpretation (frozen `PILOT_QUOTA_POLICY_VERSION`, `excluded_pool_count` definition, boundary-control structural-evidence interpretation, confirms Decision 013's objective is unchanged) | 2026-07-28 | Approved by project owner | — | — | Milestone 2.3, Stage S4 onward |
+| 018 | [M2.3 Stage S5 Accession Selection Policy](decision_018_m23_s5_accession_selection_policy.md) (applicability-aware evidence penalty within the unchanged Decision 013 §5 objective; accession roles, caps, and entity accession floors; canonical dashed accession identity and tie-break formula; deterministic `selected_order`; S4-draft disposition and a distinct content-derived S5 joint run; accession families and linked-amendment coverage; fiscal-year-end and name-change derivation; 2009/2010 pairing; controlled deferral of the unmeasurable difficult-or-nonstandard-package quota; node-limit and failure semantics; retry prohibition; S5.1/S5.2 methodological boundary; future `PILOT_JOINT_SELECTOR_POLICY_VERSION`, future additive migration `0011`, and five future reason codes) | 2026-07-28 | Approved by project owner | — | — | Milestone 2.3, Stage S5 onward (policy only; **authorizes no implementation**) |
 
 ## Controlling record by topic (quick lookup)
 
@@ -55,6 +56,7 @@ the earlier record is wrong or withdrawn on any point it does not name.
 | M2.3 pilot-use prohibition | Decision 015 |
 | M2.3 Stage S3 schema and artifact architecture | Decision 016 |
 | M2.3 Stage S4 quota-policy version, `excluded_pool_count`, boundary-control evidence interpretation | Decision 017 |
+| M2.3 Stage S5 accession selection policy (roles, caps, floors, accession identity and hashing, `selected_order`, S4-draft disposition and S5 run identity, families and linked amendments, cross-cutting quota operationalization, node-limit/failure/retry semantics, S5 stage boundaries) | Decision 018 |
 
 ## Open items this registry surfaces but does not resolve
 

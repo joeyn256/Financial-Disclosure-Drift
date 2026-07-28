@@ -191,6 +191,8 @@ See the quarterly index-instance policy in `Docs/sec_data_dictionary.md`.
 
 ## Test, lint, and type-check commands
 
+Full acceptance validation — run this before accepting work:
+
 ```bash
 ruff check .
 ruff format --check .
@@ -200,8 +202,33 @@ python scripts/check_no_secrets.py
 python scripts/check_repo_hygiene.py
 ```
 
-`make check` runs all of the above plus both CLI validation commands. CI runs the same sequence on
-pull requests and pushes to `main`.
+`make check` runs all of the above plus both CLI validation commands, sequentially and in a fixed
+order so a failure is attributable to one named gate. CI runs the same sequence on pull requests and
+pushes to `main`.
+
+Fast development loop — `make fast` runs the first two:
+
+```bash
+./scripts/ruff_changed.sh          # Ruff lint + format on changed Python files only
+dmypy run -- src                   # mypy daemon; re-runs are incremental
+pytest tests/unit/test_cohorts.py  # just the tests you are working on
+```
+
+The daemon and the changed-file script are conveniences, never gates: `mypy src` and the
+full-repository Ruff commands above are what acceptance depends on. Stop the daemon with
+`make typecheck-stop`.
+
+The suite runs in parallel with [pytest-xdist](https://pytest-xdist.readthedocs.io/) (a `dev`
+dependency). It is opted into per invocation rather than through `addopts`, so the default `pytest`
+stays serial and debuggable:
+
+```bash
+pytest -n auto      # ~8.7s on an 8-core machine; make test-parallel
+pytest              # ~19s serial
+```
+
+Tests are order-independent and hold no shared writable state, so any worker count is valid. CI runs
+the serial suite: at this size the worker start-up cost is not worth the added variability.
 
 ## Repository structure
 

@@ -22,6 +22,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from conftest import VirtualClock
 
 from disclosure_drift.config import (
     SEC_USER_AGENT_ENV,
@@ -233,12 +234,20 @@ def run_census(
     transport: ScriptedTransport,
     coverage: CoverageWindow = COVERAGE,
 ) -> object:
-    """Invoke the public orchestrator entry point."""
+    """Invoke the public orchestrator entry point.
+
+    The run is fully real — real catalog, real parsing, real retrieval policy — but its
+    waits are virtual. A fresh clock per call keeps every run independent; see
+    :class:`conftest.VirtualClock`.
+    """
+    clock = VirtualClock()
     return CensusOrchestrator(
         config,
         transport=transport,
         calendar_target_year=2024,
         coverage=coverage,
+        clock=clock.time,
+        sleeper=clock.sleep,
     ).run()
 
 

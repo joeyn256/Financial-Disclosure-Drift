@@ -33,6 +33,49 @@ class NetworkAccessAttemptedError(RuntimeError):
     """Raised when code under test attempts to open a network connection."""
 
 
+class VirtualClock:
+    """A monotonic clock that only advances when the wait strategy is invoked.
+
+    Offline tests exercise the real retry and rate-limiting code paths, so the policy
+    still *requests* every delay it would request against the live SEC. This pair makes
+    taking that delay free: :meth:`sleep` records the requested seconds and advances
+    :meth:`time` by exactly that amount instead of blocking.
+
+    Advancing the clock is what makes this correct rather than merely fast. The
+    limiter's token-refill loop waits until enough time has passed, so a sleeper that
+    returned immediately without moving the clock would spin forever instead of
+    yielding a slot. Because virtual time tracks the requested delays exactly, the
+    limiter grants slots on the same schedule it would in production.
+
+    Each test constructs its own instance, so nothing is shared across tests, across
+    modules, or across xdist workers, and no global time function is patched.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        """Return the current virtual time."""
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """Record a requested delay and advance virtual time by it, without blocking."""
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    @property
+    def total_slept(self) -> float:
+        """Total virtual seconds the code under test asked to wait."""
+        return sum(self.sleeps)
+
+
+@pytest.fixture
+def virtual_clock() -> VirtualClock:
+    """Return a per-test deterministic clock/sleeper pair."""
+    return VirtualClock()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every ``DISCLOSURE_DRIFT_*`` variable inherited from the host."""

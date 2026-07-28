@@ -24,6 +24,9 @@ dependencies = ["pyyaml>=6.0", "pydantic>=2.7,<3"]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
+  # Optional parallel test execution. Never enabled through addopts: the suite must
+  # stay correct and debuggable serially, and `-n` is opted into per invocation.
+  "pytest-xdist>=3.8",
   "ruff>=0.6",
   "mypy>=1.11",
   "types-PyYAML>=6.0",

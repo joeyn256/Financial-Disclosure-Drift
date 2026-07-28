@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import zipfile
 from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 
 import pytest
+from conftest import VirtualClock
 
 from disclosure_drift.config import (
     SEC_USER_AGENT_ENV,
@@ -35,11 +37,15 @@ from disclosure_drift.sec.parsers.historical import parse_historical_submissions
 from disclosure_drift.sec.parsers.sic import parse_sic_reference
 from disclosure_drift.sec.parsers.submissions import parse_submissions_document
 from disclosure_drift.sec.parsers.tickers import parse_company_tickers_exchange
+from disclosure_drift.sec.rate_limit import AggregateRateLimiter
+from disclosure_drift.sec.response_policy import backoff_delay
 from disclosure_drift.sec.snapshots import SnapshotStore
 from disclosure_drift.sec.transport import SecRequest, TransportResponse
 from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
 
 VALID_AGENT = "Financial Disclosure Drift research@your-institution.edu"
+# The shipped aggregate rate is 4 requests per second, so one token costs 0.25s.
+_REQUEST_INTERVAL_SECONDS = 0.25
 
 
 def location(source: str = "fixture", observation: str = "obs-1") -> RecordLocation:
@@ -387,6 +393,40 @@ def _network_config(tmp_path: Path, monkeypatch: object) -> ProjectConfig:
     )
 
 
+def _census(
+    config: ProjectConfig,
+    *,
+    clock: VirtualClock | None = None,
+    **kwargs: object,
+) -> CensusOrchestrator:
+    """Build an orchestrator whose waits are virtual rather than real.
+
+    The rate-limiting and retry code paths run exactly as they do in production: the
+    same number of attempts, in the same order, requesting the same delays. Only the
+    act of waiting is virtual, so an offline test spends no wall time on a delay the
+    policy asked for. Each call gets its own clock unless a test supplies one to
+    assert against, so nothing is shared between tests or between xdist workers.
+    """
+    virtual = VirtualClock() if clock is None else clock
+    return CensusOrchestrator(
+        config,
+        clock=virtual.time,
+        sleeper=virtual.sleep,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def _backoff_waits(clock: VirtualClock) -> list[float]:
+    """Return the retry delays requested, excluding rate-limiter token waits.
+
+    Under a virtual clock time only moves when the code asks it to, so the limiter's
+    token wait is exactly one request interval (0.25s at the configured 4 rps) rather
+    than a jittery real-time remainder. That makes the two kinds of wait separable by
+    value, with no guessing and no tolerance window.
+    """
+    return [delay for delay in clock.sleeps if delay != _REQUEST_INTERVAL_SECONDS]
+
+
 def test_orchestrator_completes_offline_with_fixture_transport(
     tmp_path: Path,
     monkeypatch: object,
@@ -394,8 +434,8 @@ def test_orchestrator_completes_offline_with_fixture_transport(
     # pytest's MonkeyPatch is intentionally not imported into production typing.
     config = _network_config(tmp_path, monkeypatch)
     transport = FixtureTransport(_bulk_archive())
-    report = CensusOrchestrator(config, transport=transport, calendar_target_year=2026).run()
-    rerun = CensusOrchestrator(config, transport=transport, calendar_target_year=2026).run()
+    report = _census(config, transport=transport, calendar_target_year=2026).run()
+    rerun = _census(config, transport=transport, calendar_target_year=2026).run()
 
     assert report.completed
     assert report.source_observations == 6
@@ -413,7 +453,7 @@ def test_prose_only_calendar_blocks_required_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
-    report = CensusOrchestrator(
+    report = _census(
         config,
         calendar_target_year=2026,
         transport=OverrideTransport(
@@ -469,7 +509,7 @@ def test_required_retrieval_failures_never_complete(
         _bulk_archive(),
         {"sec_company_tickers_exchange": response},
     )
-    report = CensusOrchestrator(config, transport=transport, calendar_target_year=2026).run()
+    report = _census(config, transport=transport, calendar_target_year=2026).run()
 
     assert not report.completed
     failed = {source.source_id: source for source in report.completion.incomplete_required_sources}
@@ -494,6 +534,7 @@ def test_required_retrieval_failures_never_complete(
 def test_exhausted_5xx_never_completes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    virtual_clock: VirtualClock,
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
     transport = OverrideTransport(
@@ -507,7 +548,12 @@ def test_exhausted_5xx_never_completes(
             )
         },
     )
-    report = CensusOrchestrator(config, transport=transport, calendar_target_year=2026).run()
+    report = _census(
+        config,
+        clock=virtual_clock,
+        transport=transport,
+        calendar_target_year=2026,
+    ).run()
     requests = [
         request
         for request in transport.requests
@@ -516,6 +562,109 @@ def test_exhausted_5xx_never_completes(
     assert not report.completed
     assert len(requests) == config.sec.max_retries
 
+    # The retry budget is spent in full, and the exponential schedule between those
+    # attempts is exactly the one `backoff_delay` prescribes. Asserting the schedule
+    # here is what keeps the virtual clock honest: the delays are still demanded, they
+    # are simply not paid for in wall time.
+    expected_backoff = [backoff_delay(attempt) for attempt in range(1, config.sec.max_retries)]
+    assert _backoff_waits(virtual_clock) == expected_backoff
+    assert expected_backoff == [1.0, 2.0, 4.0, 8.0]
+    assert virtual_clock.total_slept > 15.0
+
+
+def test_exhausted_retries_request_real_delays_without_spending_real_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    virtual_clock: VirtualClock,
+) -> None:
+    """The retry path is exercised in full; only the waiting is virtual.
+
+    This is the guard against the cheap version of this optimization: short-circuiting
+    the retry loop would also make the suite fast, and would silently delete coverage.
+    Here the policy still demands more than fifteen seconds of backoff, and the test
+    still finishes in milliseconds.
+    """
+    config = _network_config(tmp_path, monkeypatch)
+    transport = OverrideTransport(
+        _bulk_archive(),
+        {
+            "sec_company_tickers_exchange": TransportResponse(
+                status=503,
+                headers={},
+                final_url="",
+                body=b"",
+            )
+        },
+    )
+    started = time.perf_counter()
+    report = _census(
+        config,
+        clock=virtual_clock,
+        transport=transport,
+        calendar_target_year=2026,
+    ).run()
+    elapsed = time.perf_counter() - started
+
+    attempts = [
+        request
+        for request in transport.requests
+        if request.source_id == "sec_company_tickers_exchange"
+    ]
+    # The full retry budget was spent, and the delays between attempts were demanded.
+    assert len(attempts) == config.sec.max_retries == 5
+    assert _backoff_waits(virtual_clock) == [1.0, 2.0, 4.0, 8.0]
+    assert virtual_clock.total_slept > 15.0
+    # None of those seconds were real ones.
+    assert elapsed < virtual_clock.total_slept / 5
+    # Terminal outcome is unchanged by the injection.
+    assert not report.completed
+
+
+def test_production_rate_limiter_defaults_to_really_waiting() -> None:
+    """Omitting the injection leaves the shipped waiting behaviour intact.
+
+    The limiter is exercised through its public surface: the second slot at 8 rps is
+    not granted until a real request interval has actually elapsed.
+    """
+    limiter = AggregateRateLimiter(requests_per_second=8.0, burst=1)
+    limiter.acquire()  # The burst token is free.
+    started = time.perf_counter()
+    waited = limiter.acquire()  # This one must wait for a real refill.
+    elapsed = time.perf_counter() - started
+
+    assert waited > 0.0
+    assert elapsed >= 0.1  # one 0.125s interval, less scheduler tolerance
+
+
+def test_production_orchestrator_injects_no_clock_or_sleeper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A production orchestrator passes nothing down, so the real defaults apply."""
+    config = _network_config(tmp_path, monkeypatch)
+    orchestrator = CensusOrchestrator(config, calendar_target_year=2026)
+
+    assert orchestrator._clock is None
+    assert orchestrator._sleeper is None
+    # And the components it builds fall back to the real wait strategy.
+    assert AggregateRateLimiter(4.0)._sleeper is time.sleep
+
+
+@pytest.mark.parametrize("supplied", ["clock", "sleeper"])
+def test_orchestrator_rejects_a_half_supplied_wait_strategy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    virtual_clock: VirtualClock,
+    supplied: str,
+) -> None:
+    """A sleeper that does not advance the limiter's clock would spin, so it is refused."""
+    config = _network_config(tmp_path, monkeypatch)
+    kwargs = (
+        {"clock": virtual_clock.time} if supplied == "clock" else {"sleeper": virtual_clock.sleep}
+    )
+    with pytest.raises(ValueError, match="must be supplied together"):
+        CensusOrchestrator(config, **kwargs)  # type: ignore[arg-type]
+
 
 def test_report_lists_every_incomplete_required_source(
     tmp_path: Path,
@@ -523,7 +672,7 @@ def test_report_lists_every_incomplete_required_source(
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
     failure = TransportResponse(status=404, headers={}, final_url="", body=b"")
-    report = CensusOrchestrator(
+    report = _census(
         config,
         calendar_target_year=2026,
         transport=OverrideTransport(
@@ -556,7 +705,7 @@ def test_malformed_required_source_is_not_a_genuine_zero(
             )
         },
     )
-    report = CensusOrchestrator(config, transport=transport, calendar_target_year=2026).run()
+    report = _census(config, transport=transport, calendar_target_year=2026).run()
     state = next(
         source for source in report.completion.sources if source.source_id == "sec_company_tickers"
     )
@@ -570,7 +719,7 @@ def test_empty_bulk_archive_is_not_a_genuine_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
-    report = CensusOrchestrator(
+    report = _census(
         config,
         calendar_target_year=2026,
         transport=FixtureTransport(_empty_bulk_archive()),
@@ -601,7 +750,7 @@ def test_failed_discovered_historical_reference_blocks_completion(
             )
         },
     )
-    report = CensusOrchestrator(config, transport=transport, calendar_target_year=2026).run()
+    report = _census(config, transport=transport, calendar_target_year=2026).run()
     historical = [source for source in report.completion.sources if source.scope == "historical"]
     assert len(historical) == 1
     assert historical[0].required
@@ -614,7 +763,7 @@ def test_restart_after_failed_run_can_complete_from_verified_snapshots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
-    failed = CensusOrchestrator(
+    failed = _census(
         config,
         calendar_target_year=2026,
         transport=OverrideTransport(
@@ -629,7 +778,7 @@ def test_restart_after_failed_run_can_complete_from_verified_snapshots(
             },
         ),
     ).run()
-    recovered = CensusOrchestrator(
+    recovered = _census(
         config,
         calendar_target_year=2026,
         transport=FixtureTransport(_bulk_archive()),
@@ -644,7 +793,7 @@ def test_restart_after_quarantined_response_retains_evidence_and_can_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
-    failed = CensusOrchestrator(
+    failed = _census(
         config,
         calendar_target_year=2026,
         transport=OverrideTransport(
@@ -659,7 +808,7 @@ def test_restart_after_quarantined_response_retains_evidence_and_can_complete(
             },
         ),
     ).run()
-    recovered = CensusOrchestrator(
+    recovered = _census(
         config,
         calendar_target_year=2026,
         transport=FixtureTransport(_bulk_archive()),
@@ -684,7 +833,7 @@ def test_restart_with_missing_cataloged_raw_object_cannot_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _network_config(tmp_path, monkeypatch)
-    first = CensusOrchestrator(
+    first = _census(
         config,
         calendar_target_year=2026,
         transport=FixtureTransport(_bulk_archive()),
@@ -697,7 +846,7 @@ def test_restart_with_missing_cataloged_raw_object_cannot_complete(
         ).fetchone()
     (config.data_tree().data_root / row["relative_storage_path"]).unlink()
 
-    restarted = CensusOrchestrator(
+    restarted = _census(
         config,
         calendar_target_year=2026,
         transport=FixtureTransport(_bulk_archive()),
@@ -714,7 +863,7 @@ def test_structurally_valid_zero_records_remain_successful(
     empty_exchange = json.dumps(
         {"fields": ["cik", "name", "ticker", "exchange"], "data": []}
     ).encode()
-    report = CensusOrchestrator(
+    report = _census(
         config,
         calendar_target_year=2026,
         transport=OverrideTransport(
@@ -835,7 +984,7 @@ def test_missing_parser_result_is_explicitly_terminal_and_blocking(
     )
     # ``_base_plan`` is instance-bound because the annual-calendar instance identity
     # includes the requested target year, so it is invoked through an orchestrator.
-    orchestrator = CensusOrchestrator(config, transport=FixtureTransport(_bulk_archive()))
+    orchestrator = _census(config, transport=FixtureTransport(_bulk_archive()))
     state = CensusOrchestrator._after_observation(  # noqa: SLF001 - completion seam
         orchestrator._base_plan("sec_company_tickers"),  # noqa: SLF001
         observation,

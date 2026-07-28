@@ -16,6 +16,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+# mypy daemon status file, written by `make typecheck-fast` into the working directory.
+# The daemon is a local convenience only; `mypy src` remains the acceptance gate.
+.dmypy.json
 .coverage
 htmlcov/
 

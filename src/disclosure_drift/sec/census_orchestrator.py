@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -132,6 +132,8 @@ class CensusOrchestrator:
         transport: Transport | None = None,
         calendar_target_year: int | None = None,
         coverage: CoverageWindow | None = None,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         """Create an orchestrator.
 
@@ -147,11 +149,30 @@ class CensusOrchestrator:
             coverage: Explicit coverage window and as-of date. The quarterly index plan
                 is derived from it; the as-of date is never read from the clock. When
                 absent, no index instance is planned and no index coverage is claimed.
+            clock: Monotonic time source handed to the aggregate rate limiter. Absent
+                in production, where the limiter uses ``time.monotonic``.
+            sleeper: Wait strategy handed to the rate limiter and the SEC client. Absent
+                in production, where both use ``time.sleep``. This seam only changes
+                *how the wait is taken*: the retry budget, the ordering of attempts, the
+                backoff formula, and every terminal outcome are computed upstream of it
+                and are identical either way. A deterministic clock/sleeper pair lets an
+                offline test assert the exact delay schedule the policy requested without
+                spending that time. Supplying one without the other is rejected, because
+                a sleeper that does not advance the injected clock makes the limiter's
+                token-refill loop spin instead of yielding.
         """
+        if (clock is None) != (sleeper is None):
+            message = (
+                "clock and sleeper must be supplied together: a sleeper that does not "
+                "advance the same clock the limiter reads would spin in the token loop"
+            )
+            raise ValueError(message)
         self._config = config
         self._transport = transport
         self._calendar_target_year = calendar_target_year
         self._coverage = coverage
+        self._clock = clock
+        self._sleeper = sleeper
         self._index_plan = None if coverage is None else plan_index_instances(coverage)
         self._satisfied_index_keys: set[str] = set()
 
@@ -195,8 +216,11 @@ class CensusOrchestrator:
             AggregateRateLimiter(
                 self._config.sec.requests_per_second,
                 burst=self._config.sec.burst,
+                clock=self._clock,
+                sleeper=self._sleeper,
             ),
             policy,
+            sleeper=self._sleeper,
         )
         parsed = 0
         quarantined = 0

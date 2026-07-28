@@ -542,7 +542,10 @@ def test_valid_pre_0008_database_migrates_without_row_loss(tmp_path: Path) -> No
             "('parser-run', 'owner', 'fixture', '1', 'now', 'now', "
             "0, 0, 'completed', '{}')"
         )
-        assert [migration.version for migration in apply_migrations(connection)] == [8]
+        assert [
+            migration.version
+            for migration in apply_migrations(connection, available_migrations()[:8])
+        ] == [8]
         count = connection.execute("SELECT COUNT(*) FROM census_source_observations").fetchone()[0]
         child_count = connection.execute(
             "SELECT COUNT(*) FROM census_parser_runs WHERE parser_run_id = 'parser-run'"
@@ -622,7 +625,7 @@ def test_0008_schema_and_provenance_bookkeeping_commit_atomically(
             "SELECT RAISE(ABORT, 'fault after schema before provenance'); END;"
         )
         with pytest.raises(sqlite3.IntegrityError, match="fault after schema"):
-            apply_migrations(connection)
+            apply_migrations(connection, available_migrations()[:8])
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert not connection.in_transaction
         assert (
@@ -646,7 +649,10 @@ def test_0008_schema_and_provenance_bookkeeping_commit_atomically(
         )
 
         connection.execute("DROP TRIGGER reject_migration_8")
-        assert [migration.version for migration in apply_migrations(connection)] == [8]
+        assert [
+            migration.version
+            for migration in apply_migrations(connection, available_migrations()[:8])
+        ] == [8]
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM pragma_foreign_key_list('census_source_observations')"

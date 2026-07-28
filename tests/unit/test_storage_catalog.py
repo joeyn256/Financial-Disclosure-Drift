@@ -106,6 +106,7 @@ EXPECTED_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (6, "r2_resolution_and_reconciliation"),
     (7, "r2_index_retrieval"),
     (8, "r3_durability_and_lineage"),
+    (9, "m23_pilot_schema"),
 )
 """The canonical migration chain, asserted by exact version and name.
 

@@ -1166,8 +1166,7 @@ BEGIN
     -- exact set the target selected entity was chosen to satisfy -- not a
     -- subset, not a superset. Symmetric-difference check per reserve package.
     SELECT RAISE(ABORT,
-        'pilot selection feasible transition requires each reserve quota-contribution set '
-        || 'to match its target entity signature')
+        'pilot selection feasible transition requires each reserve quota-contribution set to match its target entity signature')
     WHERE EXISTS (
         SELECT r.reserve_package_id FROM pilot_reserves AS r
         WHERE r.selection_run_id = NEW.selection_run_id AND r.snapshot_id = NEW.snapshot_id

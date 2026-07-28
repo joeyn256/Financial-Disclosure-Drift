@@ -289,6 +289,47 @@ def test_migration_0009_contains_no_forbidden_statements() -> None:
     assert not re.search(r"\binventory_\w+", body)
 
 
+def test_migration_0009_raise_messages_are_string_literals() -> None:
+    """SQLite before 3.47.0 rejects a non-literal RAISE() error-message argument
+    (e.g. ``'foo' || NEW.bar``, ``CASE ...``, ``printf(...)``) with
+    ``OperationalError: near "||": syntax error``. The repository supports
+    SQLite 3.37+, so every RAISE(ROLLBACK|ABORT|FAIL, ...) in migration 0009
+    must carry a single bare string-literal message.
+
+    This walks the raw SQL rather than relying on a compiled connection so it
+    fails deterministically regardless of which SQLite version runs the tests.
+    """
+    sql = (_MIGRATIONS_DIR / "0009_m23_pilot_schema.sql").read_text(encoding="utf-8")
+    raise_call = re.compile(r"RAISE\s*\(\s*(ROLLBACK|ABORT|FAIL)\s*,\s*")
+    checked = 0
+    for match in raise_call.finditer(sql):
+        checked += 1
+        offset = match.start()
+        i = match.end()
+        assert i < len(sql) and sql[i] == "'", (
+            f"RAISE at offset {offset} does not begin its message with a string literal"
+        )
+        i += 1
+        closed = False
+        while i < len(sql):
+            if sql[i] == "'":
+                if i + 1 < len(sql) and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                i += 1
+                closed = True
+                break
+            i += 1
+        assert closed, f"RAISE at offset {offset} has an unterminated string literal"
+        trailing = sql[i:].lstrip()
+        assert trailing.startswith(")"), (
+            f"RAISE at offset {offset} error message is not a bare string literal -- "
+            f"found dynamic content (e.g. ||, a column reference, CASE, or a function call) "
+            f"before the closing parenthesis: {sql[i : i + 40]!r}"
+        )
+    assert checked == 79, f"expected 79 RAISE invocations in migration 0009, found {checked}"
+
+
 def test_fresh_database_applies_migrations_through_0009(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:

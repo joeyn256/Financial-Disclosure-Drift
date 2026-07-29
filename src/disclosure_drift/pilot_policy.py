@@ -16,6 +16,10 @@ match these constants exactly; a test asserts that agreement. Migration
 017): it freezes the governing quota-policy version -- the ``excluded_pool_count``
 definition and the boundary-control structural-evidence interpretation -- that S4.2
 callers now use as their default rather than inventing an arbitrary value per call.
+Migration ``0011`` adds the ``PILOT_JOINT_SELECTOR_POLICY_VERSION`` row the same way
+(Decision 018 section 20), for the Stage S5 joint entity-accession selector. The
+accepted S4 ``PILOT_SELECTOR_POLICY_VERSION`` is unchanged, so the checkpointed S4
+artifact stays byte-stable.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from typing import Final
 __all__ = [
     "PILOT_CANDIDATE_POLICY_VERSION",
     "PILOT_EVIDENCE_POLICY_VERSION",
+    "PILOT_JOINT_SELECTOR_POLICY_VERSION",
     "PILOT_MANIFEST_HASH_POLICY_VERSION",
     "PILOT_PRIMARY_UNIVERSE_BOUNDARY_VERSION",
     "PILOT_QUOTA_POLICY_VERSION",
@@ -41,3 +46,4 @@ PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION: Final = "quota-contribution/1.0"
 PILOT_MANIFEST_HASH_POLICY_VERSION: Final = "pilot-manifest/1.0"
 PILOT_PRIMARY_UNIVERSE_BOUNDARY_VERSION: Final = "sic-6000-6999/1.0"
 PILOT_QUOTA_POLICY_VERSION: Final = "m23-pilot-quota-policy-v1"
+PILOT_JOINT_SELECTOR_POLICY_VERSION: Final = "m23-joint-selector-policy-v1"

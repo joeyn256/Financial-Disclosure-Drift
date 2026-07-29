@@ -84,6 +84,7 @@ _D013: Final = "Docs/Decisions/decision_013_pilot_selection_mechanics.md"
 _D014: Final = "Docs/Decisions/decision_014_pilot_evidence_and_classification_policy.md"
 _D015: Final = "Docs/Decisions/decision_015_pilot_use_prohibition.md"
 _D016: Final = "Docs/Decisions/decision_016_m23_schema_and_artifact_architecture.md"
+_D018: Final = "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -896,6 +897,59 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "The exact proposed pilot manifest root hash has not received owner approval.",
         blocks_release=True,
         decision_reference=_D013,
+    ),
+    # --- M2.3 pilot: Stage S5 joint accession selection (Decision 018 section 21) ---------- #
+    #
+    # Exactly these five codes are approved; no alias, generalized variant, retry code,
+    # reserve code, or ticker-warning code is added. Unresolved amendment parentage
+    # reuses REVIEW_AMENDMENT_PARENT_UNRESOLVED, run-level infeasibility reuses
+    # PILOT_SELECTION_INFEASIBLE, and node exhaustion reuses
+    # PILOT_SELECTION_INFEASIBLE_OR_UNPROVEN (Decision 018 section 21).
+    _code(
+        # Decision 018 sections 8 and 28: a cap violation is an infeasibility
+        # condition, never a penalty and never a warning.
+        "PILOT_ACCESSION_CAP_EXCEEDED",
+        "integrity",
+        "A per-CIK or global selected-accession cap would be exceeded.",
+        blocks_release=True,
+        decision_reference=_D018,
+    ),
+    _code(
+        # Decision 018 section 9: a zero-accession or partially anchored entity
+        # result can never be feasible or publishable.
+        "PILOT_ENTITY_ACCESSION_FLOOR_UNMET",
+        "integrity",
+        "A selected entity does not meet its required selected-accession floor.",
+        blocks_release=True,
+        decision_reference=_D018,
+    ),
+    _code(
+        # Decision 018 section 15 and Decision 019 sections 7.1 and 7.6: the marker is
+        # provenance, not eligibility. It distinguishes an accession outside the frozen
+        # windows by design from one whose cohort evidence is merely absent, and it is
+        # carried at reason_scope 'cohort' only.
+        "PILOT_ACCESSION_PRE_STUDY_SUPPORT",
+        "provenance",
+        "The accession precedes the frozen study windows and is eligible only as support.",
+        decision_reference=_D018,
+    ),
+    _code(
+        # Decision 018 section 14: excluded from hard feasibility, never proxied, never
+        # reported as satisfied, and a mandatory M2.5 verification obligation.
+        "REVIEW_PILOT_QUOTA_UNMEASURABLE_AT_M23",
+        "review",
+        "The quota is not measurable from authorized M2.3 metadata and is deferred to M2.5.",
+        requires_manual_review=True,
+        decision_reference=_D018,
+    ),
+    _code(
+        # Decision 018 sections 7 and 28: a candidate-level failure -- the accession is
+        # simply not selectable -- never a run-level failure.
+        "REVIEW_PILOT_ACCESSION_ROLE_UNCLASSIFIED",
+        "review",
+        "The accession's frozen attributes do not map to exactly one selection role.",
+        requires_manual_review=True,
+        decision_reference=_D018,
     ),
 )
 

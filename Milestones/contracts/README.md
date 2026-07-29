@@ -11,12 +11,24 @@ plan and every referenced decision every session.
 - **A contract cannot override a decision record or a migration.** If a contract and
   `Docs/Decisions/` (or the schema a migration actually created) disagree, the decision record and
   the migration control. Fix the contract; do not treat the contract as authoritative over either.
-- **A blocked contract is not authorization to implement.** `STATUS: BLOCKED_PENDING_DECISION_018`
-  (or any other blocked status) means exactly what it says: no implementation, no schema change, no
-  new test asserting production behavior for that stage, until the named blocker clears. Preparatory
-  read-only work (further preflight, drafting the blocking decision itself) is not "implementation"
-  and is not authorized by the contract either — it is authorized the same way any other work is,
-  by the active milestone specification or an explicit instruction.
+- **A blocked contract is not authorization to implement.** A blocked status (for example the
+  now-cleared `STATUS: BLOCKED_PENDING_DECISION_019` on the S5.2 contract) means exactly what it
+  says: no implementation, no schema change, no new test asserting production behavior for that
+  stage, until the named blocker clears. **A blocker clears only when the named decision is approved
+  in `Docs/Decisions/decision_registry.md`** — a record still marked `PROPOSED — PENDING OWNER
+  APPROVAL` leaves the contract blocked. Preparatory read-only work (further preflight, drafting the
+  blocking decision itself) is not "implementation" and is not authorized by the contract either — it
+  is authorized the same way any other work is, by the active milestone specification or an explicit
+  instruction.
+- **A cleared blocker is not authorization to implement either.** `STATUS:
+  READY_FOR_IMPLEMENTATION` with `IMPLEMENTATION_AUTHORIZATION: YES` records that nothing external
+  blocks the stage — it does not start the work. Where a contract says so (S5.2 did), a separately
+  issued bounded implementation prompt is still required, and it may not widen the contract's
+  authorized paths. Approving the decision that unblocked a stage never implements that stage.
+- **A completed contract authorizes nothing further.** `STATUS: ACCEPTED_AND_COMPLETE` with
+  `IMPLEMENTATION_AUTHORIZATION: NO` (the S5.2 contract's current state) means the stage shipped and
+  was accepted; the contract stays on record as that stage's scope statement and never authorizes new
+  work, the same way a superseded contract does. The next stage needs its own contract.
 - **A contract should link rather than duplicate decision text.** If a governing decision changes,
   every contract that copied its text instead of linking to it goes stale silently. Cite the decision
   ID and section; do not restate its content as contract prose.
@@ -59,5 +71,30 @@ mismatch rather than proceeding on a stale assumption.
 
 ## Index
 
+`ACTIVE_STAGE_CONTRACT` in [`../STATUS.md`](../STATUS.md) names a contract file so that
+`scripts/context_snapshot.sh` can resolve it and report its status; **whether any implementation is
+authorized is carried by that contract's own status and by `IMPLEMENTATION_AUTHORIZATION` in
+`STATUS.md`, not by the fact that the marker names a path.** A completed or superseded contract stays
+on record as its stage's scope statement and never authorizes new work.
+
+**There is currently no active implementation contract.** Both contracts below are accepted and
+closed; Stage S5.4 (reserves) needs a new one before any reserve implementation is authorized.
+
+- [`m23_s5_2.md`](m23_s5_2.md) — Stage S5.2 (frozen accession reader, run identity, and selection
+  persistence). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,
+  `IMPLEMENTATION_AUTHORIZATION: NO`. Implemented under a separately issued bounded S5.2 prompt,
+  reviewed independently under S5.3, and owner-accepted 2026-07-29 (final independent recommendation
+  `ACCEPT_M23_S5_3_CHECKPOINT`; final accepted suite 1661 passed, 1 skipped). Delivered
+  `sec/accession_selection_store.py` and its test module, additive migration `0011` (INSERT-only),
+  `PILOT_JOINT_SELECTOR_POLICY_VERSION`, and the five Decision 018 §21 reason codes, under the
+  storage-to-pure-input mappings frozen by
+  [Decision 019](../../Docs/Decisions/decision_019_m23_s5_storage_to_pure_input_mapping.md).
+  Committed at the combined S5.1–S5.3 checkpoint, tag `m2.3-s5-complete`. **It authorizes no new
+  S5.2 implementation.**
 - [`m23_s5_1.md`](m23_s5_1.md) — Stage S5.1 (accession candidate and joint-selection core).
-  `STATUS: BLOCKED_PENDING_DECISION_018`.
+  **Accepted; superseded as the active contract.** Its own header still reads
+  `STATUS: READY_FOR_IMPLEMENTATION` (Decision 018's approval cleared the earlier
+  `BLOCKED_PENDING_DECISION_018` state); the stage itself is accepted and closed. The stage's code —
+  `sec/accession_selector.py` and `tests/unit/test_m23_accession_selector.py` — is accepted and was
+  **committed at the combined S5.1–S5.3 checkpoint** (Decision 018 §22), tag `m2.3-s5-complete`. It
+  remains the sole methodological selector.

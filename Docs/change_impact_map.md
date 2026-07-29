@@ -29,14 +29,45 @@ invocations.
 | `src/disclosure_drift/pilot_policy.py` | `test_m23_pilot_schema.py` (policy-version-row agreement), `test_m23_entity_selection_store.py` | none | ruff, ruff format, mypy | **yes** — asserts agreement with `reference_policy_versions` seeded by migrations `0009`/`0010` | **Yes** — every constant here is owned by an approved decision (016, 017); a new or changed constant needs a decision record first. |
 | `sec/entity_selector.py` (S4.1) | `test_m23_entity_selector.py`, `test_pilot_selection.py` | none (pure, in-memory — no integration surface) | ruff, ruff format, mypy | none (no SQLite access by design) | **Yes** — deterministic constrained-selector design is explicitly an Opus-review area (Decision 013 §5; milestone plan §17). |
 | `sec/entity_selection_store.py` (S4.2) | `test_m23_entity_selection_store.py` | none | ruff, ruff format, mypy | **yes** — writes migration-`0009` tables; run `test_migration_provenance.py` alongside | **Yes** — persistence adapter for the frozen selector policy; changes affect run-state lifecycle (Decision 016 §5). |
-| `sec/accession_selector.py` (future, S5.1 — **does not exist**) | none exist | none exist | not applicable — no file to lint | not applicable | **Yes, when created** — same class as `entity_selector.py` above, and additionally blocked by `BLOCKED_PENDING_DECISION_018` (see `Milestones/contracts/m23_s5_1.md`) until Decision 018 is approved. |
-| `sec/accession_selection_store.py` (future, S5.1 — **does not exist**) | none exist | none exist | not applicable | not applicable | **Yes, when created** — same class as `entity_selection_store.py` above, same block. |
+| `sec/accession_selector.py` (S5.1 — accepted, committed at `m2.3-s5-complete`) | `test_m23_accession_selector.py` | none (pure, in-memory — no SQLite access by design) | ruff, ruff format, mypy | none (no SQLite access by design) | **Yes** — same class as `entity_selector.py` above; the joint selector is frozen by Decision 018 and accepted. It is the **sole methodological selector**, was **not modified by S5.2**, and its expected outputs are never relaxed to accommodate persistence. |
+| `sec/accession_selection_store.py` (S5.2 — accepted, committed at `m2.3-s5-complete`) | `test_m23_accession_selection_store.py` | none | ruff, ruff format, mypy | **yes** — writes migration-`0009` tables and carries migration `0011`; run `test_migration_provenance.py` and `make sqlite-check` alongside | **Yes** — same class as `entity_selection_store.py` above; persistence adapter for the frozen joint selector, affecting run-state lifecycle (Decision 016 §5, Decision 018 §§18, 27), with storage-to-pure-input mappings governed by Decision 019. Identity, same-ID idempotence, and reconstruction are the highest-risk surface here: both public entry points must fail closed on the same stored corruption through the single `JointSelectionRunIdentity` comparison — a change that bypasses or narrows it is a review-class change. |
 | `src/disclosure_drift/reasons.py` (machine-readable reason-code registry) | `test_reasons.py` (code registry and per-code metadata), `test_storage_catalog.py` (catalog/storage reason references), `test_m23_pilot_schema.py` (pilot reason-scope FKs) | `tests/integration/test_r2_census_end_to_end.py` (reason codes written through a real census flow) | ruff, ruff format, mypy | **yes** — every reason code is an FK target of `reference_reason_codes`, seeded/referenced by migrations `0001`, `0002`, and `0009`. Run `test_migration_provenance.py` and `make sqlite-check`; a removed or renamed code can orphan persisted rows and break a foreign key that no unit test exercises. | **Yes, when the change alters methodological or fail-closed semantics** — e.g. adding, removing, or redefining a code that gates eligibility, review, or an affirmative quota (Decisions 013/014/016). Adding a purely descriptive code to an existing family is not an Opus-review class. |
 | `release/hashing.py` | `test_m23_pilot_schema.py`, `test_release_forecast_and_audit.py` | none | ruff, ruff format, mypy | none directly (pure hashing over already-read content) | **Yes** — the canonical-JSON/normalization contract is reused by every future manifest hash (Decision 009 §10, Decision 013 §7); a change ripples everywhere that reuses it. |
 | Migrations (`storage/migrations/*.sql`) | `test_migration_provenance.py`, plus the schema's own dedicated test file (e.g. `test_m23_pilot_schema.py` for `0009`/`0010`) | `tests/integration/test_r2_census_end_to_end.py`, `test_sec_cli.py` | ruff/mypy not applicable to SQL; `sqlite-check` | **yes, always** — full migration-provenance suite and a live SQLite-version check | **Yes** — schema is a persisted contract (CLAUDE.md rule 3/9); a new migration requires a preceding approved decision (see Decision 016 for the S3 precedent). |
 | Decision records (`Docs/Decisions/*.md`) | none (not code) | none | Markdown link-check only | not applicable | **Yes, always** — a decision record is itself the output of project-owner + Opus methodological review; it is never edited by an engineering session (CLAUDE.md rule 3, rule 14). |
 | CLI (`src/disclosure_drift/cli.py`) | `test_cli_coverage_arguments.py` (coverage/`--as-of` argument parsing and validation); the remaining surface is exercised through the integration tests to its right | `tests/integration/test_cli.py`, `test_sec_cli.py`, `test_no_network.py` | ruff, ruff format, mypy | none directly; exercises whatever subcommand touches storage | No, unless a subcommand's behavior (not just its wiring) changes — then follow the review rule for the underlying module. |
 | Makefile and validation scripts (`Makefile`, `scripts/*.py`, `scripts/ruff_changed.sh`, `scripts/context_snapshot.sh`) | `scripts/check_no_secrets.py` / `scripts/check_repo_hygiene.py` are self-validating (run them directly). `scripts/ruff_changed.sh` backs `make lint-changed` / `make fast`, so a change there must be verified by running `make fast`; `scripts/context_snapshot.sh` by running `make context` from both the repository root and a nested directory | none | `bash -n` for shell scripts; ruff/mypy for Python scripts under `scripts/` | not applicable | No — these are process tooling, not methodology, unless a change would weaken a gate CI depends on (then treat as a CI-semantics change and flag it explicitly). |
+
+## Stage S5.2 impact paths (implemented and accepted)
+
+Stage S5.2 is **`ACCEPTED_AND_COMPLETE`** — implemented under a bounded prompt inside the exact set
+[`../Milestones/contracts/m23_s5_2.md`](../Milestones/contracts/m23_s5_2.md) authorizes, reviewed
+independently under S5.3, and owner-accepted 2026-07-29 at the combined S5.1–S5.3 checkpoint (tag
+`m2.3-s5-complete`). The storage-to-pure-input mappings the loader depends on are governed by
+[Decision 019](Decisions/decision_019_m23_s5_storage_to_pure_input_mapping.md),
+**`APPROVED — OWNER APPROVED 2026-07-28`**.
+
+The table records which gates each path triggers **when it is changed again**. It authorizes no
+further change: the S5.2 contract is complete and authorizes no new implementation, so a change to
+any path below needs its own authorization.
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `src/disclosure_drift/sec/accession_selection_store.py` | production module (S5.2) | ruff, ruff format, mypy; `test_m23_accession_selection_store.py`; `test_migration_provenance.py`; `make sqlite-check`; S5.1 and S4 regression suites |
+| `src/disclosure_drift/pilot_policy.py` | policy constants — carries `PILOT_JOINT_SELECTOR_POLICY_VERSION` | ruff, ruff format, mypy; `test_m23_pilot_schema.py` (policy-version-row agreement), `test_m23_entity_selection_store.py`; SQLite/migration integrity gate |
+| `src/disclosure_drift/reasons.py` | reason registry — carries the five Decision 018 §21 codes | ruff, ruff format, mypy; `test_reasons.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py`; `test_migration_provenance.py` and `make sqlite-check` (reason codes are FK targets of `reference_reason_codes`) |
+| `src/disclosure_drift/storage/migrations/0011_m23_joint_selector_policy_reference.sql` | migration — INSERT-only, **no DDL** | `test_migration_provenance.py`, `test_m23_pilot_schema.py`, `make sqlite-check`; ruff/mypy not applicable to SQL |
+| `tests/unit/test_m23_accession_selection_store.py` | primary S5.2 test module | ruff, ruff format, mypy |
+| `tests/unit/test_m23_pilot_schema.py` | covers the `0011` policy row | ruff, ruff format, mypy |
+| `tests/unit/test_migration_provenance.py` | extends provenance/ordering coverage to `0011` | ruff, ruff format, mypy |
+| `tests/unit/test_reasons.py` | asserts the five S5 codes and that existing codes are unchanged | ruff, ruff format, mypy |
+
+Run as regression **without editing**: `test_m23_accession_selector.py` (S5.1),
+`test_m23_entity_selector.py` and `test_m23_entity_selection_store.py` (S4), plus the lifecycle and
+catalog integrity tests named in the table above.
+
+Reserve, manifest, release, and publication paths (Stages S5.4 and S6) are **not implemented** and
+appear nowhere above. No current S5 selection is a manifest or publication input.
 
 ## Notes on reading this table
 
@@ -58,7 +89,8 @@ invocations.
 
 It does not replace `make check` (the full acceptance gate) as the final bar before accepting work.
 It does not enumerate every test in the suite — see the test directory itself for that. It does not
-resolve which specific tests a not-yet-written module (like the future accession selector) will need
-beyond the categories already named in
-[`Milestones/contracts/m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md)'s "Required adversarial
-test categories."
+resolve which specific tests a not-yet-written module (such as the future S5.4 reserve modules) will
+need beyond the categories a governing stage contract names — see
+[`Milestones/contracts/m23_s5_2.md`](../Milestones/contracts/m23_s5_2.md)'s "Required tests" for
+S5.2, and [`m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md)'s "Required adversarial test
+categories" for the accepted S5.1 core, as the precedent for what an S5.4 contract must state.

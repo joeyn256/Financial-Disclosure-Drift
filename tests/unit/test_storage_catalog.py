@@ -108,6 +108,7 @@ EXPECTED_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (8, "r3_durability_and_lineage"),
     (9, "m23_pilot_schema"),
     (10, "m23_quota_policy_reference"),
+    (11, "m23_joint_selector_policy_reference"),
 )
 """The canonical migration chain, asserted by exact version and name.
 

@@ -29,6 +29,10 @@ from disclosure_drift.storage.sqlite import (
 
 _MIGRATIONS_DIR = Path(_migrations_path[0])
 
+#: Locks migration 0010's exact bytes: Stage S5.2 (Decision 018 section 20, migration
+#: 0011) adds an additive migration on top and never edits 0009 or 0010.
+_MIGRATION_0010_SHA256 = "2332bb93093f436b1a5999b9a8de7505f111bf26f982d6e29f8d66217e633d43"
+
 
 def _hex(seed: str) -> str:
     """Return a deterministic 64-character lowercase hex digest for a test seed."""
@@ -265,10 +269,10 @@ def _insert_selection_run(
 # --------------------------------------------------------------------------
 
 
-def test_migration_inventory_is_contiguous_through_0010() -> None:
+def test_migration_inventory_is_contiguous_through_0011() -> None:
     versions = tuple(migration.version for migration in available_migrations())
-    assert versions == tuple(range(1, 11))
-    assert versions[-1] == 10
+    assert versions == tuple(range(1, 12))
+    assert versions[-1] == 11
 
 
 def test_migration_0009_contains_no_forbidden_statements() -> None:
@@ -330,12 +334,12 @@ def test_migration_0009_raise_messages_are_string_literals() -> None:
     assert checked == 79, f"expected 79 RAISE invocations in migration 0009, found {checked}"
 
 
-def test_fresh_database_applies_migrations_through_0010(tmp_path: Path) -> None:
+def test_fresh_database_applies_migrations_through_0011(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:
         cursor = connection.execute("SELECT version FROM ops_schema_migrations ORDER BY version")
         versions = tuple(row["version"] for row in cursor.fetchall())
-    assert versions == tuple(range(1, 11))
+    assert versions == tuple(range(1, 12))
 
 
 def test_second_migration_pass_is_idempotent(tmp_path: Path) -> None:
@@ -425,6 +429,127 @@ def test_migration_0010_seed_is_idempotent_under_the_runner(tmp_path: Path) -> N
     assert row["rows"] == 1
 
 
+# --------------------------------------------------------------------------
+# Group A (S5.2): additive migration 0011, joint-selector policy reference
+# (Decision 018 section 20; Milestones/contracts/m23_s5_2.md)
+# --------------------------------------------------------------------------
+
+
+def test_migration_provenance_records_0011_correctly(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    inventory = available_migrations()
+    migration_0011 = next(m for m in inventory if m.version == 11)
+    assert migration_0011.name == "m23_joint_selector_policy_reference"
+    with connect(path, writer=True) as connection:
+        row = connection.execute(
+            "SELECT version, name, checksum_sha256 FROM ops_schema_migrations WHERE version = 11"
+        ).fetchone()
+    assert row["version"] == 11
+    assert row["name"] == "m23_joint_selector_policy_reference"
+    assert row["checksum_sha256"] == migration_0011.checksum_sha256
+
+
+def test_migration_0011_seeds_the_frozen_joint_selector_policy_version(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    assert pilot_policy.PILOT_JOINT_SELECTOR_POLICY_VERSION == "m23-joint-selector-policy-v1"
+    with connect(path, writer=True) as connection:
+        row = connection.execute(
+            "SELECT policy_version, decision_record FROM reference_policy_versions "
+            "WHERE policy_key = 'pilot_joint_selector'"
+        ).fetchone()
+    assert row is not None
+    assert row["policy_version"] == pilot_policy.PILOT_JOINT_SELECTOR_POLICY_VERSION
+    assert row["decision_record"] == (
+        "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"
+    )
+
+
+def test_migration_0011_contains_no_ddl() -> None:
+    sql = (_MIGRATIONS_DIR / "0011_m23_joint_selector_policy_reference.sql").read_text(
+        encoding="utf-8"
+    )
+    stripped_lines = [line for line in sql.splitlines() if not line.strip().startswith("--")]
+    body = "\n".join(stripped_lines)
+    assert re.search(r"\bBEGIN\s*;", body) is None
+    assert re.search(r"\bBEGIN\s+(IMMEDIATE|DEFERRED|EXCLUSIVE|TRANSACTION)\b", body) is None
+    assert "COMMIT" not in body.upper()
+    assert "PRAGMA" not in body.upper()
+    assert not re.search(r"\bCREATE\b", body, re.IGNORECASE)
+    assert not re.search(r"\bALTER\b", body, re.IGNORECASE)
+    assert not re.search(r"\bDROP\b", body, re.IGNORECASE)
+    assert not re.search(r"\bTRIGGER\b", body, re.IGNORECASE)
+    assert not re.search(r"\bINDEX\b", body, re.IGNORECASE)
+    assert not re.search(r"\bDELETE\s+FROM\b", body, re.IGNORECASE)
+    assert not re.search(r"\bUPDATE\b", body, re.IGNORECASE)
+    assert "INSERT OR REPLACE INTO reference_policy_versions" in body
+    # The only INSERT OR REPLACE it performs is the authorized policy-reference seed.
+    assert body.upper().count("INSERT") == 1
+
+
+def test_migration_0011_writes_only_the_policy_reference_table() -> None:
+    sql = (_MIGRATIONS_DIR / "0011_m23_joint_selector_policy_reference.sql").read_text(
+        encoding="utf-8"
+    )
+    stripped_lines = [line for line in sql.splitlines() if not line.strip().startswith("--")]
+    body = "\n".join(stripped_lines)
+    assert re.findall(r"\bINTO\s+(\w+)", body) == ["reference_policy_versions"]
+    # No candidate, selection, quota, reason, snapshot, inventory, or census row.
+    for table_prefix in (
+        "pilot_candidate",
+        "pilot_select",
+        "pilot_quota",
+        "pilot_reserve",
+        "pilot_manifest",
+        "inventory_",
+        "census_",
+        "reference_reason_codes",
+    ):
+        assert table_prefix not in body
+
+
+def test_migration_0011_carries_no_wall_clock_dependency() -> None:
+    sql = (_MIGRATIONS_DIR / "0011_m23_joint_selector_policy_reference.sql").read_text(
+        encoding="utf-8"
+    )
+    for token in ("CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "datetime(", "strftime("):
+        assert token.upper() not in sql.upper()
+    assert "'2026-07-28T00:00:00Z'" in sql
+
+
+def test_migration_0011_seed_is_idempotent_under_the_runner(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        assert apply_migrations(connection) == ()
+        row = connection.execute(
+            "SELECT COUNT(*) AS rows FROM reference_policy_versions "
+            "WHERE policy_key = 'pilot_joint_selector'"
+        ).fetchone()
+    assert row["rows"] == 1
+
+
+def test_migration_0011_leaves_the_accepted_s4_selector_row_unchanged(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        row = connection.execute(
+            "SELECT policy_version, decision_record FROM reference_policy_versions "
+            "WHERE policy_key = 'pilot_selector'"
+        ).fetchone()
+    assert row["policy_version"] == pilot_policy.PILOT_SELECTOR_POLICY_VERSION
+    assert row["policy_version"] == "deterministic-constrained/1.0"
+    assert row["decision_record"] == ("Docs/Decisions/decision_013_pilot_selection_mechanics.md")
+
+
+def test_migrations_0009_and_0010_are_unchanged_by_the_s5_2_addition() -> None:
+    """Migration 0009 is byte-locked above; 0010 is locked here for the same reason."""
+    sql = (_MIGRATIONS_DIR / "0010_m23_quota_policy_reference.sql").read_bytes()
+    assert hashlib.sha256(sql).hexdigest() == _MIGRATION_0010_SHA256
+
+
+def test_the_frozen_joint_selector_constant_is_exactly_the_approved_value() -> None:
+    assert pilot_policy.PILOT_JOINT_SELECTOR_POLICY_VERSION == "m23-joint-selector-policy-v1"
+    assert "PILOT_JOINT_SELECTOR_POLICY_VERSION" in pilot_policy.__all__
+
+
 def test_exactly_twenty_one_pilot_tables_exist(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     expected = {
@@ -481,6 +606,8 @@ def test_policy_version_rows_match_pilot_policy_constants(tmp_path: Path) -> Non
         "pilot_manifest_hash": pilot_policy.PILOT_MANIFEST_HASH_POLICY_VERSION,
         "pilot_primary_universe_boundary": pilot_policy.PILOT_PRIMARY_UNIVERSE_BOUNDARY_VERSION,
         "pilot_quota": pilot_policy.PILOT_QUOTA_POLICY_VERSION,
+        # Seeded by migration 0011 (Decision 018 section 20; Stage S5.2).
+        "pilot_joint_selector": pilot_policy.PILOT_JOINT_SELECTOR_POLICY_VERSION,
     }
     with connect(path, writer=True) as connection:
         rows = connection.execute(

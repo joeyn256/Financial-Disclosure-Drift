@@ -45,6 +45,44 @@ def test_valid_unchanged_chain_reopens_successfully(tmp_path: Path) -> None:
         )
 
 
+def test_packaged_chain_is_contiguous_and_ends_at_0011() -> None:
+    """Stage S5.2 adds exactly one additive migration on top of the accepted chain."""
+    inventory = available_migrations()
+    versions = tuple(migration.version for migration in inventory)
+    assert versions == tuple(range(1, len(inventory) + 1))
+    assert versions[-1] == 11
+    assert inventory[-1].name == "m23_joint_selector_policy_reference"
+
+
+def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    packaged = next(m for m in available_migrations() if m.version == 11)
+    with connect(path, writer=True) as connection:
+        rows = connection.execute(
+            "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
+        ).fetchall()
+    assert [row["version"] for row in rows] == list(range(1, 12))
+    assert rows[-1]["name"] == "m23_joint_selector_policy_reference"
+    assert rows[-1]["checksum_sha256"] == packaged.checksum_sha256
+
+
+def test_altered_migration_0011_bytes_block_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _migrated_database(tmp_path)
+    inventory = list(available_migrations())
+    original = inventory[-1]
+    assert original.version == 11
+    inventory[-1] = Migration(
+        version=original.version,
+        name=original.name,
+        sql=original.sql + "\n-- altered fixture\n",
+    )
+    monkeypatch.setattr(sqlite_module, "available_migrations", lambda: tuple(inventory))
+    with pytest.raises(GateFailureError, match="checksum mismatch"), connect(path, writer=True):
+        pass
+
+
 def test_second_normal_application_is_idempotent(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:

@@ -1,8 +1,9 @@
-"""Reason-code registry invariants, including the M2.3 S3.1 pilot vocabulary addition.
+"""Reason-code registry invariants, including the M2.3 S3.1 and S5.2 vocabulary additions.
 
-Decisions 013-016 froze exactly sixteen new reason codes for the M2.3 pilot. These tests prove the
-addition is exact (no more, no fewer, no renames) and that every pre-existing code from the accepted
-S3.0 governance baseline is unchanged.
+Decisions 013-016 froze exactly sixteen new reason codes for the M2.3 pilot at Stage S3.1, and
+Decision 018 section 21 froze exactly five more for Stage S5. These tests prove each addition is
+exact (no more, no fewer, no renames) and that every pre-existing code from the accepted S3.0
+governance baseline is unchanged.
 
 Tests are hermetic: the pre-S3.1 baseline is not reloaded from Git history (a CI checkout may be
 shallow and lack that historical commit). Instead, a canonical SHA-256 fingerprint of the 87
@@ -133,8 +134,44 @@ _NEW_CODES: dict[str, dict[str, Any]] = {
     },
 }
 
+#: Decision 018 section 21, registered at Stage S5.2. Exactly these five, no alias, no generalized
+#: variant, no retry code, no reserve code, and no ticker-warning code.
+_S5_2_CODES: dict[str, dict[str, Any]] = {
+    "PILOT_ACCESSION_CAP_EXCEEDED": {
+        "category": "integrity",
+        "blocks_release": True,
+        "requires_manual_review": False,
+        "decision_reference": ("Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"),
+    },
+    "PILOT_ENTITY_ACCESSION_FLOOR_UNMET": {
+        "category": "integrity",
+        "blocks_release": True,
+        "requires_manual_review": False,
+        "decision_reference": ("Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"),
+    },
+    "PILOT_ACCESSION_PRE_STUDY_SUPPORT": {
+        "category": "provenance",
+        "blocks_release": False,
+        "requires_manual_review": False,
+        "decision_reference": ("Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"),
+    },
+    "REVIEW_PILOT_QUOTA_UNMEASURABLE_AT_M23": {
+        "category": "review",
+        "blocks_release": False,
+        "requires_manual_review": True,
+        "decision_reference": ("Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"),
+    },
+    "REVIEW_PILOT_ACCESSION_ROLE_UNCLASSIFIED": {
+        "category": "review",
+        "blocks_release": False,
+        "requires_manual_review": True,
+        "decision_reference": ("Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"),
+    },
+}
+
 _PRE_S3_1_CODE_COUNT = 87
-_PRE_S3_1_TOTAL_COUNT = 103
+_S3_1_TOTAL_COUNT = 103
+_TOTAL_COUNT = 108
 
 # Computed once, offline, from the accepted S3.0 governance baseline (the 87 reason codes that
 # existed before the M2.3 S3.1 addition): sort the pre-S3.1 codes by their ``code`` string, render
@@ -146,7 +183,8 @@ _PRE_S3_1_FINGERPRINT_SHA256 = "65c94cf2e10eb5854b2c00034c13f4f9de746bef39673ec4
 
 
 def _pre_s3_1_codes() -> dict[str, Any]:
-    return {code: entry for code, entry in REASON_CODES.items() if code not in _NEW_CODES}
+    added = set(_NEW_CODES) | set(_S5_2_CODES)
+    return {code: entry for code, entry in REASON_CODES.items() if code not in added}
 
 
 def _fingerprint(codes: dict[str, Any]) -> str:
@@ -165,14 +203,45 @@ def _fingerprint(codes: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def test_exactly_sixteen_new_codes_were_added() -> None:
+def test_exactly_sixteen_s3_1_codes_and_five_s5_2_codes_were_added() -> None:
     added = set(REASON_CODES) - set(_pre_s3_1_codes())
-    assert added == set(_NEW_CODES)
-    assert len(added) == 16
+    assert added == set(_NEW_CODES) | set(_S5_2_CODES)
+    assert len(_NEW_CODES) == 16
+    assert len(_S5_2_CODES) == 5
+    assert not set(_NEW_CODES) & set(_S5_2_CODES)
 
 
-def test_registry_count_is_exactly_one_hundred_three() -> None:
-    assert len(REASON_CODES) == _PRE_S3_1_TOTAL_COUNT
+def test_registry_count_is_exactly_one_hundred_eight() -> None:
+    assert len(REASON_CODES) == _TOTAL_COUNT
+    assert _S3_1_TOTAL_COUNT + len(_S5_2_CODES) == _TOTAL_COUNT
+
+
+def test_no_reason_code_beyond_the_five_approved_s5_2_additions_exists() -> None:
+    """Decision 018 section 21 approves exactly five; the contract authorizes no other."""
+    beyond_s3_1 = set(REASON_CODES) - set(_pre_s3_1_codes()) - set(_NEW_CODES)
+    assert beyond_s3_1 == set(_S5_2_CODES)
+
+
+def test_s5_2_codes_carry_the_approved_metadata() -> None:
+    for code, expected in _S5_2_CODES.items():
+        entry = REASON_CODES[code]
+        assert entry.category == expected["category"]
+        assert entry.blocks_release == expected["blocks_release"]
+        assert entry.requires_manual_review == expected["requires_manual_review"]
+        assert entry.decision_reference == expected["decision_reference"]
+        assert (_REPO_ROOT / str(expected["decision_reference"])).is_file()
+
+
+def test_existing_reason_codes_reused_by_stage_s5_are_not_duplicated() -> None:
+    """Unresolved parentage, infeasibility, and node exhaustion reuse existing codes."""
+    for code in (
+        "REVIEW_AMENDMENT_PARENT_UNRESOLVED",
+        "PILOT_SELECTION_INFEASIBLE",
+        "PILOT_SELECTION_INFEASIBLE_OR_UNPROVEN",
+        "REVIEW_PILOT_MULTI_REGISTRANT_INCOMPLETE",
+    ):
+        assert code in REASON_CODES
+        assert code not in _S5_2_CODES
 
 
 def test_removing_new_codes_leaves_exactly_the_pre_s3_1_count() -> None:
@@ -225,7 +294,8 @@ def test_new_decision_reference_paths_exist_in_the_repository() -> None:
         reasons._D014,  # noqa: SLF001
         reasons._D015,  # noqa: SLF001
         reasons._D016,  # noqa: SLF001
+        reasons._D018,  # noqa: SLF001
     )
-    assert len(set(new_decision_constants)) == 5
+    assert len(set(new_decision_constants)) == 6
     for relative_path in new_decision_constants:
         assert (_REPO_ROOT / relative_path).is_file(), relative_path

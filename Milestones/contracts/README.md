@@ -26,9 +26,11 @@ plan and every referenced decision every session.
   issued bounded implementation prompt is still required, and it may not widen the contract's
   authorized paths. Approving the decision that unblocked a stage never implements that stage.
 - **A completed contract authorizes nothing further.** `STATUS: ACCEPTED_AND_COMPLETE` with
-  `IMPLEMENTATION_AUTHORIZATION: NO` (the S5.2 contract's current state) means the stage shipped and
-  was accepted; the contract stays on record as that stage's scope statement and never authorizes new
-  work, the same way a superseded contract does. The next stage needs its own contract.
+  `IMPLEMENTATION_AUTHORIZATION: NO` (the current state of both the S5.2 and the S5.4 contracts) means
+  the stage shipped and was accepted; the contract stays on record as that stage's scope statement and
+  never authorizes new work, the same way a superseded contract does. Reopening a completed stage
+  requires a **new explicit owner authorization**, not a reading of the closed contract. The next stage
+  needs its own contract.
 - **A contract should link rather than duplicate decision text.** If a governing decision changes,
   every contract that copied its text instead of linking to it goes stale silently. Cite the decision
   ID and section; do not restate its content as contract prose.
@@ -77,9 +79,27 @@ authorized is carried by that contract's own status and by `IMPLEMENTATION_AUTHO
 `STATUS.md`, not by the fact that the marker names a path.** A completed or superseded contract stays
 on record as its stage's scope statement and never authorizes new work.
 
-**There is currently no active implementation contract.** Both contracts below are accepted and
-closed; Stage S5.4 (reserves) needs a new one before any reserve implementation is authorized.
+**No contract in this directory currently authorizes implementation.** All three S5 contracts are
+accepted and closed. The next stage, S6, has no contract yet and needs one, together with its own owner
+authorization, before any S6 work begins.
 
+- [`m23_s5_4.md`](m23_s5_4.md) — Stage S5.4 (reserve packages, quota-contribution membership, and
+  replacement signatures). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,
+  `IMPLEMENTATION_AUTHORIZATION: NO`, active blocker **none**. Implemented under a separately issued
+  bounded S5.4 prompt confined to twelve authorized paths, reviewed independently, corrected under
+  bounded fixes D1/T1/T2/T3, re-reviewed, and owner-accepted 2026-07-30 (final independent
+  recommendation `ACCEPT_M23_S5_4_FOR_CHECKPOINT`; final accepted suite 1899 passed, 1 skipped).
+  Delivered the additive S5.1 quota-contribution membership output, the new pure
+  `sec/reserve_selector.py`, contribution/member/reserve/disposition persistence and reconstruction in
+  `sec/accession_selection_store.py`, the one reason code `REVIEW_PILOT_NO_COMPATIBLE_RESERVE`, and
+  DDL-only migration `0012_m23_selection_entity_reasons.sql` — **created and accepted**, reproducing
+  the Decision 020 §8.2 SQL byte-for-byte and the only migration the stage authorized. Its controlling
+  record, [Decision 020](../../Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md), is
+  `APPROVED — OWNER APPROVED 2026-07-30`: the owner's nine rulings are in its §14, its migration ruling
+  in §8.2, its test-scoping clarification in §8.3, and its **final acceptance and the five accepted
+  methodological limitations in §19**. Committed and tagged `m2.3-s5.4-complete`, which **supplements**
+  the immutable `m2.3-s5-complete`. **It authorizes no new S5.4 implementation**; a future S5.4 change
+  requires a new explicit owner authorization.
 - [`m23_s5_2.md`](m23_s5_2.md) — Stage S5.2 (frozen accession reader, run identity, and selection
   persistence). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,
   `IMPLEMENTATION_AUTHORIZATION: NO`. Implemented under a separately issued bounded S5.2 prompt,

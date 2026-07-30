@@ -66,8 +66,93 @@ Run as regression **without editing**: `test_m23_accession_selector.py` (S5.1),
 `test_m23_entity_selector.py` and `test_m23_entity_selection_store.py` (S4), plus the lifecycle and
 catalog integrity tests named in the table above.
 
-Reserve, manifest, release, and publication paths (Stages S5.4 and S6) are **not implemented** and
-appear nowhere above. No current S5 selection is a manifest or publication input.
+Reserve paths (Stage S5.4) are implemented and accepted — see the next section. Manifest, release,
+and publication paths (Stage S6) are **not implemented** and appear nowhere in this map. No S5
+selection and no reserve is a manifest or publication input.
+
+## Stage S5.4 impact paths (implemented and accepted)
+
+Stage S5.4 is **complete and owner-accepted** (2026-07-30, final independent recommendation
+`ACCEPT_M23_S5_4_FOR_CHECKPOINT`, accepted suite 1899 passed and 1 skipped), checkpointed at
+`m2.3-s5.4-complete`. Its contract,
+[`../Milestones/contracts/m23_s5_4.md`](../Milestones/contracts/m23_s5_4.md), is now
+`ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`.
+[Decision 020](Decisions/decision_020_m23_s5_4_reserve_architecture.md) is
+**`APPROVED — OWNER APPROVED 2026-07-30`** and records the final acceptance in §19 and the five
+accepted methodological limitations in §19.1.
+
+**All twelve paths below now exist**, and migration `0012` is created and accepted. They are exactly
+the set the contract authorized — nothing widened it. This section records which gates each triggers,
+so a future change to any of them runs the right suites. **It authorizes no edit**: S5.4 is closed, and
+changing any of these paths requires a new explicit owner authorization and a new contract.
+
+Three structural constraints govern every path below and should be read before planning any change to
+them. Migration `0009` requires each reserve package's quota-contribution set to equal its target
+entity's **exactly**, checked on the `running -> feasible` transition; every reserve,
+quota-contribution, and quota-member write requires `run_state = 'running'`, with `feasible ->
+running` an illegal transition, so **reserves cannot be added to an already-feasible run** and all of
+this work lands inside the S5 joint run's single existing transaction; and **no table in the schema
+can durably record a target-specific no-compatible-reserve outcome** — none carries all three of
+`selection_run_id`, a selected entity, and a `reference_reason_codes` foreign key, which is why the
+owner authorized migration `0012` in principle (Decision 020 §8).
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `src/disclosure_drift/sec/accession_selector.py` | bounded edit — one additive public quota-contribution membership output; no policy, objective, ordering, or quota change | ruff, ruff format, mypy; `test_m23_accession_selector.py`; `test_m23_accession_selection_store.py`; S4 regression |
+| `src/disclosure_drift/sec/reserve_selector.py` | new pure module — reserve ranking, package assembly, signature computation | ruff, ruff format, mypy; `test_m23_reserve_selector.py`; S5.1 regression |
+| `src/disclosure_drift/sec/accession_selection_store.py` | bounded edit — persist and reconstruct contributions, members, and reserves in the existing single transaction | ruff, ruff format, mypy; `test_m23_accession_selection_store.py`; `test_m23_pilot_schema.py`; `test_migration_provenance.py`; `make sqlite-check` |
+| `src/disclosure_drift/reasons.py` | bounded edit — register exactly **one** code, `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` (`REVIEW_PILOT_RESERVE_POOL_EXHAUSTED` is **not** authorized) | ruff, ruff format, mypy; `test_reasons.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py`; `test_migration_provenance.py` and `make sqlite-check` |
+| `tests/unit/test_m23_reserve_selector.py` | new primary test module | ruff, ruff format, mypy |
+| `tests/unit/test_m23_accession_selector.py` | bounded edit — membership emission and the achieved-count invariant | ruff, ruff format, mypy |
+| `tests/unit/test_m23_accession_selection_store.py` | bounded edit — contribution, member, and reserve persistence and reconstruction | ruff, ruff format, mypy |
+| `tests/unit/test_reasons.py` | bounded edit — the one new code | ruff, ruff format, mypy |
+| `src/disclosure_drift/storage/migrations/0012_m23_selection_entity_reasons.sql` | **new migration — DDL-only**, reproducing the complete SQL frozen in Decision 020 §8.2: one new STRICT `pilot_selection_entity_reasons` table plus four triggers — fail-closed INSERT/UPDATE/DELETE lifecycle guards whose UPDATE form checks **both** the OLD and the NEW associated run and holds `selection_run_id`/`snapshot_id`/`cik_numeric` immutable, and one additive feasible-transition disposition-completeness trigger. Seeds no policy row; edits, replaces, and reinterprets no existing migration | `test_migration_provenance.py`, `test_m23_pilot_schema.py`, `make sqlite-check` (floor 3.37, required for STRICT); ruff/mypy not applicable to SQL |
+| `tests/unit/test_m23_pilot_schema.py` | bounded edit — the new table's keys, foreign keys, CHECKs; the fail-closed lifecycle guards including the OLD-and-NEW run check and immutable target identity; and the feasible-transition disposition trigger | ruff, ruff format, mypy |
+| `tests/unit/test_migration_provenance.py` | bounded edit — extends contiguous-chain, ordering, and byte-immutability coverage to `0012` | ruff, ruff format, mypy |
+| `tests/unit/test_storage_catalog.py` | bounded edit — the one new reason code through existing registry/catalog conventions | ruff, ruff format, mypy |
+
+**Migrations: exactly one, `0012`, created and accepted.** For the reserve,
+contribution, and member families no migration is needed — migration `0009` already contains every
+table, and `PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION` and its `pilot_replacement_signature`
+reference row both already exist. Registering the one new reason code needs none either, since
+`reference_reason_codes` is seeded at runtime from `reasons.py`. **But the durable
+no-compatible-reserve record has no lawful location in migration `0009`**, so the owner authorized
+`0012_m23_selection_entity_reasons.sql` rather than weakening the durability requirement. Its design
+is frozen by Decision 020 §8.2 — table plus all four triggers — and that exact DDL passed the focused
+independent governance re-review that preceded approval, closing the 2026-07-29 lifecycle defect. **The
+frozen SQL was reproduced verbatim**, and the final independent acceptance review confirmed the
+migration's statement region is byte-identical to it, that it adds exactly one `STRICT` table and four
+triggers, and that it alters no existing object. **No migration other than `0012` is authorized**, new
+or edited. Migrations `0009`–`0011` are unmodified and byte-identical, including their inherited
+OLD-only guard behaviour. **The migration chain now ends at `0012`.**
+
+**Test scoping (Decision 020 §8.3, binding).** Each invariant is exercised at the layer that enforces
+it: unauthorized reserve scope or reason code at the `pilot_selection_entity_reasons` CHECK
+constraints; duplicate no-compatible-reserve disposition rows at that table's primary key; duplicate
+rank-1 reserve packages at migration `0009`'s existing
+`UNIQUE (selection_run_id, snapshot_id, target_cik_numeric, reserve_rank)`. The feasible-transition
+trigger is not tested against states those constraints make unconstructible, but its tests still cover
+every constructible invalid state. This changes no gate in the table above — it determines which
+assertions land in `test_m23_pilot_schema.py`, not which suites run.
+
+**Membership rows.** All three families are emitted from **one** S5.1 output, with no S5.2 or
+reserve-module re-derivation. Only `pilot_selected_entity_quota_contributions` is load-bearing for the
+reserve trigger; `pilot_selected_accession_quota_contributions` and `pilot_quota_result_members` are
+provenance (Decision 020 §6).
+
+Run as regression **without editing**: `test_m23_entity_selector.py` and
+`test_m23_entity_selection_store.py` (S4). `tests/unit/test_m23_pilot_schema.py` carries the S3-era
+reserve schema tests — rank uniqueness per target, target/package signature mismatch, and independent
+signature recomputation from normalized content — which the accepted S5.4 implementation satisfies
+rather than replaces.
+
+**Accepted limitations recorded against these paths** (Decision 020 §19.1), relevant when planning any
+future change to them: cross-anchor amendment-family resolution follows resolved-root accession
+identity without an anchor-equality condition; provenance-oriented union member sets may exceed a
+minimal witness; the exact target-selected versus complete-replacement bundle comparison may reduce
+reserve availability; the seven named signature contribution values are counts of achieved units, not
+Boolean presence; and the schema-layer subset/superset/empty transition-test observation is nonblocking
+and was independently validated at acceptance.
 
 ## Notes on reading this table
 
@@ -89,7 +174,7 @@ appear nowhere above. No current S5 selection is a manifest or publication input
 
 It does not replace `make check` (the full acceptance gate) as the final bar before accepting work.
 It does not enumerate every test in the suite — see the test directory itself for that. It does not
-resolve which specific tests a not-yet-written module (such as the future S5.4 reserve modules) will
+resolve which specific tests a not-yet-written module (such as the future S6 manifest modules) will
 need beyond the categories a governing stage contract names — see
 [`Milestones/contracts/m23_s5_2.md`](../Milestones/contracts/m23_s5_2.md)'s "Required tests" for
 S5.2, and [`m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md)'s "Required adversarial test

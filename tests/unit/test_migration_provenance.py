@@ -45,13 +45,14 @@ def test_valid_unchanged_chain_reopens_successfully(tmp_path: Path) -> None:
         )
 
 
-def test_packaged_chain_is_contiguous_and_ends_at_0011() -> None:
-    """Stage S5.2 adds exactly one additive migration on top of the accepted chain."""
+def test_packaged_chain_is_contiguous_and_ends_at_0012() -> None:
+    """Stage S5.4 adds exactly one additive migration on top of the accepted chain."""
     inventory = available_migrations()
     versions = tuple(migration.version for migration in inventory)
     assert versions == tuple(range(1, len(inventory) + 1))
-    assert versions[-1] == 11
-    assert inventory[-1].name == "m23_joint_selector_policy_reference"
+    assert versions[-1] == 12
+    assert inventory[-1].name == "m23_selection_entity_reasons"
+    assert inventory[-2].name == "m23_joint_selector_policy_reference"
 
 
 def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
@@ -61,19 +62,33 @@ def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 12))
-    assert rows[-1]["name"] == "m23_joint_selector_policy_reference"
+    assert [row["version"] for row in rows] == list(range(1, 13))
+    recorded = next(row for row in rows if row["version"] == 11)
+    assert recorded["name"] == "m23_joint_selector_policy_reference"
+    assert recorded["checksum_sha256"] == packaged.checksum_sha256
+
+
+def test_migration_0012_provenance_is_recorded_in_order(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    packaged = next(m for m in available_migrations() if m.version == 12)
+    with connect(path, writer=True) as connection:
+        rows = connection.execute(
+            "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
+        ).fetchall()
+    assert [row["version"] for row in rows] == list(range(1, 13))
+    assert rows[-1]["name"] == "m23_selection_entity_reasons"
     assert rows[-1]["checksum_sha256"] == packaged.checksum_sha256
 
 
-def test_altered_migration_0011_bytes_block_reopen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("version", (11, 12))
+def test_altered_migration_bytes_block_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
 ) -> None:
     path = _migrated_database(tmp_path)
     inventory = list(available_migrations())
-    original = inventory[-1]
-    assert original.version == 11
-    inventory[-1] = Migration(
+    position = next(i for i, m in enumerate(inventory) if m.version == version)
+    original = inventory[position]
+    inventory[position] = Migration(
         version=original.version,
         name=original.name,
         sql=original.sql + "\n-- altered fixture\n",
@@ -81,6 +96,27 @@ def test_altered_migration_0011_bytes_block_reopen(
     monkeypatch.setattr(sqlite_module, "available_migrations", lambda: tuple(inventory))
     with pytest.raises(GateFailureError, match="checksum mismatch"), connect(path, writer=True):
         pass
+
+
+def test_no_earlier_migration_mentions_the_s5_4_objects() -> None:
+    """Decision 020 sections 8.2 and 11: migration 0012 edits, replaces, and
+    reinterprets nothing that came before it, so the new table and the new
+    feasible-transition trigger appear in migration 0012 and nowhere else."""
+    packaged = {
+        entry.name: entry.read_bytes()
+        for entry in resources.files(MIGRATIONS_PACKAGE).iterdir()
+        if entry.name.endswith(".sql")
+    }
+    new_objects = (
+        b"pilot_selection_entity_reasons",
+        b"pilot_selection_run_feasible_requires_reserve_disposition",
+    )
+    for name, content in packaged.items():
+        if name == "0012_m23_selection_entity_reasons.sql":
+            assert all(marker in content for marker in new_objects)
+            continue
+        for marker in new_objects:
+            assert marker not in content, f"{marker!r} leaked into {name}"
 
 
 def test_second_normal_application_is_idempotent(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from typing import Final
 
 import pytest
 
+from disclosure_drift.sec import accession_selector
 from disclosure_drift.sec.accession_selector import (
     ACCESSION_CAP_LIMITS,
     ACCESSION_QUOTA_IDENTIFIERS,
@@ -42,6 +43,7 @@ from disclosure_drift.sec.accession_selector import (
     QUOTA_DIMENSION_ACCESSION_CAP,
     QUOTA_DIMENSION_CROSS_CUTTING,
     QUOTA_KEY_ACCESSIONS_TOTAL,
+    QUOTA_KEY_AMENDMENT_PURPOSE_CATEGORIES,
     QUOTA_KEY_BASE_ACCESSIONS_PER_CIK,
     QUOTA_KEY_BASE_ACCESSIONS_TOTAL,
     QUOTA_KEY_INLINE_XBRL_ORIGINALS,
@@ -57,6 +59,7 @@ from disclosure_drift.sec.accession_selector import (
     JointObjective,
     JointSelectionResult,
     NameChangeEvidence,
+    QuotaContributionMembership,
     accession_cap_outcomes,
     accession_caps_satisfied,
     accession_evidence_penalty,
@@ -65,6 +68,7 @@ from disclosure_drift.sec.accession_selector import (
     canonical_anchor_cik_padded,
     circular_month_day_distance,
     derive_amendment_families,
+    official_filing_year,
     solve_joint_selection,
 )
 from disclosure_drift.sec.entity_selector import (
@@ -86,6 +90,37 @@ _ACCESSION_SELECTOR_SOURCE: Final = (
     / "sec"
     / "accession_selector.py"
 )
+
+_RESERVE_SELECTOR_SOURCE: Final = _ACCESSION_SELECTOR_SOURCE.with_name("reserve_selector.py")
+
+
+def code_without_docstrings(path: Path) -> str:
+    """One module's source with every docstring and comment removed.
+
+    Source-level prohibitions are checked against this rather than the raw text, so
+    a docstring that *names* a forbidden idiom cannot be mistaken for one.
+    """
+
+    class Strip(ast.NodeTransformer):
+        def _strip(self, node: ast.AST) -> ast.AST:
+            self.generic_visit(node)
+            body = node.body  # type: ignore[attr-defined]
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                node.body = body[1:] or [ast.Pass()]  # type: ignore[attr-defined]
+            return node
+
+        visit_Module = _strip  # noqa: N815
+        visit_FunctionDef = _strip  # noqa: N815
+        visit_AsyncFunctionDef = _strip  # noqa: N815
+        visit_ClassDef = _strip  # noqa: N815
+
+    return ast.unparse(Strip().visit(ast.parse(path.read_text(encoding="utf-8"))))
+
 
 #: Large enough that every fixture in this module proves its optimum; never an
 #: assertion about a production node-limit default (Decision 018 section 17
@@ -3043,3 +3078,562 @@ def test_the_oracle_confirms_the_control_anchored_pair_exploit_is_infeasible() -
     oracle.)
     """
     assert_matches_oracle(pair_exploit_pool())
+
+
+# --------------------------------------------------------------------------
+# 24: the Decision 020 quota-contribution membership output
+# --------------------------------------------------------------------------
+#
+# Decision 020 sections 5 and 6 add exactly one immutable, deterministic public
+# output to this accepted core, sourced from the witness derivation the achieved
+# counts already come from. These tests prove the projection is exact, the
+# artifact is order-independent and immutable, achieved counts and membership
+# agree on every quota of every fixture, the deferred quota emits nothing, and
+# the accepted selection, objective, and diagnostics are unchanged by it.
+
+
+def membership(result: JointSelectionResult) -> QuotaContributionMembership:
+    return result.quota_contributions
+
+
+def cross_cutting_diagnostics(
+    result: JointSelectionResult,
+) -> tuple[AccessionQuotaDiagnostic, ...]:
+    return tuple(
+        d
+        for d in result.accession_quota_results
+        if d.dimension == QUOTA_DIMENSION_CROSS_CUTTING and not d.deferred
+    )
+
+
+@pytest.mark.parametrize(
+    "build",
+    (
+        base_pool,
+        dual_eligible_control_pool,
+        lambda: Pool(entities=base_pool().entities, accessions=base_pool().accessions),
+    ),
+    ids=("base_pool", "dual_eligible_control_pool", "rebuilt_base_pool"),
+)
+def test_achieved_counts_equal_the_emitted_membership_on_every_quota(
+    build: object,
+) -> None:
+    """The Decision 020 section 6 invariant, asserted independently of the
+    by-construction wiring: recomputing each quota's achieved count from the
+    emitted membership reproduces the published diagnostic exactly."""
+    result = build().solve()  # type: ignore[operator]
+    assert result.status == "feasible"
+    emitted = membership(result)
+    for diagnostic in cross_cutting_diagnostics(result):
+        recomputed = len(emitted.units_for(diagnostic.dimension, diagnostic.key))
+        assert recomputed == diagnostic.achieved_count, diagnostic.key
+    assert cross_cutting_diagnostics(result)
+
+
+def test_every_measurable_cross_cutting_quota_is_reported_and_no_other_dimension() -> None:
+    emitted = membership(base_pool().solve())
+    assert {unit.dimension for unit in emitted.units} == {QUOTA_DIMENSION_CROSS_CUTTING}
+    assert {unit.key for unit in emitted.units} <= set(CROSS_CUTTING_QUOTAS)
+
+
+def test_the_deferred_quota_emits_no_contribution_membership() -> None:
+    """Decision 018 section 14 and Decision 020 section 6: the deferred quota
+    contributes nothing and is never reported as satisfied."""
+    result = base_pool().solve()
+    emitted = membership(result)
+    assert emitted.units_for(QUOTA_DIMENSION_CROSS_CUTTING, DEFERRED_QUOTA_KEY) == ()
+    assert all(unit.key != DEFERRED_QUOTA_KEY for unit in emitted.units)
+    assert result.deferred_quota_result.achieved_count == 0
+    assert result.deferred_quota_result.status == "unproven"
+    assert not any(
+        key == DEFERRED_QUOTA_KEY for _cik, _dimension, key in emitted.entity_contributions()
+    )
+
+
+def test_accession_cap_quotas_emit_no_contribution_membership() -> None:
+    """Caps are ``at_most`` constraints, never affirmative contributions."""
+    emitted = membership(base_pool().solve())
+    assert not [unit for unit in emitted.units if unit.dimension == QUOTA_DIMENSION_ACCESSION_CAP]
+    for key in ACCESSION_CAP_LIMITS:
+        assert emitted.units_for(QUOTA_DIMENSION_ACCESSION_CAP, key) == ()
+
+
+def test_membership_is_a_projection_of_the_witness_members_only() -> None:
+    """Every accession member is a selected accession anchored to the CIK the
+    member carries, and every entity member is a selected entity."""
+    result = base_pool().solve()
+    selected_plains = {a.accession_plain: a for a in result.selected_accessions}
+    selected_ciks = {c.cik_padded for c in result.selected_entities}
+    for unit in membership(result).units:
+        assert unit.members
+        for member in unit.members:
+            if member.member_kind == "accession":
+                assert member.accession_plain in selected_plains
+                assert selected_plains[member.accession_plain].anchor_cik_padded == (
+                    member.cik_padded
+                )
+            else:
+                assert member.accession_plain is None
+                assert member.cik_padded in selected_ciks
+
+
+def test_the_entity_and_accession_forms_are_transposes_of_one_artifact() -> None:
+    result = base_pool().solve()
+    emitted = membership(result)
+    expected_entities = sorted(
+        {
+            (member.cik_padded, unit.dimension, unit.key)
+            for unit in emitted.units
+            for member in unit.members
+        }
+    )
+    expected_accessions = sorted(
+        {
+            (member.accession_plain, unit.dimension, unit.key)
+            for unit in emitted.units
+            for member in unit.members
+            if member.accession_plain is not None
+        }
+    )
+    assert list(emitted.entity_contributions()) == expected_entities
+    assert list(emitted.accession_contributions()) == expected_accessions
+    assert len(set(emitted.entity_contributions())) == len(emitted.entity_contributions())
+    assert len(set(emitted.accession_contributions())) == len(emitted.accession_contributions())
+
+
+def test_quota_result_members_are_contiguous_and_distinct_within_each_quota() -> None:
+    emitted = membership(base_pool().solve())
+    by_quota: dict[tuple[str, str], list[tuple[int, str, str, str | None]]] = {}
+    for dimension, key, order, kind, cik, plain in emitted.quota_members():
+        by_quota.setdefault((dimension, key), []).append((order, kind, cik, plain))
+    assert by_quota
+    for rows in by_quota.values():
+        assert [row[0] for row in rows] == list(range(1, len(rows) + 1))
+        assert len({row[1:] for row in rows}) == len(rows)
+
+
+def test_quota_result_members_cover_exactly_the_units_members() -> None:
+    emitted = membership(base_pool().solve())
+    expected: dict[tuple[str, str], set[tuple[str, str, str | None]]] = {}
+    for unit in emitted.units:
+        expected.setdefault((unit.dimension, unit.key), set()).update(
+            (m.member_kind, m.cik_padded, m.accession_plain) for m in unit.members
+        )
+    found: dict[tuple[str, str], set[tuple[str, str, str | None]]] = {}
+    for dimension, key, _order, kind, cik, plain in emitted.quota_members():
+        found.setdefault((dimension, key), set()).add((kind, cik, plain))
+    assert found == expected
+
+
+def test_membership_is_invariant_under_entity_and_accession_input_permutation() -> None:
+    """Order independence is a Decision 020 section 6 requirement, and the reason
+    a unit records the union of its satisfying witnesses rather than the first."""
+    pool = base_pool()
+    reference = pool.solve()
+    rng = random.Random(20260730)  # noqa: S311 - deterministic local test seed only
+    for _ in range(5):
+        entities = list(pool.entities)
+        accessions = list(pool.accessions)
+        rng.shuffle(entities)
+        rng.shuffle(accessions)
+        permuted = solve_joint_selection(entities, accessions, node_limit=GENEROUS_NODE_LIMIT)
+        assert permuted.quota_contributions == reference.quota_contributions
+
+
+def shared_purpose_pool() -> tuple[Pool, str, tuple[str, ...]]:
+    """A pool whose amendment-purpose coverage rests on one *shared* unit.
+
+    ``amendment_purpose_categories`` is the only quota whose contribution unit is a
+    coverage token shared across entities rather than an entity's or an accession's
+    own identity, so one unit can be satisfied by several independent selected
+    witnesses anchored to *different* entities. Slots 1 and 2 keep the other two
+    categories (the quota requires three), and every remaining amendment is moved
+    onto the shared category so the multi-witness shape is explicit rather than an
+    incidental consequence of ``slot % 3``.
+
+    Returns the pool, the shared category, and the CIKs the *inputs* say contribute
+    to it -- read off the fixture, never off the emitted membership.
+    """
+    pool = base_pool()
+    shared = PURPOSE_CATEGORIES[0]
+    contributors: list[str] = []
+    for slot in range(8):
+        cik = slot + 1
+        number = dashed(cik, 2021, 3)
+        category = PURPOSE_CATEGORIES[slot] if slot in (1, 2) else shared
+        pool.replace_accession(
+            number,
+            amendment_purpose_category=category,
+            amendment_purpose_evidence_level="provisional",
+            amendment_purpose_quota_eligible=True,
+        )
+        if category == shared:
+            contributors.append(f"{cik:010d}")
+    return pool, shared, tuple(sorted(contributors))
+
+
+def test_a_shared_quota_unit_credits_every_entity_with_a_satisfying_witness() -> None:
+    """The load-bearing family must not collapse a shared unit to one contributor.
+
+    ``pilot_selected_entity_quota_contributions`` is what migration 0009's
+    feasible-transition trigger compares each reserve package against, so an entity
+    that really does supply a cross-cutting contribution has to appear in it.
+    Decision 013 section 6 forbids a reserve that "would silently drop or alter a
+    cross-cutting contribution", and a canonical-minimal single-witness
+    representation would do exactly that here.
+
+    This test deliberately asserts **nothing** about the member sets of the two
+    provenance-only families (``pilot_selected_accession_quota_contributions`` and
+    ``pilot_quota_result_members``): their representation is an open acceptance
+    finding, and pinning either a minimal or a maximal reading here would freeze it.
+    """
+    pool, shared, expected_contributors = shared_purpose_pool()
+    result = pool.solve()
+    assert result.status == "feasible"
+    emitted = membership(result)
+
+    # The fixture itself says which entities qualify: each has one selected
+    # amendment carrying the shared category at provisional evidence.
+    selected_plains = {a.accession_plain for a in result.selected_accessions}
+    qualifying = sorted(
+        {
+            a.anchor_cik_padded
+            for a in pool.accessions
+            if a.accession_plain in selected_plains
+            and a.amendment_purpose_category == shared
+            and a.amendment_purpose_quota_eligible
+        }
+    )
+    assert tuple(qualifying) == expected_contributors
+    assert len(expected_contributors) > 1, "the shared unit needs several satisfying witnesses"
+
+    # 1. every entity participating in at least one satisfying witness is credited.
+    shared_quota = (QUOTA_DIMENSION_CROSS_CUTTING, QUOTA_KEY_AMENDMENT_PURPOSE_CATEGORIES)
+    credited = sorted(
+        cik
+        for cik, dimension, key in emitted.entity_contributions()
+        if (dimension, key) == shared_quota
+    )
+    assert set(expected_contributors) <= set(credited)
+
+    # 2. the canonical-minimal alternative -- keep only the canonically first member
+    #    of each unit, which for this quota is exactly the first satisfying witness,
+    #    because every one of its witnesses is a single accession -- drops real
+    #    contributions.
+    minimal_credited = {
+        unit.members[0].cik_padded
+        for unit in emitted.units
+        if unit.key == QUOTA_KEY_AMENDMENT_PURPOSE_CATEGORIES
+    }
+    dropped = set(expected_contributors) - minimal_credited
+    assert dropped, "the fixture must make the two representations differ"
+
+    # 3. and the implementation does not drop them.
+    assert dropped <= set(credited)
+    assert not dropped & minimal_credited
+
+    # 4. the shared unit is still counted once, however many witnesses satisfy it.
+    units = emitted.units_for(QUOTA_DIMENSION_CROSS_CUTTING, QUOTA_KEY_AMENDMENT_PURPOSE_CATEGORIES)
+    assert len([unit for unit in units if unit.unit == shared]) == 1
+    achieved = next(
+        d.achieved_count
+        for d in cross_cutting_diagnostics(result)
+        if d.key == QUOTA_KEY_AMENDMENT_PURPOSE_CATEGORIES
+    )
+    assert achieved == len(units) == len({unit.unit for unit in units})
+    assert achieved == emitted.achieved_count(
+        QUOTA_DIMENSION_CROSS_CUTTING, QUOTA_KEY_AMENDMENT_PURPOSE_CATEGORIES
+    )
+
+    # 5. and none of it depends on input order.
+    rng = random.Random(20260731)  # noqa: S311 - deterministic local test seed only
+    for _ in range(5):
+        entities = list(pool.entities)
+        accessions = list(pool.accessions)
+        rng.shuffle(entities)
+        rng.shuffle(accessions)
+        permuted = solve_joint_selection(entities, accessions, node_limit=GENEROUS_NODE_LIMIT)
+        assert permuted.quota_contributions == emitted
+        assert permuted.quota_contributions.entity_contributions() == (
+            emitted.entity_contributions()
+        )
+
+
+def test_membership_is_emitted_in_canonical_sorted_order() -> None:
+    emitted = membership(base_pool().solve())
+    keys = [(unit.dimension, unit.key, unit.unit) for unit in emitted.units]
+    assert keys == sorted(keys)
+    assert len(keys) == len(set(keys))
+    for unit in emitted.units:
+        rendered = [(m.member_kind, m.cik_padded, m.accession_plain or "") for m in unit.members]
+        assert rendered == sorted(rendered)
+
+
+def test_the_membership_artifact_is_immutable() -> None:
+    emitted = membership(base_pool().solve())
+    unit = emitted.units[0]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        emitted.units = ()  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        unit.key = "tampered"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        unit.members[0].cik_padded = "0000000000"  # type: ignore[misc]
+    assert isinstance(emitted.units, tuple)
+    assert all(isinstance(entry.members, tuple) for entry in emitted.units)
+
+
+def test_a_non_feasible_run_emits_no_contribution_membership() -> None:
+    pool = base_pool()
+    pool.drop_accession(dashed(1, 2010, 2))
+    result = pool.solve()
+    assert result.status != "feasible"
+    assert result.quota_contributions.units == ()
+    assert result.quota_contributions.entity_contributions() == ()
+    assert result.quota_contributions.accession_contributions() == ()
+    assert result.quota_contributions.quota_members() == ()
+
+
+def test_node_limit_exhaustion_emits_no_contribution_membership() -> None:
+    result = base_pool().solve(node_limit=1)
+    assert result.status == "infeasible_or_unproven"
+    assert result.node_limit_exhausted
+    assert result.quota_contributions.units == ()
+
+
+def test_only_provisional_evidence_produces_an_affirmative_contribution() -> None:
+    """Decision 014 section 1, observed through the membership rather than a count."""
+    strong = base_pool().solve()
+    strong_units = {
+        unit.unit
+        for unit in strong.quota_contributions.units
+        if unit.key == QUOTA_KEY_SUPPORT_TARGET_PAIR_ENTITIES
+    }
+    assert "0000000001" in strong_units
+    weak = base_pool()
+    weak.replace_accession(dashed(1, 2009, 1), filing_date_evidence_level="review_required")
+    weakened = weak.solve()
+    weak_units = {
+        unit.unit
+        for unit in weakened.quota_contributions.units
+        if unit.key == QUOTA_KEY_SUPPORT_TARGET_PAIR_ENTITIES
+    }
+    assert "0000000001" not in weak_units
+
+
+def test_the_membership_output_changes_no_accepted_selection_or_objective() -> None:
+    """The additive output alters no selected entity, accession, role, order,
+    objective term, quota diagnostic, family, or node-budget value."""
+    pool = base_pool()
+    result = pool.solve()
+    assert result.status == "feasible"
+    stripped = dataclasses.replace(
+        result, quota_contributions=QuotaContributionMembership(units=())
+    )
+    again = pool.solve()
+    assert again.selected_operating == result.selected_operating
+    assert again.selected_controls == result.selected_controls
+    assert again.selected_accessions == result.selected_accessions
+    assert again.objective == result.objective
+    assert again.entity_quota_results == result.entity_quota_results
+    assert again.accession_quota_results == result.accession_quota_results
+    assert again.amendment_families == result.amendment_families
+    assert again.expanded_node_count == result.expanded_node_count
+    assert again.node_limit == result.node_limit
+    assert again.node_limit_exhausted == result.node_limit_exhausted
+    assert stripped.quota_contributions.units == ()
+
+
+def test_derive_reproduces_the_membership_the_solver_publishes() -> None:
+    """The artifact's own constructor is the single membership derivation: applying
+    it to the accepted selection reproduces the published output exactly."""
+    pool = base_pool()
+    result = pool.solve()
+    rederived = QuotaContributionMembership.derive(
+        pool.entities,
+        pool.accessions,
+        selected_entity_ciks=[c.cik_padded for c in result.selected_entities],
+        selected_accession_plains=[a.accession_plain for a in result.selected_accessions],
+    )
+    assert rederived == result.quota_contributions
+
+
+def test_derive_over_a_hypothetical_subset_reports_only_that_subsets_contributions() -> None:
+    """A reserve package's contribution set is derived by this same function over
+    the package's own entity and accession bundle (Decision 020 sections 6 and 7)."""
+    pool = base_pool()
+    result = pool.solve()
+    target = result.selected_operating[0].cik_padded
+    bundle = [
+        a.accession_plain for a in result.selected_accessions if a.anchor_cik_padded == target
+    ]
+    subset = QuotaContributionMembership.derive(
+        pool.entities,
+        pool.accessions,
+        selected_entity_ciks=[target],
+        selected_accession_plains=bundle,
+    )
+    assert {member.cik_padded for unit in subset.units for member in unit.members} == {target}
+    assert set(subset.contribution_keys()) <= set(
+        result.quota_contributions.contribution_keys_for_entity(target)
+    )
+
+
+def test_contribution_keys_for_entity_is_that_entitys_complete_signature() -> None:
+    result = base_pool().solve()
+    emitted = result.quota_contributions
+    for candidate in result.selected_entities:
+        expected = sorted(
+            {
+                (dimension, key)
+                for cik, dimension, key in emitted.entity_contributions()
+                if cik == candidate.cik_padded
+            }
+        )
+        assert list(emitted.contribution_keys_for_entity(candidate.cik_padded)) == expected
+
+
+def test_derive_rejects_an_identity_outside_the_candidate_pool() -> None:
+    pool = base_pool()
+    with pytest.raises(ValueError, match="not in the candidate entity pool"):
+        QuotaContributionMembership.derive(
+            pool.entities,
+            pool.accessions,
+            selected_entity_ciks=["9999999999"],
+            selected_accession_plains=[],
+        )
+    with pytest.raises(ValueError, match="not in the candidate accession pool"):
+        QuotaContributionMembership.derive(
+            pool.entities,
+            pool.accessions,
+            selected_entity_ciks=[],
+            selected_accession_plains=["999999999999999999"],
+        )
+
+
+def test_derive_is_pure_and_mutates_no_input() -> None:
+    pool = base_pool()
+    entities = tuple(pool.entities)
+    accessions = tuple(pool.accessions)
+    before = (dataclasses.astuple(entities[0]), dataclasses.astuple(accessions[0]))
+    QuotaContributionMembership.derive(
+        entities,
+        accessions,
+        selected_entity_ciks=[],
+        selected_accession_plains=[],
+    )
+    assert (dataclasses.astuple(entities[0]), dataclasses.astuple(accessions[0])) == before
+    assert tuple(pool.entities) == entities
+    assert tuple(pool.accessions) == accessions
+
+
+# --------------------------------------------------------------------------
+# The single accepted filing-year derivation (Decision 018 sections 15 and 19)
+# --------------------------------------------------------------------------
+
+#: Every stored ``official_filing_date`` shape the helper must classify, with the
+#: year the accepted strict ISO rule yields. Values are frozen here as literals
+#: read off Decision 018 section 5 and Decision 019 section 5.9's exact-date rule,
+#: not produced by any production helper.
+FILING_YEAR_CASES: Final[tuple[tuple[str | None, int | None], ...]] = (
+    (None, None),
+    ("2009-03-15", 2009),
+    ("2024-12-31", 2024),
+    ("2009-02-30", None),  # regex-shaped, impossible calendar date
+    ("20090315", None),  # compact, no separators
+    ("2009-3-15", None),  # partially padded
+    ("abcd-01-01", None),  # non-numeric year
+    ("", None),  # empty string
+    ("2009-13-01", None),  # impossible month
+    ("2009-03-15T00:00:00Z", None),  # trailing time component
+    (" 2009-03-15", None),  # leading whitespace
+)
+
+
+@pytest.mark.parametrize(("stored", "expected"), FILING_YEAR_CASES)
+def test_official_filing_year_classifies_every_stored_date_shape(
+    stored: str | None, expected: int | None
+) -> None:
+    """One derivation, and it never reads a year out of a value the core rejects."""
+    assert official_filing_year(stored) == expected
+
+
+def test_official_filing_year_agrees_with_the_strict_date_rule_it_delegates_to() -> None:
+    """It is a projection of the accepted parse, not a second interpretation."""
+    for stored, _expected in FILING_YEAR_CASES:
+        parsed = accession_selector._parse_iso_date(stored)  # noqa: SLF001
+        assert official_filing_year(stored) == (None if parsed is None else parsed.year)
+
+
+def test_official_filing_year_structurally_delegates_to_the_strict_parse() -> None:
+    """Delegation is proved from the source, not only from agreeing outputs."""
+    tree = ast.parse(_ACCESSION_SELECTOR_SOURCE.read_text(encoding="utf-8"))
+    helper = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "official_filing_year"
+    )
+    called = {ast.unparse(node.func) for node in ast.walk(helper) if isinstance(node, ast.Call)}
+    assert called == {"_parse_iso_date"}
+
+
+def test_exactly_one_filing_year_derivation_exists_across_both_pure_modules() -> None:
+    """Decision 018 section 19: no substring parser and no ``int(value[:4])``.
+
+    The check reads each module with its docstrings stripped, so prose that merely
+    *names* a prohibited shape cannot mask a real one.
+    """
+    selector_code = code_without_docstrings(_ACCESSION_SELECTOR_SOURCE)
+    reserve_code = code_without_docstrings(_RESERVE_SELECTOR_SOURCE)
+    for label, code in (("selector", selector_code), ("reserve", reserve_code)):
+        assert "[:4]" not in code, label
+        assert "strptime" not in code, label
+    # exactly one place turns a parsed date into a filing year, and it is the helper
+    assert selector_code.count(".year") == 1
+    assert selector_code.count("date.fromisoformat") == 1
+    # the reserve module consults the accepted helper and holds no parser of its own
+    assert "official_filing_year(" in reserve_code
+    assert "_parse_iso_date" not in reserve_code
+    assert "fromisoformat" not in reserve_code
+    assert ".year" not in reserve_code
+    assert "re." not in reserve_code
+
+
+def test_a_malformed_filing_date_never_yields_a_support_role_in_the_accepted_core() -> None:
+    """Decision 018 section 7's support branch is the one filing-year-dependent
+    branch, and a date the core cannot read must not reach it."""
+    for stored, expected in FILING_YEAR_CASES:
+        candidate = mk_accession(
+            900, 2009, 1, role="support", inline=False, has_xbrl=False, pre_study=True
+        )
+        candidate = dataclasses.replace(candidate, official_filing_date=stored)
+        role, _reason = assign_accession_role(
+            candidate, anchor_category="operating", filing_year=official_filing_year(stored)
+        )
+        assert role == ("support" if expected == 2009 else None)
+
+
+def test_a_malformed_filing_date_changes_no_valid_selection_result() -> None:
+    """The valid-date fixtures the accepted suite pins are unaffected by the
+    refactor: the pool solves to the same selection, objective, and membership."""
+    reference = base_pool().solve()
+    again = base_pool().solve()
+    assert again.selected_operating == reference.selected_operating
+    assert again.selected_controls == reference.selected_controls
+    assert again.selected_accessions == reference.selected_accessions
+    assert again.objective == reference.objective
+    assert again.quota_contributions == reference.quota_contributions
+    assert again.accession_quota_results == reference.accession_quota_results
+    # every accession in the accepted fixture carries a canonical date, so the
+    # helper resolves each one rather than failing closed.
+    for accession in base_pool().accessions:
+        assert official_filing_year(accession.official_filing_date) is not None
+
+
+def test_the_input_schema_version_and_run_identity_inputs_are_untouched() -> None:
+    """Decision 020 section 9: membership is an output, so the frozen S5 input
+    schema version -- the value the run identity is built from -- is not bumped."""
+    from disclosure_drift.sec.accession_selection_store import (
+        ACCESSION_SELECTION_INPUT_SCHEMA_VERSION,
+    )
+
+    assert ACCESSION_SELECTION_INPUT_SCHEMA_VERSION == "pilot-joint-selection-input/1.0"

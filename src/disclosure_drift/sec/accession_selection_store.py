@@ -37,16 +37,27 @@ no outcome, and no ``inventory_*`` or ``census_*`` table. The only acceptance fi
 reads is ``pilot_candidate_accessions.acceptance_audit_date`` (Decision 019 section
 5.9.1); ``acceptance_audit_cohort`` is audit-only and is never read for ordering.
 
-Two deliberate persistence boundaries, recorded so neither is mistaken for an omission:
+Stage S5.4 (Decision 020) extends the single ``running`` window this module already
+owns. Migration ``0009`` refuses every contribution, member, and reserve write once a
+run leaves ``running`` and refuses ``feasible -> running`` outright, so reserves can
+never be a later pass over an accepted run: the quota-contribution rows, the
+quota-result member rows, the reserve packages, and the no-compatible-reserve
+dispositions are all written inside the same transaction, and the ``running ->
+feasible`` transition remains its last statement.
 
-* **No quota-contribution or quota-result-member rows are written.** No migration-0009
-  trigger requires them for a feasible run, the Stage S5.2 contract's persistence list
-  does not name them, and deriving per-quota membership here would duplicate quota
-  methodology the pure core owns (Decision 018 section 19).
-* **``selection_result_sha256`` is left ``NULL``**, exactly as the accepted S4.2
-  precedent leaves it. Reconstruction validates the persisted rows against a
-  deterministic re-derivation of the pure result instead, which is strictly stronger
-  than a stored scalar digest and introduces no new persisted contract.
+**No contribution or reserve methodology lives here.** Quota-contribution membership is
+the accepted Stage S5.1 output, projected into rows; reserve eligibility, ranking,
+package assembly, and signatures are the pure
+:mod:`disclosure_drift.sec.reserve_selector` module's. This adapter writes rows and
+validates them against a re-derivation, and derives neither (Decision 018 section 19;
+Decision 020 section 6).
+
+One deliberate persistence boundary, recorded so it is not mistaken for an omission:
+**``selection_result_sha256`` is left ``NULL``** through Stage S5.4 (Decision 020
+section 9), exactly as the accepted S4.2 precedent leaves it. Reconstruction validates
+the persisted rows against a deterministic re-derivation of the pure result instead,
+which is strictly stronger than a stored scalar digest and introduces no new persisted
+contract.
 
 Neither hash derived here is the M2.3 manifest hash (Stage S6); no manifest or
 publication behaviour exists in this module.
@@ -88,6 +99,12 @@ from disclosure_drift.sec.entity_selector import (
     QuotaDiagnostic,
     selection_rank,
 )
+from disclosure_drift.sec.reserve_selector import (
+    RESERVE_RANK,
+    ReserveConstruction,
+    ReservePackage,
+    build_reserve_packages,
+)
 from disclosure_drift.storage.sqlite import transaction
 
 __all__ = [
@@ -124,6 +141,7 @@ _PROVISIONAL: Final = "provisional"
 _REVIEW_REQUIRED: Final = "review_required"
 _UNAVAILABLE: Final = "unavailable"
 
+_HEX64_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
 _PLAIN_ACCESSION_PATTERN: Final = re.compile(r"^\d{18}$")
 _DASHED_ACCESSION_PATTERN: Final = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 _ISO_DATE_PATTERN: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1591,11 +1609,12 @@ def build_joint_selection_run_identity(
 
 @dataclass(frozen=True, slots=True)
 class _Derived:
-    """One deterministic derivation of the pure result and its run identity."""
+    """One deterministic derivation of the pure result, run identity, and reserves."""
 
     candidate_set: FrozenJointCandidateSet
     identity: JointSelectionRunIdentity
     result: JointSelectionResult
+    reserves: ReserveConstruction
 
 
 def _derive(
@@ -1621,7 +1640,20 @@ def _derive(
         node_limit=node_limit,
         selection_seed=selection_seed,
     )
-    return _Derived(candidate_set=candidate_set, identity=identity, result=result)
+    # Reserve construction is pure and deterministic, so both the execution path and
+    # historical reconstruction derive it here from the run's own recorded inputs.
+    reserves = build_reserve_packages(
+        candidate_set.entities,
+        candidate_set.accessions,
+        result,
+        selection_run_id=identity.selection_run_id,
+        snapshot_id=candidate_set.snapshot_id,
+        selection_seed=selection_seed,
+        quota_policy_version=quota_policy_version,
+    )
+    return _Derived(
+        candidate_set=candidate_set, identity=identity, result=result, reserves=reserves
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1641,9 +1673,17 @@ def _persist_feasible_result(
     snapshot_id: str,
     selection_seed: str,
     result: JointSelectionResult,
+    reserves: ReserveConstruction,
     recorded_at_utc: str,
 ) -> None:
-    """Persist one complete feasible joint result into the migration-0009 tables.
+    """Persist one complete feasible joint result into the pilot result tables.
+
+    Written in foreign-key order inside the caller's single transaction: selected
+    entities, then selected accessions, then quota results, then the three
+    quota-contribution and member families, then reserve packages with their accession
+    bundles and contribution signatures, then the no-compatible-reserve dispositions.
+    The caller performs the ``running -> feasible`` transition afterwards, as the last
+    statement in that transaction (Decision 020 section 5).
 
     Selected entities are written before selected accessions so that every accession's
     composite ``(selection_run_id, snapshot_id, anchor_cik_numeric)`` foreign key
@@ -1727,6 +1767,155 @@ def _persist_feasible_result(
             quota_result=accession_diagnostic.status,
             binding_constraint=accession_diagnostic.binding_constraint,
             recorded_at_utc=recorded_at_utc,
+        )
+    _persist_quota_contribution_membership(
+        c,
+        selection_run_id=selection_run_id,
+        snapshot_id=snapshot_id,
+        result=result,
+        recorded_at_utc=recorded_at_utc,
+    )
+    _persist_reserve_dispositions(
+        c,
+        selection_run_id=selection_run_id,
+        snapshot_id=snapshot_id,
+        reserves=reserves,
+        recorded_at_utc=recorded_at_utc,
+    )
+
+
+def _persist_quota_contribution_membership(
+    c: sqlite3.Connection,
+    *,
+    selection_run_id: str,
+    snapshot_id: str,
+    result: JointSelectionResult,
+    recorded_at_utc: str,
+) -> None:
+    """Project the accepted S5.1 membership artifact into its three row families.
+
+    All three are transposes of one output (Decision 020 section 6): this function
+    writes what that output already decided and computes no contribution rule of its
+    own. The entity family is load-bearing -- migration ``0009``'s feasible-transition
+    trigger compares every reserve package's contribution set against it -- and the
+    other two are the normalized member-level provenance for each persisted
+    ``achieved_count``.
+    """
+    membership = result.quota_contributions
+    for cik_padded, dimension, key in membership.entity_contributions():
+        c.execute(
+            "INSERT INTO pilot_selected_entity_quota_contributions "
+            "(selection_run_id, snapshot_id, cik_numeric, quota_dimension, quota_key, "
+            "recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+            (selection_run_id, snapshot_id, int(cik_padded), dimension, key, recorded_at_utc),
+        )
+    for accession_plain, dimension, key in membership.accession_contributions():
+        c.execute(
+            "INSERT INTO pilot_selected_accession_quota_contributions "
+            "(selection_run_id, snapshot_id, accession_plain, quota_dimension, quota_key, "
+            "recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+            (selection_run_id, snapshot_id, accession_plain, dimension, key, recorded_at_utc),
+        )
+    for dimension, key, member_order, member_kind, cik_padded, plain in membership.quota_members():
+        c.execute(
+            "INSERT INTO pilot_quota_result_members "
+            "(quota_result_id, selection_run_id, snapshot_id, member_order, member_kind, "
+            "cik_numeric, accession_plain, recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _quota_result_id(selection_run_id, dimension, key),
+                selection_run_id,
+                snapshot_id,
+                member_order,
+                member_kind,
+                int(cik_padded) if member_kind == "entity" else None,
+                plain if member_kind == "accession" else None,
+                recorded_at_utc,
+            ),
+        )
+
+
+def _persist_reserve_dispositions(
+    c: sqlite3.Connection,
+    *,
+    selection_run_id: str,
+    snapshot_id: str,
+    reserves: ReserveConstruction,
+    recorded_at_utc: str,
+) -> None:
+    """Write every target's single reserve disposition.
+
+    A package and its two child families are written together, so a package can never
+    be persisted without its accession bundle or its contribution signature. A target
+    with no compatible reserve gets exactly one ``pilot_selection_entity_reasons`` row
+    instead, and never both (Decision 020 section 7.1).
+    """
+    for package in reserves.packages:
+        c.execute(
+            "INSERT INTO pilot_reserves "
+            "(reserve_package_id, selection_run_id, snapshot_id, target_cik_numeric, "
+            "replacement_cik_numeric, reserve_rank, replaces_signature_sha256, "
+            "reserve_signature_sha256, signature_policy_version, quota_policy_version, "
+            "reserve_tie_break_sha256, evidence_floor, recorded_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                package.reserve_package_id,
+                selection_run_id,
+                snapshot_id,
+                int(package.target_cik_padded),
+                int(package.replacement_cik_padded),
+                package.reserve_rank,
+                package.replaces_signature_sha256,
+                package.reserve_signature_sha256,
+                package.signature_policy_version,
+                package.quota_policy_version,
+                package.reserve_tie_break_sha256,
+                package.evidence_floor,
+                recorded_at_utc,
+            ),
+        )
+        for entry in package.accessions:
+            c.execute(
+                "INSERT INTO pilot_reserve_accessions "
+                "(reserve_package_id, selection_run_id, snapshot_id, accession_plain, "
+                "accession_role, accession_order, accession_hash_sha256, recorded_at_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    package.reserve_package_id,
+                    selection_run_id,
+                    snapshot_id,
+                    entry.accession_plain,
+                    entry.accession_role,
+                    entry.accession_order,
+                    entry.accession_tie_break_sha256,
+                    recorded_at_utc,
+                ),
+            )
+        for dimension, key in package.quota_contributions:
+            c.execute(
+                "INSERT INTO pilot_reserve_quota_contributions "
+                "(reserve_package_id, selection_run_id, snapshot_id, quota_dimension, "
+                "quota_key, recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    package.reserve_package_id,
+                    selection_run_id,
+                    snapshot_id,
+                    dimension,
+                    key,
+                    recorded_at_utc,
+                ),
+            )
+    for entry_without_reserve in reserves.no_compatible_reserve:
+        c.execute(
+            "INSERT INTO pilot_selection_entity_reasons "
+            "(selection_run_id, snapshot_id, cik_numeric, reason_scope, reason_code, "
+            "recorded_at_utc) VALUES (?, ?, ?, 'reserve', ?, ?)",
+            (
+                selection_run_id,
+                snapshot_id,
+                int(entry_without_reserve.target_cik_padded),
+                entry_without_reserve.reason_code,
+                recorded_at_utc,
+            ),
         )
 
 
@@ -1882,6 +2071,7 @@ def execute_and_persist_joint_selection(
                 snapshot_id=snapshot_id,
                 selection_seed=selection_seed,
                 result=result,
+                reserves=derived.reserves,
                 recorded_at_utc=occurred_at_utc,
             )
             c.execute(
@@ -2081,6 +2271,10 @@ def _reconstruct(
     )
     _validate_persisted_accessions(connection, selection_run_id, snapshot_id, result)
     _validate_persisted_quota_results(connection, selection_run_id, snapshot_id, result)
+    _validate_persisted_membership(connection, selection_run_id, snapshot_id, result)
+    _validate_persisted_reserves(
+        connection, selection_run_id, snapshot_id, result, derived.reserves
+    )
 
     # Every field below is the value the run itself persisted. The identity comparison
     # above has already proved each one equals the derived value, so the wrapper can
@@ -2335,3 +2529,383 @@ def _expected_quota_row(
         diagnostic.status,
         diagnostic.binding_constraint,
     )
+
+
+# --------------------------------------------------------------------------
+# Stage S5.4 -- membership and reserve validation (Decision 020 section 10)
+# --------------------------------------------------------------------------
+
+
+def _require_rows_match(
+    persisted: Sequence[tuple[object, ...]],
+    expected: Sequence[tuple[object, ...]],
+    *,
+    where: str,
+    family: str,
+) -> None:
+    """Fail closed on any missing, extra, or altered row.
+
+    The comparison is over sorted tuples, so SQLite retrieval order can never affect a
+    result, and both directions are reported: a persisted run that is missing a row and
+    one that carries an extra row are equally refused.
+    """
+    if sorted(persisted) == sorted(expected):
+        return
+    missing = sorted(set(map(tuple, expected)) - set(map(tuple, persisted)))
+    extra = sorted(set(map(tuple, persisted)) - set(map(tuple, expected)))
+    message = (
+        f"{where}: persisted {family} rows do not match the re-derived membership "
+        f"({len(missing)} missing, {len(extra)} extra, "
+        f"{len(persisted)} persisted vs {len(expected)} derived)"
+    )
+    raise _fail(message)
+
+
+def _validate_persisted_membership(
+    connection: sqlite3.Connection,
+    selection_run_id: str,
+    snapshot_id: str,
+    result: JointSelectionResult,
+) -> None:
+    """Validate all three quota-contribution and member families by re-derivation.
+
+    Membership is never trusted as stored: it is re-derived from the frozen snapshot
+    (Decision 020 section 6) and every persisted row is compared against it. A
+    non-feasible run carries none of these rows at all.
+    """
+    where = f"selection_run_id {selection_run_id!r}"
+    membership = result.quota_contributions
+    entity_rows = connection.execute(
+        "SELECT cik_numeric, quota_dimension, quota_key "
+        "FROM pilot_selected_entity_quota_contributions "
+        "WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+    accession_rows = connection.execute(
+        "SELECT accession_plain, quota_dimension, quota_key "
+        "FROM pilot_selected_accession_quota_contributions "
+        "WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+    member_rows = connection.execute(
+        "SELECT quota_result_id, member_order, member_kind, cik_numeric, accession_plain "
+        "FROM pilot_quota_result_members WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+
+    if result.status != "feasible":
+        if entity_rows or accession_rows or member_rows:
+            message = (
+                f"{where} is {result.status!r} but persists contribution or member rows; a "
+                "non-feasible run carries no result rows"
+            )
+            raise _fail(message)
+        return
+
+    _require_rows_match(
+        [
+            (
+                canonical_anchor_cik_padded(_integer(row["cik_numeric"], "cik_numeric")),
+                _text(row["quota_dimension"], "quota_dimension"),
+                _text(row["quota_key"], "quota_key"),
+            )
+            for row in entity_rows
+        ],
+        list(membership.entity_contributions()),
+        where=where,
+        family="pilot_selected_entity_quota_contributions",
+    )
+    _require_rows_match(
+        [
+            (
+                _text(row["accession_plain"], "accession_plain"),
+                _text(row["quota_dimension"], "quota_dimension"),
+                _text(row["quota_key"], "quota_key"),
+            )
+            for row in accession_rows
+        ],
+        list(membership.accession_contributions()),
+        where=where,
+        family="pilot_selected_accession_quota_contributions",
+    )
+    _require_rows_match(
+        [
+            (
+                _text(row["quota_result_id"], "quota_result_id"),
+                _integer(row["member_order"], "member_order"),
+                _text(row["member_kind"], "member_kind"),
+                _optional_text(row["accession_plain"], "accession_plain"),
+                None
+                if row["cik_numeric"] is None
+                else canonical_anchor_cik_padded(_integer(row["cik_numeric"], "cik_numeric")),
+            )
+            for row in member_rows
+        ],
+        [
+            (
+                _quota_result_id(selection_run_id, dimension, key),
+                member_order,
+                member_kind,
+                plain if member_kind == "accession" else None,
+                cik_padded if member_kind == "entity" else None,
+            )
+            for dimension, key, member_order, member_kind, cik_padded, plain in (
+                membership.quota_members()
+            )
+        ],
+        where=where,
+        family="pilot_quota_result_members",
+    )
+
+
+def _validate_persisted_reserves(
+    connection: sqlite3.Connection,
+    selection_run_id: str,
+    snapshot_id: str,
+    result: JointSelectionResult,
+    reserves: ReserveConstruction,
+) -> None:
+    """Validate every reserve row and disposition against the re-derived construction.
+
+    Fails closed on a missing, extra, or altered package; a package identity, signature,
+    rank, or target/replacement pair that does not re-derive; a partial package missing
+    its accession bundle or its contribution signature; a contribution set that differs
+    from its target's; a replacement that is the target or is itself selected; a
+    duplicate replacement within one target; a reason row beside a package; and a
+    selected entity carrying neither disposition (Decision 020 section 10).
+    """
+    where = f"selection_run_id {selection_run_id!r}"
+    reserve_rows = connection.execute(
+        "SELECT reserve_package_id, target_cik_numeric, replacement_cik_numeric, reserve_rank, "
+        "replaces_signature_sha256, reserve_signature_sha256, signature_policy_version, "
+        "quota_policy_version, reserve_tie_break_sha256, evidence_floor FROM pilot_reserves "
+        "WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+    accession_rows = connection.execute(
+        "SELECT reserve_package_id, accession_plain, accession_role, accession_order, "
+        "accession_hash_sha256 FROM pilot_reserve_accessions "
+        "WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+    contribution_rows = connection.execute(
+        "SELECT reserve_package_id, quota_dimension, quota_key "
+        "FROM pilot_reserve_quota_contributions WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+    reason_rows = connection.execute(
+        "SELECT cik_numeric, reason_scope, reason_code FROM pilot_selection_entity_reasons "
+        "WHERE selection_run_id = ? AND snapshot_id = ?",
+        (selection_run_id, snapshot_id),
+    ).fetchall()
+
+    if result.status != "feasible":
+        if reserve_rows or accession_rows or contribution_rows or reason_rows:
+            message = (
+                f"{where} is {result.status!r} but persists reserve or disposition rows; a "
+                "non-feasible run carries no result rows"
+            )
+            raise _fail(message)
+        return
+
+    _require_rows_match(
+        [
+            (
+                _text(row["reserve_package_id"], "reserve_package_id"),
+                canonical_anchor_cik_padded(_integer(row["target_cik_numeric"], "target")),
+                canonical_anchor_cik_padded(
+                    _integer(row["replacement_cik_numeric"], "replacement")
+                ),
+                _integer(row["reserve_rank"], "reserve_rank"),
+                _text(row["replaces_signature_sha256"], "replaces_signature_sha256"),
+                _text(row["reserve_signature_sha256"], "reserve_signature_sha256"),
+                _text(row["signature_policy_version"], "signature_policy_version"),
+                _text(row["quota_policy_version"], "quota_policy_version"),
+                _text(row["reserve_tie_break_sha256"], "reserve_tie_break_sha256"),
+                _text(row["evidence_floor"], "evidence_floor"),
+            )
+            for row in reserve_rows
+        ],
+        [
+            (
+                package.reserve_package_id,
+                package.target_cik_padded,
+                package.replacement_cik_padded,
+                package.reserve_rank,
+                package.replaces_signature_sha256,
+                package.reserve_signature_sha256,
+                package.signature_policy_version,
+                package.quota_policy_version,
+                package.reserve_tie_break_sha256,
+                package.evidence_floor,
+            )
+            for package in reserves.packages
+        ],
+        where=where,
+        family="pilot_reserves",
+    )
+    _require_rows_match(
+        [
+            (
+                _text(row["reserve_package_id"], "reserve_package_id"),
+                _text(row["accession_plain"], "accession_plain"),
+                _text(row["accession_role"], "accession_role"),
+                _integer(row["accession_order"], "accession_order"),
+                _text(row["accession_hash_sha256"], "accession_hash_sha256"),
+            )
+            for row in accession_rows
+        ],
+        [
+            (
+                package.reserve_package_id,
+                entry.accession_plain,
+                entry.accession_role,
+                entry.accession_order,
+                entry.accession_tie_break_sha256,
+            )
+            for package in reserves.packages
+            for entry in package.accessions
+        ],
+        where=where,
+        family="pilot_reserve_accessions",
+    )
+    _require_rows_match(
+        [
+            (
+                _text(row["reserve_package_id"], "reserve_package_id"),
+                _text(row["quota_dimension"], "quota_dimension"),
+                _text(row["quota_key"], "quota_key"),
+            )
+            for row in contribution_rows
+        ],
+        [
+            (package.reserve_package_id, dimension, key)
+            for package in reserves.packages
+            for dimension, key in package.quota_contributions
+        ],
+        where=where,
+        family="pilot_reserve_quota_contributions",
+    )
+    _require_rows_match(
+        [
+            (
+                canonical_anchor_cik_padded(_integer(row["cik_numeric"], "cik_numeric")),
+                _text(row["reason_scope"], "reason_scope"),
+                _text(row["reason_code"], "reason_code"),
+            )
+            for row in reason_rows
+        ],
+        [
+            (entry.target_cik_padded, "reserve", entry.reason_code)
+            for entry in reserves.no_compatible_reserve
+        ],
+        where=where,
+        family="pilot_selection_entity_reasons",
+    )
+    _require_reserve_invariants(where, result, reserves)
+
+
+def _require_reserve_invariants(
+    where: str, result: JointSelectionResult, reserves: ReserveConstruction
+) -> None:
+    """The S5.4 invariants migration ``0009`` does not enforce.
+
+    Decision 020 section 7 makes replacement/selected disjointness and within-target
+    replacement uniqueness explicit S5.4 invariants rather than DDL constraints, so they
+    are proved here against the re-derived construction as well as by the pure module
+    that built it.
+    """
+    selected = {candidate.cik_padded for candidate in result.selected_entities}
+    membership = result.quota_contributions
+    seen: dict[str, set[str]] = {}
+    for package in reserves.packages:
+        if package.reserve_rank != RESERVE_RANK:
+            message = (
+                f"{where}: reserve package {package.reserve_package_id!r} is at rank "
+                f"{package.reserve_rank}, but only rank {RESERVE_RANK} is authorized"
+            )
+            raise _fail(message)
+        if package.target_cik_padded == package.replacement_cik_padded:
+            message = (
+                f"{where}: reserve package {package.reserve_package_id!r} replaces its target "
+                "with itself"
+            )
+            raise _fail(message)
+        if package.replacement_cik_padded in selected:
+            message = (
+                f"{where}: reserve replacement {package.replacement_cik_padded} for target "
+                f"{package.target_cik_padded} is itself a selected entity"
+            )
+            raise _fail(message)
+        replacements = seen.setdefault(package.target_cik_padded, set())
+        if package.replacement_cik_padded in replacements:
+            message = (
+                f"{where}: replacement {package.replacement_cik_padded} appears more than once "
+                f"for target {package.target_cik_padded}"
+            )
+            raise _fail(message)
+        replacements.add(package.replacement_cik_padded)
+        expected = membership.contribution_keys_for_entity(package.target_cik_padded)
+        if package.quota_contributions != expected:
+            message = (
+                f"{where}: reserve package {package.reserve_package_id!r} contributes "
+                f"{list(package.quota_contributions)!r}, but its target "
+                f"{package.target_cik_padded} contributes {list(expected)!r}"
+            )
+            raise _fail(message)
+        if not package.accessions:
+            message = (
+                f"{where}: reserve package {package.reserve_package_id!r} carries no accession "
+                "bundle"
+            )
+            raise _fail(message)
+        _require_package_signature_recomputes(where, package)
+    _require_one_disposition_per_selected_entity(where, selected, reserves)
+
+
+def _require_package_signature_recomputes(where: str, package: ReservePackage) -> None:
+    """Both stored signatures must be well-formed and equal.
+
+    The DDL equality ``CHECK`` proves only that the two stored columns agree; the
+    re-derivation above is what proves each was computed correctly from current content
+    (Decision 016 section 7). This adds the shape gate a malformed digest would slip
+    past.
+    """
+    for label, digest in (
+        ("replaces_signature_sha256", package.replaces_signature_sha256),
+        ("reserve_signature_sha256", package.reserve_signature_sha256),
+    ):
+        if len(digest) != 64 or digest != digest.lower() or not _HEX64_PATTERN.match(digest):
+            message = (
+                f"{where}: reserve package {package.reserve_package_id!r} carries a malformed "
+                f"{label}"
+            )
+            raise _fail(message)
+    if package.replaces_signature_sha256 != package.reserve_signature_sha256:
+        message = (
+            f"{where}: reserve package {package.reserve_package_id!r} has a target signature "
+            "that does not equal its replacement signature"
+        )
+        raise _fail(message)
+
+
+def _require_one_disposition_per_selected_entity(
+    where: str, selected: set[str], reserves: ReserveConstruction
+) -> None:
+    """Exactly one disposition per selected entity, controls included."""
+    targets = list(reserves.disposition_targets())
+    duplicated = sorted({cik for cik in targets if targets.count(cik) > 1})
+    if duplicated:
+        message = f"{where}: selected entities {duplicated!r} carry more than one disposition"
+        raise _fail(message)
+    missing = sorted(selected - set(targets))
+    if missing:
+        message = (
+            f"{where}: selected entities {missing!r} carry neither a reserve package nor a "
+            "no-compatible-reserve disposition"
+        )
+        raise _fail(message)
+    unknown = sorted(set(targets) - selected)
+    if unknown:
+        message = f"{where}: reserve dispositions name unselected entities {unknown!r}"
+        raise _fail(message)

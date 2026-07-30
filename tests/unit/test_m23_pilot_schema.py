@@ -269,10 +269,10 @@ def _insert_selection_run(
 # --------------------------------------------------------------------------
 
 
-def test_migration_inventory_is_contiguous_through_0011() -> None:
+def test_migration_inventory_is_contiguous_through_0012() -> None:
     versions = tuple(migration.version for migration in available_migrations())
-    assert versions == tuple(range(1, 12))
-    assert versions[-1] == 11
+    assert versions == tuple(range(1, 13))
+    assert versions[-1] == 12
 
 
 def test_migration_0009_contains_no_forbidden_statements() -> None:
@@ -334,12 +334,12 @@ def test_migration_0009_raise_messages_are_string_literals() -> None:
     assert checked == 79, f"expected 79 RAISE invocations in migration 0009, found {checked}"
 
 
-def test_fresh_database_applies_migrations_through_0011(tmp_path: Path) -> None:
+def test_fresh_database_applies_migrations_through_0012(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:
         cursor = connection.execute("SELECT version FROM ops_schema_migrations ORDER BY version")
         versions = tuple(row["version"] for row in cursor.fetchall())
-    assert versions == tuple(range(1, 12))
+    assert versions == tuple(range(1, 13))
 
 
 def test_second_migration_pass_is_idempotent(tmp_path: Path) -> None:
@@ -550,7 +550,7 @@ def test_the_frozen_joint_selector_constant_is_exactly_the_approved_value() -> N
     assert "PILOT_JOINT_SELECTOR_POLICY_VERSION" in pilot_policy.__all__
 
 
-def test_exactly_twenty_one_pilot_tables_exist(tmp_path: Path) -> None:
+def test_exactly_twenty_two_pilot_tables_exist(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     expected = {
         "pilot_candidate_snapshots",
@@ -574,6 +574,8 @@ def test_exactly_twenty_one_pilot_tables_exist(tmp_path: Path) -> None:
         "pilot_quota_result_members",
         "pilot_manifest_versions",
         "pilot_projection_recovery_events",
+        # Migration 0012, the single additive Stage S5.4 table (Decision 020 section 8.2).
+        "pilot_selection_entity_reasons",
     }
     with connect(path, writer=True) as connection:
         rows = connection.execute(
@@ -581,7 +583,7 @@ def test_exactly_twenty_one_pilot_tables_exist(tmp_path: Path) -> None:
         ).fetchall()
     found = {row["name"] for row in rows}
     assert found == expected
-    assert len(found) == 21
+    assert len(found) == 22
 
 
 def test_every_pilot_table_is_strict(tmp_path: Path) -> None:
@@ -590,7 +592,7 @@ def test_every_pilot_table_is_strict(tmp_path: Path) -> None:
         rows = connection.execute(
             "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name LIKE 'pilot_%'"
         ).fetchall()
-    assert len(rows) == 21
+    assert len(rows) == 22
     for row in rows:
         assert "STRICT" in row["sql"], f"{row['name']} is not STRICT"
 
@@ -1650,19 +1652,22 @@ def _insert_selected_entity(
     snapshot_id: str,
     cik_numeric: int,
     selected_order: int,
+    entity_role: str = "operating",
 ) -> None:
     with transaction(connection) as c:
         c.execute(
             "INSERT INTO pilot_selected_entities "
             "(selection_run_id, snapshot_id, cik_numeric, selected_order, entity_hash_sha256, "
             "entity_role, candidate_category, recorded_at_utc) "
-            "VALUES (?, ?, ?, ?, ?, 'operating', 'operating', '2026-01-01T00:00:00Z')",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')",
             (
                 selection_run_id,
                 snapshot_id,
                 cik_numeric,
                 selected_order,
                 _hex(f"entity-hash:{selection_run_id}:{cik_numeric}"),
+                entity_role,
+                entity_role,
             ),
         )
 
@@ -1690,6 +1695,61 @@ def _insert_selected_accession(
                 selected_order,
                 _hex(f"accession-hash:{selection_run_id}:{accession_plain}"),
             ),
+        )
+
+
+#: Decision 020 section 13: the only reserve-scope disposition code the migration
+#: 0012 CHECK constraint admits.
+_NO_COMPATIBLE_RESERVE = "REVIEW_PILOT_NO_COMPATIBLE_RESERVE"
+
+
+def _insert_reserve_disposition(
+    connection: sqlite3.Connection,
+    *,
+    selection_run_id: str,
+    snapshot_id: str,
+    cik_numeric: int,
+    reason_scope: str = "reserve",
+    reason_code: str = _NO_COMPATIBLE_RESERVE,
+    recorded_at_utc: str = "2026-01-01T00:00:00Z",
+) -> None:
+    """Insert one migration-0012 ``pilot_selection_entity_reasons`` row."""
+    with transaction(connection) as c:
+        c.execute(
+            "INSERT INTO pilot_selection_entity_reasons "
+            "(selection_run_id, snapshot_id, cik_numeric, reason_scope, reason_code, "
+            "recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                selection_run_id,
+                snapshot_id,
+                cik_numeric,
+                reason_scope,
+                reason_code,
+                recorded_at_utc,
+            ),
+        )
+
+
+def _seed_reserve_dispositions(
+    connection: sqlite3.Connection,
+    *,
+    selection_run_id: str,
+    snapshot_id: str,
+    ciks: range | tuple[int, ...],
+) -> None:
+    """Give every named selected entity its one no-compatible-reserve disposition.
+
+    Migration 0012 requires exactly one disposition per selected entity before
+    ``running -> feasible``. Seeding the reason-row form -- rather than a reserve
+    package -- is the minimal way to satisfy that trigger, so the migration-0009
+    invariant a test is actually about remains the one that trips.
+    """
+    for cik in ciks:
+        _insert_reserve_disposition(
+            connection,
+            selection_run_id=selection_run_id,
+            snapshot_id=snapshot_id,
+            cik_numeric=cik,
         )
 
 
@@ -1779,6 +1839,9 @@ def test_feasible_run_requires_exactly_24_selected_entities(tmp_path: Path) -> N
                 cik_numeric=cik,
                 selected_order=order,
             )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 25)
+        )
         with transaction(connection) as c:
             c.execute(
                 "UPDATE pilot_selection_runs SET run_state = 'feasible', "
@@ -1808,6 +1871,9 @@ def test_feasible_run_with_fewer_than_24_entities_fails(tmp_path: Path) -> None:
                 cik_numeric=cik,
                 selected_order=order,
             )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 6)
+        )
         with (
             pytest.raises(
                 sqlite3.IntegrityError, match="requires exactly 24 actual selected entities"
@@ -1851,10 +1917,19 @@ def test_feasible_requires_actual_rows_not_only_declared_count(tmp_path: Path) -
 
 
 def _feasible_run_with_24_actual_entities_and_accessions(
-    connection: sqlite3.Connection, *, snapshot_id: str, run_id: str
+    connection: sqlite3.Connection,
+    *,
+    snapshot_id: str,
+    run_id: str,
+    seed_dispositions: bool = True,
 ) -> None:
     """Seed a running selection run with exactly 24 actual selected-entity and
-    selected-accession rows, but leave the declared count columns untouched (B1)."""
+    selected-accession rows, but leave the declared count columns untouched (B1).
+
+    ``seed_dispositions`` is left on by default so a migration-0009 invariant under
+    test is the one that trips; the migration-0012 disposition tests turn it off and
+    craft the disposition state they are actually about.
+    """
     _frozen_snapshot_with_n_entities(connection, snapshot_id, 24)
     _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
     for order, cik in enumerate(range(1, 25), start=1):
@@ -1872,6 +1947,10 @@ def _feasible_run_with_24_actual_entities_and_accessions(
             accession_plain=f"acc-{cik}",
             anchor_cik_numeric=cik,
             selected_order=order,
+        )
+    if seed_dispositions:
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 25)
         )
 
 
@@ -2047,6 +2126,9 @@ def test_feasible_requires_selected_order_contiguity(tmp_path: Path) -> None:
             snapshot_id=snapshot_id,
             cik_numeric=24,
             selected_order=25,
+        )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 25)
         )
         with (
             pytest.raises(
@@ -2938,3 +3020,964 @@ def test_no_persistent_repository_database_is_touched(tmp_path: Path) -> None:
     assert after_candidates == persistent_candidates
     after = {candidate: candidate.stat().st_mtime for candidate in after_candidates}
     assert before == after
+
+
+# --------------------------------------------------------------------------
+# Migration 0012 -- pilot_selection_entity_reasons (Decision 020 section 8.2)
+# --------------------------------------------------------------------------
+#
+# The complete DDL -- the table and all four triggers -- is frozen in Decision 020
+# section 8.2 and is reproduced verbatim in migration 0012. These tests prove the
+# reproduction is byte-faithful, that the migration is additive only, and that
+# every guard behaves as the frozen SQL says. Following the owner's binding
+# enforcement-layer clarification (Decision 020 section 8.3), each invariant is
+# proven at the layer that owns it: unauthorized scope and code at the CHECK
+# constraints, duplicate dispositions at the primary key, duplicate rank-1
+# packages at migration 0009's existing UNIQUE constraint, and only the
+# constructible invalid states at the feasible transition.
+
+_DECISION_020 = (
+    Path(__file__).resolve().parents[2]
+    / "Docs"
+    / "Decisions"
+    / "decision_020_m23_s5_4_reserve_architecture.md"
+)
+_MIGRATION_0012 = _MIGRATIONS_DIR / "0012_m23_selection_entity_reasons.sql"
+
+#: The accepted Decision 020 section 8.2 digests: the table DDL, the three
+#: lifecycle guards, the feasible-transition trigger, and their concatenation.
+_FROZEN_SQL_SHA256 = (
+    "4340a681675ebaf648e5553210b2a119ea5202bdfb5254a7310b6b7c6072fc7a",
+    "d291d431a0171c672be4629097e13ad32f63efd85fc2e4fc641ebf9c95d62659",
+    "df8299099e1d7eaceb93fd31270427bfcb964cf87149dfc2e2e56581fa28eba8",
+)
+_FROZEN_CONCATENATED_SHA256 = "8a157a6768996e1a7006202f36fcff1a235198a68a308383f63e7b534dc16443"
+
+_MIGRATION_0011_SHA256 = hashlib.sha256(
+    (_MIGRATIONS_DIR / "0011_m23_joint_selector_policy_reference.sql").read_bytes()
+).hexdigest()
+
+
+def _frozen_sql_blocks() -> tuple[str, ...]:
+    """The three ``sql`` fenced blocks of Decision 020 section 8.2, in order."""
+    text = _DECISION_020.read_text(encoding="utf-8")
+    return tuple(re.findall(r"```sql\n(.*?)```", text, flags=re.S))
+
+
+def _migration_0012_statements() -> str:
+    """Migration 0012 from its first statement line to end of file.
+
+    The file's leading ``--`` header is repository convention (migrations 0010 and
+    0011 carry the same shape); everything from the first non-comment, non-blank
+    line onward must be the frozen SQL and nothing else.
+    """
+    lines = _MIGRATION_0012.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.strip() and not line.lstrip().startswith("--")
+    )
+    return "".join(lines[start:])
+
+
+def test_the_decision_020_sql_blocks_match_the_accepted_digests() -> None:
+    blocks = _frozen_sql_blocks()
+    assert len(blocks) == 3
+    for block, expected in zip(blocks, _FROZEN_SQL_SHA256, strict=True):
+        assert hashlib.sha256(block.encode("utf-8")).hexdigest() == expected
+    assert (
+        hashlib.sha256("".join(blocks).encode("utf-8")).hexdigest() == _FROZEN_CONCATENATED_SHA256
+    )
+
+
+def test_migration_0012_reproduces_the_frozen_decision_020_sql_byte_for_byte() -> None:
+    """No implementation-time reinterpretation of the section 8.2 SQL is permitted:
+    a difference here is a defect in the migration, never a correction to the
+    decision record."""
+    statements = _migration_0012_statements()
+    assert statements == "".join(_frozen_sql_blocks())
+    assert hashlib.sha256(statements.encode("utf-8")).hexdigest() == _FROZEN_CONCATENATED_SHA256
+
+
+def test_migration_0012_is_ddl_only_and_carries_no_forbidden_statement() -> None:
+    body = _migration_0012_statements()
+    assert re.search(r"\bBEGIN\s*;", body) is None
+    assert re.search(r"\bBEGIN\s+(IMMEDIATE|DEFERRED|EXCLUSIVE|TRANSACTION)\b", body) is None
+    assert "COMMIT" not in body.upper()
+    assert "PRAGMA" not in body.upper()
+    assert not re.search(r"\bDROP\b", body, re.IGNORECASE)
+    assert not re.search(r"\bALTER\s+TABLE\b", body, re.IGNORECASE)
+    assert "INSERT INTO" not in body.upper()
+    assert "reference_policy_versions" not in body
+
+
+def test_migration_0012_creates_exactly_one_table_and_four_triggers(tmp_path: Path) -> None:
+    body = _migration_0012_statements()
+    assert body.count("CREATE TABLE") == 1
+    assert body.count("CREATE TRIGGER") == 4
+    assert body.count("CREATE INDEX") == 0
+    assert body.count("CREATE UNIQUE INDEX") == 0
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        objects = connection.execute(
+            "SELECT name, type FROM sqlite_master "
+            "WHERE name LIKE 'pilot_selection_entity_reasons%' "
+            "OR name = 'pilot_selection_run_feasible_requires_reserve_disposition' "
+            "ORDER BY name"
+        ).fetchall()
+    assert [(row["type"], row["name"]) for row in objects] == [
+        ("table", "pilot_selection_entity_reasons"),
+        ("trigger", "pilot_selection_entity_reasons_delete_guard"),
+        ("trigger", "pilot_selection_entity_reasons_insert_guard"),
+        ("trigger", "pilot_selection_entity_reasons_update_guard"),
+        ("trigger", "pilot_selection_run_feasible_requires_reserve_disposition"),
+    ]
+
+
+def test_migrations_0009_to_0011_are_byte_identical_after_the_s5_4_addition() -> None:
+    """Decision 020 sections 8.2 and 11: migration 0012 edits, replaces, and
+    reinterprets none of them, and replaces no existing trigger."""
+    assert (
+        hashlib.sha256(
+            (_MIGRATIONS_DIR / "0010_m23_quota_policy_reference.sql").read_bytes()
+        ).hexdigest()
+        == _MIGRATION_0010_SHA256
+    )
+    for name in (
+        "0009_m23_pilot_schema.sql",
+        "0010_m23_quota_policy_reference.sql",
+        "0011_m23_joint_selector_policy_reference.sql",
+    ):
+        content = (_MIGRATIONS_DIR / name).read_text(encoding="utf-8")
+        assert "pilot_selection_entity_reasons" not in content
+        assert "pilot_selection_run_feasible_requires_reserve_disposition" not in content
+    body = _migration_0012_statements()
+    assert "DROP TRIGGER" not in body.upper()
+    for existing in (
+        "pilot_selection_run_feasible_requires_actual_results",
+        "pilot_selection_run_requires_clean_non_feasible_result",
+        "pilot_selection_run_transition_guard",
+    ):
+        assert existing not in body
+
+
+def test_migration_0012_is_idempotent_under_a_second_runner_pass(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        assert apply_migrations(connection) == ()
+        count = connection.execute(
+            "SELECT COUNT(*) AS rows FROM sqlite_master "
+            "WHERE name = 'pilot_selection_entity_reasons'"
+        ).fetchone()["rows"]
+    assert count == 1
+
+
+def test_the_disposition_table_has_exactly_the_frozen_columns_and_key(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        columns = connection.execute(
+            "SELECT name, type, `notnull`, pk "
+            "FROM pragma_table_info('pilot_selection_entity_reasons')"
+        ).fetchall()
+        foreign_keys = connection.execute(
+            "SELECT `table`, `from`, `to` FROM pragma_foreign_key_list("
+            "'pilot_selection_entity_reasons') ORDER BY `table`, `from`"
+        ).fetchall()
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'pilot_selection_entity_reasons'"
+        ).fetchone()["sql"]
+    assert [(row["name"], row["type"]) for row in columns] == [
+        ("selection_run_id", "TEXT"),
+        ("snapshot_id", "TEXT"),
+        ("cik_numeric", "INTEGER"),
+        ("reason_scope", "TEXT"),
+        ("reason_code", "TEXT"),
+        ("recorded_at_utc", "TEXT"),
+    ]
+    assert all(row["notnull"] == 1 for row in columns)
+    assert {row["name"] for row in columns if row["pk"]} == {
+        "selection_run_id",
+        "snapshot_id",
+        "cik_numeric",
+        "reason_scope",
+    }
+    assert "detail" not in {row["name"] for row in columns}
+    assert sorted((row["table"], row["from"]) for row in foreign_keys) == [
+        ("pilot_selected_entities", "cik_numeric"),
+        ("pilot_selected_entities", "selection_run_id"),
+        ("pilot_selected_entities", "snapshot_id"),
+        ("reference_reason_codes", "reason_code"),
+    ]
+    assert "STRICT" in sql
+    assert "reason_scope IN ('reserve')" in sql
+    assert "reason_code = 'REVIEW_PILOT_NO_COMPATIBLE_RESERVE'" in sql
+
+
+def _running_run_with_one_selected_entity(
+    connection: sqlite3.Connection, *, snapshot_id: str, run_id: str, entities: int = 1
+) -> None:
+    _frozen_snapshot_with_n_entities(connection, snapshot_id, max(entities, 2))
+    _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+    for order, cik in enumerate(range(1, entities + 1), start=1):
+        _insert_selected_entity(
+            connection,
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            cik_numeric=cik,
+            selected_order=order,
+        )
+
+
+# --- CHECK-constraint boundary (Decision 020 section 8.3, item 1) ----------- #
+
+
+def test_an_unauthorized_reserve_scope_is_refused_by_the_check_constraint(
+    tmp_path: Path,
+) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("scope-check-snapshot")
+    run_id = _hex("scope-check-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+            _insert_reserve_disposition(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                cik_numeric=1,
+                reason_scope="selection",
+            )
+
+
+def test_an_unauthorized_reserve_reason_code_is_refused_by_the_check_constraint(
+    tmp_path: Path,
+) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("code-check-snapshot")
+    run_id = _hex("code-check-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+            _insert_reserve_disposition(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                cik_numeric=1,
+                reason_code="REVIEW_PILOT_QUOTA_UNMEASURABLE_AT_M23",
+            )
+
+
+def test_an_unregistered_reason_code_is_refused_by_the_foreign_key(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("code-fk-snapshot")
+    run_id = _hex("code-fk-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+        connection.execute(
+            "DELETE FROM reference_reason_codes WHERE reason_code = ?",
+            (_NO_COMPATIBLE_RESERVE,),
+        )
+        connection.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_reserve_disposition(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                cik_numeric=1,
+            )
+
+
+def test_a_cik_that_is_not_a_selected_entity_of_that_run_is_refused(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("entity-fk-snapshot")
+    run_id = _hex("entity-fk-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_reserve_disposition(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                cik_numeric=2,
+            )
+
+
+# --- primary-key boundary (Decision 020 section 8.3, item 2) --------------- #
+
+
+def test_a_duplicate_disposition_row_is_refused_by_the_primary_key(tmp_path: Path) -> None:
+    """Excluding ``reason_code`` from the key is what makes a second disposition
+    for one target structurally impossible."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("duplicate-disposition-snapshot")
+    run_id = _hex("duplicate-disposition-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+        _insert_reserve_disposition(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, cik_numeric=1
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint"):
+            _insert_reserve_disposition(
+                connection, selection_run_id=run_id, snapshot_id=snapshot_id, cik_numeric=1
+            )
+        rows = connection.execute(
+            "SELECT COUNT(*) AS rows FROM pilot_selection_entity_reasons"
+        ).fetchone()["rows"]
+    assert rows == 1
+
+
+# --- migration 0009's existing UNIQUE (Decision 020 section 8.3, item 3) ---- #
+
+
+def test_a_duplicate_rank_one_reserve_package_is_refused_at_insertion(tmp_path: Path) -> None:
+    """Migration 0012 neither duplicates nor replaces this constraint, and no test
+    may require the transition trigger to catch a row that cannot be written."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("duplicate-rank1-snapshot")
+    run_id = _hex("duplicate-rank1-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+        _insert_reserve(
+            connection,
+            reserve_package_id=_hex("rank1-a"),
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            target_cik_numeric=1,
+            replacement_cik_numeric=2,
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint"):
+            _insert_reserve(
+                connection,
+                reserve_package_id=_hex("rank1-b"),
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                target_cik_numeric=1,
+                replacement_cik_numeric=3,
+            )
+
+
+# --- lifecycle guards ------------------------------------------------------- #
+
+
+def test_a_disposition_insert_requires_a_running_run(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("insert-guard-snapshot")
+    run_id = _hex("insert-guard-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _frozen_snapshot_with_n_entities(connection, snapshot_id, 2)
+        _insert_selection_run(
+            connection,
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            run_state="planned",
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="requires an existing running selection run"
+        ):
+            _insert_reserve_disposition(
+                connection, selection_run_id=run_id, snapshot_id=snapshot_id, cik_numeric=1
+            )
+
+
+def test_a_disposition_insert_for_a_missing_run_fails_closed(tmp_path: Path) -> None:
+    """The frozen guard uses ``NOT EXISTS (... AND run_state = 'running')``, which is
+    true -- and therefore aborts -- when no such run row exists at all. Migration
+    0009's ``(SELECT run_state ...) <> 'running'`` form yields NULL there and never
+    fires; that three-valued-logic path does not exist here."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("insert-missing-run-snapshot")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _frozen_snapshot_with_n_entities(connection, snapshot_id, 2)
+        with pytest.raises(
+            sqlite3.IntegrityError, match="requires an existing running selection run"
+        ):
+            _insert_reserve_disposition(
+                connection,
+                selection_run_id=_hex("no-such-run"),
+                snapshot_id=snapshot_id,
+                cik_numeric=1,
+            )
+
+
+def _running_run_with_one_disposition(
+    connection: sqlite3.Connection, *, snapshot_id: str, run_id: str
+) -> None:
+    _running_run_with_one_selected_entity(connection, snapshot_id=snapshot_id, run_id=run_id)
+    _insert_reserve_disposition(
+        connection, selection_run_id=run_id, snapshot_id=snapshot_id, cik_numeric=1
+    )
+
+
+def test_recorded_at_utc_may_be_updated_while_the_same_run_is_running(tmp_path: Path) -> None:
+    """Operational provenance only: excluded from every deterministic identity and
+    hash, and never defining the outcome (Decision 020 sections 8.2 and 9)."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("update-timestamp-snapshot")
+    run_id = _hex("update-timestamp-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_disposition(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_entity_reasons SET recorded_at_utc = ? "
+                "WHERE selection_run_id = ?",
+                ("2026-02-02T00:00:00Z", run_id),
+            )
+        stored = connection.execute(
+            "SELECT recorded_at_utc FROM pilot_selection_entity_reasons WHERE selection_run_id = ?",
+            (run_id,),
+        ).fetchone()["recorded_at_utc"]
+    assert stored == "2026-02-02T00:00:00Z"
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    (
+        ("snapshot_id", "other-snapshot"),
+        ("cik_numeric", 2),
+    ),
+)
+def test_target_identity_columns_are_immutable(tmp_path: Path, column: str, value: object) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("immutable-identity-snapshot")
+    run_id = _hex("immutable-identity-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_disposition(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with (
+            pytest.raises(sqlite3.IntegrityError, match="target identity is immutable"),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                f"UPDATE pilot_selection_entity_reasons SET {column} = ? "  # noqa: S608
+                "WHERE selection_run_id = ?",
+                (value, run_id),
+            )
+
+
+def test_a_disposition_cannot_be_moved_onto_a_feasible_run(tmp_path: Path) -> None:
+    """The 2026-07-29 defect, closed: with an OLD-only UPDATE predicate a row could
+    be moved from a running run onto an already-feasible one, leaving a sealed run
+    holding both a reserve package and a no-compatible-reserve row for one target."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("cross-run-move-snapshot")
+    running_run = _hex("cross-run-move-running")
+    sealed_run = _hex("cross-run-move-sealed")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=sealed_run
+        )
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'feasible', "
+                "selected_entity_count = 24, selected_accession_count = 24 "
+                "WHERE selection_run_id = ?",
+                (sealed_run,),
+            )
+        _running_selection_run(connection, selection_run_id=running_run, snapshot_id=snapshot_id)
+        _insert_selected_entity(
+            connection,
+            selection_run_id=running_run,
+            snapshot_id=snapshot_id,
+            cik_numeric=1,
+            selected_order=1,
+        )
+        _insert_reserve_disposition(
+            connection,
+            selection_run_id=running_run,
+            snapshot_id=snapshot_id,
+            cik_numeric=1,
+        )
+        with (
+            pytest.raises(
+                sqlite3.IntegrityError, match="requires an existing running selection run"
+            ),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "UPDATE pilot_selection_entity_reasons SET selection_run_id = ? "
+                "WHERE selection_run_id = ?",
+                (sealed_run, running_run),
+            )
+        sealed_rows = connection.execute(
+            "SELECT COUNT(*) AS rows FROM pilot_selection_entity_reasons "
+            "WHERE selection_run_id = ?",
+            (sealed_run,),
+        ).fetchone()["rows"]
+    assert sealed_rows == 24
+
+
+def test_a_disposition_cannot_be_moved_between_two_running_runs(tmp_path: Path) -> None:
+    """Both runs are running, so the run predicate passes and the immutability
+    predicate is the one that refuses the move."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("two-running-snapshot")
+    first_run = _hex("two-running-first")
+    second_run = _hex("two-running-second")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_disposition(connection, snapshot_id=snapshot_id, run_id=first_run)
+        _running_selection_run(connection, selection_run_id=second_run, snapshot_id=snapshot_id)
+        _insert_selected_entity(
+            connection,
+            selection_run_id=second_run,
+            snapshot_id=snapshot_id,
+            cik_numeric=1,
+            selected_order=1,
+        )
+        with (
+            pytest.raises(sqlite3.IntegrityError, match="target identity is immutable"),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "UPDATE pilot_selection_entity_reasons SET selection_run_id = ? "
+                "WHERE selection_run_id = ?",
+                (second_run, first_run),
+            )
+
+
+def test_a_disposition_may_be_deleted_while_its_run_is_running(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("delete-guard-snapshot")
+    run_id = _hex("delete-guard-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_disposition(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with transaction(connection) as c:
+            c.execute(
+                "DELETE FROM pilot_selection_entity_reasons WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) AS rows FROM pilot_selection_entity_reasons"
+            ).fetchone()["rows"]
+            == 0
+        )
+
+
+def _drop_run_row_bypassing_foreign_keys(path: Path, run_id: str) -> None:
+    """Simulate catalog corruption: the associated run row disappears.
+
+    Foreign keys make this unreachable through the application connection -- the
+    selected-entity child would block it -- so the row is removed on a raw
+    connection with foreign keys off, exactly as the migration-provenance suite
+    tampers with stored provenance. The point is what the guards do afterwards.
+    """
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute("DELETE FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,))
+        raw.commit()
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "UPDATE pilot_selection_entity_reasons SET recorded_at_utc = 'x' "
+        "WHERE selection_run_id = ?",
+        "DELETE FROM pilot_selection_entity_reasons WHERE selection_run_id = ?",
+    ),
+    ids=("update", "delete"),
+)
+def test_update_and_delete_fail_closed_when_the_associated_run_is_missing(
+    tmp_path: Path, statement: str
+) -> None:
+    """Every guard uses an explicit ``NOT EXISTS (... AND run_state = 'running')``,
+    which is true -- and therefore aborts -- when no such run row exists at all."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("missing-run-guard-snapshot")
+    run_id = _hex("missing-run-guard-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_disposition(connection, snapshot_id=snapshot_id, run_id=run_id)
+    _drop_run_row_bypassing_foreign_keys(path, run_id)
+    with connect(path, writer=True) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) AS rows FROM pilot_selection_runs WHERE selection_run_id = ?",
+                (run_id,),
+            ).fetchone()["rows"]
+            == 0
+        )
+        with (
+            pytest.raises(
+                sqlite3.IntegrityError, match="requires an existing running selection run"
+            ),
+            transaction(connection) as c,
+        ):
+            c.execute(statement, (run_id,))
+        remaining = connection.execute(
+            "SELECT COUNT(*) AS rows FROM pilot_selection_entity_reasons "
+            "WHERE selection_run_id = ?",
+            (run_id,),
+        ).fetchone()["rows"]
+    assert remaining == 1
+
+
+def test_disposition_rows_are_immutable_once_the_run_leaves_running(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("terminal-immutable-snapshot")
+    run_id = _hex("terminal-immutable-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id
+        )
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'feasible', "
+                "selected_entity_count = 24, selected_accession_count = 24 "
+                "WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        with (
+            pytest.raises(
+                sqlite3.IntegrityError, match="requires an existing running selection run"
+            ),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "UPDATE pilot_selection_entity_reasons SET recorded_at_utc = 'x' "
+                "WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        with (
+            pytest.raises(
+                sqlite3.IntegrityError, match="requires an existing running selection run"
+            ),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "DELETE FROM pilot_selection_entity_reasons WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        remaining = connection.execute(
+            "SELECT COUNT(*) AS rows FROM pilot_selection_entity_reasons "
+            "WHERE selection_run_id = ?",
+            (run_id,),
+        ).fetchone()["rows"]
+    assert remaining == 24
+
+
+def test_a_disposition_insert_is_refused_once_the_run_is_feasible(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("post-feasible-insert-snapshot")
+    run_id = _hex("post-feasible-insert-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 24)
+        )
+        _insert_reserve(
+            connection,
+            reserve_package_id=_hex("post-feasible-reserve"),
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            target_cik_numeric=24,
+            replacement_cik_numeric=1,
+        )
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'feasible', "
+                "selected_entity_count = 24, selected_accession_count = 24 "
+                "WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="requires an existing running selection run"
+        ):
+            _insert_reserve_disposition(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                cik_numeric=24,
+            )
+
+
+# --- feasible-transition disposition completeness --------------------------- #
+
+
+def _transition_to_feasible(connection: sqlite3.Connection, run_id: str) -> None:
+    with transaction(connection) as c:
+        c.execute(
+            "UPDATE pilot_selection_runs SET run_state = 'feasible', "
+            "selected_entity_count = 24, selected_accession_count = 24 "
+            "WHERE selection_run_id = ?",
+            (run_id,),
+        )
+
+
+def test_a_run_where_every_selected_entity_has_one_disposition_becomes_feasible(
+    tmp_path: Path,
+) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("disposition-ok-snapshot")
+    run_id = _hex("disposition-ok-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 24)
+        )
+        _insert_reserve(
+            connection,
+            reserve_package_id=_hex("mixed-disposition-reserve"),
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            target_cik_numeric=24,
+            replacement_cik_numeric=1,
+        )
+        _transition_to_feasible(connection, run_id)
+        state = connection.execute(
+            "SELECT run_state FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,)
+        ).fetchone()["run_state"]
+    assert state == "feasible"
+
+
+def test_a_selected_entity_with_neither_disposition_refuses_the_transition(
+    tmp_path: Path,
+) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("neither-disposition-snapshot")
+    run_id = _hex("neither-disposition-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="requires exactly one reserve disposition per selected entity",
+        ):
+            _transition_to_feasible(connection, run_id)
+
+
+def test_one_missing_disposition_among_many_refuses_the_transition(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("one-missing-snapshot")
+    run_id = _hex("one-missing-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 24)
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="requires exactly one reserve disposition per selected entity",
+        ):
+            _transition_to_feasible(connection, run_id)
+
+
+def test_a_target_with_both_disposition_types_refuses_the_transition(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("both-dispositions-snapshot")
+    run_id = _hex("both-dispositions-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=True
+        )
+        _insert_reserve(
+            connection,
+            reserve_package_id=_hex("both-dispositions-reserve"),
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            target_cik_numeric=7,
+            replacement_cik_numeric=8,
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="requires exactly one reserve disposition per selected entity",
+        ):
+            _transition_to_feasible(connection, run_id)
+
+
+def test_a_rank_two_only_target_refuses_the_transition(tmp_path: Path) -> None:
+    """Load-bearing on its own: a rank-2-only target's disposition count is exactly
+    1, so only the rank condition rejects it."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("rank-two-only-snapshot")
+    run_id = _hex("rank-two-only-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 24)
+        )
+        _insert_reserve(
+            connection,
+            reserve_package_id=_hex("rank-two-only-reserve"),
+            selection_run_id=run_id,
+            snapshot_id=snapshot_id,
+            target_cik_numeric=24,
+            replacement_cik_numeric=1,
+            reserve_rank=2,
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="requires every reserve package to be reserve_rank 1",
+        ):
+            _transition_to_feasible(connection, run_id)
+
+
+def test_a_target_with_rank_one_plus_rank_two_refuses_the_transition(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("rank-one-plus-two-snapshot")
+    run_id = _hex("rank-one-plus-two-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 24)
+        )
+        for rank, replacement in ((1, 1), (2, 2)):
+            _insert_reserve(
+                connection,
+                reserve_package_id=_hex(f"rank-{rank}-package"),
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                target_cik_numeric=24,
+                replacement_cik_numeric=replacement,
+                reserve_rank=rank,
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="requires exactly one reserve disposition per selected entity",
+        ):
+            _transition_to_feasible(connection, run_id)
+
+
+def test_a_control_target_with_no_disposition_refuses_the_transition(tmp_path: Path) -> None:
+    """Every selected entity is a reserve target, controls included."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("control-no-disposition-snapshot")
+    run_id = _hex("control-no-disposition-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _frozen_snapshot_with_n_entities(connection, snapshot_id, 24)
+        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        for order, cik in enumerate(range(1, 25), start=1):
+            _insert_selected_entity(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                cik_numeric=cik,
+                selected_order=order,
+                entity_role="control" if cik > 20 else "operating",
+            )
+            _insert_selected_accession(
+                connection,
+                selection_run_id=run_id,
+                snapshot_id=snapshot_id,
+                accession_plain=f"acc-{cik}",
+                anchor_cik_numeric=cik,
+                selected_order=order,
+            )
+        _seed_reserve_dispositions(
+            connection, selection_run_id=run_id, snapshot_id=snapshot_id, ciks=range(1, 24)
+        )
+        roles = connection.execute(
+            "SELECT entity_role FROM pilot_selected_entities "
+            "WHERE selection_run_id = ? AND cik_numeric = 24",
+            (run_id,),
+        ).fetchone()["entity_role"]
+        assert roles == "control"
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="requires exactly one reserve disposition per selected entity",
+        ):
+            _transition_to_feasible(connection, run_id)
+
+
+def test_a_non_feasible_terminal_transition_stays_clean_with_zero_parents(
+    tmp_path: Path,
+) -> None:
+    """Decision 020 section 8.2: the composite foreign key requires a parent
+    selected-entity row, and migration 0009 already requires zero selected entities
+    before a non-feasible terminal transition, so the clean-run invariant holds
+    transitively and needs no change to that trigger."""
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("clean-non-feasible-snapshot")
+    run_id = _hex("clean-non-feasible-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _frozen_snapshot_with_n_entities(connection, snapshot_id, 2)
+        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'infeasible' "
+                "WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        state = connection.execute(
+            "SELECT run_state FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,)
+        ).fetchone()["run_state"]
+        rows = connection.execute(
+            "SELECT COUNT(*) AS rows FROM pilot_selection_entity_reasons"
+        ).fetchone()["rows"]
+    assert state == "infeasible"
+    assert rows == 0
+
+
+def test_a_non_feasible_transition_is_refused_while_a_disposition_row_exists(
+    tmp_path: Path,
+) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("dirty-non-feasible-snapshot")
+    run_id = _hex("dirty-non-feasible-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _running_run_with_one_disposition(connection, snapshot_id=snapshot_id, run_id=run_id)
+        with (
+            pytest.raises(sqlite3.IntegrityError, match="zero durable result rows"),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'infeasible' "
+                "WHERE selection_run_id = ?",
+                (run_id,),
+            )
+
+
+def test_a_refused_transition_rolls_back_and_leaves_the_run_running(tmp_path: Path) -> None:
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("rollback-snapshot")
+    run_id = _hex("rollback-run")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _feasible_run_with_24_actual_entities_and_accessions(
+            connection, snapshot_id=snapshot_id, run_id=run_id, seed_dispositions=False
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _transition_to_feasible(connection, run_id)
+        row = connection.execute(
+            "SELECT run_state, selected_entity_count FROM pilot_selection_runs "
+            "WHERE selection_run_id = ?",
+            (run_id,),
+        ).fetchone()
+    assert row["run_state"] == "running"
+    assert row["selected_entity_count"] is None

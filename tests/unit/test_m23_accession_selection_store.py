@@ -18,7 +18,7 @@ import json
 import sqlite3
 import sys
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Final
@@ -2689,6 +2689,10 @@ def _result_row_counts(connection: sqlite3.Connection) -> dict[str, int]:
             "pilot_quota_result_members",
             "pilot_selected_entity_quota_contributions",
             "pilot_selected_accession_quota_contributions",
+            "pilot_reserves",
+            "pilot_reserve_accessions",
+            "pilot_reserve_quota_contributions",
+            "pilot_selection_entity_reasons",
         )
     }
 
@@ -3180,3 +3184,1029 @@ def test_an_untampered_completed_run_still_replays_and_reconstructs(
     assert replayed.node_limit == _NODE_LIMIT
     assert _result_row_counts(db) == counts_before
     assert whole_database(db) == state_before
+
+
+# --------------------------------------------------------------------------
+# 12: Stage S5.4 -- contribution, member, reserve, and disposition persistence
+# --------------------------------------------------------------------------
+#
+# Decision 020 sections 5 and 10. Migration 0009 refuses every contribution,
+# member, and reserve write once a run leaves ``running`` and refuses
+# ``feasible -> running`` outright, so all of this lands inside the single
+# existing transaction with the terminal transition as its last statement.
+
+
+def reserve_plan() -> Plan:
+    """The accepted feasible pool plus one spare operating candidate.
+
+    Twenty-one operating candidates compete for twenty slots, so exactly one is
+    left unselected and becomes a compatible replacement for the entities sharing
+    its stratum -- a run with **both** reserve packages and no-compatible-reserve
+    dispositions, which is what the migration-0012 trigger requires to be total.
+    """
+    plan = feasible_plan()
+    plan.entities.append(
+        EntityPlan(
+            cik=200,
+            size=SIZE_SEQUENCE[18],
+            industry=INDUSTRY_SEQUENCE[18],
+            history=HISTORY_SEQUENCE[18],
+        )
+    )
+    plan.accessions.append(AccessionPlan(cik=200, year=2018, seq=2, base_eligible=True))
+    return plan
+
+
+def _rows(connection: sqlite3.Connection, table: str) -> list[tuple[object, ...]]:
+    return sorted(
+        tuple(row)
+        for row in connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
+    )
+
+
+def _count(connection: sqlite3.Connection, table: str) -> int:
+    value = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+    assert isinstance(value, int)
+    return value
+
+
+def _database_path(connection: sqlite3.Connection) -> str:
+    row = connection.execute("PRAGMA database_list").fetchone()
+    return str(row["file"])
+
+
+def _corrupt_sealed_row(
+    connection: sqlite3.Connection, sql: str, parameters: tuple[object, ...]
+) -> None:
+    """Corrupt a row of a sealed feasible run, bypassing the lifecycle guards.
+
+    Migration 0009 makes a completed run immutable through the application
+    connection, which is exactly the property under test elsewhere. Reconstruction
+    must still fail closed if the stored bytes are altered some other way, so the
+    corruption is applied on a raw connection with the guards and foreign keys off.
+    """
+    raw = sqlite3.connect(_database_path(connection))
+    try:
+        raw.execute("PRAGMA foreign_keys = OFF")
+        guards = [
+            row[0]
+            for row in raw.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND (name LIKE 'pilot_%_insert_guard' OR name LIKE 'pilot_%_update_guard' "
+                "OR name LIKE 'pilot_%_delete_guard')"
+            ).fetchall()
+        ]
+        for guard in guards:
+            raw.execute(f"DROP TRIGGER {guard}")  # noqa: S608
+        raw.execute(sql, parameters)
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_a_feasible_run_persists_mixed_reserve_and_reason_dispositions(
+    db: sqlite3.Connection,
+) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    assert persisted.run_state == "feasible"
+    packages = db.execute(
+        "SELECT target_cik_numeric, replacement_cik_numeric, reserve_rank FROM pilot_reserves"
+    ).fetchall()
+    reasons_rows = db.execute(
+        "SELECT cik_numeric, reason_scope, reason_code FROM pilot_selection_entity_reasons"
+    ).fetchall()
+    assert packages
+    assert reasons_rows
+    assert {row["reserve_rank"] for row in packages} == {1}
+    assert {row["reason_scope"] for row in reasons_rows} == {"reserve"}
+    assert {row["reason_code"] for row in reasons_rows} == {"REVIEW_PILOT_NO_COMPATIBLE_RESERVE"}
+    covered = {row["target_cik_numeric"] for row in packages}
+    uncovered = {row["cik_numeric"] for row in reasons_rows}
+    selected = {int(c.cik_padded) for c in persisted.result.selected_entities}
+    assert not covered & uncovered
+    assert covered | uncovered == selected
+    assert len(covered) + len(uncovered) == 24
+
+
+def test_a_replacement_may_serve_two_persisted_targets(db: sqlite3.Connection) -> None:
+    """Packages are independent contingencies, so cross-target reuse survives
+    persistence unchanged (Decision 020 section 7)."""
+    write_plan(db, reserve_plan())
+    run_once(db)
+    rows = db.execute(
+        "SELECT replacement_cik_numeric, COUNT(*) AS packages FROM pilot_reserves "
+        "GROUP BY replacement_cik_numeric"
+    ).fetchall()
+    assert rows
+    assert max(row["packages"] for row in rows) >= 2
+
+
+def test_no_persisted_replacement_is_itself_selected(db: sqlite3.Connection) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    selected = {int(c.cik_padded) for c in persisted.result.selected_entities}
+    rows = db.execute(
+        "SELECT target_cik_numeric, replacement_cik_numeric FROM pilot_reserves"
+    ).fetchall()
+    assert rows
+    for row in rows:
+        assert row["replacement_cik_numeric"] not in selected
+        assert row["replacement_cik_numeric"] != row["target_cik_numeric"]
+
+
+def test_every_persisted_package_carries_its_bundle_and_contribution_signature(
+    db: sqlite3.Connection,
+) -> None:
+    write_plan(db, reserve_plan())
+    run_once(db)
+    packages = [
+        row["reserve_package_id"]
+        for row in db.execute("SELECT reserve_package_id FROM pilot_reserves").fetchall()
+    ]
+    assert packages
+    for package_id in packages:
+        assert _count_for(db, "pilot_reserve_accessions", package_id) >= 1
+        assert _count_for(db, "pilot_reserve_quota_contributions", package_id) >= 1
+
+
+def _count_for(connection: sqlite3.Connection, table: str, package_id: str) -> int:
+    value = connection.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE reserve_package_id = ?",  # noqa: S608
+        (package_id,),
+    ).fetchone()[0]
+    assert isinstance(value, int)
+    return value
+
+
+def test_every_persisted_reserve_contribution_set_equals_its_targets(
+    db: sqlite3.Connection,
+) -> None:
+    """The invariant migration 0009's feasible-transition trigger enforces, checked
+    again against the persisted rows on both sides."""
+    write_plan(db, reserve_plan())
+    run_once(db)
+    packages = db.execute(
+        "SELECT reserve_package_id, target_cik_numeric FROM pilot_reserves"
+    ).fetchall()
+    assert packages
+    for package in packages:
+        reserve_set = {
+            (row["quota_dimension"], row["quota_key"])
+            for row in db.execute(
+                "SELECT quota_dimension, quota_key FROM pilot_reserve_quota_contributions "
+                "WHERE reserve_package_id = ?",
+                (package["reserve_package_id"],),
+            ).fetchall()
+        }
+        target_set = {
+            (row["quota_dimension"], row["quota_key"])
+            for row in db.execute(
+                "SELECT quota_dimension, quota_key FROM pilot_selected_entity_quota_contributions "
+                "WHERE cik_numeric = ?",
+                (package["target_cik_numeric"],),
+            ).fetchall()
+        }
+        assert reserve_set == target_set
+        assert reserve_set
+
+
+def test_the_three_membership_families_reproduce_the_pure_output(
+    db: sqlite3.Connection,
+) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    membership = persisted.result.quota_contributions
+    entity_rows = {
+        (f"{row['cik_numeric']:010d}", row["quota_dimension"], row["quota_key"])
+        for row in db.execute(
+            "SELECT cik_numeric, quota_dimension, quota_key "
+            "FROM pilot_selected_entity_quota_contributions"
+        ).fetchall()
+    }
+    accession_rows = {
+        (row["accession_plain"], row["quota_dimension"], row["quota_key"])
+        for row in db.execute(
+            "SELECT accession_plain, quota_dimension, quota_key "
+            "FROM pilot_selected_accession_quota_contributions"
+        ).fetchall()
+    }
+    assert entity_rows == set(membership.entity_contributions())
+    assert accession_rows == set(membership.accession_contributions())
+    assert _count(db, "pilot_quota_result_members") == len(membership.quota_members())
+    assert entity_rows
+    assert accession_rows
+
+
+def test_persisted_achieved_counts_equal_their_persisted_member_counts(
+    db: sqlite3.Connection,
+) -> None:
+    """The Decision 020 section 6 invariant, observed end to end on stored rows."""
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    measured = {
+        (row["quota_dimension"], row["quota_key"]): row["achieved_count"]
+        for row in db.execute(
+            "SELECT quota_dimension, quota_key, achieved_count FROM pilot_quota_results"
+        ).fetchall()
+    }
+    membership = persisted.result.quota_contributions
+    for dimension, key in membership.contribution_keys():
+        assert membership.achieved_count(dimension, key) == measured[(dimension, key)]
+
+
+def test_the_deferred_quota_persists_no_member_or_contribution_row(
+    db: sqlite3.Connection,
+) -> None:
+    write_plan(db, reserve_plan())
+    run_once(db)
+    for table, column in (
+        ("pilot_selected_entity_quota_contributions", "quota_key"),
+        ("pilot_selected_accession_quota_contributions", "quota_key"),
+    ):
+        rows = db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",  # noqa: S608
+            (DEFERRED_QUOTA_KEY,),
+        ).fetchone()[0]
+        assert rows == 0
+    deferred_id = db.execute(
+        "SELECT quota_result_id FROM pilot_quota_results WHERE quota_key = ?",
+        (DEFERRED_QUOTA_KEY,),
+    ).fetchone()["quota_result_id"]
+    members = db.execute(
+        "SELECT COUNT(*) FROM pilot_quota_result_members WHERE quota_result_id = ?",
+        (deferred_id,),
+    ).fetchone()[0]
+    assert members == 0
+
+
+def test_a_non_feasible_run_persists_no_contribution_member_or_reserve_row(
+    db: sqlite3.Connection,
+) -> None:
+    plan = feasible_plan()
+    plan.accessions = [a for a in plan.accessions if a.dashed != dashed(1, 2010, 2)]
+    write_plan(db, plan)
+    persisted = run_once(db)
+    assert persisted.run_state != "feasible"
+    for table in (
+        "pilot_selected_entity_quota_contributions",
+        "pilot_selected_accession_quota_contributions",
+        "pilot_quota_result_members",
+        "pilot_reserves",
+        "pilot_reserve_accessions",
+        "pilot_reserve_quota_contributions",
+        "pilot_selection_entity_reasons",
+    ):
+        assert _count(db, table) == 0
+
+
+def test_the_terminal_transition_is_the_last_write_of_the_transaction(
+    db: sqlite3.Connection,
+) -> None:
+    """One explicit transaction, with ``running -> feasible`` last: no reserve,
+    contribution, member, or disposition row is written after it."""
+    write_plan(db, reserve_plan())
+    statements: list[str] = []
+    db.set_trace_callback(statements.append)
+    try:
+        run_once(db)
+    finally:
+        db.set_trace_callback(None)
+    normalized = [" ".join(entry.split()) for entry in statements]
+    feasible_positions = [
+        index
+        for index, entry in enumerate(normalized)
+        if entry.startswith("UPDATE pilot_selection_runs SET run_state = 'feasible'")
+    ]
+    # SQLite traces the parent statement once per trigger sub-program, so a single
+    # UPDATE surfaces as one contiguous run of identical trace lines.
+    assert feasible_positions
+    assert len({normalized[index] for index in feasible_positions}) == 1
+    assert feasible_positions == list(range(feasible_positions[0], feasible_positions[-1] + 1))
+    tail = normalized[feasible_positions[-1] + 1 :]
+    assert not [entry for entry in tail if entry.upper().startswith("INSERT INTO PILOT_")]
+    assert not [entry for entry in tail if entry.upper().startswith("UPDATE PILOT_")]
+    assert not [entry for entry in tail if entry.upper().startswith("DELETE FROM PILOT_")]
+    # Only the commit and the read-only reconstruction reads follow the transition.
+    assert "COMMIT" in tail
+    assert all(entry == "COMMIT" or entry.upper().startswith("SELECT") for entry in tail)
+    assert normalized.count("BEGIN IMMEDIATE") == 1
+    assert normalized.count("COMMIT") == 1
+    assert normalized.count("ROLLBACK") == 0
+
+
+@pytest.mark.parametrize(
+    "table",
+    (
+        "pilot_selected_entity_quota_contributions",
+        "pilot_selected_accession_quota_contributions",
+        "pilot_quota_result_members",
+        "pilot_reserves",
+        "pilot_reserve_accessions",
+        "pilot_reserve_quota_contributions",
+        "pilot_selection_entity_reasons",
+    ),
+)
+def test_a_failure_at_any_new_row_family_rolls_the_whole_run_back(
+    db: sqlite3.Connection, table: str
+) -> None:
+    """Nothing is partially persisted: an injected failure while writing any new
+    family leaves no lifecycle row, no event, and no result row at all."""
+    write_plan(db, reserve_plan())
+
+    def authorizer(action: int, first: str | None, *_rest: object) -> int:
+        if action == sqlite3.SQLITE_INSERT and first == table:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    db.set_authorizer(authorizer)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            run_once(db)
+    finally:
+        db.set_authorizer(None)
+    assert _result_row_counts(db) == dict.fromkeys(_result_row_counts(db), 0)
+    assert _count(db, "pilot_selection_runs") == 0
+    assert _count(db, "pilot_selection_run_events") == 0
+
+
+def test_an_idempotent_replay_writes_no_duplicate_reserve_or_membership_row(
+    db: sqlite3.Connection,
+) -> None:
+    write_plan(db, reserve_plan())
+    first = run_once(db)
+    before = whole_database(db)
+    counts_before = _result_row_counts(db)
+    replayed = run_once(db, occurred_at_utc="2027-05-05T00:00:00Z", event_id="replay")
+    assert replayed == first
+    assert whole_database(db) == before
+    assert _result_row_counts(db) == counts_before
+    assert counts_before["pilot_reserves"] > 0
+    assert counts_before["pilot_selection_entity_reasons"] > 0
+
+
+def test_no_row_is_written_after_the_run_reaches_feasible(db: sqlite3.Connection) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    with (
+        pytest.raises(sqlite3.IntegrityError, match="requires a running selection run"),
+        transaction(db) as c,
+    ):
+        c.execute(
+            "INSERT INTO pilot_selected_entity_quota_contributions "
+            "(selection_run_id, snapshot_id, cik_numeric, quota_dimension, quota_key, "
+            "recorded_at_utc) VALUES (?, ?, ?, 'cross_cutting', 'late', '2027-01-01T00:00:00Z')",
+            (
+                persisted.selection_run_id,
+                _SNAPSHOT_ID,
+                int(persisted.result.selected_entities[0].cik_padded),
+            ),
+        )
+    with (
+        pytest.raises(sqlite3.IntegrityError, match="requires an existing running selection run"),
+        transaction(db) as c,
+    ):
+        c.execute(
+            "INSERT INTO pilot_selection_entity_reasons "
+            "(selection_run_id, snapshot_id, cik_numeric, reason_scope, reason_code, "
+            "recorded_at_utc) VALUES (?, ?, ?, 'reserve', "
+            "'REVIEW_PILOT_NO_COMPATIBLE_RESERVE', '2027-01-01T00:00:00Z')",
+            (
+                persisted.selection_run_id,
+                _SNAPSHOT_ID,
+                int(persisted.result.selected_entities[0].cik_padded),
+            ),
+        )
+
+
+def test_reconstruction_round_trips_every_new_row_family(db: sqlite3.Connection) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    rebuilt = reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
+    assert rebuilt == persisted
+    assert rebuilt.result.quota_contributions == persisted.result.quota_contributions
+    assert rebuilt.result.quota_contributions.units
+
+
+@pytest.mark.parametrize(
+    ("statement", "parameters", "message"),
+    (
+        (
+            "DELETE FROM pilot_selected_entity_quota_contributions "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_selected_entity_quota_contributions)",
+            (),
+            "pilot_selected_entity_quota_contributions",
+        ),
+        (
+            "UPDATE pilot_selected_entity_quota_contributions SET quota_key = 'tampered' "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_selected_entity_quota_contributions)",
+            (),
+            "pilot_selected_entity_quota_contributions",
+        ),
+        (
+            "DELETE FROM pilot_selected_accession_quota_contributions "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_selected_accession_quota_contributions)",
+            (),
+            "pilot_selected_accession_quota_contributions",
+        ),
+        (
+            "DELETE FROM pilot_quota_result_members "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_quota_result_members)",
+            (),
+            "pilot_quota_result_members",
+        ),
+        (
+            "UPDATE pilot_quota_result_members SET member_order = 99 "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_quota_result_members)",
+            (),
+            "pilot_quota_result_members",
+        ),
+    ),
+)
+def test_corrupted_contribution_or_member_rows_fail_closed(
+    db: sqlite3.Connection, statement: str, parameters: tuple[object, ...], message: str
+) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    _corrupt_sealed_row(db, statement, parameters)
+    with pytest.raises(GateFailureError, match=message):
+        reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    (
+        (
+            "DELETE FROM pilot_reserves WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+            "pilot_reserves",
+        ),
+        (
+            "UPDATE pilot_reserves SET reserve_rank = 2 "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+            "pilot_reserves",
+        ),
+        (
+            "UPDATE pilot_reserves SET replacement_cik_numeric = 999 "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+            "pilot_reserves",
+        ),
+        (
+            "UPDATE pilot_reserves SET reserve_package_id = 'f' || substr(reserve_package_id, 2) "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+            "pilot_reserves",
+        ),
+        (
+            "UPDATE pilot_reserves SET replaces_signature_sha256 = "
+            "'0000000000000000000000000000000000000000000000000000000000000000', "
+            "reserve_signature_sha256 = "
+            "'0000000000000000000000000000000000000000000000000000000000000000' "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+            "pilot_reserves",
+        ),
+        (
+            "UPDATE pilot_reserves SET evidence_floor = 'unavailable' "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+            "pilot_reserves",
+        ),
+        (
+            "DELETE FROM pilot_reserve_accessions "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserve_accessions)",
+            "pilot_reserve_accessions",
+        ),
+        (
+            "DELETE FROM pilot_reserve_quota_contributions "
+            "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserve_quota_contributions)",
+            "pilot_reserve_quota_contributions",
+        ),
+    ),
+)
+def test_corrupted_reserve_rows_fail_closed(
+    db: sqlite3.Connection, statement: str, message: str
+) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    _corrupt_sealed_row(db, statement, ())
+    with pytest.raises(GateFailureError, match=message):
+        reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
+
+
+def test_a_malformed_signature_is_refused_at_the_check_constraint(
+    db: sqlite3.Connection,
+) -> None:
+    """The owning enforcement boundary for a malformed digest is the
+    ``pilot_reserves`` CHECK constraint, so that state never reaches reconstruction
+    (Decision 020 section 8.3, item 4). The reconstruction shape gate remains as
+    defence in depth and is deliberately not the layer proved here."""
+    write_plan(db, reserve_plan())
+    run_once(db)
+    raw = sqlite3.connect(_database_path(db))
+    try:
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute("DROP TRIGGER IF EXISTS pilot_reserves_update_guard")
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+            raw.execute(
+                "UPDATE pilot_reserves SET replaces_signature_sha256 = 'NOT-A-DIGEST', "
+                "reserve_signature_sha256 = 'NOT-A-DIGEST' "
+                "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)"
+            )
+    finally:
+        raw.close()
+
+
+def test_a_signature_that_no_longer_derives_from_its_content_fails_closed(
+    db: sqlite3.Connection,
+) -> None:
+    """A well-formed digest that is not the one the package's own content derives is
+    constructible, and reconstruction refuses it."""
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    _corrupt_sealed_row(
+        db,
+        "UPDATE pilot_reserves SET replaces_signature_sha256 = ?, reserve_signature_sha256 = ? "
+        "WHERE rowid = (SELECT MIN(rowid) FROM pilot_reserves)",
+        ("a" * 64, "a" * 64),
+    )
+    with pytest.raises(GateFailureError, match="pilot_reserves"):
+        reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "DELETE FROM pilot_selection_entity_reasons "
+        "WHERE rowid = (SELECT MIN(rowid) FROM pilot_selection_entity_reasons)",
+        "UPDATE pilot_selection_entity_reasons SET cik_numeric = 999 "
+        "WHERE rowid = (SELECT MIN(rowid) FROM pilot_selection_entity_reasons)",
+    ),
+    ids=("missing", "retargeted"),
+)
+def test_corrupted_disposition_rows_fail_closed(db: sqlite3.Connection, statement: str) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    _corrupt_sealed_row(db, statement, ())
+    with pytest.raises(GateFailureError, match="pilot_selection_entity_reasons"):
+        reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
+
+
+def test_a_reason_row_beside_a_reserve_package_fails_closed(db: sqlite3.Connection) -> None:
+    """The two dispositions are mutually exclusive: a target holding both is
+    refused even if the row was written outside the lifecycle guards."""
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    covered = db.execute("SELECT target_cik_numeric FROM pilot_reserves LIMIT 1").fetchone()[
+        "target_cik_numeric"
+    ]
+    _corrupt_sealed_row(
+        db,
+        "INSERT INTO pilot_selection_entity_reasons "
+        "(selection_run_id, snapshot_id, cik_numeric, reason_scope, reason_code, "
+        "recorded_at_utc) VALUES (?, ?, ?, 'reserve', "
+        "'REVIEW_PILOT_NO_COMPATIBLE_RESERVE', '2027-01-01T00:00:00Z')",
+        (persisted.selection_run_id, _SNAPSHOT_ID, covered),
+    )
+    with pytest.raises(GateFailureError, match="pilot_selection_entity_reasons"):
+        reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
+
+
+def test_a_conflicting_same_id_replay_is_refused_with_reserves_present(
+    db: sqlite3.Connection,
+) -> None:
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    assert _count(db, "pilot_reserves") > 0
+    _corrupt_sealed_row(
+        db,
+        "UPDATE pilot_selection_runs SET selection_input_sha256 = ? WHERE selection_run_id = ?",
+        ("0" * 64, persisted.selection_run_id),
+    )
+    with pytest.raises(GateFailureError, match="refusing to overwrite"):
+        run_once(db, occurred_at_utc="2027-06-06T00:00:00Z", event_id="conflict")
+
+
+def test_the_s4_draft_is_untouched_by_reserve_persistence(db: sqlite3.Connection) -> None:
+    """Decision 018 section 6 and Decision 020 section 11: the S4 entity-only draft
+    stays ``running``, non-publishable, and excluded from every S5.4 artifact."""
+    write_plan(db, reserve_plan())
+    draft = execute_and_persist_entity_selection(
+        db,
+        _SNAPSHOT_ID,
+        node_limit=_NODE_LIMIT,
+        occurred_at_utc=_AT,
+        event_id="s4-draft-event",
+    )
+    draft_rows_before = _rows(db, "pilot_selection_runs")
+    persisted = run_once(db, event_id="s5-event")
+    assert persisted.selection_run_id != draft.selection_run_id
+    draft_after = db.execute(
+        "SELECT * FROM pilot_selection_runs WHERE selection_run_id = ?",
+        (draft.selection_run_id,),
+    ).fetchone()
+    before = next(row for row in draft_rows_before if row[0] == draft.selection_run_id)
+    assert tuple(draft_after) == before
+    for table in ("pilot_reserves", "pilot_selection_entity_reasons"):
+        rows = db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE selection_run_id = ?",  # noqa: S608
+            (draft.selection_run_id,),
+        ).fetchone()[0]
+        assert rows == 0
+
+
+def test_no_manifest_or_publication_row_is_written_by_stage_s5_4(
+    db: sqlite3.Connection,
+) -> None:
+    """Stage S6 is not begun: no manifest version, no projection recovery event, and
+    ``selection_result_sha256`` still NULL (Decision 020 sections 2 and 9)."""
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    assert _count(db, "pilot_manifest_versions") == 0
+    assert _count(db, "pilot_projection_recovery_events") == 0
+    stored = db.execute(
+        "SELECT selection_result_sha256 FROM pilot_selection_runs WHERE selection_run_id = ?",
+        (persisted.selection_run_id,),
+    ).fetchone()["selection_result_sha256"]
+    assert stored is None
+    assert _count(db, "pilot_reserves") > 0
+
+
+# --------------------------------------------------------------------------
+# 13: Decision 016 section 7 -- independent recomputation of both signatures
+# --------------------------------------------------------------------------
+#
+# "Acceptance tests must independently recompute both signatures from normalized
+# source content (not merely compare the two stored hash columns) and assert the
+# recomputed values equal the stored ones and equal each other."
+#
+# Everything below is reassembled from persisted rows by this module. It calls no
+# production signature constructor, no helper that returns an already-assembled
+# signature mapping, and never uses one stored digest as the other's expected
+# value; the only production code reused is the generic content-hashing primitive
+# ``release.hashing.hash_table`` and the canonical CIK renderer.
+
+#: Decision 016 section 7's frozen input list, transcribed from the decision record.
+#: The signature is hashed under this exact sorted column vector.
+_SIGNATURE_FIELDS: Final[tuple[str, ...]] = (
+    "accession_counts_by_role",
+    "amendment_purpose_contributions",
+    "control_kind",
+    "entity_role",
+    "eventful_and_currently_inactive",
+    "evidence_floor",
+    "history_class",
+    "industry_family",
+    "industry_quota_eligible",
+    "inline_xbrl_contribution",
+    "multi_registrant_contribution",
+    "name_change_contribution",
+    "original_2024_contribution",
+    "original_2025_2026_contribution",
+    "pre_inline_xbrl_contribution",
+    "primary_universe_eligible",
+    "quota_policy_version",
+    "signature_policy_version",
+    "size_stratum",
+    "support_pair_contribution",
+)
+
+#: Strongest to weakest, per ``pilot_reserves.evidence_floor``'s frozen vocabulary.
+_FLOOR_ORDER: Final[tuple[str, ...]] = (
+    "provisional",
+    "review_required",
+    "conflicting",
+    "unavailable",
+)
+_ROLE_ORDER: Final[tuple[str, ...]] = ("base", "control", "stress", "support")
+
+#: The quotas whose contribution unit is an accession identity, so the count is the
+#: number of qualifying accessions in the side's own bundle.
+_ACCESSION_UNIT_QUOTAS: Final[tuple[str, ...]] = (
+    "multi_registrant_accessions",
+    "pre_inline_xbrl_originals",
+    "inline_xbrl_originals",
+)
+#: The quotas whose contribution unit is the entity, so the count is 0 or 1 and is
+#: read off the side's own persisted contribution key set.
+_ENTITY_UNIT_QUOTAS: Final[tuple[str, str]] = (
+    "name_change_entities",
+    "support_target_pair_entities",
+)
+_YEAR_UNIT_QUOTAS: Final[tuple[str, str]] = (
+    "original_2024_entities",
+    "original_2025_2026_entities",
+)
+
+
+def _candidate_accessions(
+    connection: sqlite3.Connection, plains: Sequence[str]
+) -> dict[str, sqlite3.Row]:
+    """The frozen candidate row behind each accession of one side's bundle."""
+    rows: dict[str, sqlite3.Row] = {}
+    for plain in plains:
+        row = connection.execute(
+            "SELECT accession_plain, form_type, is_amendment, official_filing_date, "
+            "has_inline_xbrl, multi_registrant, amendment_purpose_category, "
+            "amendment_purpose_quota_eligible, amendment_purpose_evidence_level, "
+            "filing_date_evidence_level, cohort_evidence_level, xbrl_evidence_level, "
+            "provisional_official_cohort FROM pilot_candidate_accessions "
+            "WHERE snapshot_id = ? AND accession_plain = ?",
+            (_SNAPSHOT_ID, plain),
+        ).fetchone()
+        assert row is not None, plain
+        rows[plain] = row
+    return rows
+
+
+def _independent_evidence_floor(candidates: dict[str, sqlite3.Row]) -> str:
+    """The weakest structurally applicable evidence level across a bundle.
+
+    Decision 016 section 7's own wording, over Decision 018 section 3.4's
+    applicability model. Only the dimensions the snapshot *stores* are read here.
+    Amendment-linkage and multi-registrant evidence levels are derived by the S5.2
+    loader (Decision 019 sections 5 and 6) rather than stored, so this reassembly
+    asserts the bundle contains no amendment and no multi-registrant accession
+    instead of silently ignoring those dimensions: a fixture that changes shape
+    fails loudly here rather than quietly weakening the comparison.
+    """
+    weakest = 0
+    for row in candidates.values():
+        assert not row["is_amendment"], "extend this reassembly before using an amendment bundle"
+        assert not row["multi_registrant"], "extend this reassembly for multi-registrant bundles"
+        levels = [row["filing_date_evidence_level"], row["xbrl_evidence_level"]]
+        if row["provisional_official_cohort"] is not None:
+            levels.append(row["cohort_evidence_level"])
+        for level in levels:
+            assert level in _FLOOR_ORDER, level
+            weakest = max(weakest, _FLOOR_ORDER.index(level))
+    return _FLOOR_ORDER[weakest]
+
+
+def _independent_role_counts(roles: Sequence[str]) -> str:
+    counts = dict.fromkeys(_ROLE_ORDER, 0)
+    for role in roles:
+        counts[role] += 1
+    return "|".join(f"{role}={counts[role]}" for role in _ROLE_ORDER)
+
+
+def _independent_contribution_counts(
+    candidates: dict[str, sqlite3.Row], contribution_keys: set[str]
+) -> dict[str, int]:
+    """How many achieved units of each named quota this side's bundle supplies.
+
+    Accession-unit quotas are counted from the bundle's own frozen attributes;
+    entity-unit quotas are 0 or 1 and are read from the side's persisted
+    contribution key set, which is exactly what the schema records for them.
+    """
+    counts = dict.fromkeys((*_ACCESSION_UNIT_QUOTAS, *_ENTITY_UNIT_QUOTAS, *_YEAR_UNIT_QUOTAS), 0)
+    for row in candidates.values():
+        original_annual = not row["is_amendment"] and row["form_type"] in ("10-K", "10-KT")
+        if row["multi_registrant"]:
+            counts["multi_registrant_accessions"] += 1
+        if original_annual:
+            key = "inline_xbrl_originals" if row["has_inline_xbrl"] else "pre_inline_xbrl_originals"
+            counts[key] += 1
+    for key in (*_ENTITY_UNIT_QUOTAS, *_YEAR_UNIT_QUOTAS):
+        counts[key] = 1 if key in contribution_keys else 0
+    return counts
+
+
+def _independent_purpose_categories(candidates: dict[str, sqlite3.Row]) -> str:
+    return "|".join(
+        sorted(
+            {
+                row["amendment_purpose_category"]
+                for row in candidates.values()
+                if row["amendment_purpose_quota_eligible"]
+                and row["amendment_purpose_category"] is not None
+            }
+        )
+    )
+
+
+def _independent_signature_fields(
+    entity: sqlite3.Row,
+    *,
+    entity_role: str,
+    candidates: dict[str, sqlite3.Row],
+    roles: Sequence[str],
+    contribution_keys: set[str],
+    signature_policy_version: str,
+    quota_policy_version: str,
+) -> dict[str, object]:
+    """Decision 016 section 7's twenty inputs, assembled here from persisted rows."""
+    counts = _independent_contribution_counts(candidates, contribution_keys)
+    assembled: dict[str, object] = {
+        "signature_policy_version": signature_policy_version,
+        "quota_policy_version": quota_policy_version,
+        "entity_role": entity_role,
+        "control_kind": entity["control_kind"],
+        "size_stratum": entity["size_stratum"],
+        "industry_family": entity["industry_family"],
+        "industry_quota_eligible": bool(entity["industry_quota_eligible"]),
+        "history_class": entity["history_class"],
+        "eventful_and_currently_inactive": (
+            entity["history_class"] == "eventful" and bool(entity["currently_inactive"])
+        ),
+        "primary_universe_eligible": bool(entity["primary_universe_eligible"]),
+        "name_change_contribution": counts["name_change_entities"],
+        "support_pair_contribution": counts["support_target_pair_entities"],
+        "multi_registrant_contribution": counts["multi_registrant_accessions"],
+        "pre_inline_xbrl_contribution": counts["pre_inline_xbrl_originals"],
+        "inline_xbrl_contribution": counts["inline_xbrl_originals"],
+        "original_2024_contribution": counts["original_2024_entities"],
+        "original_2025_2026_contribution": counts["original_2025_2026_entities"],
+        "amendment_purpose_contributions": _independent_purpose_categories(candidates),
+        "accession_counts_by_role": _independent_role_counts(roles),
+        "evidence_floor": _independent_evidence_floor(candidates),
+    }
+    assert tuple(sorted(assembled)) == _SIGNATURE_FIELDS
+    return assembled
+
+
+def _independent_digest(fields_by_name: dict[str, object]) -> str:
+    """Hash one assembled input with the generic accepted content primitive."""
+    return hash_table(
+        "pilot_reserve_signature", _SIGNATURE_FIELDS, [fields_by_name]
+    ).normalized_content_sha256
+
+
+def _target_side(
+    connection: sqlite3.Connection, run_id: str, package: sqlite3.Row
+) -> tuple[dict[str, object], set[str]]:
+    """Reassemble the target's signature input from its own persisted rows."""
+    target_cik = package["target_cik_numeric"]
+    entity = connection.execute(
+        "SELECT control_kind, size_stratum, industry_family, history_class "
+        "FROM pilot_selected_entities WHERE selection_run_id = ? AND snapshot_id = ? "
+        "AND cik_numeric = ?",
+        (run_id, _SNAPSHOT_ID, target_cik),
+    ).fetchone()
+    assert entity is not None
+    candidate_entity = connection.execute(
+        "SELECT candidate_category, control_kind, size_stratum, industry_family, "
+        "industry_quota_eligible, history_class, currently_inactive, primary_universe_eligible "
+        "FROM pilot_candidate_entities WHERE snapshot_id = ? AND cik_numeric = ?",
+        (_SNAPSHOT_ID, target_cik),
+    ).fetchone()
+    assert candidate_entity is not None
+    # the selected row and the frozen candidate row must agree on the shared columns
+    for column in ("control_kind", "size_stratum", "industry_family", "history_class"):
+        assert entity[column] == candidate_entity[column]
+
+    accessions = connection.execute(
+        "SELECT accession_plain, accession_role FROM pilot_selected_accessions "
+        "WHERE selection_run_id = ? AND snapshot_id = ? AND anchor_cik_numeric = ? "
+        "ORDER BY accession_plain",
+        (run_id, _SNAPSHOT_ID, target_cik),
+    ).fetchall()
+    plains = [row["accession_plain"] for row in accessions]
+    keys = {
+        row["quota_key"]
+        for row in connection.execute(
+            "SELECT quota_key FROM pilot_selected_entity_quota_contributions "
+            "WHERE selection_run_id = ? AND snapshot_id = ? AND cik_numeric = ?",
+            (run_id, _SNAPSHOT_ID, target_cik),
+        ).fetchall()
+    }
+    assembled = _independent_signature_fields(
+        candidate_entity,
+        entity_role=candidate_entity["candidate_category"],
+        candidates=_candidate_accessions(connection, plains),
+        roles=[row["accession_role"] for row in accessions],
+        contribution_keys=keys,
+        signature_policy_version=package["signature_policy_version"],
+        quota_policy_version=package["quota_policy_version"],
+    )
+    return assembled, set(plains)
+
+
+def _replacement_side(
+    connection: sqlite3.Connection, package: sqlite3.Row
+) -> tuple[dict[str, object], set[str]]:
+    """Reassemble the replacement's signature input from the package's own rows."""
+    replacement_cik = package["replacement_cik_numeric"]
+    candidate_entity = connection.execute(
+        "SELECT candidate_category, control_kind, size_stratum, industry_family, "
+        "industry_quota_eligible, history_class, currently_inactive, primary_universe_eligible "
+        "FROM pilot_candidate_entities WHERE snapshot_id = ? AND cik_numeric = ?",
+        (_SNAPSHOT_ID, replacement_cik),
+    ).fetchone()
+    assert candidate_entity is not None
+    accessions = connection.execute(
+        "SELECT accession_plain, accession_role FROM pilot_reserve_accessions "
+        "WHERE reserve_package_id = ? ORDER BY accession_order",
+        (package["reserve_package_id"],),
+    ).fetchall()
+    plains = [row["accession_plain"] for row in accessions]
+    keys = {
+        row["quota_key"]
+        for row in connection.execute(
+            "SELECT quota_key FROM pilot_reserve_quota_contributions WHERE reserve_package_id = ?",
+            (package["reserve_package_id"],),
+        ).fetchall()
+    }
+    assembled = _independent_signature_fields(
+        candidate_entity,
+        entity_role=candidate_entity["candidate_category"],
+        candidates=_candidate_accessions(connection, plains),
+        roles=[row["accession_role"] for row in accessions],
+        contribution_keys=keys,
+        signature_policy_version=package["signature_policy_version"],
+        quota_policy_version=package["quota_policy_version"],
+    )
+    return assembled, set(plains)
+
+
+def _persisted_packages(connection: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return connection.execute(
+        "SELECT reserve_package_id, target_cik_numeric, replacement_cik_numeric, "
+        "replaces_signature_sha256, reserve_signature_sha256, signature_policy_version, "
+        "quota_policy_version, evidence_floor FROM pilot_reserves "
+        "WHERE selection_run_id = ? AND snapshot_id = ? ORDER BY reserve_package_id",
+        (run_id, _SNAPSHOT_ID),
+    ).fetchall()
+
+
+def test_both_persisted_signatures_recompute_from_normalized_persisted_content(
+    db: sqlite3.Connection,
+) -> None:
+    """Decision 016 section 7's recomputation obligation, discharged independently.
+
+    Each side's twenty frozen inputs are reassembled here from persisted rows and
+    hashed with the generic content primitive; the target digest is compared with
+    ``replaces_signature_sha256`` and the replacement digest with
+    ``reserve_signature_sha256``. Neither stored column is used as the other's
+    expected value, and no production signature code runs.
+    """
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    assert persisted.run_state == "feasible"
+    packages = _persisted_packages(db, persisted.selection_run_id)
+    assert packages, "the fixture must persist at least one reserve package"
+
+    for package in packages:
+        target_fields, target_plains = _target_side(db, persisted.selection_run_id, package)
+        replacement_fields, replacement_plains = _replacement_side(db, package)
+
+        # independently obtained, and disjoint: a target is never its own replacement
+        assert target_plains
+        assert replacement_plains
+        assert not target_plains & replacement_plains
+        assert package["target_cik_numeric"] != package["replacement_cik_numeric"]
+
+        target_digest = _independent_digest(target_fields)
+        replacement_digest = _independent_digest(replacement_fields)
+        assert target_digest == package["replaces_signature_sha256"]
+        assert replacement_digest == package["reserve_signature_sha256"]
+        assert target_digest == replacement_digest
+        # the independently derived floor is the one the package stored
+        assert target_fields["evidence_floor"] == package["evidence_floor"]
+        assert replacement_fields["evidence_floor"] == package["evidence_floor"]
+
+
+def _perturb(value: object) -> object:
+    """Any materially different value of the same shape, never equal to the input."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if value is None:
+        return "perturbed"
+    assert isinstance(value, str)
+    return f"{value}-perturbed"
+
+
+@pytest.mark.parametrize("field_name", _SIGNATURE_FIELDS)
+def test_perturbing_one_normalized_signature_input_changes_the_digest(
+    db: sqlite3.Connection, field_name: str
+) -> None:
+    """Every one of Decision 016 section 7's twenty inputs is load-bearing.
+
+    Proved from the independently reassembled mapping, so a field that silently
+    stopped entering the production hash would still be caught here by the stored
+    digest comparison in the test above.
+    """
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    package = _persisted_packages(db, persisted.selection_run_id)[0]
+    baseline, _plains = _replacement_side(db, package)
+    assert _independent_digest(baseline) == package["reserve_signature_sha256"]
+
+    altered = dict(baseline)
+    altered[field_name] = _perturb(baseline[field_name])
+    assert altered[field_name] != baseline[field_name], field_name
+    assert _independent_digest(altered) != package["reserve_signature_sha256"]
+
+
+def test_the_persisted_run_identity_is_the_one_its_own_frozen_inputs_derive(
+    db: sqlite3.Connection,
+) -> None:
+    """Run identity is unchanged by S5.4: it is still derived from the frozen inputs
+    alone, and no reserve, contribution, or member row enters it (Decision 020
+    section 9)."""
+    write_plan(db, reserve_plan())
+    persisted = run_once(db)
+    loaded = load_frozen_joint_candidates(db, _SNAPSHOT_ID)
+    identity = build_joint_selection_run_identity(loaded, node_limit=_NODE_LIMIT)
+    assert persisted.selection_run_id == identity.selection_run_id
+    assert persisted.selection_input_sha256 == identity.selection_input_sha256
+    assert _count(db, "pilot_reserves") > 0
+    assert _count(db, "pilot_selected_entity_quota_contributions") > 0

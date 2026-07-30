@@ -109,6 +109,7 @@ EXPECTED_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (9, "m23_pilot_schema"),
     (10, "m23_quota_policy_reference"),
     (11, "m23_joint_selector_policy_reference"),
+    (12, "m23_selection_entity_reasons"),
 )
 """The canonical migration chain, asserted by exact version and name.
 
@@ -242,6 +243,56 @@ def test_reference_seed_covers_reason_codes_and_frozen_cohorts(writer: CatalogWr
     ]
     assert {row["assignment_date_source"] for row in cohorts} == {"official_sec_filing_date"}
     assert sic == 0, "SIC reference data is loaded in Stage M2.2 from an SEC snapshot"
+
+
+def test_the_s5_4_reserve_reason_code_reaches_the_catalog(writer: CatalogWriter) -> None:
+    """Decision 020 section 8: registering ``REVIEW_PILOT_NO_COMPATIBLE_RESERVE``
+    needs no migration, because ``reference_reason_codes`` is seeded at runtime
+    from ``reasons.py`` through the established catalog convention. Migration
+    ``0012`` therefore seeds no reason code and no policy-reference row."""
+    with writer as catalog:
+        catalog.migrate()
+        catalog.seed_reference_data()
+        row = catalog.connection.execute(
+            "SELECT category, blocks_release, requires_manual_review, decision_record "
+            "FROM reference_reason_codes WHERE reason_code = ?",
+            ("REVIEW_PILOT_NO_COMPATIBLE_RESERVE",),
+        ).fetchone()
+        pool_exhausted = catalog.connection.execute(
+            "SELECT COUNT(*) AS rows FROM reference_reason_codes WHERE reason_code = ?",
+            ("REVIEW_PILOT_RESERVE_POOL_EXHAUSTED",),
+        ).fetchone()["rows"]
+    assert row is not None
+    assert row["category"] == "review"
+    assert row["blocks_release"] == 0
+    assert row["requires_manual_review"] == 1
+    assert row["decision_record"] == (
+        "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
+    )
+    assert pool_exhausted == 0
+
+
+def test_migration_0012_seeds_no_policy_reference_row(writer: CatalogWriter) -> None:
+    """The signature and quota policy versions already exist, so the S5.4
+    migration adds none (Decision 020 sections 8 and 12)."""
+    packaged = next(item for item in available_migrations() if item.version == 12)
+    statements = "".join(
+        line
+        for line in packaged.sql.splitlines(keepends=True)
+        if not line.lstrip().startswith("--")
+    )
+    assert "reference_policy_versions" not in statements
+    assert "reference_reason_codes(reason_code)" in statements
+    assert "INSERT INTO" not in statements.upper()
+    assert "REVIEW_PILOT_NO_COMPATIBLE_RESERVE" in statements
+    with writer as catalog:
+        catalog.migrate()
+        rows = catalog.connection.execute(
+            "SELECT policy_key FROM reference_policy_versions ORDER BY policy_key"
+        ).fetchall()
+    keys = [row["policy_key"] for row in rows]
+    assert "pilot_replacement_signature" in keys
+    assert len(keys) == len(set(keys))
 
 
 def test_seeding_is_idempotent(writer: CatalogWriter) -> None:

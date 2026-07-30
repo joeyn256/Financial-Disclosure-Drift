@@ -85,6 +85,7 @@ _D014: Final = "Docs/Decisions/decision_014_pilot_evidence_and_classification_po
 _D015: Final = "Docs/Decisions/decision_015_pilot_use_prohibition.md"
 _D016: Final = "Docs/Decisions/decision_016_m23_schema_and_artifact_architecture.md"
 _D018: Final = "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"
+_D020: Final = "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -950,6 +951,25 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "The accession's frozen attributes do not map to exactly one selection role.",
         requires_manual_review=True,
         decision_reference=_D018,
+    ),
+    # --- M2.3 pilot: Stage S5.4 reserve construction (Decision 020 section 13) ------------- #
+    #
+    # Exactly one code is authorized. REVIEW_PILOT_RESERVE_POOL_EXHAUSTED is explicitly
+    # not authorized and must not be added: each target's reserve is computed
+    # independently of every other target's, so no pool-exhaustion state exists. No
+    # integrity, retry, approximation, or substitution code is added either -- every
+    # reserve integrity violation is a gate failure (Decision 020 section 10), and
+    # Decision 013 section 6 forbids discretionary substitution outright.
+    _code(
+        # Decision 020 section 7.1: target-specific, review-required, and nonblocking.
+        # It is not selection infeasibility and not node-limit exhaustion; the run still
+        # reaches 'feasible' with the disposition durably recorded.
+        "REVIEW_PILOT_NO_COMPATIBLE_RESERVE",
+        "review",
+        "No candidate preserves the target selected entity's complete quota-contribution "
+        "signature, so that target has no reserve package.",
+        requires_manual_review=True,
+        decision_reference=_D020,
     ),
 )
 

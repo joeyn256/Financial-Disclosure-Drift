@@ -1,9 +1,10 @@
-"""Reason-code registry invariants, including the M2.3 S3.1 and S5.2 vocabulary additions.
+"""Reason-code registry invariants, including the M2.3 S3.1, S5.2, and S5.4 additions.
 
-Decisions 013-016 froze exactly sixteen new reason codes for the M2.3 pilot at Stage S3.1, and
-Decision 018 section 21 froze exactly five more for Stage S5. These tests prove each addition is
-exact (no more, no fewer, no renames) and that every pre-existing code from the accepted S3.0
-governance baseline is unchanged.
+Decisions 013-016 froze exactly sixteen new reason codes for the M2.3 pilot at Stage S3.1,
+Decision 018 section 21 froze exactly five more for Stage S5, and Decision 020 section 13 froze
+exactly one more for Stage S5.4. These tests prove each addition is exact (no more, no fewer, no
+renames) and that every pre-existing code from the accepted S3.0 governance baseline is
+unchanged.
 
 Tests are hermetic: the pre-S3.1 baseline is not reloaded from Git history (a CI checkout may be
 shallow and lack that historical commit). Instead, a canonical SHA-256 fingerprint of the 87
@@ -169,9 +170,30 @@ _S5_2_CODES: dict[str, dict[str, Any]] = {
     },
 }
 
+#: Decision 020 section 13, registered at Stage S5.4. Exactly one, and explicitly no
+#: pool-exhaustion, integrity, retry, approximation, or substitution code alongside it.
+_S5_4_CODES: dict[str, dict[str, Any]] = {
+    "REVIEW_PILOT_NO_COMPATIBLE_RESERVE": {
+        "category": "review",
+        "blocks_release": False,
+        "requires_manual_review": True,
+        "decision_reference": "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md",
+    },
+}
+
+#: Codes Decision 020 section 13 explicitly refuses to authorize.
+_FORBIDDEN_S5_4_CODES: tuple[str, ...] = (
+    "REVIEW_PILOT_RESERVE_POOL_EXHAUSTED",
+    "PILOT_RESERVE_POOL_EXHAUSTED",
+    "PILOT_RESERVE_APPROXIMATE_SUBSTITUTION",
+    "PILOT_RESERVE_RETRY_REQUIRED",
+    "REVIEW_PILOT_RESERVE_SUBSTITUTION",
+)
+
 _PRE_S3_1_CODE_COUNT = 87
 _S3_1_TOTAL_COUNT = 103
-_TOTAL_COUNT = 108
+_S5_2_TOTAL_COUNT = 108
+_TOTAL_COUNT = 109
 
 # Computed once, offline, from the accepted S3.0 governance baseline (the 87 reason codes that
 # existed before the M2.3 S3.1 addition): sort the pre-S3.1 codes by their ``code`` string, render
@@ -183,7 +205,7 @@ _PRE_S3_1_FINGERPRINT_SHA256 = "65c94cf2e10eb5854b2c00034c13f4f9de746bef39673ec4
 
 
 def _pre_s3_1_codes() -> dict[str, Any]:
-    added = set(_NEW_CODES) | set(_S5_2_CODES)
+    added = set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES)
     return {code: entry for code, entry in REASON_CODES.items() if code not in added}
 
 
@@ -203,23 +225,70 @@ def _fingerprint(codes: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def test_exactly_sixteen_s3_1_codes_and_five_s5_2_codes_were_added() -> None:
+def test_exactly_sixteen_s3_1_five_s5_2_and_one_s5_4_code_were_added() -> None:
     added = set(REASON_CODES) - set(_pre_s3_1_codes())
-    assert added == set(_NEW_CODES) | set(_S5_2_CODES)
+    assert added == set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES)
     assert len(_NEW_CODES) == 16
     assert len(_S5_2_CODES) == 5
+    assert len(_S5_4_CODES) == 1
     assert not set(_NEW_CODES) & set(_S5_2_CODES)
+    assert not (set(_NEW_CODES) | set(_S5_2_CODES)) & set(_S5_4_CODES)
 
 
-def test_registry_count_is_exactly_one_hundred_eight() -> None:
+def test_registry_count_is_exactly_one_hundred_nine() -> None:
     assert len(REASON_CODES) == _TOTAL_COUNT
-    assert _S3_1_TOTAL_COUNT + len(_S5_2_CODES) == _TOTAL_COUNT
+    assert _S3_1_TOTAL_COUNT + len(_S5_2_CODES) == _S5_2_TOTAL_COUNT
+    assert _S5_2_TOTAL_COUNT + len(_S5_4_CODES) == _TOTAL_COUNT
 
 
 def test_no_reason_code_beyond_the_five_approved_s5_2_additions_exists() -> None:
     """Decision 018 section 21 approves exactly five; the contract authorizes no other."""
-    beyond_s3_1 = set(REASON_CODES) - set(_pre_s3_1_codes()) - set(_NEW_CODES)
+    beyond_s3_1 = set(REASON_CODES) - set(_pre_s3_1_codes()) - set(_NEW_CODES) - set(_S5_4_CODES)
     assert beyond_s3_1 == set(_S5_2_CODES)
+
+
+def test_no_reason_code_beyond_the_single_approved_s5_4_addition_exists() -> None:
+    """Decision 020 section 13 approves exactly one; the contract authorizes no other."""
+    beyond_s5_2 = set(REASON_CODES) - set(_pre_s3_1_codes()) - set(_NEW_CODES) - set(_S5_2_CODES)
+    assert beyond_s5_2 == set(_S5_4_CODES)
+
+
+def test_s5_4_codes_carry_the_approved_metadata() -> None:
+    for code, expected in _S5_4_CODES.items():
+        entry = REASON_CODES[code]
+        assert entry.category == expected["category"]
+        assert entry.blocks_release == expected["blocks_release"]
+        assert entry.requires_manual_review == expected["requires_manual_review"]
+        assert entry.decision_reference == expected["decision_reference"]
+        assert (_REPO_ROOT / str(expected["decision_reference"])).is_file()
+        assert entry.description.endswith(".")
+
+
+def test_the_s5_4_reserve_code_is_nonblocking_and_review_required() -> None:
+    """Decision 020 section 7.1: target-specific, review-required, and nonblocking --
+    the run still reaches ``feasible`` with the disposition recorded."""
+    entry = REASON_CODES["REVIEW_PILOT_NO_COMPATIBLE_RESERVE"]
+    assert entry.requires_manual_review is True
+    assert entry.blocks_release is False
+    assert "REVIEW_PILOT_NO_COMPATIBLE_RESERVE" not in reasons.release_blocking_codes()
+    assert "REVIEW_PILOT_NO_COMPATIBLE_RESERVE" in reasons.codes_for_category("review")
+
+
+def test_no_pool_exhaustion_integrity_retry_or_substitution_code_was_added() -> None:
+    """Decision 020 section 13: ``REVIEW_PILOT_RESERVE_POOL_EXHAUSTED`` is not
+    authorized -- each target's reserve is independent, so no pool can be exhausted --
+    and every reserve integrity violation is a gate failure, not a reason code."""
+    for forbidden in _FORBIDDEN_S5_4_CODES:
+        assert forbidden not in REASON_CODES
+    assert set(_S5_4_CODES) & set(reasons.codes_for_category("integrity")) == set()
+
+
+def test_the_existing_reserve_codes_are_unchanged_by_the_s5_4_addition() -> None:
+    """The S5.4 code supplements the accepted vocabulary and renames nothing."""
+    for code in ("PILOT_RESERVE_SIGNATURE_INCOMPATIBLE", "PILOT_RESERVE_UNAVAILABLE"):
+        entry = REASON_CODES[code]
+        assert entry.category == "integrity"
+        assert entry.blocks_release is True
 
 
 def test_s5_2_codes_carry_the_approved_metadata() -> None:
@@ -295,7 +364,8 @@ def test_new_decision_reference_paths_exist_in_the_repository() -> None:
         reasons._D015,  # noqa: SLF001
         reasons._D016,  # noqa: SLF001
         reasons._D018,  # noqa: SLF001
+        reasons._D020,  # noqa: SLF001
     )
-    assert len(set(new_decision_constants)) == 6
+    assert len(set(new_decision_constants)) == 7
     for relative_path in new_decision_constants:
         assert (_REPO_ROOT / relative_path).is_file(), relative_path

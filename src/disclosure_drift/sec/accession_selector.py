@@ -123,6 +123,10 @@ __all__ = [
     "JointSelectionResult",
     "JointSelectionStatus",
     "NameChangeEvidence",
+    "QuotaContributionMember",
+    "QuotaContributionMembership",
+    "QuotaContributionUnit",
+    "QuotaMemberKind",
     "SelectedAccession",
     "accession_cap_outcomes",
     "accession_caps_satisfied",
@@ -132,6 +136,7 @@ __all__ = [
     "canonical_anchor_cik_padded",
     "circular_month_day_distance",
     "derive_amendment_families",
+    "official_filing_year",
     "solve_joint_selection",
 ]
 
@@ -275,6 +280,8 @@ _MAX_CIK_NUMERIC: Final = 9_999_999_999
 
 AccessionRole = Literal["base", "stress", "support", "control"]
 JointSelectionStatus = Literal["feasible", "infeasible", "infeasible_or_unproven"]
+#: The two member kinds ``pilot_quota_result_members.member_kind`` admits.
+QuotaMemberKind = Literal["entity", "accession"]
 
 
 # --------------------------------------------------------------------------
@@ -405,6 +412,28 @@ def _parse_iso_date(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def official_filing_year(official_filing_date: str | None) -> int | None:
+    """The calendar year of a stored official filing date, or ``None`` if unusable.
+
+    **The single accepted filing-year derivation.** Decision 018 section 19 puts
+    every methodological rule in exactly one place, and this is that place for the
+    filing year Decision 018 sections 7 and 15 make the 2009 support role depend
+    on. It delegates to :func:`_parse_iso_date` and adds no second regex, no
+    substring parser, and no ``int(value[:4])`` shortcut, so a caller cannot read a
+    year out of a value the accepted core rejects.
+
+    ``None`` is returned for an absent date and for every value
+    :func:`_parse_iso_date` refuses -- an impossible calendar date such as
+    ``2009-02-30``, a compact ``20090315``, a partially padded ``2009-3-15``, a
+    non-numeric ``abcd-01-01``, and the empty string alike. Returning ``None``
+    rather than raising keeps this helper's contract identical to the accepted
+    core's existing fail-closed behaviour; a caller that needs a usable year for a
+    non-null stored date raises its own fail-closed error.
+    """
+    parsed = _parse_iso_date(official_filing_date)
+    return None if parsed is None else parsed.year
 
 
 # --------------------------------------------------------------------------
@@ -603,13 +632,194 @@ class JointObjective:
 
 
 @dataclass(frozen=True, slots=True)
+class QuotaContributionMember:
+    """One member of one achieved quota-contribution unit.
+
+    ``cik_padded`` is the member entity for an ``entity`` member and the **anchor**
+    entity for an ``accession`` member, so the entity-level projection of a
+    membership artifact needs no further derivation. ``accession_plain`` is
+    ``None`` on an ``entity`` member and the canonical eighteen-digit identity on
+    an ``accession`` member, matching ``pilot_quota_result_members``'s two
+    mutually exclusive member columns (Decision 016 section 3).
+    """
+
+    member_kind: QuotaMemberKind
+    cik_padded: str
+    accession_plain: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaContributionUnit:
+    """One achieved contribution unit of one quota, with the members achieving it.
+
+    ``unit`` is the unit identity the accepted witness model already uses -- an
+    anchor CIK, a canonical dashed accession, or an amendment-purpose category --
+    and is never reinterpreted here.
+    """
+
+    dimension: str
+    key: str
+    unit: str
+    members: tuple[QuotaContributionMember, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaContributionMembership:
+    """The single immutable quota-contribution membership artifact (Decision 020).
+
+    **One artifact, three projections.** Decision 020 sections 5 and 6 make Stage
+    S5.1 the sole source of quota-contribution membership: the entity-level form,
+    the accession-level form, and the quota-result-member form are transposes of
+    the units carried here, and no consumer re-derives a contribution rule
+    (Decision 018 section 19).
+
+    Membership covers exactly the eleven measurable cross-cutting quotas. The
+    Decision 018 section 14 deferred quota contributes nothing and is never
+    reported as satisfied; the four accession caps are ``at_most`` constraints
+    rather than affirmative contributions and produce no membership either.
+
+    The artifact is canonical and order-independent: units are emitted sorted by
+    ``(dimension, key, unit)`` and members sorted within a unit, so neither the
+    candidate input order nor a database retrieval order can change a result.
+    """
+
+    units: tuple[QuotaContributionUnit, ...]
+
+    @classmethod
+    def derive(
+        cls,
+        entities: Iterable[EntityCandidate],
+        accessions: Iterable[AccessionCandidate],
+        *,
+        selected_entity_ciks: Iterable[str],
+        selected_accession_plains: Iterable[str],
+        selection_seed: str = PILOT_SELECTION_SEED,
+    ) -> QuotaContributionMembership:
+        """Derive the membership a selection -- or a hypothetical package -- supplies.
+
+        ``entities`` and ``accessions`` are the complete frozen candidate pool, so
+        amendment parentage resolves transitively exactly as it does for the
+        selection itself; the two ``selected_*`` arguments name the subset whose
+        contributions are being derived. Passing a reserve package's own entity
+        and accession bundle therefore yields the contribution set that package
+        would supply, computed by this one derivation rather than by a second
+        implementation of any quota rule (Decision 020 sections 6 and 7).
+
+        Raises:
+            ValueError: a malformed candidate pool, or a selected identity that is
+                not in it.
+        """
+        entity_pool = _validate_entities(entities)
+        accession_pool = _validate_accessions(accessions)
+        ctx = _build_pool_context(accession_pool, selection_seed)
+        return _derive_membership(
+            ctx,
+            entity_pool,
+            selected_entity_ciks=selected_entity_ciks,
+            selected_accession_plains=selected_accession_plains,
+        )
+
+    def units_for(self, dimension: str, key: str) -> tuple[QuotaContributionUnit, ...]:
+        """Every achieved unit of one quota, in canonical order."""
+        return tuple(unit for unit in self.units if unit.dimension == dimension and unit.key == key)
+
+    def achieved_count(self, dimension: str, key: str) -> int:
+        """The number of achieved units of one quota.
+
+        This is the value :func:`solve_joint_selection` publishes as that quota's
+        ``achieved_count``, so the published integer and the emitted membership
+        agree by construction rather than by a downstream reconciliation.
+        """
+        return len(self.units_for(dimension, key))
+
+    def entity_contributions(self) -> tuple[tuple[str, str, str], ...]:
+        """``(cik_padded, dimension, key)`` rows, deduplicated and sorted.
+
+        The projection behind ``pilot_selected_entity_quota_contributions``. An
+        entity contributes to a quota when it is an entity member of one of that
+        quota's achieved units, or when it anchors an accession member of one.
+        """
+        rows = {
+            (member.cik_padded, unit.dimension, unit.key)
+            for unit in self.units
+            for member in unit.members
+        }
+        return tuple(sorted(rows))
+
+    def accession_contributions(self) -> tuple[tuple[str, str, str], ...]:
+        """``(accession_plain, dimension, key)`` rows, deduplicated and sorted.
+
+        The projection behind ``pilot_selected_accession_quota_contributions``.
+        """
+        rows = {
+            (member.accession_plain, unit.dimension, unit.key)
+            for unit in self.units
+            for member in unit.members
+            if member.accession_plain is not None
+        }
+        return tuple(sorted(rows))
+
+    def quota_members(self) -> tuple[tuple[str, str, int, str, str, str | None], ...]:
+        """``(dimension, key, member_order, member_kind, cik_padded, accession_plain)``.
+
+        The projection behind ``pilot_quota_result_members``: every distinct
+        member of a quota's achieved units, in canonical order, numbered
+        contiguously from 1 within that quota.
+        """
+        by_quota: dict[tuple[str, str], set[QuotaContributionMember]] = {}
+        for unit in self.units:
+            by_quota.setdefault((unit.dimension, unit.key), set()).update(unit.members)
+        rows: list[tuple[str, str, int, str, str, str | None]] = []
+        for (dimension, key), members in sorted(by_quota.items()):
+            for order, member in enumerate(sorted(members, key=_member_sort_key), start=1):
+                rows.append(
+                    (
+                        dimension,
+                        key,
+                        order,
+                        member.member_kind,
+                        member.cik_padded,
+                        member.accession_plain,
+                    )
+                )
+        return tuple(rows)
+
+    def contribution_keys_for_entity(self, cik_padded: str) -> tuple[tuple[str, str], ...]:
+        """The complete ``(dimension, key)`` contribution signature of one entity.
+
+        This is the set Decision 013 section 6 requires a reserve package to
+        preserve exactly, and the set migration ``0009``'s feasible-transition
+        trigger compares each reserve package against.
+        """
+        return tuple(
+            sorted(
+                {
+                    (dimension, key)
+                    for cik, dimension, key in self.entity_contributions()
+                    if cik == cik_padded
+                }
+            )
+        )
+
+    def contribution_keys(self) -> tuple[tuple[str, str], ...]:
+        """Every ``(dimension, key)`` this membership contributes to, sorted."""
+        return tuple(sorted({(unit.dimension, unit.key) for unit in self.units}))
+
+
+def _member_sort_key(member: QuotaContributionMember) -> tuple[str, str, str]:
+    """Canonical member order: kind, then entity identity, then accession identity."""
+    return (member.member_kind, member.cik_padded, member.accession_plain or "")
+
+
+@dataclass(frozen=True, slots=True)
 class JointSelectionResult:
     """The S5.1 joint entity-accession outcome.
 
     A non-feasible result never carries a partial selection and never exposes a
     partial approved objective: ``selected_operating``, ``selected_controls``, and
-    ``selected_accessions`` are empty and ``objective`` is ``None`` unless
-    ``status == "feasible"`` (Decision 018 section 17).
+    ``selected_accessions`` are empty, ``objective`` is ``None``, and
+    ``quota_contributions`` is empty unless ``status == "feasible"`` (Decision 018
+    section 17).
     """
 
     status: JointSelectionStatus
@@ -624,6 +834,7 @@ class JointSelectionResult:
     excluded_candidates: tuple[CandidateDiagnostic, ...]
     accession_diagnostics: tuple[AccessionDiagnostic, ...]
     amendment_families: tuple[AmendmentFamily, ...]
+    quota_contributions: QuotaContributionMembership
     expanded_node_count: int
     node_limit: int
     node_limit_exhausted: bool
@@ -1081,8 +1292,7 @@ def _build_pool_context(
     filing_years: list[int | None] = []
     report_dates: list[date | None] = []
     for accession in accessions:
-        filing = _parse_iso_date(accession.official_filing_date)
-        filing_years.append(filing.year if filing is not None else None)
+        filing_years.append(official_filing_year(accession.official_filing_date))
         report_dates.append(_parse_iso_date(accession.report_date))
 
     role_if_operating: list[AccessionRole | None] = []
@@ -1332,7 +1542,9 @@ def _add_fye_distance_witnesses(
                     )
 
 
-def _fiscal_year_end_entities(ctx: _PoolContext, chosen: Sequence[int]) -> set[str]:
+def _fiscal_year_end_contributions(
+    ctx: _PoolContext, chosen: Sequence[int]
+) -> dict[str, tuple[int, ...]]:
     """Exact fiscal-year-end contribution over a complete selection (section 12).
 
     An entity contributes when it has a selected 10-KT or 10-KT/A, or when two
@@ -1341,32 +1553,166 @@ def _fiscal_year_end_entities(ctx: _PoolContext, chosen: Sequence[int]) -> set[s
     values fail closed: an entity with any undated selected original annual report
     makes no distance-rule contribution at all, which also prevents an undated
     filing from creating a false adjacency between two dated ones.
+
+    **This is the single fiscal-year-end contribution rule.** It returns each
+    contributing anchor with the selected accessions that establish the
+    contribution, so the published ``achieved_count`` and the emitted membership
+    (Decision 020 section 6) come from one derivation rather than two. The
+    pairwise witnesses :func:`_add_fye_distance_witnesses` builds are an
+    optimistic *pruning* bound only and never define a contribution.
     """
-    contributing: set[str] = set()
-    originals_by_anchor: dict[str, list[tuple[date, str]]] = {}
+    contributing: dict[str, list[int]] = {}
+    originals_by_anchor: dict[str, list[tuple[date, str, int]]] = {}
     undated_anchors: set[str] = set()
     for i in chosen:
         anchor = ctx.anchors[i]
         if ctx.accessions[i].form_type in TRANSITION_REPORT_FORMS:
-            contributing.add(anchor)
+            contributing.setdefault(anchor, []).append(i)
         if ctx.is_original_annual[i]:
             report = ctx.report_dates[i]
             if report is None:
                 undated_anchors.add(anchor)
             else:
                 originals_by_anchor.setdefault(anchor, []).append(
-                    (report, ctx.accessions[i].accession_number_dashed)
+                    (report, ctx.accessions[i].accession_number_dashed, i)
                 )
     for anchor in sorted(originals_by_anchor):
         if anchor in contributing or anchor in undated_anchors:
             continue
         ordered = sorted(originals_by_anchor[anchor])
+        members: list[int] = []
         for position in range(len(ordered) - 1):
             distance = circular_month_day_distance(ordered[position][0], ordered[position + 1][0])
             if distance > FYE_CIRCULAR_TOLERANCE_DAYS:
-                contributing.add(anchor)
-                break
-    return contributing
+                members.extend((ordered[position][2], ordered[position + 1][2]))
+        if members:
+            contributing[anchor] = members
+    return {anchor: tuple(sorted(set(members))) for anchor, members in contributing.items()}
+
+
+def _fiscal_year_end_entities(ctx: _PoolContext, chosen: Sequence[int]) -> set[str]:
+    """The contributing anchors of :func:`_fiscal_year_end_contributions`.
+
+    A projection of that single rule, kept so callers that need only the entity
+    set do not carry the member detail.
+    """
+    return set(_fiscal_year_end_contributions(ctx, chosen))
+
+
+def _achieved_unit_members(
+    witnesses: Sequence[_Witness], present: Sequence[bool]
+) -> dict[str, tuple[int, ...]]:
+    """Every achieved unit with the accessions that achieve it.
+
+    A unit is achieved when at least one of its witnesses is entirely selected --
+    the same predicate :func:`_count_units` applies -- and its members are the
+    **union** of every satisfying witness's members. Taking the union rather than
+    the first satisfying witness is what makes the emitted membership independent
+    of candidate input order, which a first-match rule would not be.
+    """
+    achieved: dict[str, set[int]] = {}
+    for witness in witnesses:
+        if all(present[member] for member in witness.members):
+            achieved.setdefault(witness.unit, set()).update(witness.members)
+    return {unit: tuple(sorted(members)) for unit, members in achieved.items()}
+
+
+def _accession_member(ctx: _PoolContext, index: int) -> QuotaContributionMember:
+    return QuotaContributionMember(
+        member_kind="accession",
+        cik_padded=ctx.anchors[index],
+        accession_plain=ctx.accessions[index].accession_plain,
+    )
+
+
+def _derive_membership(
+    ctx: _PoolContext,
+    entity_pool: Sequence[EntityCandidate],
+    *,
+    selected_entity_ciks: Iterable[str],
+    selected_accession_plains: Iterable[str],
+) -> QuotaContributionMembership:
+    """Build the membership artifact for one selected entity and accession set.
+
+    Every quota's membership comes from the accepted rule that already decides
+    that quota's achieved count: the witness model for the nine witness-derived
+    cross-cutting quotas, :func:`_fiscal_year_end_contributions` for the
+    fiscal-year-end quota whose witnesses are only a pruning bound, and
+    :func:`_name_change_contributes` for the purely entity-level name-change
+    quota. Nothing here re-expresses a contribution rule (Decision 018 section 19).
+
+    Raises:
+        ValueError: a selected identity that is not in the candidate pool.
+    """
+    entity_by_cik = {entry.cik_padded: entry for entry in entity_pool}
+    selected_ciks: list[str] = []
+    for cik in selected_entity_ciks:
+        if cik not in entity_by_cik:
+            message = f"selected CIK {cik!r} is not in the candidate entity pool"
+            raise ValueError(message)
+        selected_ciks.append(cik)
+    category_by_cik = {cik: entity_by_cik[cik].candidate.category for cik in selected_ciks}
+
+    index_by_plain = {a.accession_plain: i for i, a in enumerate(ctx.accessions)}
+    chosen: list[int] = []
+    for plain in selected_accession_plains:
+        index = index_by_plain.get(plain)
+        if index is None:
+            message = f"selected accession {plain!r} is not in the candidate accession pool"
+            raise ValueError(message)
+        chosen.append(index)
+    chosen.sort()
+
+    assigned_roles: dict[int, AccessionRole] = {}
+    for index in chosen:
+        category = category_by_cik.get(ctx.anchors[index])
+        role: AccessionRole | None
+        if category == "operating":
+            role = ctx.role_if_operating[index]
+        elif category == "control":
+            role = ctx.role_if_control[index]
+        else:
+            role = None
+        if role is not None:
+            assigned_roles[index] = role
+
+    witnesses = _build_witnesses(ctx, chosen, assigned_roles=assigned_roles, require_evidence=True)
+    present = [False] * len(ctx.accessions)
+    for index in chosen:
+        present[index] = True
+
+    units: list[QuotaContributionUnit] = []
+    for key in CROSS_CUTTING_QUOTAS:
+        members_by_unit: Mapping[str, tuple[int, ...]]
+        if key == QUOTA_KEY_NAME_CHANGE_ENTITIES:
+            members_by_unit = {
+                cik: ()
+                for cik in selected_ciks
+                if _name_change_contributes(entity_by_cik[cik].name_change)
+            }
+            entity_units = True
+        elif key == QUOTA_KEY_FISCAL_YEAR_END_CHANGE_ENTITIES:
+            members_by_unit = _fiscal_year_end_contributions(ctx, chosen)
+            entity_units = False
+        else:
+            members_by_unit = _achieved_unit_members(witnesses[key], present)
+            entity_units = False
+        for unit in sorted(members_by_unit):
+            members = (
+                (QuotaContributionMember("entity", unit, None),)
+                if entity_units
+                else tuple(_accession_member(ctx, index) for index in members_by_unit[unit])
+            )
+            units.append(
+                QuotaContributionUnit(
+                    dimension=QUOTA_DIMENSION_CROSS_CUTTING,
+                    key=key,
+                    unit=unit,
+                    members=tuple(sorted(members, key=_member_sort_key)),
+                )
+            )
+    units.sort(key=lambda entry: (entry.dimension, entry.key, entry.unit))
+    return QuotaContributionMembership(units=tuple(units))
 
 
 # --------------------------------------------------------------------------
@@ -2120,18 +2466,20 @@ def _build_accession_quota_results(
     assigned_roles: Mapping[int, AccessionRole],
     name_change_eligible: int,
     name_change_structural: int,
-    chosen_indices: Sequence[int],
-    name_change_achieved: int,
+    membership: QuotaContributionMembership,
 ) -> tuple[AccessionQuotaDiagnostic, ...]:
-    """Build one integer-only diagnostic per measurable cross-cutting quota."""
+    """Build one integer-only diagnostic per measurable cross-cutting quota.
+
+    Every ``achieved_count`` is the number of achieved units in ``membership``, so
+    the published integer and the emitted quota-contribution membership agree **by
+    construction** (Decision 020 section 6). ``available_eligible_count`` and
+    ``excluded_pool_count`` remain pool-level diagnostics over the eligible
+    candidates and are unchanged.
+    """
     strict = _build_witnesses(
         ctx, eligible_positions, assigned_roles=assigned_roles, require_evidence=True
     )
     all_present = [True] * len(ctx.accessions)
-    chosen_present = [False] * len(ctx.accessions)
-    for index in chosen_indices:
-        chosen_present[index] = True
-    achieved_fye = _fiscal_year_end_entities(ctx, chosen_indices)
     excluded_counts = _excluded_pool_counts(ctx, eligible_positions, assigned_roles)
     excluded_counts[QUOTA_KEY_NAME_CHANGE_ENTITIES] = max(
         0, name_change_structural - name_change_eligible
@@ -2139,15 +2487,11 @@ def _build_accession_quota_results(
 
     results: list[AccessionQuotaDiagnostic] = []
     for key, required in CROSS_CUTTING_QUOTAS.items():
+        achieved = membership.achieved_count(QUOTA_DIMENSION_CROSS_CUTTING, key)
         if key == QUOTA_KEY_NAME_CHANGE_ENTITIES:
             available = name_change_eligible
-            achieved = name_change_achieved
         else:
             available = _count_units(strict[key], all_present)
-            if key == QUOTA_KEY_FISCAL_YEAR_END_CHANGE_ENTITIES:
-                achieved = len(achieved_fye)
-            else:
-                achieved = _count_units(strict[key], chosen_present)
         results.append(
             AccessionQuotaDiagnostic(
                 dimension=QUOTA_DIMENSION_CROSS_CUTTING,
@@ -2391,8 +2735,16 @@ def solve_joint_selection(
     name_change_structural = sum(
         1 for cik in sorted(eligible_entity_ciks) if name_change_structural_by_cik[cik]
     )
-    name_change_achieved = sum(
-        1 for c in (*selected_operating, *selected_controls) if name_change_by_cik[c.cik_padded]
+    # The one additive Decision 020 output. It is derived from the same pool context
+    # and the same accepted contribution rules the diagnostics below report, and the
+    # diagnostics take their achieved counts from it.
+    membership = _derive_membership(
+        ctx,
+        entity_pool,
+        selected_entity_ciks=[c.cik_padded for c in (*selected_operating, *selected_controls)],
+        selected_accession_plains=[
+            ctx.accessions[index].accession_plain for index in chosen_indices
+        ],
     )
     accession_quota_results = _build_accession_quota_results(
         ctx,
@@ -2401,8 +2753,7 @@ def solve_joint_selection(
         pool_assigned_roles,
         name_change_eligible,
         name_change_structural,
-        chosen_indices,
-        name_change_achieved,
+        membership,
     )
     base_by_cik: dict[str, int] = {}
     for selected in selected_accessions:
@@ -2432,6 +2783,7 @@ def solve_joint_selection(
         excluded_candidates=tuple(excluded),
         accession_diagnostics=accession_diagnostics,
         amendment_families=ctx.families,
+        quota_contributions=membership,
         expanded_node_count=budget.count,
         node_limit=node_limit,
         node_limit_exhausted=budget.exhausted,

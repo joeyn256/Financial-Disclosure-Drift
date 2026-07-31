@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 import unicodedata
@@ -549,6 +550,11 @@ def write_plan(connection: sqlite3.Connection, plan: Plan, snapshot_id: str = _S
     return snapshot_id
 
 
+#: Catalogs this suite built for the test now running. The corruption fixtures
+#: below accept nothing else, so they cannot touch a real catalog even by mistake.
+_SCRATCH_CATALOGS: set[Path] = set()
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     """A migrated, reference-seeded temporary catalog."""
@@ -556,7 +562,11 @@ def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     with connect(path, writer=True) as connection:
         apply_migrations(connection)
         _seed_reference_data(connection)
-        yield connection
+        _SCRATCH_CATALOGS.add(path.resolve())
+        try:
+            yield connection
+        finally:
+            _SCRATCH_CATALOGS.discard(path.resolve())
 
 
 def frozen(connection: sqlite3.Connection, plan: Plan) -> FrozenJointCandidateSet:
@@ -2720,11 +2730,11 @@ def test_audit_metadata_never_enters_the_run_identity(
 def test_a_conflicting_same_id_replay_fails_closed(db: sqlite3.Connection) -> None:
     write_plan(db, feasible_plan())
     persisted = run_once(db)
-    with transaction(db) as c:
-        c.execute(
-            "UPDATE pilot_selection_runs SET selection_input_sha256 = ? WHERE selection_run_id = ?",
-            ("0" * 64, persisted.selection_run_id),
-        )
+    _corrupt_stored_run_identity(
+        db,
+        "UPDATE pilot_selection_runs SET selection_input_sha256 = ? WHERE selection_run_id = ?",
+        ("0" * 64, persisted.selection_run_id),
+    )
     with pytest.raises(GateFailureError, match="refusing to overwrite"):
         run_once(db)
 
@@ -3044,15 +3054,23 @@ def whole_database(connection: sqlite3.Connection) -> dict[str, list[tuple[objec
 
 
 def tampered_run(connection: sqlite3.Connection, column: str, value: object) -> str:
-    """Persist a valid feasible run, then mutate one stored identity column."""
+    """Persist a valid feasible run, then mutate one stored identity column.
+
+    ``selection_input_sha256`` is one of the three columns migration 0013 trigger 8
+    holds immutable, so the mutation is applied through
+    :func:`_corrupt_stored_run_identity`. The other four parametrized columns are
+    not named by that trigger and need no bypass, but they take the same path so
+    this helper keeps one code path and every parametrization reaches both public
+    paths below with the guard reinstalled.
+    """
     write_plan(connection, feasible_plan())
     persisted = run_once(connection)
     assert persisted.run_state == "feasible"
-    with transaction(connection) as c:
-        c.execute(
-            f"UPDATE pilot_selection_runs SET {column} = ? WHERE selection_run_id = ?",  # noqa: S608
-            (value, persisted.selection_run_id),
-        )
+    _corrupt_stored_run_identity(
+        connection,
+        f"UPDATE pilot_selection_runs SET {column} = ? WHERE selection_run_id = ?",  # noqa: S608
+        (value, persisted.selection_run_id),
+    )
     return persisted.selection_run_id
 
 
@@ -3110,12 +3128,12 @@ def test_both_paths_reject_a_run_that_no_longer_derives_its_own_run_id(
     )
     assert forged.selection_run_id != persisted.selection_run_id
     assert forged.selection_input_sha256 != persisted.selection_input_sha256
-    with transaction(db) as c:
-        c.execute(
-            "UPDATE pilot_selection_runs SET selection_seed = ?, selection_input_sha256 = ? "
-            "WHERE selection_run_id = ?",
-            ("tampered-seed", forged.selection_input_sha256, persisted.selection_run_id),
-        )
+    _corrupt_stored_run_identity(
+        db,
+        "UPDATE pilot_selection_runs SET selection_seed = ?, selection_input_sha256 = ? "
+        "WHERE selection_run_id = ?",
+        ("tampered-seed", forged.selection_input_sha256, persisted.selection_run_id),
+    )
     with pytest.raises(GateFailureError, match="selection_run_id"):
         reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
     with pytest.raises(GateFailureError):
@@ -3235,33 +3253,165 @@ def _database_path(connection: sqlite3.Connection) -> str:
     return str(row["file"])
 
 
-def _corrupt_sealed_row(
+def _require_scratch_catalog(path: str) -> str:
+    """Refuse to hand back anything but a catalog this suite itself created.
+
+    The two helpers below deliberately remove a lifecycle guard, so they must be
+    structurally incapable of running against a real catalog. This is an allowlist
+    rather than a location test: a path qualifies only because the ``db`` fixture
+    built it for the running test and registered it in :data:`_SCRATCH_CATALOGS`.
+    A repository or production catalog can never be in that set, and, unlike a
+    check against the interpreter's temporary root, this holds under ``--basetemp``,
+    ``PYTEST_DEBUG_TEMPROOT``, a relocated ``TMPDIR``, and xdist alike.
+    """
+    resolved = Path(path).resolve()
+    if resolved not in _SCRATCH_CATALOGS:
+        message = (
+            f"refusing to disable a lifecycle guard on {resolved}: corruption fixtures "
+            "run only against a throwaway catalog created by this suite's own fixture"
+        )
+        raise AssertionError(message)
+    return str(resolved)
+
+
+def _corrupt_stored_run_identity(
     connection: sqlite3.Connection, sql: str, parameters: tuple[object, ...]
 ) -> None:
-    """Corrupt a row of a sealed feasible run, bypassing the lifecycle guards.
+    """Rewrite a stored ``pilot_selection_runs`` identity column out of band.
+
+    Migration 0013 trigger 8 ``pilot_selection_run_identity_guard`` makes
+    ``selection_run_id``, ``snapshot_id``, and ``selection_input_sha256`` immutable
+    on every ordinary connection (Decision 021 section 15.5), and
+    ``tests/unit/test_m23_pilot_schema.py`` proves that directly for all three
+    columns. Historically corrupted storage must still fail closed anyway: a row
+    whose bytes were altered before that guard existed, or by something that is not
+    this application, has to be refused by reconstruction and by same-ID replay
+    rather than trusted or silently overwritten. That state is no longer reachable
+    through the guarded path, so it is constructed here instead -- on a raw
+    connection to the throwaway per-test catalog, in autocommit, with foreign keys
+    ON and exactly one trigger dropped. Every other guard stays installed, so the
+    resulting row is precisely what the ordinary pre-0013 write produced and nothing
+    else was relaxed to obtain it.
+
+    The drop is unconditional so this fixture has a single code path, and the
+    trigger is reinstalled from its own captured ``sqlite_master`` definition in a
+    ``finally`` block before the caller regains control. The bypass therefore lasts
+    exactly one statement: every assertion the calling test then makes runs against
+    a fully guarded catalog.
+    """
+    raw = sqlite3.connect(
+        _require_scratch_catalog(_database_path(connection)), isolation_level=None
+    )
+    try:
+        raw.execute("PRAGMA foreign_keys = ON")
+        definition = raw.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            ("pilot_selection_run_identity_guard",),
+        ).fetchone()
+        assert definition is not None, "pilot_selection_run_identity_guard is not installed"
+        raw.execute("DROP TRIGGER pilot_selection_run_identity_guard")
+        try:
+            raw.execute(sql, parameters)
+        finally:
+            raw.execute(str(definition[0]))
+        restored = raw.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            ("pilot_selection_run_identity_guard",),
+        ).fetchone()[0]
+        assert restored == 1, "the identity guard was not reinstalled after the corruption"
+    finally:
+        raw.close()
+
+
+_CORRUPTION_VERBS: Final[dict[str, str]] = {
+    "UPDATE": "update",
+    "DELETE": "delete",
+    "INSERT": "insert",
+}
+
+
+def _blocking_guard(sql: str) -> str:
+    """The single migration-0009 lifecycle guard that blocks this exact statement.
+
+    The guards are named ``pilot_<table>_<verb>_guard``, so the statement's own verb and
+    target table identify the one that has to come out -- and only that one.
+    """
+    match = re.match(
+        r"\s*(UPDATE|DELETE\s+FROM|INSERT\s+INTO)\s+(?P<table>[a-z_][a-z0-9_]*)",
+        sql,
+        re.IGNORECASE,
+    )
+    assert match is not None, f"cannot identify the target table of {sql!r}"
+    verb = _CORRUPTION_VERBS[match.group(1).split()[0].upper()]
+    return f"{match.group('table')}_{verb}_guard"
+
+
+def _corrupt_sealed_row(
+    connection: sqlite3.Connection,
+    sql: str,
+    parameters: tuple[object, ...],
+    *,
+    foreign_keys: bool = True,
+) -> None:
+    """Corrupt a row of a sealed feasible run, bypassing one lifecycle guard.
 
     Migration 0009 makes a completed run immutable through the application
     connection, which is exactly the property under test elsewhere. Reconstruction
     must still fail closed if the stored bytes are altered some other way, so the
-    corruption is applied on a raw connection with the guards and foreign keys off.
+    corruption is applied on a raw connection to the throwaway per-test catalog with
+    **only the single guard that blocks this exact statement** removed, and with that
+    guard reinstalled from its own captured ``sqlite_master`` definition in a ``finally``
+    block before the caller regains control. Every other guard -- including all eight of
+    migration 0013's -- stays installed, so the assertions the calling test then makes run
+    against a fully guarded catalog.
+
+    ``foreign_keys`` stays on unless the corruption being modelled is precisely a broken
+    reference: removing a parent row is the "missing row" corruption class reconstruction
+    has to refuse, and it cannot be constructed while the reference is enforced. Each
+    caller that turns it off says why.
+
+    This helper serves the child tables of a run. A ``pilot_selection_runs``
+    identity column is corrupted by :func:`_corrupt_stored_run_identity` instead,
+    which is narrower.
     """
-    raw = sqlite3.connect(_database_path(connection))
+    guard = _blocking_guard(sql)
+    raw = sqlite3.connect(_require_scratch_catalog(_database_path(connection)))
     try:
-        raw.execute("PRAGMA foreign_keys = OFF")
-        guards = [
-            row[0]
-            for row in raw.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
-                "AND (name LIKE 'pilot_%_insert_guard' OR name LIKE 'pilot_%_update_guard' "
-                "OR name LIKE 'pilot_%_delete_guard')"
-            ).fetchall()
-        ]
-        for guard in guards:
-            raw.execute(f"DROP TRIGGER {guard}")  # noqa: S608
-        raw.execute(sql, parameters)
-        raw.commit()
+        raw.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys else 'OFF'}")
+        definition = raw.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", (guard,)
+        ).fetchone()
+        assert definition is not None, f"{guard} is not installed"
+        raw.execute(f"DROP TRIGGER {guard}")  # noqa: S608
+        try:
+            raw.execute(sql, parameters)
+            raw.commit()
+        finally:
+            raw.execute(str(definition[0]))
+            raw.commit()
+        restored = raw.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?", (guard,)
+        ).fetchone()[0]
+        assert restored == 1, f"{guard} was not reinstalled after the corruption"
     finally:
         raw.close()
+
+
+#: Corruptions that model a broken reference rather than an altered value: a removed
+#: parent row, a re-keyed parent that orphans its children, or a pointer retargeted at a
+#: row that does not exist. Each is a state reconstruction must refuse, and none can be
+#: constructed while the reference it breaks is still enforced.
+_REFERENTIAL_CORRUPTIONS: Final[tuple[str, ...]] = (
+    "DELETE FROM pilot_reserves",
+    "SET replacement_cik_numeric = 999",
+    "SET reserve_package_id =",
+    "SET cik_numeric = 999",
+)
+
+
+def _breaks_a_reference(statement: str) -> bool:
+    """Whether this corruption is one of the referential cases above."""
+    return any(marker in statement for marker in _REFERENTIAL_CORRUPTIONS)
 
 
 def test_a_feasible_run_persists_mixed_reserve_and_reason_dispositions(
@@ -3685,7 +3835,7 @@ def test_corrupted_reserve_rows_fail_closed(
 ) -> None:
     write_plan(db, reserve_plan())
     persisted = run_once(db)
-    _corrupt_sealed_row(db, statement, ())
+    _corrupt_sealed_row(db, statement, (), foreign_keys=not _breaks_a_reference(statement))
     with pytest.raises(GateFailureError, match=message):
         reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
 
@@ -3743,7 +3893,7 @@ def test_a_signature_that_no_longer_derives_from_its_content_fails_closed(
 def test_corrupted_disposition_rows_fail_closed(db: sqlite3.Connection, statement: str) -> None:
     write_plan(db, reserve_plan())
     persisted = run_once(db)
-    _corrupt_sealed_row(db, statement, ())
+    _corrupt_sealed_row(db, statement, (), foreign_keys=not _breaks_a_reference(statement))
     with pytest.raises(GateFailureError, match="pilot_selection_entity_reasons"):
         reconstruct_persisted_joint_selection(db, persisted.selection_run_id)
 
@@ -3774,7 +3924,7 @@ def test_a_conflicting_same_id_replay_is_refused_with_reserves_present(
     write_plan(db, reserve_plan())
     persisted = run_once(db)
     assert _count(db, "pilot_reserves") > 0
-    _corrupt_sealed_row(
+    _corrupt_stored_run_identity(
         db,
         "UPDATE pilot_selection_runs SET selection_input_sha256 = ? WHERE selection_run_id = ?",
         ("0" * 64, persisted.selection_run_id),

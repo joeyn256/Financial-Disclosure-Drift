@@ -137,14 +137,16 @@ solver plus S4.2 persistence adapter.
   source. Decision 018 §3.3 confirms it does not retrofit or alter the accepted S4 selector or any S4
   persisted artifact. See "Lifecycle notes" below.
 
-## 6. Accession selection — policy approved (Decision 018), not implemented
+## 6. Accession selection — accepted and checkpointed (Stages S5.1 and S5.2)
 
-**Purpose (intended, not implemented):** joint entity-accession selection so both quota families are
-solved as one assignment problem.
+**Purpose:** joint entity-accession selection so both quota families are solved as one assignment
+problem.
 
-- **Source: not implemented.** No `accession_selector.py` or `accession_selection_store.py` module
-  exists in this repository. Any reference to these names elsewhere in this documentation set is a
-  **provisional, unauthorized proposal name**, not a claim that the module exists.
+- **Source:** [`accession_selector.py`](../src/disclosure_drift/sec/accession_selector.py) (S5.1,
+  pure, in-memory — the **sole methodological selector**),
+  [`accession_selection_store.py`](../src/disclosure_drift/sec/accession_selection_store.py) (S5.2,
+  frozen reader, deterministic run identity, transactional persistence, reconstruction, same-ID
+  idempotence).
 - **Decisions:** entity-level counting units and the entity-side objective are frozen
   ([013](Decisions/decision_013_pilot_selection_mechanics.md) §3–§5). The accession-specific
   interpretation is now frozen by
@@ -156,58 +158,127 @@ solved as one assignment problem.
   retry prohibition (§18), and the S5.1/S5.2 methodological boundary (§19). See
   [`Docs/decision_index.md`](decision_index.md) and
   [`Milestones/contracts/m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md).
-- **Persistence:** schema exists ahead of its writer —
-  `pilot_candidate_accessions`, `pilot_candidate_accession_registrants`,
-  `pilot_selected_accessions`, `pilot_selected_accession_quota_contributions` (migration `0009`).
-  No code writes to any of these tables. Decision 018 requires **no schema change** (§25); the
-  `PILOT_JOINT_SELECTOR_POLICY_VERSION` constant and additive migration `0011` it approves (§20) are
-  **future Stage S5.2 work and do not exist** — `pilot_policy.py` and
-  `storage/migrations/` are unchanged, and migrations still end at `0010`.
-- **Tests:** none exist for accession selection logic (there is no implementation to test).
-- **Status:** **policy approved, implementation not started and not yet authorized.** Architecture
-  preflight for this stage is complete (concluded no migration-`0009` schema contradiction blocks
-  it) and Decision 018 is approved, but no S5 code has been written. Decision 018 authorizes no
-  implementation on its own; the stage contract governs the next bounded step.
+- **Persistence:** `pilot_selected_accessions`, `pilot_selected_accession_quota_contributions`,
+  `pilot_quota_results`, `pilot_quota_result_members` (migration `0009`), written inside the S5 joint
+  run's single `running` window; `reference_policy_versions` joint-selector row (migration `0011`,
+  INSERT-only). Decision 018 required **no DDL** (§25), and the
+  `PILOT_JOINT_SELECTOR_POLICY_VERSION` constant it approved (§20) now exists in `pilot_policy.py`.
+  `pilot_candidate_accessions` and `pilot_candidate_accession_registrants` are still **schema ahead
+  of a writer** — no candidate-snapshot builder exists (see §4).
+- **Tests:** `test_m23_accession_selector.py`, `test_m23_accession_selection_store.py`.
+- **Status:** **accepted and checkpointed** — tag `m2.3-s5-complete` (`51837c0`), the combined
+  S5.1–S5.3 boundary, owner-accepted 2026-07-29. The S5 joint run receives its own content-derived
+  `selection_run_id`, distinct from the S4 draft's, and reaches `feasible`. `selection_result_sha256`
+  is written by **Stage S6** and by nothing else (Decision 021 §6): the accepted S6 store seals it
+  append-once on an already-`feasible` run, and migration `0013` enforces that at the schema layer.
+  It is `NULL` in any catalog no S6 seal has run against, and **no production catalog exists**.
 
-## 7. Reserve packages
+## 7. Reserve packages — accepted and checkpointed (Stage S5.4)
 
-**Purpose (intended, not implemented):** deterministic same-signature replacement candidates for a
-selected entity/accession that later fails objective verification (Decision 013 §6, D11).
+**Purpose:** deterministic same-signature replacement candidates for a selected entity that later
+fails objective verification (Decision 013 §6, D11). A reserve is **constructed, never applied**;
+substitution is an M2.5 event.
 
-- **Source:** not implemented.
+- **Source:** [`reserve_selector.py`](../src/disclosure_drift/sec/reserve_selector.py) (pure —
+  eligibility, ranking, package assembly, signatures, no-compatible-reserve dispositions); the
+  quota-contribution membership output in
+  [`accession_selector.py`](../src/disclosure_drift/sec/accession_selector.py); persistence and
+  fail-closed reconstruction in
+  [`accession_selection_store.py`](../src/disclosure_drift/sec/accession_selection_store.py).
 - **Decisions:** [013](Decisions/decision_013_pilot_selection_mechanics.md) §6 (D11, no
   discretionary substitution; complete quota-contribution signature required),
   [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §7 (reserve-package table
-  design and signature contents).
-- **Persistence:** schema exists ahead of its writer — `pilot_reserves`, `pilot_reserve_accessions`,
-  `pilot_reserve_quota_contributions` (migration `0009`).
-- **Tests:** none (no implementation).
-- **Status:** policy approved; belongs to the Stage-S5 envelope as its **S5.4** boundary — a later
-  sub-stage within S5, not concurrent with S5.1. Not started.
+  design and signature contents), [020](Decisions/decision_020_m23_s5_4_reserve_architecture.md)
+  (controlling: membership source, identity boundary, schema ruling, the nine owner rulings, and the
+  five accepted limitations in §19.1).
+- **Persistence:** `pilot_reserves`, `pilot_reserve_accessions`, `pilot_reserve_quota_contributions`,
+  `pilot_selected_entity_quota_contributions`, `pilot_selected_accession_quota_contributions`,
+  `pilot_quota_result_members` (migration `0009`), plus `pilot_selection_entity_reasons` (migration
+  `0012`, DDL-only: one `STRICT` table and four triggers). All written inside the S5 run's single
+  `running` window, in one transaction, with `running -> feasible` as its last statement.
+- **Tests:** `test_m23_reserve_selector.py`, plus the reserve coverage in
+  `test_m23_accession_selection_store.py`, `test_m23_pilot_schema.py`, and
+  `test_migration_provenance.py`.
+- **Status:** **accepted and checkpointed** — tag `m2.3-s5.4-complete`, owner-accepted 2026-07-30 on
+  the final independent recommendation `ACCEPT_M23_S5_4_FOR_CHECKPOINT`. Reserves are **never
+  published and are not a manifest input before Stage S6**; Decision 021 §7.4 rules that Stage S6
+  binds them, with their `pilot_selection_entity_reasons` dispositions, into `reserves_sha256`.
+- **A run with zero reserve packages is lawful and manifest-eligible.** Decision 020 §7.1 makes
+  `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` target-specific and nonblocking, and migration `0012` accepts
+  one such disposition per selected target as complete coverage.
+  [Decision 022](Decisions/decision_022_m23_s6_reserve_rank_applicability.md)
+  (`ACCEPTED — OWNER APPROVED 2026-07-31`) is the controlling record for what that means at Stage S6:
+  crosswalk item 46's reserve rank is applicable **once per persisted package** and is **structurally
+  not applicable** for a target carrying the disposition instead, while item 70 remains the total
+  per-target coverage requirement. No synthetic package and no invented rank is ever created or
+  serialized.
 
 ## 8. Manifest and release
 
 **Purpose:** two distinct things live here — (a) the general release-manifest/hashing machinery
-already used for non-pilot releases, and (b) the pilot-specific manifest that Stage S6 will produce.
+already used for non-pilot releases, and (b) the pilot-specific manifest Stage S6 produces. They are
+**distinct artifacts**: the pilot manifest reuses only the hashing primitives, never
+`ReleaseManifest`, `build_manifest`, or `RELEASE_SCHEMA_VERSION` (Decision 021 §13.6).
 
 - **Source (general release machinery, implemented):**
   [`release/hashing.py`](../src/disclosure_drift/release/hashing.py) (normalized table-content
   hashing), [`release/manifest.py`](../src/disclosure_drift/release/manifest.py) (release gates,
   diffs), [`forecast/storage.py`](../src/disclosure_drift/forecast/storage.py) (capacity
   forecasting), [`audit/cohort_divergence.py`](../src/disclosure_drift/audit/cohort_divergence.py).
-- **Source (pilot manifest, not implemented):** `pilot_manifest_versions`,
-  `pilot_projection_recovery_events` exist as schema only (migration `0009`); no module serializes a
-  pilot manifest.
+- **Source (pilot manifest, implemented and accepted at Stage S6):**
+  [`release/pilot_manifest.py`](../src/disclosure_drift/release/pilot_manifest.py) — pure: the eight
+  component digests, the five-column structural-fingerprint reduction, `selection_result_sha256`, the
+  root, `manifest_id`, the thirteen-block §13.2 document schema, the 81-item §13.2.1 crosswalk, and
+  the canonical-JSON renderer. No SQLite, clock, filesystem, environment, Git, or `sys.version`.
+  [`sec/pilot_manifest_store.py`](../src/disclosure_drift/sec/pilot_manifest_store.py) — persistence:
+  row loading, the seven fail-closed eligibility checks, append-once sealing in its own prior
+  transaction, one `proposed` `pilot_manifest_versions` row written atomically with its serialized
+  document, public verification, and write-free idempotent replay; it takes the six Decision 021 §8.4
+  explicit arguments and infers none of them. **`pilot_projection_recovery_events` remains schema
+  only** — S6 writes it not at all (Decision 021 §16).
 - **Decisions:** [009](Decisions/decision_009_raw_data_governance.md) §10 (general hashing),
   [013](Decisions/decision_013_pilot_selection_mechanics.md) §7–§8 (D12 manifest hashing precedent
-  the pilot manifest will reuse, D13 approval semantics),
+  the pilot manifest reuses, D13 approval semantics),
   [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §8 (hash boundaries —
-  excluded fields, dedicated `pilot_projection_recovery_events` table).
-- **Persistence:** `0009_m23_pilot_schema.sql` (pilot manifest schema, unwritten).
-- **Tests:** `test_release_forecast_and_audit.py`, `test_m23_pilot_schema.py` (hash-contract-adjacent
-  assertions only).
+  excluded fields, dedicated `pilot_projection_recovery_events` table),
+  [021](Decisions/decision_021_m23_s6_manifest_construction.md) **v0.5** (**controlling for Stage S6;
+  `ACCEPTED`, owner approved 2026-07-30, binding**: the exact preimage of `selection_result_sha256` and of all eight component hashes
+  plus the root, the circularity exclusions and commitment closure, manifest identity and its
+  six-field immutability, manifest eligibility, the proposed-only boundary, the **complete
+  pilot-manifest document contract** operationalizing
+  [`milestone_2_3_pilot_selection_plan.md`](../Milestones/milestone_2_3_pilot_selection_plan.md)
+  §10 — including the **exhaustive item-by-item §10 crosswalk** over all 81 atomic items with zero
+  unclassified (§13.2.1) — the **five-column** structural-fingerprint partition rule, and the frozen
+  **eight-trigger** migration-`0013` SQL — **status `ACCEPTED`, binding**. Its §15.5 states the append-once and identity guarantee: a run is inserted only
+  unsealed, can never be replaced or deleted, cannot have `selection_run_id`, `snapshot_id`, or
+  `selection_input_sha256` changed, and therefore carries a `selection_result_sha256` that is
+  append-once **and remains recomputable from its persisted preimage** across every direct SQLite
+  write path. Its §19.11 v0.4 finding on run replacement, deletion, and identity mutation is
+  **closed** by triggers 6, 7, and 8).
+- **Persistence:** `0009_m23_pilot_schema.sql` (the `pilot_manifest_versions` schema) plus
+  `0013_m23_manifest_lifecycle_guards.sql` — **DDL-only, eight triggers, no table, column, or
+  index**, reproducing the Decision 021 §15.1 SQL byte-for-byte and its nine §15.3 digests over a
+  10939-byte, 186-line statement region. `pilot_projection_recovery_events` still has no writer.
+- **Tests:** `test_m23_pilot_manifest.py` (the pure hashing, document-schema, crosswalk,
+  completeness, and serialization contract), `test_m23_pilot_manifest_store.py` (eligibility,
+  sealing, persistence, atomicity, verification, replay, explicit-argument discipline),
+  `test_m23_pilot_schema.py` (the eight triggers adversarially under every pragma combination),
+  `test_migration_provenance.py`, `test_release_forecast_and_audit.py`.
 - **Status:** general release machinery accepted and in use; **pilot manifest construction is Stage
-  S6, not started**, and depends on S5 completing first.
+  S6 — implemented, independently accepted, and checkpointed** at `m2.3-s6-complete`. Governance is
+  Decision 021 v0.5 (architecture), Decision 022 (item-46 applicability), and
+  [Decision 023](Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md) (acceptance,
+  `M23_STAGE_S6_ACCEPTED_AND_COMPLETE`, owner approved 2026-07-31). Its contract,
+  [`Milestones/contracts/m23_s6.md`](../Milestones/contracts/m23_s6.md), is now
+  `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO` and authorizes nothing further. S6
+  delivered **machinery plus the complete manifest document schema, fixture-tested**, and can create
+  only a `proposed` manifest: the exact real-data instance and CLI output belong to Stage S9, owner
+  approval of the root hash to Stage S10, and Gate F live-metadata safety to Stage S7 — **none
+  authorized**, and all unreachable while no candidate-snapshot builder and no production catalog
+  exist (Decision 021 §17). Decision 023 §7 records four accepted nonblocking limitations: an empty
+  sole-carrier crosswalk family fails closed (**O1**), the release root is assumed owner-controlled
+  (**O2**), atomicity governs newly created artifacts only (**O3**), and item-46 enforcement is
+  consistent defence in depth (**O4**).
 
 ## 9. Validation and CI
 
@@ -236,7 +307,7 @@ S4 implementation; it does not introduce any new state or transition.
   does not attempt. Treat any S4 run row as a draft, not a completed selection. A permanently-
   `running` S4 draft is expected residue, not an abandoned run
   ([018](Decisions/decision_018_m23_s5_accession_selection_policy.md) §27).
-- **The S5 joint entity-accession run — accepted design (Decision 018 §6).** S5 produces a
+- **The S5 joint entity-accession run — accepted and implemented (Decision 018 §6).** S5 produces a
   **distinct, content-derived** joint-selection run rather than editing the S4 draft in place. The
   S4 draft remains unchanged, remains in `running`, is non-publishable, and is never mutated,
   deleted, promoted, or used as a manifest source. **Only the S5 joint run may advance toward
@@ -246,6 +317,14 @@ S4 implementation; it does not introduce any new state or transition.
   via an explicit recorded retry event) is unchanged and applies to the S5 run row; Decision 018 §18
   additionally prohibits any automatic retry and authorizes no S5 retry entry point, so
   `failed -> running` is exercised by no S5 module.
-- **S6 is the final-manifest boundary.** Manifest serialization, hashing, and owner-approval
-  workflow (Decision 013 §7–§8) are Stage S6 and have not started. S6 depends on a `feasible` S5
-  selection run existing first; it is not reachable from the current S4-only state.
+- **S6 is the manifest-machinery boundary, and it is accepted.** Manifest serialization and hashing
+  (Decision 013 §7) are Stage S6, together with the complete document schema Decision 021 §13 freezes
+  from milestone plan §10 and enumerates item by item in §13.2.1; the **owner-approval workflow
+  (Decision 013 §8) is not** — Decision 021 §11.1 confines S6 code to creating a `proposed` manifest,
+  and §17 places Gate F safety at Stage S7, live metadata at S8, the exact real-data manifest
+  instance and CLI output at S9, and owner approval of the root hash at S10. S6 requires a `feasible`
+  S5 joint run, which exists as an implemented path. **S6 is implemented, accepted, and
+  checkpointed** (Decision 023); **Stages S7–S10 have not begun and are not authorized**, no S7
+  contract exists, and no Milestone 3 implementation exists. The Milestone 2 / Milestone 3 boundary
+  reorganization and the final integrated Milestone 2 audit are separate later sessions, and
+  **Milestone 2 is not closed by S6 acceptance**.

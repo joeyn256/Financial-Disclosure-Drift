@@ -66,9 +66,9 @@ Run as regression **without editing**: `test_m23_accession_selector.py` (S5.1),
 `test_m23_entity_selector.py` and `test_m23_entity_selection_store.py` (S4), plus the lifecycle and
 catalog integrity tests named in the table above.
 
-Reserve paths (Stage S5.4) are implemented and accepted — see the next section. Manifest, release,
-and publication paths (Stage S6) are **not implemented** and appear nowhere in this map. No S5
-selection and no reserve is a manifest or publication input.
+Reserve paths (Stage S5.4) are implemented and accepted — see the next section. Manifest paths
+(Stage S6) are **implemented and accepted** — see "Stage S6 impact paths" below. **Publication,
+approval, live-metadata, and CLI paths remain unimplemented and unauthorized** (Stages S7–S10).
 
 ## Stage S5.4 impact paths (implemented and accepted)
 
@@ -154,6 +154,109 @@ reserve availability; the seven named signature contribution values are counts o
 Boolean presence; and the schema-layer subset/superset/empty transition-test observation is nonblocking
 and was independently validated at acceptance.
 
+## Stage S6 impact paths (implemented and accepted)
+
+**Everything in this section now exists, and nothing here authorizes an edit.** Stage S6 is
+**implemented, independently accepted, and checkpointed** at `m2.3-s6-complete`.
+[Decision 021](Decisions/decision_021_m23_s6_manifest_construction.md) is at **v0.5** and
+**`ACCEPTED`** (owner approved 2026-07-30) and remains the controlling architecture record;
+[`../Milestones/contracts/m23_s6.md`](../Milestones/contracts/m23_s6.md) is now
+`ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO` and authorizes nothing further; and
+[Decision 023](Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`) records acceptance,
+outcome `M23_STAGE_S6_ACCEPTED_AND_COMPLETE`. **Changing any path below requires a new explicit owner
+authorization and its own contract.** The table records which gates each path triggers when it is
+changed again.
+[Decision 022](Decisions/decision_022_m23_s6_reserve_rank_applicability.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`) additionally clarifies Decision 021 §13.2.1 item 46:
+reserve rank is applicable **once per persisted reserve package** and is **structurally not
+applicable** for a selected target that carries the persisted `REVIEW_PILOT_NO_COMPATIBLE_RESERVE`
+disposition instead, so a zero-package run stays manifest-eligible. Touching item-46 applicability
+therefore means touching `release/pilot_manifest.py` and `sec/pilot_manifest_store.py` and running
+both S6 test modules **plus** the reserve, disposition, reconstruction, and replay regressions listed
+below — a zero-package or mixed-coverage run is a first-class case, not an edge case.
+
+**The delivered path set is ten, not seven.** The contract authorized seven and that authorization is
+unchanged by the v0.2, v0.3, v0.4, and v0.5 corrections. Migration `0013` then forced three further
+test edits, which Decision 023 §4 **ratifies retroactively** — they are marked **(ratified)** in the
+table. Every other production, test, migration, decision, and contract path remains prohibited unless
+later owner-authorized, and the ratification is of three named paths only, never a general widening.
+
+Six structural constraints govern the whole stage and should be read before planning any change to
+it. `pilot_manifest_versions` has **no `INSERT` guard and consults no run state**, so a manifest over
+a `running` or `infeasible` run — including the permanently-`running` S4 draft — is accepted and
+approvable today; `pilot_selection_runs.selection_result_sha256` has **no trigger at all**, so it is
+writable, overwritable, and clearable on any run in any state, **and the table has no `INSERT` guard
+either, so a run can be created already `feasible` and already sealed**; **no existing trigger
+protects any `pilot_manifest_versions` identity column**, so `manifest_id`, `manifest_schema_version`,
+`ordinal_version`, and `supersedes_manifest_id` are all rewritable after insert; and the accepted
+S5.2 reconstruction path **does not read the seal**, so a sealed digest is invisible to it; and
+**`INSERT OR REPLACE` rewrites a `pilot_manifest_versions` row wholesale past every existing guard**,
+because all four of migration `0009`'s manifest triggers are `BEFORE UPDATE` or `BEFORE DELETE` and
+SQLite does not fire a delete trigger for replacement unless `PRAGMA recursive_triggers` is on, which
+this repository never sets. Decision 021 §§3.1–3.3 and §3.5 record the direct probes, §15 the
+authorized **eight-trigger** migration, and §12 the S6-owned verification that closes the S5.2 gap
+without reopening S5.2. The sixth constraint, closed at v0.5: **`pilot_selection_runs` itself had no
+row-replacement guard, no delete guard, and no guard on any identity column**, so a sealed terminal
+digest could be cleared by `INSERT OR REPLACE`, the run removed by `DELETE`, and `selection_run_id`,
+`snapshot_id`, or `selection_input_sha256` rewritten by direct `UPDATE` — under either
+`recursive_triggers` setting. Decision 021 §3.6 records those probes, triggers 6, 7, and 8 close
+them, and **§15.5 states the resulting append-once and recomputability guarantee**.
+
+| Delivered path | Kind | Gates it triggers |
+|---|---|---|
+| `src/disclosure_drift/release/pilot_manifest.py` | new pure module — the eight component digests, the five-column structural-fingerprint reduction, `selection_result_sha256`, the root, `manifest_id`, the §13.2 document schema and the §13.2.1 81-item §10 crosswalk, and its canonical JSON | ruff, ruff format, mypy; `test_m23_pilot_manifest.py`; release regression (`test_release_forecast_and_audit.py`) |
+| `src/disclosure_drift/sec/pilot_manifest_store.py` | new persistence adapter — row loading, eligibility, sealing, one `proposed` manifest row plus its document, verification; six required explicit arguments (Decision 021 §8.4) | ruff, ruff format, mypy; `test_m23_pilot_manifest_store.py`; `test_m23_pilot_schema.py`; `test_migration_provenance.py`; `make sqlite-check`; S5.1/S5.2/S5.4 and S4 regression |
+| `src/disclosure_drift/storage/migrations/0013_m23_manifest_lifecycle_guards.sql` | **new migration — DDL-only**, **eight** new triggers and no table, column, or index, reproducing the Decision 021 §15.1 eight-block SQL byte-for-byte and its nine §15.3 digests | `test_migration_provenance.py`, `test_m23_pilot_schema.py`, `make sqlite-check` (floor 3.37); ruff/mypy not applicable to SQL |
+| `tests/unit/test_m23_pilot_manifest.py` | new primary test module | ruff, ruff format, mypy |
+| `tests/unit/test_m23_pilot_manifest_store.py` | new test module | ruff, ruff format, mypy |
+| `tests/unit/test_m23_pilot_schema.py` | bounded edit — the **eight** new triggers adversarially, including the `INSERT OR REPLACE` routes on both tables, the `DELETE` refusals in every run state, the three selection-run identity fields, and the byte-preservation assertions, all under every pragma combination, plus the `_insert_manifest` fixtures a sealed feasible run now requires | ruff, ruff format, mypy |
+| `tests/unit/test_migration_provenance.py` | bounded edit — extends contiguous-chain, ordering, and byte-immutability coverage to `0013` | ruff, ruff format, mypy |
+| `tests/unit/test_storage_catalog.py` | **(ratified)** forced consequence — the canonical migration chain is asserted by exact version **and** name, so `(13, "m23_manifest_lifecycle_guards")` had to be added | ruff, ruff format, mypy |
+| `tests/unit/test_m23_entity_selection_store.py` | **(ratified)** forced consequence — its accepted S4 corruption fixture built its precondition with a plain `UPDATE` on `selection_input_sha256`, which trigger 8 now refuses | ruff, ruff format, mypy |
+| `tests/unit/test_m23_accession_selection_store.py` | **(ratified)** forced consequence — same cause at four call sites, plus narrowing `_corrupt_sealed_row`, whose wildcard guard-drop would otherwise have swallowed the new `pilot_selection_run_delete_guard` | ruff, ruff format, mypy |
+
+**The three ratified paths changed no production module, no S4 or S5 methodology, and no assertion's
+strength**; the rewritten corruption fixtures are narrower and more fail-closed than the code they
+replaced — a scratch-catalog allowlist, exactly one trigger dropped per statement, restoration from
+the captured `sqlite_master` definition in a `finally` with reinstallation asserted, and foreign keys
+left enabled except where the modelled corruption is itself a broken reference (Decision 023 §4.1).
+
+**Migration: exactly one, `0013`.** Its complete **eight-block** SQL is frozen
+in Decision 021 §15.1 with per-block and concatenation SHA-256 digests, byte counts, line counts, and
+the exact concatenation rule in §15.3; a difference between the written file's statement region and
+that SQL is a defect in the file, never a correction to the record — and the final independent
+acceptance review confirmed byte-for-byte identity, all nine digests, the 10939-byte and 186-line
+counts, exactly eight triggers, and no table, index, column, or data statement. The v0.4 **five-block** region
+(7436 bytes, 129 lines, `6bfb897c…`), the v0.3 **four-block** region (4990 bytes, 88 lines,
+`51151767…`), and the v0.1 three-block region are all **withdrawn as compositions** and must not be
+reproduced; the individual digests of blocks 1–5 are **not** withdrawn and carry forward unchanged. Migrations `0009`–`0012` must remain
+byte-identical. **No migration other than `0013` is authorized.**
+
+**Behaviour-neutrality (Decision 021 §3.4).** No accepted S4 or S5 statement names
+`selection_result_sha256`, `selection_run_id`, or `snapshot_id` in an `UPDATE … SET` list; none names
+`selection_result_sha256` in an `INSERT` column list; and none writes `pilot_manifest_versions` at
+all, and none uses `INSERT OR REPLACE`, `REPLACE INTO`, `INSERT OR IGNORE`, or `DELETE` against
+either table. The accepted replay path `SELECT`s the run first and reconstructs and returns when it
+exists, inserting only when it does not. None of the eight new triggers can fire on any accepted code
+path, and migration `0013` changes no accepted **production** behaviour. **The consequences landed in
+tests, and were wider than foreseen.** Decision 021 §20 anticipated that `test_m23_pilot_schema.py`'s
+`_insert_manifest` helper would need a `feasible` run sealed by a **later `UPDATE`** — a pre-sealed
+`INSERT` is refused — which is why that module was a bounded-edit path; §20 states the three fixture
+changes and the two legitimate routes. The same mechanism additionally reached three modules §20 did
+not name: the migration-chain assertion in `test_storage_catalog.py`, and the plain-`UPDATE`
+corruption fixtures in `test_m23_entity_selection_store.py` and
+`test_m23_accession_selection_store.py`, all three ratified by Decision 023 §4. **When adding a
+lifecycle trigger, search the suite for fixtures that construct the state the trigger now forbids** —
+that is the generalizable lesson this row records.
+
+**Not authorized, and appearing nowhere in this map:** owner approval of a manifest, publication,
+Gate F live-metadata safety work, live SEC metadata execution, a real candidate snapshot, the exact
+real-data manifest instance, **any CLI surface**, and any projection-recovery writer. Those are
+Stages S7–S10 and later operational work (Decision 021 §§16, 17). `release/hashing.py`,
+`release/manifest.py`, `paths.py`, `pilot_policy.py`, `reasons.py`, `cli.py`, and every accepted
+S4/S5 module are **reused or regressed, never edited**.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,
@@ -174,8 +277,10 @@ and was independently validated at acceptance.
 
 It does not replace `make check` (the full acceptance gate) as the final bar before accepting work.
 It does not enumerate every test in the suite — see the test directory itself for that. It does not
-resolve which specific tests a not-yet-written module (such as the future S6 manifest modules) will
-need beyond the categories a governing stage contract names — see
-[`Milestones/contracts/m23_s5_2.md`](../Milestones/contracts/m23_s5_2.md)'s "Required tests" for
-S5.2, and [`m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md)'s "Required adversarial test
-categories" for the accepted S5.1 core, as the precedent for what an S5.4 contract must state.
+resolve which specific tests a not-yet-written module will need beyond the categories a governing
+decision and stage contract name — for S6, now written and accepted, those were
+[Decision 021](Decisions/decision_021_m23_s6_manifest_construction.md) §20 and
+[`Milestones/contracts/m23_s6.md`](../Milestones/contracts/m23_s6.md)'s "Required tests", with
+[`m23_s5_4.md`](../Milestones/contracts/m23_s5_4.md), [`m23_s5_2.md`](../Milestones/contracts/m23_s5_2.md),
+and [`m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md) as the accepted precedents for what a stage
+contract must state.

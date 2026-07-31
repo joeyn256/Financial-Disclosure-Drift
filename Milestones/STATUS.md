@@ -19,19 +19,22 @@ a hand-maintained hash can.
 ## Accepted baseline
 
 - Branch: `main`.
-- Accepted methodological checkpoint tag: `m2.3-s5.4-complete` -> the commit created by the
-  2026-07-30 checkpoint session ("Complete M2.3 S5.4 reserve architecture"). This file records no
-  hash for it by design; resolve it live with `make context`.
-- Immediately preceding checkpoint tag: `m2.3-s5-complete` -> the commit created by the 2026-07-29
-  checkpoint session ("Complete M2.3 S5 joint selection checkpoint"). **It is immutable and was never
-  moved, replaced, or re-pointed**; `m2.3-s5.4-complete` supplements rather than replaces it
-  (Decision 020 §§14.9, 15).
+- Accepted methodological checkpoint tag: `m2.3-s6-complete` -> the commit created by the 2026-07-31
+  acceptance-recording session ("Complete M2.3 S6 deterministic pilot manifest"). This file records
+  no hash for it by design; resolve it live with `make context`.
+- Immediately preceding checkpoint tag: `m2.3-s5.4-complete` -> the commit created by the
+  2026-07-30 checkpoint session ("Complete M2.3 S5.4 reserve architecture").
+- Earlier checkpoint tag: `m2.3-s5-complete` -> the commit created by the 2026-07-29
+  checkpoint session ("Complete M2.3 S5 joint selection checkpoint"). **`m2.3-s5-complete` and
+  `m2.3-s5.4-complete` are immutable and were never moved, replaced, or re-pointed**;
+  `m2.3-s5.4-complete` supplements rather than replaces `m2.3-s5-complete` (Decision 020 §§14.9, 15),
+  and `m2.3-s6-complete` supplements both (Decision 021 §22, Decision 023 §8).
 - Earlier accepted commits: `921f57b` ("Approve Decision 018 accession selection policy"),
   `3b01c50` ("Add repository orientation and stage-contract workflow"),
   `f490281` ("Optimize offline test execution and parallel validation").
 - Earlier checkpoint tags: `m2.3-s4-complete` -> `e7157aa` ("Complete M2.3 S4 deterministic entity
   selection and persistence"); `m2.3-s3.2-complete` -> `5fb8e27`.
-- Migrations end at `0012_m23_selection_entity_reasons.sql`, created and accepted at Stage S5.4. See
+- Migrations end at `0013_m23_manifest_lifecycle_guards.sql`, created and accepted at Stage S6. See
   `src/disclosure_drift/storage/migrations/` for the authoritative list.
 
 ## Current phase
@@ -59,11 +62,26 @@ contract — [`Milestones/contracts/m23_s5_4.md`](contracts/m23_s5_4.md) — is 
 checkpoint is tagged **`m2.3-s5.4-complete`**, supplementing the immutable `m2.3-s5-complete`. **No
 active S5.4 blocker remains**, and further S5.4 change requires a new explicit owner authorization.
 
-The next stage is **M2.3 S6 (final manifest construction) — planning and implementation. S6 has not
-begun**, is separately gated, and needs its own contract and owner authorization. No manifest,
-publication, or release work is authorized. **No S5 selection and no reserve is yet a manifest or
-publication input.** The full Milestone 2 integrated review occurs **only after S6 acceptance**. See
-"Current stage" below.
+**Stage S6 (pilot manifest construction, terminal result identity, and the publication boundary) is
+complete and owner-accepted** (2026-07-31). Its governance is accepted at **v0.5**: Decision 021 v0.5
+is `ACCEPTED` (owner approved 2026-07-30), Decision 022 is `ACCEPTED` (owner approved 2026-07-31) for
+crosswalk item-46 applicability, and **Decision 023 is `ACCEPTED` (owner approved 2026-07-31)** and
+records acceptance itself, outcome **`M23_STAGE_S6_ACCEPTED_AND_COMPLETE`**. v0.2 applied six bounded
+owner corrections issued after the focused independent governance review of v0.1; v0.3 applied one
+further correction widening the structural-fingerprint tuple to five columns; v0.4 applied two
+corrections issued after the focused independent governance review of v0.3 — the exhaustive 81-item
+milestone-plan §10 crosswalk and the growth of migration `0013` from four triggers to five; and
+**v0.5 applied one owner ruling issued after the focused independent governance review of v0.4** —
+migration `0013` grows from five triggers to **eight**, closing selection-run replacement, deletion,
+and identity mutation. **v0.1, v0.3, and v0.4 were each independently reviewed and none was approved;
+v0.2 was never independently reviewed.** [`Milestones/contracts/m23_s6.md`](contracts/m23_s6.md) is
+now `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`. **No stage contract currently
+authorizes implementation.** **Stages S7–S10 have not begun and are not authorized**: no publication,
+approval, CLI, live-metadata, real-snapshot, or Milestone 3 work exists or is authorized, and no S7
+contract exists. **No S5 selection and no reserve is a published or owner-approved input** — S6
+creates only a `proposed` manifest, over fixtures. The next authorized action is a **governance-only
+Milestone 2 / Milestone 3 boundary session**; the full Milestone 2 integrated review follows it, and
+**Milestone 2 is not closed by S6 acceptance**. See "Current stage" below.
 
 ## Completed stages
 
@@ -149,18 +167,271 @@ publication input.** The full Milestone 2 integrated review occurs **only after 
   and `selection_run_id` are **unchanged**, verified by running the pre-S5.4 code and the accepted code
   over the same frozen snapshot. Checkpointed at `m2.3-s5.4-complete`, supplementing the immutable
   `m2.3-s5-complete`.
+- **Decision 021** — accepted by project owner (2026-07-30),
+  `Docs/Decisions/decision_021_m23_s6_manifest_construction.md`, **v0.5**. Freezes the Stage S6
+  architecture: every digest preimage, the root, `manifest_id` and its six-field immutability, the
+  circularity exclusions and commitment closure, eligibility, the proposed-only boundary,
+  reconstruction and replay, the thirteen-block document contract with the exhaustive 81-item §10
+  crosswalk, the S4/S5 boundary, the complete eight-block migration-`0013` SQL and its nine digests,
+  the §15.5 append-once and identity guarantee, the no-new-surfaces and CLI-narrowing rulings, and
+  the S7–S10 boundary. Accepted on the fourth focused independent governance review
+  (`ACCEPT_DECISION_021_V05_FOR_OWNER_APPROVAL`); the first three each returned
+  `REQUIRES_OWNER_CLARIFICATION`. **Remains the controlling S6 architecture record.**
+- **Decision 022** — accepted by project owner (2026-07-31),
+  `Docs/Decisions/decision_022_m23_s6_reserve_rank_applicability.md`. The owner clarification of
+  crosswalk item 46: reserve rank is applicable **once per persisted reserve package** and is
+  **structurally not applicable** for a selected target carrying the persisted
+  `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` disposition instead; item 70 remains the total per-target
+  coverage requirement; no synthetic package or invented rank may be created or serialized. Issued
+  after a fresh independent S6 implementation audit correctly stopped under Decision 021 §§21 and
+  13.3 and referred the conflict rather than resolving it. **Supersedes and amends nothing.**
+- **Decision 023** — accepted by project owner (2026-07-31),
+  `Docs/Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md`. Records **formal owner
+  acceptance of Stage S6** (`M23_STAGE_S6_ACCEPTED_AND_COMPLETE`) on the final independent
+  recommendation `ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING`; **ratifies three
+  forced-consequence test paths**; records **four accepted nonblocking limitations O1–O4**; and
+  authorizes exactly one commit, one push, the annotated tag `m2.3-s6-complete`, and one tag push.
+  **Adds no architecture and reopens no ruling**; grants no Stage-S7 and no Milestone 3 authority.
+- **Stage S6** — deterministic pilot-manifest construction, terminal result identity, and the
+  publication boundary. Governed by Decision 013 §§7–8, Decision 016 §§1, 5, 8, Decision 018 §22,
+  Decision 020 §§9, 11, 14.4, milestone plan §10/§16, and — controlling — Decision 021 v0.5 with
+  Decision 022. **Complete and owner-accepted 2026-07-31.** Implemented under separately issued
+  bounded authorizations, corrected once under Decision 022, rereviewed independently
+  (`ACCEPT_M23_S6_IMPLEMENTATION_FOR_ACCEPTANCE_REVIEW`), and accepted on the final independent
+  recommendation **`ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING`** — no methodological findings, no
+  implementation defects, no test defects, no outstanding owner clarifications, no acceptance
+  blockers. Final accepted suite **2324 passed, 2 skipped**, reproduced under the parallel and
+  alternate-temp-root runs alike. Delivered across **ten** implementation and test paths: the new
+  pure `release/pilot_manifest.py`; the new `sec/pilot_manifest_store.py`; DDL-only migration
+  `0013_m23_manifest_lifecycle_guards.sql`, reproducing the Decision 021 §15.1 eight-block SQL
+  byte-for-byte over a 10939-byte, 186-line statement region with all nine §15.3 digests; the two new
+  S6 test modules; bounded edits to `test_m23_pilot_schema.py` and `test_migration_provenance.py`;
+  and the three ratified forced-consequence test paths `test_storage_catalog.py`,
+  `test_m23_entity_selection_store.py`, and `test_m23_accession_selection_store.py`. Unchanged and
+  verified unchanged at acceptance: all 81 crosswalk rows and their totals (D 42 / T 30 / X 8 /
+  S9 1 / S10 0 / unclassified 0), every hash preimage, all eight triggers, migrations `0009`–`0012`,
+  and all accepted S4 and S5 behaviour. Checkpointed at `m2.3-s6-complete`, supplementing the
+  immutable `m2.3-s5-complete` and `m2.3-s5.4-complete`.
 
 ## Current stage
 
-**M2.3 Stage S6 (final manifest construction) — planning. Not begun.** Stage S5 is finished end to
-end: S5.1, S5.2, and the combined S5.1–S5.3 checkpoint were owner-accepted 2026-07-29, and **S5.4 was
-owner-accepted 2026-07-30** and checkpointed at `m2.3-s5.4-complete`. **There is no active
-implementation contract.** S6 is separately gated: it needs its own decision-level design where the
-existing records do not already settle a point, its own stage contract, and an explicit owner
-authorization. **No S6 code, test, migration, schema, policy constant, or reason code exists or is
-authorized.**
+**M2.3 Stage S6 (pilot manifest construction, terminal result identity, and the publication
+boundary) — complete, owner-accepted, and checkpointed.** Stage S5 is finished end to end: S5.1,
+S5.2, and the combined S5.1–S5.3 checkpoint were owner-accepted 2026-07-29, and **S5.4 was
+owner-accepted 2026-07-30** and checkpointed at `m2.3-s5.4-complete`. **Stage S6 was owner-accepted
+2026-07-31** through
+[Decision 023](../Docs/Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md) and
+checkpointed at `m2.3-s6-complete`. **There is no active implementation contract**: every contract in
+`Milestones/contracts/` is now `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`.
 
-**Active blocker: none.** No S5.4 blocker remains, and no S5 acceptance blocker remains.
+**What S6 delivered.** The eight component digests and `root_manifest_sha256` at their frozen
+preimages; `selection_result_sha256` and its append-once sealing; `manifest_id` and its six-field
+identity immutability; the complete thirteen-block pilot-manifest document, every one of the 81
+atomic milestone-plan §10 items bound and asserted item by item; canonical JSON under
+`DataTree.releases / "pilot"` with a content-derived filename; historical S5 reconstruction through
+the accepted entry point; persistence of exactly one `proposed` manifest row atomically with its
+document; public verification that re-derives everything and fails closed; write-free idempotent
+replay; and DDL-only migration `0013` with its eight lifecycle, identity, replacement, and deletion
+guards. **S6 creates only a `proposed` manifest, over fixtures.** No real snapshot exists, no
+candidate-snapshot builder exists, no production catalog exists, and no code path approves or
+publishes anything.
+
+**Three forced-consequence test paths were ratified at acceptance** (Decision 023 §4). The S6
+contract authorized seven implementation paths; migration `0013` forced three further test edits —
+`tests/unit/test_storage_catalog.py` (the canonical migration chain is asserted by exact version and
+name), and `tests/unit/test_m23_entity_selection_store.py` and
+`tests/unit/test_m23_accession_selection_store.py` (their accepted corruption fixtures built their
+preconditions with plain `UPDATE`s that trigger 8 now refuses). The final independent acceptance
+review found the authorization gap and referred it rather than resolving it; the owner ratified all
+three retroactively. **No production path changed, no S4 or S5 methodology changed, and no assertion
+was removed, weakened, relaxed, skipped, or xfailed**; the rewritten corruption fixtures are narrower
+and more fail-closed than the code they replaced. **The delivered S6 path set is therefore ten**, and
+the ratification covers three named paths only — it is not a general widening.
+
+**Accepted nonblocking S6 limitations** (Decision 023 §7). None is a defect; none requires an
+implementation change.
+
+- **O1 — an empty sole-carrier crosswalk family fails closed.** Where a §10 item has more than one
+  serialized carrier, an empty family is accepted; where a family is an item's sole carrier, an empty
+  family raises `GateFailureError`, as Decision 021 §21 designs. **No accepted current S5 plan
+  reaches that condition.** If a lawful future run ever does, it is referred for an owner ruling —
+  never resolved by reclassifying an item, adding a category, or changing a count.
+- **O2 — the release root is assumed owner-controlled.** `Path.write_text` follows a symlink
+  pre-positioned at the content-derived output path. Symlink-resistant publication was never an
+  accepted S6 requirement. Verification still fails closed on wrong bytes, and no database row
+  survives a failed write.
+- **O3 — a pre-existing artifact at the content-derived path is outside the transaction's
+  ownership.** Atomicity governs artifacts the current operation created: a fault leaves no new row
+  and no new file. A pre-existing file at that exact name is not deleted; wrong bytes fail
+  verification and an authorized retry repairs it.
+- **O4 — item-46 enforcement is consistent defence in depth.** The Decision 022 applicability check
+  and the per-record completeness check agree on every document; neither is vacuous. Reserve rank
+  remains substantively enforced for every real package.
+
+**Owner clarification recorded 2026-07-31 — Decision 022.** A fresh independent S6 implementation
+audit confirmed the earlier bounded corrections and found one further conflict: a lawful, accepted,
+feasible, sealed S5 run with **zero compatible reserve packages** — every selected target instead
+carrying one persisted `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` disposition, the shape Decision 020 §7.1
+rules nonblocking and migration `0012` accepts as complete — passed all seven Decision 021 §11.2
+eligibility conditions and sealed normally, but was refused at document verification because
+crosswalk item 46's `reserves.packages[].reserve_rank` leaf cannot exist with zero packages. The audit
+correctly stopped under Decision 021 §§21 and 13.3 and returned `REQUIRES_OWNER_CLARIFICATION`.
+[Decision 022](../Docs/Decisions/decision_022_m23_s6_reserve_rank_applicability.md) is
+**`ACCEPTED — OWNER APPROVED 2026-07-31`** and is the controlling record for that one point: reserve
+rank is applicable **once per persisted reserve package** and is **structurally not applicable** for a
+target carrying the disposition instead; **item 70 remains the total per-target coverage
+requirement**; and no synthetic package, `reserve_rank = 0`, `null`, `"N/A"`, placeholder, or invented
+rank may ever be created or serialized. Decision 021 remains `ACCEPTED` and otherwise unchanged — the
+81-item crosswalk, its counts, every preimage, `manifest_id`, canonicalization, migration `0013`'s
+bytes, its nine digests, and its eight triggers are all untouched.
+
+**Active blocker: none.** Decision 021 v0.5 is `ACCEPTED` (owner approved 2026-07-30), Decision 022
+is `ACCEPTED` (owner approved 2026-07-31), and Decision 023 is `ACCEPTED` (owner approved
+2026-07-31). Both required independent reviews ran and passed — the fresh independent S6 rereview of
+the corrected tree (`ACCEPT_M23_S6_IMPLEMENTATION_FOR_ACCEPTANCE_REVIEW`) and the separate final S6
+acceptance review (`ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING`), neither performed by a session
+that wrote the work it reviewed. No S5, S5.4, or S6 blocker remains.
+
+**S6 governance was accepted at v0.5, and gated the stage in three steps — all now satisfied.**
+[Decision 021](../Docs/Decisions/decision_021_m23_s6_manifest_construction.md) records the project
+owner's S6 rulings and freezes the resulting architecture: the exact canonical preimage of
+`selection_result_sha256` and of all eight manifest component hashes plus `root_manifest_sha256`; the
+four terminal component boundaries, with the migration-`0012` reserve dispositions bound into
+`reserves_sha256`; the source-content, candidate-table, quota-definition, and **eleven-field**
+selector-policy allowlists, with dependency-lock, code-commit, Python-runtime, configuration,
+decision-authority, and source-plan identity as **six** required explicit arguments never inferred
+from Git, the environment, the interpreter, or the working tree; the `manifest_id` derivation and the
+**immutability after insertion of all six manifest identity fields**; eight circularity exclusions
+plus the commitment closure; fail-closed manifest eligibility; the proposed-only boundary; **the
+complete pilot-manifest document contract — thirteen mandatory blocks operationalizing
+[`milestone_2_3_pilot_selection_plan.md`](milestone_2_3_pilot_selection_plan.md) §10, with no
+substantive serialized field left unbound by the root; S6 defines and fixture-tests the schema, S9
+supplies the exact real-data instance — and the **exhaustive item-by-item §10 crosswalk** in §13.2.1
+covering all **81** atomic §10 items in four categories with a frozen machine-checkable count of 42
+direct, 30 transitive, 8 operationally excluded, 1 deferred to S9, 0 deferred to S10, and **0
+unclassified****; the **five-column** structural-fingerprint partition rule; explicit
+classification of six residual schema columns; canonical JSON under `DataTree.releases / "pilot"`;
+and the complete frozen **eight-block** SQL and nine digests of one authorized future migration
+`0013_m23_manifest_lifecycle_guards.sql` (§§15.1, 15.3), together with the **§15.5 append-once and
+identity guarantee**. Its §3 records the **seven** schema gaps observed directly: `selection_result_sha256` is writable, overwritable, and clearable on any run in
+any state **and a run can be inserted already `feasible` and already sealed**;
+`pilot_manifest_versions` accepts — and approves — a manifest over a `running` or `infeasible` run,
+including the permanently-`running` S4 draft; **no existing trigger protects any manifest identity
+column**; **`INSERT OR REPLACE` rewrites a manifest row wholesale past every guard**, because every
+existing manifest trigger is `BEFORE UPDATE` or `BEFORE DELETE` and SQLite fires no delete trigger for
+replacement unless `PRAGMA recursive_triggers` is on, which this repository never sets; and — added
+at v0.5 — **`pilot_selection_runs` itself is replaceable, deletable, and re-identifiable**, having no
+delete guard of any kind and no trigger naming any identity column, so a sealed digest can be cleared
+by `INSERT OR REPLACE`, the run removed by `DELETE`, and `selection_run_id`, `snapshot_id`, or
+`selection_input_sha256` rewritten by direct `UPDATE` under either `recursive_triggers` setting.
+**It authorized no implementation by itself.** Stage S6 required, in order: (1) a focused
+independent governance **review of v0.5** of Decision 021 and the S6 contract — **SATISFIED
+2026-07-30**, recommendation `ACCEPT_DECISION_021_V05_FOR_OWNER_APPROVAL`; (2) owner acceptance of
+Decision 021 v0.5 recorded in the registry — **SATISFIED 2026-07-30**; (3) a separately issued
+bounded S6 implementation authorization — **SATISFIED**, issued and exercised, with one further
+bounded correction authorized by Decision 022 §7.
+[`Milestones/contracts/m23_s6.md`](contracts/m23_s6.md) is now `STATUS: ACCEPTED_AND_COMPLETE` with
+`IMPLEMENTATION_AUTHORIZATION: NO`. It named **seven** authorized implementation paths — unchanged by
+the v0.2, v0.3, v0.4, and v0.5 corrections, and preserved in the contract exactly as issued; the
+delivered set is **ten**, the extra three ratified by Decision 023 §4. Every other path remains
+prohibited.
+
+**Four focused independent governance reviews have run; the fourth accepted the record.** The v0.1
+review returned `REQUIRES_OWNER_CLARIFICATION` and produced owner corrections A–F, applied at v0.2;
+**v0.2 was never independently reviewed**; v0.3 was reviewed on 2026-07-30 and also returned
+`REQUIRES_OWNER_CLARIFICATION`, confirming the five-column fingerprint, the eleven-field §8.4 layer,
+the acyclic digest graph, and the then-frozen four-block SQL and digests, while finding three
+defects — an incomplete §10 crosswalk, identity immutability holding on the `UPDATE` path only, and
+a "twelve blocks" heading over a thirteen-row table; v0.4 applied the two resulting owner
+corrections; and the **v0.4 review**, also on 2026-07-30, returned `REQUIRES_OWNER_CLARIFICATION`
+again — it accepted the crosswalk and the five-trigger manifest design and proved by direct probe
+that `pilot_selection_runs` was still open to row replacement, deletion, and identity mutation.
+**v0.5 applies the resulting owner ruling** and **withdraws the v0.4 five-block statement region, its
+7436-byte and 129-line counts, and its concatenation digest `6bfb897c…` as a composition** — blocks
+1–5 keep their exact bytes and their individual digests, which are **not** withdrawn — replacing it
+with an **eight-block region of 10939 bytes over 186 lines**, digest `7f473802…`. The **v0.5 review** then returned
+`ACCEPT_DECISION_021_V05_FOR_OWNER_APPROVAL` with **no governance blockers and no owner
+clarifications required**, having reproduced all nine §15.3 digests from the record bytes, applied
+the extracted SQL to a scratch `0001`–`0012` catalog, and run 318 adversarial assertions across all
+four `recursive_triggers` × `foreign_keys` combinations. **The project owner approved Decision 021
+v0.5 on 2026-07-30**, with one editorial correction to §13.2.1's explanatory arithmetic —
+**74 original bullets producing 81 atomic requirements** (74 + 7 compound splits = 81) — which
+changes no crosswalk row, numbering, category total, digest preimage, trigger, or SQL byte.
+
+**The v0.4 open finding is now closed (Decision 021 §19.11).** Triggers 6, 7, and 8 —
+`pilot_selection_run_replacement_guard`, `pilot_selection_run_delete_guard`, and
+`pilot_selection_run_identity_guard` — close run replacement, deletion, and identity mutation
+respectively. **Trigger 2 was deliberately not widened or renamed**, so the seal lifecycle and run
+identity stay separate, independently testable invariants. Decision 021 **§15.5** now states the
+guarantee without qualification: every new run begins unsealed, an existing run cannot be replaced, a
+run cannot be deleted, the persisted run identity cannot change, sealing occurs only through the
+guarded update on an already-`feasible` run, a sealed digest cannot change or clear, identical
+restatement stays idempotent, `selection_input_sha256` cannot change before or after sealing, and
+`selection_result_sha256` is therefore **append-once and remains recomputable from its persisted
+preimage** across every direct SQLite write path. `selection_input_schema_version` needs no guard: it
+is not a `pilot_selection_runs` column at all, and is supplied as the accepted code constant
+`ACCESSION_SELECTION_INPUT_SCHEMA_VERSION`.
+
+**v0.2 applied six bounded owner corrections** issued after the focused independent governance review
+of v0.1 (recommendation `REQUIRES_OWNER_CLARIFICATION`, 2026-07-30): (A) six-field manifest-identity
+immutability; (B) migration `0013` grows from three triggers to **four** (five at v0.4), with completely restated
+normative SQL and digests — the v0.1 SQL and digests are **withdrawn**; (C) the complete manifest
+document contract, citing milestone plan §10 explicitly, with the consequent extension of
+`selector_policy_sha256`; (D) the structural-fingerprint partition rule; (E) explicit classification
+of six residual schema columns; (F) the CLI narrowing and the complete S7–S10 boundary.
+
+**v0.3 applies one further bounded owner correction, to the fingerprint only.** The structural tuple
+widens from three columns to **five** — `region`, `state`, `observed_type`, `member_name`,
+`record_path` — under the same partition-and-equality rule, and the v0.2 accepted limitation claiming
+`observed_type` and `record_path` were unbound is **withdrawn and replaced** with an accurate one:
+`parser_run_id` is used only for cross-run consistency checking and excluded from identity, duplicate
+identical rows are collapsed, row order is excluded, and all five substantive structural fields are
+bound. The eleven-field `selector_policy_sha256` layer of v0.2 is accepted and unchanged.
+
+**v0.4 applies two further bounded owner corrections, issued after the focused independent governance
+review of v0.3 returned `REQUIRES_OWNER_CLARIFICATION`.** (A) **The exhaustive milestone-plan §10
+crosswalk** (§13.2.1): the review found that nineteen §10 items and four partially covered items were
+neither serialized nor classified while the record claimed only two deliberate omissions, so §10 is
+now enumerated **atomically** — **81 items**, every compound bullet split — each classified into
+exactly one of four categories, with a frozen count of 42 direct, 30 transitive, 8 operationally
+excluded, 1 deferred to S9, 0 deferred to S10, and **0 unclassified**; §13.2's "twelve blocks"
+heading over a thirteen-row table is corrected to thirteen in the same pass. (B) **Migration `0013`
+grows from four triggers to five**: the review demonstrated that six-field identity immutability held
+on the `UPDATE` path only, because `INSERT OR REPLACE` rewrites a manifest row wholesale — identity,
+lineage, all eight component digests, the root, and the state — past trigger 4 and past all four of
+migration `0009`'s manifest triggers, including over an `owner_approved` manifest. Trigger 5,
+`pilot_manifest_versions_replacement_guard`, closes all three uniqueness routes with `BEFORE INSERT`
+predicates that hold under every pragma setting. **The crosswalk required no preimage change**, and
+blocks 1–4 keep their exact bytes and digests; the **v0.3 four-block region, its 4990-byte and
+88-line counts, and its concatenation digest `51151767…` are withdrawn**, replaced at v0.4 by a
+five-block region of 7436 bytes over 129 lines — **itself since withdrawn as a composition at v0.5**
+in favour of the eight-block region of 10939 bytes over 186 lines.
+
+**v0.5 applies one further bounded owner ruling, issued after the focused independent governance
+review of v0.4.** That review accepted the 81-item §10 crosswalk and the five-trigger manifest design
+and proved by direct probe that `pilot_selection_runs` was still open on the three fronts the
+manifest table had just been closed on: **row replacement**, **deletion**, and **identity mutation**.
+Migration `0013` therefore grows from five triggers to **eight** — trigger 6
+`pilot_selection_run_replacement_guard`, trigger 7 `pilot_selection_run_delete_guard`, and trigger 8
+`pilot_selection_run_identity_guard`, the last holding `selection_run_id`, `snapshot_id`, and
+`selection_input_sha256` immutable. **Trigger 2 is neither widened nor renamed**, and blocks 1–5 are
+retained byte-for-byte with their individual digests, which are **not** withdrawn; only the v0.4
+five-block *composition* is. Decision 021 **§15.5** now states the append-once and identity guarantee
+without qualification, and **§19.11 is closed**.
+
+**v0.1 was reviewed but never approved and never left `PROPOSED`; v0.2 was never independently
+reviewed and never approved; v0.3 and v0.4 were each independently reviewed and neither was accepted
+for approval. All five are the same record, so nothing downstream was invalidated by any revision.**
+No earlier conclusion carried over: each review reached its own conclusion, and the v0.5 review —
+the one covering the eight-trigger SQL and the §15.5 guarantee — is the one the owner approved.
+
+**Stages S7–S10 remain excluded and unauthorized, and none has begun.** S6 delivered machinery plus a
+fixture-tested document schema. Gate F live-metadata safety and allowlist (S7), live SEC metadata
+execution (S8), the frozen candidate snapshot with the exact real-data manifest instance **and the
+CLI output deferred from S6** (S9), and owner approval of the exact root hash (S10) are each
+separately gated, and none is reachable now: no candidate-snapshot builder and no production catalog
+exists. **No S7 contract exists, no Gate F implementation exists, no live-metadata allowlist exists,
+and no Milestone 3 implementation exists.** S6 acceptance authorizes none of them (Decision 023 §9).
 
 **Stage S5.4 is complete and accepted.**
 [`Milestones/contracts/m23_s5_4.md`](contracts/m23_s5_4.md) is now **`STATUS: ACCEPTED_AND_COMPLETE`**
@@ -215,17 +486,23 @@ cross-target assignment problem; exactly one new reason code, `REVIEW_PILOT_NO_C
 with `m2.3-s5.4-complete` supplementing it. A tenth ruling authorized migration `0012` in principle; an
 eleventh is the test-scoping clarification (Decision 020 §8.3). All are satisfied.
 
-**No stage contract currently authorizes implementation.** `Milestones/contracts/m23_s5_4.md`,
-`m23_s5_2.md`, and `m23_s5_1.md` are all closed and authorize nothing; each remains on record as its
-stage's scope statement. `ACTIVE_STAGE_CONTRACT` below names the S5.4 contract because
-`scripts/context_snapshot.sh` resolves that marker as a file path and it is the most recent stage's
-contract — **authorization is carried by that contract's own status and by
-`IMPLEMENTATION_AUTHORIZATION` here, both of which now read closed and `NO`**, never by the fact that
-the marker names a path.
+**No stage contract currently authorizes implementation.** `Milestones/contracts/m23_s6.md`,
+`m23_s5_4.md`, `m23_s5_2.md`, and `m23_s5_1.md` are **all closed and authorize nothing**; each
+remains on record as its stage's scope statement. `ACTIVE_STAGE_CONTRACT` below names the S6 contract
+because it is the most recent stage's contract and the snapshot script needs a resolvable path —
+**authorization is carried by that contract's own status and by `IMPLEMENTATION_AUTHORIZATION` here,
+which now read `ACCEPTED_AND_COMPLETE` and `NO`**, never by the fact that the marker names a path.
+Per [`contracts/README.md`](contracts/README.md), a completed contract authorizes nothing further;
+reopening a closed stage requires a new explicit owner authorization and its own contract.
 
-**S6 has not begun.** No manifest, publication, or release work is authorized before S6 (Decision 018
-§22); see `Docs/architecture_map.md` §8. **No S5 selection and no reserve is a manifest or publication
-input.** The **full Milestone 2 integrated review occurs only after S6 acceptance**, not before.
+**S6 implementation is complete and accepted; publication work has not begun and is not authorized.**
+No manifest approval, publication, CLI, live-metadata, real-snapshot, or release work is authorized
+(Decision 018 §22, Decision 021 §§4, 11.1, 16, 17; Decision 023 §9); see `Docs/architecture_map.md`
+§8. **No S5 selection and no reserve is a published or owner-approved input** — the only manifest S6
+can create is `proposed`, over fixtures. The **full Milestone 2 integrated review occurs only after
+the Milestone 2 / Milestone 3 boundary governance session** — and, for the pilot line of work, only
+after the former S7–S10 obligations reach their own acceptance — **not as part of S6 acceptance**.
+**Milestone 2 is not closed.**
 
 **The S4 entity-only draft is unchanged.** It stays in `running` state, remains non-publishable, and
 is excluded from S5 run identity and from every manifest input. It is never promoted, mutated,
@@ -234,26 +511,70 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**Design and authorize Stage S6 (final manifest construction).** S5 is complete: S5.4 is
-owner-accepted (2026-07-30) on the final independent recommendation
-`ACCEPT_M23_S5_4_FOR_CHECKPOINT`, checkpointed at `m2.3-s5.4-complete`, with no active blocker. The
-next step is S6 governance — a decision-level design where the existing records do not already settle a
-point (including whether `selection_result_sha256` stays `NULL` beyond S5.4, Decision 020 §14.4), then
-an S6 stage contract, then a separately issued bounded S6 implementation prompt. **Until all three
-exist, no S6 code, test, migration, schema, policy constant, or reason code may be written**, and no
-manifest, publication, or release work is authorized. The S6 handoff conditions in
+**Run the governance-only Milestone 2 / Milestone 3 boundary session.** Stage S6 is accepted and
+checkpointed, so the M2.3 implementation line is closed at S6. The next session is
+**`MILESTONE_2_TO_MILESTONE_3_BOUNDARY_GOVERNANCE`**, and it is **governance only**. It will:
+
+- redefine accepted Stage S6 as the end of Milestone 2 implementation;
+- move the former S7–S10 obligations (Gate F live-metadata safety and allowlist; live SEC metadata
+  execution; the frozen candidate snapshot with the exact real-data manifest instance and the CLI
+  output deferred from S6; owner approval of the exact root hash) into Milestone 3;
+- preserve every gate and requirement those stages carry, changing none of them;
+- **authorize no implementation**;
+- prepare the final integrated Milestone 2 audit.
+
+**After that session**, a separate **final independent integrated audit of all Milestone 2 work**
+runs. **Only after that audit passes** is Milestone 2 formally closed. **Milestone 2 is not closed
+now.**
+
+Until the boundary session has run, **no S7 work, no live SEC access, no real pilot execution, no
+publication, no manifest approval, and no Milestone 3 implementation or planning is authorized**, and
+no S6 change may be made without a new explicit owner authorization and its own contract.
+
+**Historical — the approval path that closed the first two gates.**
+S6 governance is drafted and has been through **three** full review cycles: the v0.1 review returned
+`REQUIRES_OWNER_CLARIFICATION` and produced six bounded corrections applied at v0.2; v0.3 widened the
+structural-fingerprint tuple to five columns; the v0.3 review **also** returned
+`REQUIRES_OWNER_CLARIFICATION`, producing the two corrections v0.4 applied; and the v0.4 review
+returned it a **third** time, producing the v0.5 ruling that grows migration `0013` to eight
+triggers. **v0.2 was never independently reviewed, and no completed review covers the eight-trigger
+SQL or the §15.5 guarantee, so the review may not inherit an earlier recommendation.** Decision 021
+v0.5 freezes the manifest, document, and terminal-result architecture, including the **exhaustive
+81-item §10 crosswalk** (§13.2.1) and the complete **eight-block** migration-`0013` SQL (§15.1) with
+its **nine** normative digests, byte and line counts, and concatenation rule (§15.3), and
+`Milestones/contracts/m23_s6.md` was `BLOCKED_PENDING_DECISION_021` at the time and is now
+`READY_FOR_IMPLEMENTATION`. The review covered that exact SQL and its digests, the **§15.5 append-once and identity guarantee** and its nine clauses, the
+crosswalk and its frozen counts, every digest preimage in Decision 021 §§6–9 **including the
+eleven-field §8.4 selector-policy layer and the §8.1 five-column fingerprint rule**, the §10
+circularity exclusions and the §10.1 commitment closure, the §9.2 six-field identity-immutability
+ruling, and the §13 document contract. After it, in order: owner approval of Decision 021 v0.5
+recorded in the registry, then separately issued bounded S6 implementation prompts. **All three
+gates closed**, the stage was implemented and independently accepted, and Decision 023 records the
+result. The S6 handoff conditions in
 [`Milestones/contracts/m23_s5_4.md`](contracts/m23_s5_4.md) record which prerequisites S5.4 already
-satisfied. No further S5.4 work is authorized without a new explicit owner authorization.
+satisfied; the fifth — `selection_result_sha256` — is now settled by Decision 021 §6, which populates
+it at S6 under the existing `pilot-manifest/1.0` policy. No further S5.4 work is authorized without a
+new explicit owner authorization.
 
 ## Deferred stages
 
 - **S5.4 (reserves)** — no longer deferred and no longer current: **complete and owner-accepted
   2026-07-30**, checkpointed at `m2.3-s5.4-complete`. See "Completed stages" and "Current stage".
-- **S6 (final manifest construction)** — **not started**, and the next stage. No manifest,
-  publication, or release work is authorized before S6 (Decision 018 §22); see
-  `Docs/architecture_map.md` §8. It needs its own governance, its own stage contract, and an explicit
-  owner authorization. **No S5 selection and no reserve is a manifest or publication input.**
-- **Full Milestone 2 integrated review** — not started; it occurs **only after S6 acceptance**.
+- **S6 (pilot manifest construction)** — no longer deferred and no longer current: **complete and
+  owner-accepted 2026-07-31**, checkpointed at `m2.3-s6-complete`. See "Completed stages" and
+  "Current stage". No manifest approval, publication, CLI, or release work is authorized (Decision
+  018 §22, Decision 021 §§11.1, 16, 17; Decision 023 §9); see `Docs/architecture_map.md` §8.
+- **S7 (Gate F — live-metadata safety and allowlist), S8 (real candidate metadata and the first live
+  metadata run), S9 (the frozen candidate snapshot, the exact real-data manifest instance, and the
+  CLI output deferred from S6), and S10 (owner approval of the exact root hash)** — **not started**,
+  separately gated, and explicitly excluded from S6 (Decision 021 §§16, 17; Decision 023 §9). None is
+  reachable now: no candidate-snapshot builder and no production catalog exists, and no S7 contract
+  exists. **These obligations move to Milestone 3 at the boundary governance session**, with every
+  gate preserved.
+- **Milestone 2 / Milestone 3 boundary governance** — **the next authorized action.** Governance
+  only; authorizes no implementation.
+- **Full Milestone 2 integrated review** — not started; it occurs **only after the boundary
+  governance session**, and Milestone 2 is formally closed only after that audit passes.
 
 ## Nonblocking maintenance notes
 
@@ -270,10 +591,15 @@ outside a future authorized stage.
   membership** used by reserve/replacement signatures. This was an S5.4 input, not an S5.3 gap.
   **Resolved and closed** by Decision 020 §§5–6 and the accepted S5.4 implementation: membership is
   published from the accepted S5.1 witness derivation as one additive immutable output.
-- **`selection_result_sha256` remains NULL at S5.3.** Accepted; populating it was not an S5.3
-  obligation. **Owner ruling recorded 2026-07-29: it remains NULL through S5.4** (Decision 020 §9).
-  **Still `NULL` after S5.4 acceptance**; whether it stays `NULL` beyond S5.4 is an open S6 question
-  (Decision 020 §14.4).
+- **`selection_result_sha256` remained NULL at S5.3.** Accepted; populating it was not an S5.3
+  obligation. **Owner ruling recorded 2026-07-29: it remained NULL through S5.4** (Decision 020 §9).
+  The open S6 question (Decision 020 §14.4) was **settled by Decision 021 §6 and is now
+  implemented and accepted**: Stage S6 seals it under the existing `pilot-manifest/1.0` policy at a
+  frozen fourteen-field preimage, append-once on every direct SQLite write path (migration `0013`
+  triggers 1 and 2, widened by triggers 6, 7, and 8 at v0.5), and Decision 021 §15.5's guarantee that
+  it also **remains recomputable from its persisted preimage** was proven against the migration as
+  written. It is `NULL` in any catalog no S6 seal has run against, and **no production catalog
+  exists**. **Closed.**
 - **Quota-contribution and quota-member rows remain intentionally absent at S5.2.** **Closed at
   S5.4**: all three membership families are now written inside the S5 run's single `running` window,
   in the same transaction as the selection, exactly as Decision 020 requires.
@@ -290,14 +616,16 @@ The markers below are consumed by `scripts/context_snapshot.sh`. Keep each on it
 then reported. It therefore always names a real contract file — it is not a place to record "none".
 **Whether any implementation is authorized is carried by `IMPLEMENTATION_AUTHORIZATION` here and by
 the named contract's own status**, which now read `NO` and `ACCEPTED_AND_COMPLETE` respectively:
-`Milestones/contracts/m23_s5_4.md` is named because it is the most recent stage's contract and the
+`Milestones/contracts/m23_s6.md` is named because it is the most recent stage's contract and the
 script needs a resolvable path, **not** because it authorizes anything. No stage contract currently
 authorizes implementation.
 
 ```
-CURRENT_STAGE: M2.3 Stage S6 (final manifest construction) — PLANNING, not begun; Stage S5.4 (reserves) is complete and owner-accepted 2026-07-30 on the final independent recommendation ACCEPT_M23_S5_4_FOR_CHECKPOINT with an accepted suite of 1899 passed and 1 skipped, contract ACCEPTED_AND_COMPLETE, migration chain ending at 0012_m23_selection_entity_reasons.sql, checkpointed at m2.3-s5.4-complete supplementing the immutable m2.3-s5-complete; Decision 020 remains APPROVED — OWNER APPROVED 2026-07-30; S5.1, S5.2, and the combined S5.1-S5.3 checkpoint remain owner-accepted at m2.3-s5-complete
-ACTIVE_BLOCKER: none — S5.4 is accepted and checkpointed with no remaining acceptance or checkpoint blocker, and no S5 acceptance blocker remains; S6 is not blocked, it is simply not yet designed or authorized
-IMPLEMENTATION_AUTHORIZATION: NO — no stage contract currently authorizes implementation; Milestones/contracts/m23_s5_4.md is ACCEPTED_AND_COMPLETE and authorizes no new S5.4 work, and any future S5.4 change requires a new explicit owner authorization; S6 requires its own governance, its own stage contract, and a separately issued bounded S6 implementation prompt before any S6 code, test, migration, schema, policy constant, or reason code may be written; no S5 selection or reserve is a manifest or publication input
-ACTIVE_STAGE_CONTRACT: Milestones/contracts/m23_s5_4.md
-NEXT_AUTHORIZED_ACTION: Design and authorize Stage S6 — S6 governance first (including whether selection_result_sha256 stays NULL beyond S5.4, Decision 020 section 14.4), then an S6 stage contract, then a separately issued bounded S6 implementation prompt; no S6 code/test/migration/schema/policy constant/reason code before all three; no further S5.4 work without a new explicit owner authorization; the full Milestone 2 integrated review occurs only after S6 acceptance
+CURRENT_STAGE: M2.3 Stage S6 (pilot manifest construction, terminal result identity, and the publication boundary) — COMPLETE, OWNER-ACCEPTED 2026-07-31, AND CHECKPOINTED at m2.3-s6-complete, which supplements the immutable m2.3-s5-complete and m2.3-s5.4-complete; acceptance is recorded in Decision 023 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE) on the final independent recommendation ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING with no methodological findings, no implementation defects, no test defects, no outstanding owner clarifications, and no acceptance blockers, following the fresh independent S6 rereview ACCEPT_M23_S6_IMPLEMENTATION_FOR_ACCEPTANCE_REVIEW; Decision 021 v0.5 remains ACCEPTED (owner approved 2026-07-30) and controlling for the S6 architecture, and Decision 022 remains ACCEPTED (owner approved 2026-07-31) and controlling for crosswalk item-46 applicability; delivered were the eight component digests and root_manifest_sha256 at their frozen preimages, selection_result_sha256 and its append-once sealing, manifest_id and six-field identity immutability, the complete thirteen-block document with all 81 atomic section 10 items bound item by item at totals 42 direct / 30 transitive / 8 operationally excluded / 1 deferred to S9 / 0 deferred to S10 / 0 unclassified, canonical JSON under DataTree.releases/pilot with a content-derived filename, historical S5 reconstruction, one proposed manifest row written atomically with its document, public verification, write-free idempotent replay, and DDL-only migration 0013 reproducing the Decision 021 section 15.1 eight-block SQL byte-for-byte over 10939 bytes and 186 lines with all nine section 15.3 digests including region digest 7f473802; the delivered path set is ten — the contract's seven plus three forced-consequence test paths ratified by Decision 023 section 4 (tests/unit/test_storage_catalog.py, tests/unit/test_m23_entity_selection_store.py, tests/unit/test_m23_accession_selection_store.py); final accepted suite 2324 passed and 2 skipped, reproduced under parallel and alternate-temp-root runs; migration chain ends at 0013_m23_manifest_lifecycle_guards.sql; four accepted nonblocking limitations O1 to O4 are recorded in Decision 023 section 7; S6 creates only a proposed manifest over fixtures and no production catalog, candidate-snapshot builder, or real snapshot exists; Stage S5.4 remains complete and owner-accepted 2026-07-30 at m2.3-s5.4-complete, and S5.1, S5.2, and the combined S5.1-S5.3 checkpoint remain owner-accepted at m2.3-s5-complete
+ACTIVE_BLOCKER: none — Stage S6 is implemented, independently rereviewed, independently accepted, owner-accepted 2026-07-31 through Decision 023, validated, committed, pushed, and tagged m2.3-s6-complete; Decision 021 v0.5, Decision 022, and Decision 023 are all ACCEPTED; Decision 021 section 19.11 is closed and no open schema finding remains; both required independent reviews ran and passed and neither was performed by a session that wrote the work it reviewed; no S5, S5.4, or S6 acceptance or checkpoint blocker remains; Milestone 2 is not closed and its integrated audit has not run
+DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controlling for crosswalk item 46 reserve-rank applicability only; reserve rank is applicable once per persisted reserve package and structurally not applicable for a selected target carrying the persisted REVIEW_PILOT_NO_COMPATIBLE_RESERVE disposition; structural non-applicability never makes a feasible S5 run manifest-ineligible; item 70 remains the total per-target reserve-coverage requirement; no synthetic package, reserve_rank 0, null, N/A, placeholder, or invented rank may be created or serialized; it supersedes and amends nothing, and changes no crosswalk row, item number, classification total, digest binding, hash preimage, manifest identity, canonicalization rule, or migration SQL byte
+DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; the controlling record for Stage S6 acceptance, delivered-path ratification, accepted limitations, and checkpoint authorization; formal outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; it ratifies retroactively the three forced-consequence test paths tests/unit/test_storage_catalog.py, tests/unit/test_m23_entity_selection_store.py, and tests/unit/test_m23_accession_selection_store.py as unavoidable consequences of authorized migration 0013, verified to change no production path, no S4 or S5 methodology, and no assertion's strength, with the rewritten corruption fixtures narrower and more fail-closed than the code they replaced, and it is a ratification of three named paths and never a general widening; it records accepted nonblocking limitations O1 empty sole-carrier crosswalk family fails closed, O2 owner-controlled release root, O3 atomicity governs newly created artifacts only, and O4 item-46 defence in depth; it confirms unchanged all 81 crosswalk rows, the totals D42 T30 X8 S9-1 S10-0 unclassified-0, every hash preimage, all nine migration 0013 digests, all eight triggers, migrations 0001 to 0012, and accepted S4 and S5 behaviour; it supersedes and amends nothing, adds no architecture, and grants no Stage S7, S8, S9, S10, or Milestone 3 authority
+IMPLEMENTATION_AUTHORIZATION: NO — every stage contract in Milestones/contracts/ is closed: m23_s6.md, m23_s5_4.md, m23_s5_2.md, and m23_s5_1.md are all ACCEPTED_AND_COMPLETE or accepted and superseded, and a completed contract authorizes nothing further; all three S6 gates were satisfied (focused independent governance review of Decision 021 v0.5, owner approval recorded in Docs/Decisions/decision_registry.md, and the separately issued bounded S6 implementation authorizations, which were issued and exercised) and Stage S6 is now accepted and checkpointed; any future S6 or S5.4 change requires a new explicit owner authorization and its own contract; no S5 selection or reserve is a published or owner-approved input and S6 creates only a proposed manifest over fixtures; S7, S8, S9, and S10 remain excluded and unauthorized, no S7 contract exists, no Gate F implementation or live-metadata allowlist exists, and no Milestone 3 implementation exists
+ACTIVE_STAGE_CONTRACT: Milestones/contracts/m23_s6.md
+NEXT_AUTHORIZED_ACTION: Run the governance-only Milestone 2 to Milestone 3 boundary session, MILESTONE_2_TO_MILESTONE_3_BOUNDARY_GOVERNANCE. It will redefine accepted Stage S6 as the end of Milestone 2 implementation, move the former S7 to S10 obligations (Gate F live-metadata safety and allowlist; live SEC metadata execution; the frozen candidate snapshot with the exact real-data manifest instance and the CLI output deferred from S6; owner approval of the exact root hash) into Milestone 3, preserve every gate and requirement those stages carry, authorize no implementation, and prepare the final integrated Milestone 2 audit. After that session, a separate final independent integrated audit of all Milestone 2 work runs, and only after that audit passes is Milestone 2 formally closed. Until the boundary session has run, no S7 work, no live SEC access, no real pilot execution, no publication, no manifest approval, and no Milestone 3 implementation or planning is authorized, and no S6 or S5.4 change may be made without a new explicit owner authorization and its own contract
 ```

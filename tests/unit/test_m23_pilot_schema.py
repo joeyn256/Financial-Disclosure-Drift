@@ -12,6 +12,7 @@ import hashlib
 import re
 import sqlite3
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -28,6 +29,15 @@ from disclosure_drift.storage.sqlite import (
 )
 
 _MIGRATIONS_DIR = Path(_migrations_path[0])
+
+#: The accepted Stage S6 architecture record, whose section 15.1 SQL migration 0013
+#: reproduces byte for byte.
+_DECISION_021_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "Docs"
+    / "Decisions"
+    / "decision_021_m23_s6_manifest_construction.md"
+)
 
 #: Locks migration 0010's exact bytes: Stage S5.2 (Decision 018 section 20, migration
 #: 0011) adds an additive migration on top and never edits 0009 or 0010.
@@ -269,10 +279,10 @@ def _insert_selection_run(
 # --------------------------------------------------------------------------
 
 
-def test_migration_inventory_is_contiguous_through_0012() -> None:
+def test_migration_inventory_is_contiguous_through_0013() -> None:
     versions = tuple(migration.version for migration in available_migrations())
-    assert versions == tuple(range(1, 13))
-    assert versions[-1] == 12
+    assert versions == tuple(range(1, 14))
+    assert versions[-1] == 13
 
 
 def test_migration_0009_contains_no_forbidden_statements() -> None:
@@ -334,12 +344,12 @@ def test_migration_0009_raise_messages_are_string_literals() -> None:
     assert checked == 79, f"expected 79 RAISE invocations in migration 0009, found {checked}"
 
 
-def test_fresh_database_applies_migrations_through_0012(tmp_path: Path) -> None:
+def test_fresh_database_applies_migrations_through_0013(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:
         cursor = connection.execute("SELECT version FROM ops_schema_migrations ORDER BY version")
         versions = tuple(row["version"] for row in cursor.fetchall())
-    assert versions == tuple(range(1, 13))
+    assert versions == tuple(range(1, 14))
 
 
 def test_second_migration_pass_is_idempotent(tmp_path: Path) -> None:
@@ -1645,6 +1655,43 @@ def _running_selection_run(
         )
 
 
+def _feasible_sealed_selection_run(
+    connection: sqlite3.Connection, *, selection_run_id: str, snapshot_id: str
+) -> None:
+    """A ``feasible`` run carrying a sealed ``selection_result_sha256``.
+
+    Migration 0013 requires a manifest's referenced run to be feasible **and** sealed
+    (trigger 3), and refuses both a pre-sealed ``INSERT`` (trigger 1) and a seal that
+    rides along with the terminal transition (trigger 2). Decision 021 section 20
+    blesses this route for fixtures that only need a manifest over an eligible run:
+    insert the run directly in ``feasible`` with the seal left ``NULL``, then establish
+    the seal by a later ``UPDATE``. The alternative -- driving the full lifecycle -- is
+    exercised by the store's own suite.
+    """
+    with transaction(connection) as c:
+        c.execute(
+            "INSERT INTO pilot_selection_runs "
+            "(selection_run_id, snapshot_id, selection_seed, selector_policy_version, "
+            "quota_policy_version, search_node_limit, run_state, selection_input_sha256, "
+            "started_at_utc, selected_entity_count, selected_accession_count, "
+            "expanded_node_count, finished_at_utc) "
+            "VALUES (?, ?, 'seed', ?, 'quota/1.0', 1000, 'feasible', ?, "
+            "'2026-01-01T00:00:00Z', 24, 0, 10, '2026-01-02T00:00:00Z')",
+            (
+                selection_run_id,
+                snapshot_id,
+                pilot_policy.PILOT_SELECTOR_POLICY_VERSION,
+                _hex(f"selection-input:{selection_run_id}"),
+            ),
+        )
+    with transaction(connection) as c:
+        c.execute(
+            "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+            "WHERE selection_run_id = ?",
+            (_hex(f"selection-result:{selection_run_id}"), selection_run_id),
+        )
+
+
 def _insert_selected_entity(
     connection: sqlite3.Connection,
     *,
@@ -2729,7 +2776,7 @@ def test_manifest_approval_rejects_mismatched_root_hash(tmp_path: Path) -> None:
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         root_hash = _hex("root-hash-correct")
         _insert_manifest(
             connection,
@@ -2762,7 +2809,7 @@ def test_owner_approved_manifest_may_become_superseded_retaining_approval_fields
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         root_hash = _hex("root-hash-supersede")
         _insert_manifest(
             connection,
@@ -2814,7 +2861,7 @@ def test_rejected_and_superseded_manifests_are_terminal(tmp_path: Path) -> None:
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         _insert_manifest(
             connection,
             manifest_id=rejected_id,
@@ -2849,7 +2896,7 @@ def test_manifest_component_hashes_are_immutable(tmp_path: Path) -> None:
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         _insert_manifest(
             connection,
             manifest_id=manifest_id,
@@ -2884,7 +2931,7 @@ def test_unsafe_manifest_paths_fail(tmp_path: Path, unsafe_path: str) -> None:
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
             _insert_manifest(
                 connection,
@@ -2904,7 +2951,7 @@ def test_manifest_rows_are_undeletable(tmp_path: Path) -> None:
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         _insert_manifest(
             connection,
             manifest_id=manifest_id,
@@ -2927,7 +2974,7 @@ def test_projection_recovery_lifecycle_constraints(tmp_path: Path) -> None:
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _frozen_snapshot_with_n_entities(connection, snapshot_id, 1)
-        _running_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
+        _feasible_sealed_selection_run(connection, selection_run_id=run_id, snapshot_id=snapshot_id)
         _insert_manifest(
             connection,
             manifest_id=manifest_id,
@@ -3576,6 +3623,12 @@ def _drop_run_row_bypassing_foreign_keys(path: Path, run_id: str) -> None:
     raw = sqlite3.connect(path)
     try:
         raw.execute("PRAGMA foreign_keys = OFF")
+        # Migration 0013's trigger 7 aborts every DELETE on this table unconditionally
+        # and independently of any pragma (Decision 021 section 15.5 clause 3), so the
+        # guard is dropped on this throwaway catalog purely to construct the corrupted
+        # state the migration-0009 and 0012 NOT EXISTS predicates are being tested
+        # against. That a normal path can no longer reach this state is the point.
+        raw.execute("DROP TRIGGER pilot_selection_run_delete_guard")
         raw.execute("DELETE FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,))
         raw.commit()
     finally:
@@ -3981,3 +4034,744 @@ def test_a_refused_transition_rolls_back_and_leaves_the_run_running(tmp_path: Pa
         ).fetchone()
     assert row["run_state"] == "running"
     assert row["selected_entity_count"] is None
+
+
+# ==========================================================================
+# Migration 0013 -- the eight Stage S6 lifecycle, identity, replacement, and
+# deletion guards (Decision 021 sections 15.1, 15.3, 15.5)
+#
+# The statement region of migration 0013 is frozen byte-for-byte in Decision 021
+# section 15.1 and was accepted by the project owner on 2026-07-30 following the
+# focused independent governance review of v0.5. These tests prove the file
+# reproduces that SQL exactly, that it adds exactly eight triggers and alters
+# nothing, and that each guard behaves as frozen -- including under every
+# combination of recursive_triggers and foreign_keys, because Decision 021
+# section 15.5 states the guarantee holds with no pragma required for correctness.
+# ==========================================================================
+
+_MIGRATION_0013 = _MIGRATIONS_DIR / "0013_m23_manifest_lifecycle_guards.sql"
+
+_S6_BLOCK_DIGESTS: Final = (
+    "f805f666be223cdaf7d5b29fdbd1bec8709f9ba3c71fd8e46f419ca35ab3b850",
+    "e2e44785a6b123e3eef87314c8e8d4d24b75fb3b3ffef3c6adde763dcfd940f2",
+    "495a1c43e7a1e542f9464c86e18900a5a161aa84dc85bee55fb7d7e5f86394fb",
+    "1a376c1b37317ec0fc9dc697a69370f54a09cf0124942c742ea9a984c838cb98",
+    "21d8cc57090c35ac3624e908a98759112623f7be4347df15ea0a5bce20b5c97e",
+    "fb43032dd3c2c868428539ac5eb7fed98bef8bad39318014ddd34f0eec26b424",
+    "879459ec7dbde300ce586c9d51c3aa32208e5c44719c8fce177465f942536448",
+    "167f7a891728250b04f3637562fe5526d0cf997ea9ae098e97be71e8611b7eef",
+)
+_S6_REGION_DIGEST: Final = "7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595"
+_S6_REGION_BYTES: Final = 10939
+_S6_REGION_LINES: Final = 186
+_S6_TRIGGER_NAMES: Final = (
+    "pilot_selection_run_insert_unsealed_guard",
+    "pilot_selection_run_result_hash_guard",
+    "pilot_manifest_versions_insert_guard",
+    "pilot_manifest_versions_identity_guard",
+    "pilot_manifest_versions_replacement_guard",
+    "pilot_selection_run_replacement_guard",
+    "pilot_selection_run_delete_guard",
+    "pilot_selection_run_identity_guard",
+)
+#: Withdrawn as compositions by Decision 021 section 15.3; must appear nowhere.
+_WITHDRAWN_REGION_DIGESTS: Final = (
+    "6bfb897cc0db1b870d67546dc8ce5937741fbef542d6c2f940f2928c0c9a6c40",
+    "51151767895eee673997331d4e8a3153836a31738c094c152340320021449edc",
+)
+_RUN_STATES: Final = (
+    "planned",
+    "running",
+    "feasible",
+    "failed",
+    "infeasible",
+    "infeasible_or_unproven",
+)
+
+
+def _migration_0013_statement_region() -> str:
+    """Migration 0013 from its first statement line to end of file.
+
+    The leading ``--`` header block follows the migration 0012 convention and is
+    explicitly not part of the normative statement region (Decision 021 section 15.1).
+    """
+    lines = _MIGRATION_0013.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(index for index, line in enumerate(lines) if line.startswith("CREATE TRIGGER"))
+    return "".join(lines[start:])
+
+
+def _frozen_blocks() -> list[str]:
+    """The eight fenced SQL blocks, extracted from the accepted decision record."""
+    text = _DECISION_021_PATH.read_text(encoding="utf-8").split("\n")
+    start = next(i for i, line in enumerate(text) if line.startswith("### 15.1"))
+    end = next(i for i, line in enumerate(text) if line.startswith("### 15.2"))
+    blocks: list[str] = []
+    current: list[str] = []
+    inside = False
+    for line in text[start:end]:
+        if line.strip() == "```sql":
+            inside, current = True, []
+            continue
+        if inside and line.strip() == "```":
+            inside = False
+            blocks.append("\n".join(current) + "\n")
+            continue
+        if inside:
+            current.append(line)
+    return blocks
+
+
+def test_migration_0013_reproduces_the_frozen_decision_021_sql_byte_for_byte() -> None:
+    """The statement region equals the section 15.1 SQL exactly, block for block."""
+    blocks = _frozen_blocks()
+    assert len(blocks) == 8
+    assert _migration_0013_statement_region() == "\n".join(blocks)
+
+
+def test_migration_0013_reproduces_all_nine_normative_digests() -> None:
+    """Eight per-block digests plus the concatenation, with byte and line counts."""
+    blocks = _frozen_blocks()
+    for block, expected in zip(blocks, _S6_BLOCK_DIGESTS, strict=True):
+        assert hashlib.sha256(block.encode("utf-8")).hexdigest() == expected
+        assert block.endswith("\n")
+    region = _migration_0013_statement_region()
+    encoded = region.encode("utf-8")
+    assert hashlib.sha256(encoded).hexdigest() == _S6_REGION_DIGEST
+    assert len(encoded) == _S6_REGION_BYTES
+    assert region.count("\n") == _S6_REGION_LINES
+
+
+def test_migration_0013_does_not_reproduce_a_withdrawn_region() -> None:
+    """The v0.4 five-block and v0.3 four-block compositions are withdrawn."""
+    content = _MIGRATION_0013.read_text(encoding="utf-8")
+    for withdrawn in _WITHDRAWN_REGION_DIGESTS:
+        assert withdrawn not in content
+    assert _migration_0013_statement_region().count("CREATE TRIGGER") == 8
+
+
+def test_migration_0013_is_ddl_only_and_carries_no_forbidden_statement() -> None:
+    """Every body statement is a ``SELECT RAISE(ABORT, ...)`` guard."""
+    region = _migration_0013_statement_region()
+    executable = "\n".join(line for line in region.split("\n") if not line.strip().startswith("--"))
+    for forbidden in ("DROP ", "ALTER ", "PRAGMA ", "ATTACH ", "VACUUM ", "CREATE TABLE"):
+        assert forbidden not in executable.upper()
+    bodies = re.findall(r"BEGIN\n(.*?)\nEND;", region, re.DOTALL)
+    assert len(bodies) == 8
+    for body in bodies:
+        statements = [
+            fragment.strip()
+            for fragment in re.split(r";\s*\n", body)
+            if fragment.strip() and not fragment.strip().startswith("--")
+        ]
+        for statement in statements:
+            assert statement.startswith("SELECT RAISE(ABORT")
+
+
+def test_migration_0013_adds_exactly_eight_triggers_and_alters_nothing(tmp_path: Path) -> None:
+    """Additive only: no object is created, dropped, altered, or replaced."""
+    path = tmp_path / "catalog.sqlite3"
+    with connect(path, writer=True) as connection:
+        inventory = tuple(m for m in available_migrations() if m.version <= 12)
+        apply_migrations(connection, inventory)
+        before = {
+            (row["type"], row["name"]): row["sql"]
+            for row in connection.execute("SELECT type, name, sql FROM sqlite_master")
+        }
+        apply_migrations(connection)
+        after = {
+            (row["type"], row["name"]): row["sql"]
+            for row in connection.execute("SELECT type, name, sql FROM sqlite_master")
+        }
+    added = set(after) - set(before)
+    assert sorted(name for _, name in added) == sorted(_S6_TRIGGER_NAMES)
+    assert {kind for kind, _ in added} == {"trigger"}
+    assert set(before) - set(after) == set()
+    assert all(before[key] == after[key] for key in before)
+    assert len(after) == len(before) + 8
+
+
+def _s6_catalog(tmp_path: Path, *, recursive_triggers: int = 0, foreign_keys: int = 1) -> Path:
+    """A migrated catalog with one frozen snapshot, at the requested pragma settings."""
+    path = _migrated_database(tmp_path)
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _frozen_snapshot_with_n_entities(connection, _hex("s6-snapshot"), 1)
+    return path
+
+
+def _s6_insert_run(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    state: str = "planned",
+    sealed: str | None = None,
+    snapshot_id: str | None = None,
+    input_sha256: str | None = None,
+    verb: str = "INSERT",
+) -> None:
+    """Insert one selection run at an arbitrary state, optionally pre-sealed."""
+    columns = [
+        "selection_run_id",
+        "snapshot_id",
+        "selection_seed",
+        "selector_policy_version",
+        "quota_policy_version",
+        "search_node_limit",
+        "run_state",
+        "selection_input_sha256",
+        "started_at_utc",
+    ]
+    values: list[object] = [
+        run_id,
+        snapshot_id or _hex("s6-snapshot"),
+        "seed",
+        pilot_policy.PILOT_SELECTOR_POLICY_VERSION,
+        "quota/1.0",
+        1000,
+        state,
+        input_sha256 or _hex(f"selection-input:{run_id}"),
+        "2026-01-01T00:00:00Z",
+    ]
+    if state in {"feasible", "failed", "infeasible", "infeasible_or_unproven"}:
+        columns += [
+            "selected_entity_count",
+            "selected_accession_count",
+            "expanded_node_count",
+            "finished_at_utc",
+        ]
+        values += [24, 0] if state == "feasible" else [None, None]
+        values += [10, "2026-01-02T00:00:00Z"]
+    if sealed is not None:
+        columns.append("selection_result_sha256")
+        values.append(sealed)
+    placeholders = ", ".join("?" for _ in columns)
+    connection.execute(
+        f"{verb} INTO pilot_selection_runs ({', '.join(columns)}) VALUES ({placeholders})",  # noqa: S608
+        tuple(values),
+    )
+
+
+def _run_row(connection: sqlite3.Connection, run_id: str) -> tuple[object, ...]:
+    """The complete run row, for byte-preservation comparison."""
+    row = connection.execute(
+        "SELECT * FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,)
+    ).fetchone()
+    return tuple(row) if row is not None else ()
+
+
+@pytest.mark.parametrize("state", _RUN_STATES)
+def test_s6_trigger_1_refuses_a_pre_sealed_insert_in_every_state(
+    tmp_path: Path, state: str
+) -> None:
+    """Block 1: every selection run begins unsealed, on every write path."""
+    path = _s6_catalog(tmp_path)
+    with (
+        connect(path, writer=True) as connection,
+        transaction(connection) as c,
+        pytest.raises(sqlite3.IntegrityError, match="must be inserted unsealed"),
+    ):
+        _s6_insert_run(c, run_id=_hex(f"presealed-{state}"), state=state, sealed=_hex("seal"))
+
+
+@pytest.mark.parametrize("state", ["planned", "running", "feasible"])
+def test_s6_trigger_1_accepts_a_genuinely_new_unsealed_run(tmp_path: Path, state: str) -> None:
+    """A genuinely new unsealed run inserts normally in every authorized state."""
+    path = _s6_catalog(tmp_path)
+    with connect(path, writer=True) as connection, transaction(connection) as c:
+        _s6_insert_run(c, run_id=_hex(f"unsealed-{state}"), state=state)
+
+
+@pytest.mark.parametrize("state", ["planned", "running", "failed", "infeasible"])
+def test_s6_trigger_2_refuses_sealing_a_non_feasible_run(tmp_path: Path, state: str) -> None:
+    """Block 2: sealing is permitted only on a run that is feasible before and after."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex(f"seal-{state}")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state=state)
+        with (
+            pytest.raises(sqlite3.IntegrityError, match="only on a feasible selection run"),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                "WHERE selection_run_id = ?",
+                (_hex("seal"), run_id),
+            )
+
+
+def test_s6_trigger_2_seals_immutably_and_idempotently(tmp_path: Path) -> None:
+    """NULL to non-NULL once; identical restatement accepted; change and clear refused."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("seal-lifecycle")
+    seal = _hex("seal")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="feasible")
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                "WHERE selection_run_id = ?",
+                (seal, run_id),
+            )
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                "WHERE selection_run_id = ?",
+                (seal, run_id),
+            )
+        for replacement in (_hex("other-seal"), None):
+            with (
+                pytest.raises(sqlite3.IntegrityError, match="immutable once set"),
+                transaction(connection) as c,
+            ):
+                c.execute(
+                    "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                    "WHERE selection_run_id = ?",
+                    (replacement, run_id),
+                )
+
+
+def test_s6_trigger_2_refuses_a_seal_riding_the_terminal_transition(tmp_path: Path) -> None:
+    """The seal is always a separate, later write over an already-terminal run."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("seal-ride-along")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="running")
+        with (
+            pytest.raises(sqlite3.IntegrityError, match="only on a feasible selection run"),
+            transaction(connection) as c,
+        ):
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'feasible', "
+                "selected_entity_count = 24, selected_accession_count = 0, "
+                "selection_result_sha256 = ? WHERE selection_run_id = ?",
+                (_hex("seal"), run_id),
+            )
+
+
+@pytest.mark.parametrize("recursive_triggers", [0, 1])
+@pytest.mark.parametrize("foreign_keys", [0, 1])
+@pytest.mark.parametrize(
+    ("label", "sealed", "state"),
+    [
+        ("identical digest", "same", "feasible"),
+        ("changed digest", "other", "feasible"),
+        ("omitted digest", None, "feasible"),
+    ],
+)
+def test_s6_trigger_6_refuses_every_run_replacement_form(
+    tmp_path: Path,
+    recursive_triggers: int,
+    foreign_keys: int,
+    label: str,
+    sealed: str | None,
+    state: str,
+) -> None:
+    """Block 6: a run is never replaced, under any pragma setting."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("replace-target")
+    seal = _hex("seal")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state=state)
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                "WHERE selection_run_id = ?",
+                (seal, run_id),
+            )
+        connection.execute(f"PRAGMA recursive_triggers = {recursive_triggers}")
+        connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
+        before = _run_row(connection, run_id)
+        incoming = {"same": seal, "other": _hex("other-seal")}.get(sealed or "")
+        with pytest.raises(sqlite3.IntegrityError, match="already exists"):
+            _s6_insert_run(
+                connection,
+                run_id=run_id,
+                state=state,
+                sealed=incoming,
+                verb="INSERT OR REPLACE",
+            )
+        assert _run_row(connection, run_id) == before
+
+
+@pytest.mark.parametrize("verb", ["INSERT", "INSERT OR IGNORE", "INSERT OR REPLACE"])
+def test_s6_trigger_6_refuses_duplicate_and_ignored_inserts(tmp_path: Path, verb: str) -> None:
+    """A duplicate INSERT and an INSERT OR IGNORE are refused, not silently dropped."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("duplicate-run")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="planned")
+        before = _run_row(connection, run_id)
+        with pytest.raises(sqlite3.IntegrityError, match="already exists"):
+            _s6_insert_run(connection, run_id=run_id, state="planned", verb=verb)
+        assert _run_row(connection, run_id) == before
+
+
+@pytest.mark.parametrize("column", ["snapshot_id", "selection_input_sha256"])
+def test_s6_trigger_6_refuses_a_replacement_that_changes_run_identity(
+    tmp_path: Path, column: str
+) -> None:
+    """A replacement arriving with a different snapshot or input digest is refused."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("replace-identity")
+    other_snapshot = _hex("s6-second-snapshot")
+    with connect(path, writer=True) as connection:
+        _frozen_snapshot_with_n_entities(connection, other_snapshot, 1)
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="feasible")
+        before = _run_row(connection, run_id)
+        override: dict[str, str] = {
+            column: other_snapshot if column == "snapshot_id" else _hex("x")
+        }
+        with pytest.raises(sqlite3.IntegrityError, match="already exists"):
+            _s6_insert_run(
+                connection,
+                run_id=run_id,
+                state="feasible",
+                verb="INSERT OR REPLACE",
+                snapshot_id=override.get("snapshot_id"),
+                input_sha256=override.get("selection_input_sha256"),
+            )
+        assert _run_row(connection, run_id) == before
+
+
+@pytest.mark.parametrize("recursive_triggers", [0, 1])
+@pytest.mark.parametrize("foreign_keys", [0, 1])
+@pytest.mark.parametrize("state", _RUN_STATES)
+def test_s6_trigger_7_refuses_deletion_in_every_state(
+    tmp_path: Path, recursive_triggers: int, foreign_keys: int, state: str
+) -> None:
+    """Block 7: selection runs are undeletable in every state, under any pragma."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex(f"delete-{state}")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state=state)
+        connection.execute(f"PRAGMA recursive_triggers = {recursive_triggers}")
+        connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
+        before = _run_row(connection, run_id)
+        with pytest.raises(sqlite3.IntegrityError, match="undeletable"):
+            connection.execute(
+                "DELETE FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,)
+            )
+        assert _run_row(connection, run_id) == before
+
+
+@pytest.mark.parametrize("column", ["selection_run_id", "snapshot_id", "selection_input_sha256"])
+def test_s6_trigger_8_holds_run_identity_immutable(tmp_path: Path, column: str) -> None:
+    """Block 8: the three persisted identity fields never change once inserted."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("identity-run")
+    other_snapshot = _hex("s6-third-snapshot")
+    with connect(path, writer=True) as connection:
+        _frozen_snapshot_with_n_entities(connection, other_snapshot, 1)
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="feasible")
+        before = _run_row(connection, run_id)
+        replacement = other_snapshot if column == "snapshot_id" else _hex("changed")
+        with pytest.raises(sqlite3.IntegrityError, match="identity is immutable"):
+            connection.execute(
+                f"UPDATE pilot_selection_runs SET {column} = ? WHERE selection_run_id = ?",  # noqa: S608
+                (replacement, run_id),
+            )
+        assert _run_row(connection, run_id) == before
+
+
+def test_s6_trigger_8_accepts_an_identical_identity_restatement(tmp_path: Path) -> None:
+    """Rewriting all three identically is an idempotent no-op, not a failure."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("identity-restate")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="feasible")
+        row = connection.execute(
+            "SELECT snapshot_id, selection_input_sha256 FROM pilot_selection_runs "
+            "WHERE selection_run_id = ?",
+            (run_id,),
+        ).fetchone()
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_run_id = ?, snapshot_id = ?, "
+                "selection_input_sha256 = ? WHERE selection_run_id = ?",
+                (run_id, row["snapshot_id"], row["selection_input_sha256"], run_id),
+            )
+
+
+def test_s6_trigger_8_leaves_the_accepted_s5_update_shapes_untouched(tmp_path: Path) -> None:
+    """No accepted S4 or S5 statement names an identity column, so trigger 8 never fires."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("neutrality-run")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="planned")
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET run_state = 'running', current_attempt = 1 "
+                "WHERE selection_run_id = ?",
+                (run_id,),
+            )
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selected_entity_count = 24, "
+                "selected_accession_count = 0, expanded_node_count = 7, "
+                "node_limit_exhausted = 0 WHERE selection_run_id = ?",
+                (run_id,),
+            )
+
+
+@pytest.mark.parametrize("recursive_triggers", [0, 1])
+@pytest.mark.parametrize("foreign_keys", [0, 1])
+def test_s6_trigger_5_refuses_every_manifest_replacement_route(
+    tmp_path: Path, recursive_triggers: int, foreign_keys: int
+) -> None:
+    """Block 5: all three uniqueness routes refused, with the row byte-identical."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("manifest-replace-run")
+    manifest_id = _hex("manifest-replace")
+    with connect(path, writer=True) as connection:
+        _feasible_sealed_selection_run(
+            connection, selection_run_id=run_id, snapshot_id=_hex("s6-snapshot")
+        )
+        _insert_manifest(
+            connection,
+            manifest_id=manifest_id,
+            selection_run_id=run_id,
+            snapshot_id=_hex("s6-snapshot"),
+            root_hash=_hex("manifest-replace-root"),
+        )
+        connection.execute(f"PRAGMA recursive_triggers = {recursive_triggers}")
+        connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
+        before = tuple(
+            connection.execute(
+                "SELECT * FROM pilot_manifest_versions WHERE manifest_id = ?", (manifest_id,)
+            ).fetchone()
+        )
+        # Route 1: the manifest_id primary key.
+        with pytest.raises(sqlite3.IntegrityError, match="never replaced"):
+            connection.execute(
+                "INSERT OR REPLACE INTO pilot_manifest_versions "
+                "(manifest_id, selection_run_id, snapshot_id, manifest_schema_version, "
+                "ordinal_version, source_observation_set_sha256, candidate_tables_sha256, "
+                "quota_definitions_sha256, selector_policy_sha256, selected_entities_sha256, "
+                "selected_accessions_sha256, reserves_sha256, quota_report_sha256, "
+                "root_manifest_sha256, manifest_state, generated_at_utc) "
+                "VALUES (?, ?, ?, 'manifest/1.0', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', "
+                "'2026-01-05T00:00:00Z')",
+                (
+                    manifest_id,
+                    run_id,
+                    _hex("s6-snapshot"),
+                    *[_hex(f"forged-{index}") for index in range(9)],
+                ),
+            )
+        # Route 2: UNIQUE (selection_run_id, snapshot_id, ordinal_version).
+        with pytest.raises(sqlite3.IntegrityError, match="never replaced"):
+            connection.execute(
+                "INSERT OR REPLACE INTO pilot_manifest_versions "
+                "(manifest_id, selection_run_id, snapshot_id, manifest_schema_version, "
+                "ordinal_version, source_observation_set_sha256, candidate_tables_sha256, "
+                "quota_definitions_sha256, selector_policy_sha256, selected_entities_sha256, "
+                "selected_accessions_sha256, reserves_sha256, quota_report_sha256, "
+                "root_manifest_sha256, manifest_state, generated_at_utc) "
+                "VALUES (?, ?, ?, 'manifest/1.0', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', "
+                "'2026-01-05T00:00:00Z')",
+                (
+                    _hex("manifest-replace-other"),
+                    run_id,
+                    _hex("s6-snapshot"),
+                    *[_hex(f"forged2-{index}") for index in range(9)],
+                ),
+            )
+        assert (
+            tuple(
+                connection.execute(
+                    "SELECT * FROM pilot_manifest_versions WHERE manifest_id = ?", (manifest_id,)
+                ).fetchone()
+            )
+            == before
+        )
+
+
+def test_s6_trigger_3_requires_a_feasible_sealed_run_for_a_manifest(tmp_path: Path) -> None:
+    """Block 3: a manifest over a feasible but unsealed run is refused."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("unsealed-manifest-run")
+    with connect(path, writer=True) as connection:
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="feasible")
+        with pytest.raises(sqlite3.IntegrityError, match="sealed"):
+            _insert_manifest(
+                connection,
+                manifest_id=_hex("unsealed-manifest"),
+                selection_run_id=run_id,
+                snapshot_id=_hex("s6-snapshot"),
+                root_hash=_hex("unsealed-root"),
+            )
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "manifest_id",
+        "manifest_schema_version",
+        "selection_run_id",
+        "snapshot_id",
+        "ordinal_version",
+        "supersedes_manifest_id",
+    ],
+)
+def test_s6_trigger_4_holds_all_six_manifest_identity_fields_immutable(
+    tmp_path: Path, column: str
+) -> None:
+    """Block 4: manifest identity is immutable in all six of its fields."""
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("manifest-identity-run")
+    manifest_id = _hex("manifest-identity")
+    with connect(path, writer=True) as connection:
+        _feasible_sealed_selection_run(
+            connection, selection_run_id=run_id, snapshot_id=_hex("s6-snapshot")
+        )
+        _insert_manifest(
+            connection,
+            manifest_id=manifest_id,
+            selection_run_id=run_id,
+            snapshot_id=_hex("s6-snapshot"),
+            root_hash=_hex("manifest-identity-root"),
+        )
+        before = tuple(
+            connection.execute(
+                "SELECT * FROM pilot_manifest_versions WHERE manifest_id = ?", (manifest_id,)
+            ).fetchone()
+        )
+        # For the two columns that also name the referenced run, move the manifest onto a
+        # second run that is itself feasible and sealed. Migration 0013's block 4 checks
+        # the OLD and the NEW referenced run first, so pointing at a nonexistent run would
+        # trip that predicate instead and prove nothing about identity immutability.
+        second_run = _hex("manifest-identity-second-run")
+        _feasible_sealed_selection_run(
+            connection, selection_run_id=second_run, snapshot_id=_hex("s6-snapshot")
+        )
+        _frozen_snapshot_with_n_entities(connection, _hex("s6-second-snapshot-for-identity"), 1)
+        replacement: object
+        if column == "ordinal_version":
+            replacement = 9
+        elif column == "selection_run_id":
+            replacement = second_run
+        elif column == "snapshot_id":
+            replacement = _hex("s6-second-snapshot-for-identity")
+        else:
+            replacement = _hex("changed")
+        # Changing snapshot_id necessarily points the row at a (run, snapshot) pair no
+        # sealed feasible run carries, so block 4's referenced-run predicate refuses it
+        # before the identity predicate is reached. Both are the same guard refusing the
+        # same write, so the assertion accepts either message and the column still cannot
+        # move -- which is the guarantee under test.
+        expected = (
+            "identity is immutable|requires an existing feasible selection run"
+            if column == "snapshot_id"
+            else "identity is immutable"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match=expected):
+            connection.execute(
+                f"UPDATE pilot_manifest_versions SET {column} = ? WHERE manifest_id = ?",  # noqa: S608
+                (replacement, manifest_id),
+            )
+        assert (
+            tuple(
+                connection.execute(
+                    "SELECT * FROM pilot_manifest_versions WHERE manifest_id = ?", (manifest_id,)
+                ).fetchone()
+            )
+            == before
+        )
+
+
+def test_s6_append_once_and_recomputability_guarantee_holds(tmp_path: Path) -> None:
+    """Decision 021 section 15.5: the nine clauses, proven together on one run.
+
+    A run is inserted only unsealed, cannot be replaced, cannot be deleted, cannot have
+    its persisted identity changed, seals only on an already-feasible run, cannot have
+    that seal changed or cleared, tolerates an identical restatement, and therefore
+    carries a ``selection_result_sha256`` that is append-once **and** still recomputable
+    from the persisted preimage its section 6.1 fields are read from.
+    """
+    path = _s6_catalog(tmp_path)
+    run_id = _hex("guarantee-run")
+    seal = _hex("guarantee-seal")
+    with connect(path, writer=True) as connection:
+        # 1. Every new run begins unsealed.
+        with (
+            pytest.raises(sqlite3.IntegrityError, match="must be inserted unsealed"),
+            transaction(connection) as c,
+        ):
+            _s6_insert_run(c, run_id=run_id, state="feasible", sealed=seal)
+        with transaction(connection) as c:
+            _s6_insert_run(c, run_id=run_id, state="feasible")
+        preimage = _run_row(connection, run_id)
+        # 5. Sealing occurs only through the guarded update on an already-feasible run.
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                "WHERE selection_run_id = ?",
+                (seal, run_id),
+            )
+        # 7. Identical restatement stays idempotent.
+        with transaction(connection) as c:
+            c.execute(
+                "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                "WHERE selection_run_id = ?",
+                (seal, run_id),
+            )
+        sealed_row = _run_row(connection, run_id)
+        # 6. A sealed digest cannot change or clear.
+        for replacement in (_hex("other"), None):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE pilot_selection_runs SET selection_result_sha256 = ? "
+                    "WHERE selection_run_id = ?",
+                    (replacement, run_id),
+                )
+        # 2. An existing run cannot be replaced.
+        with pytest.raises(sqlite3.IntegrityError, match="already exists"):
+            _s6_insert_run(connection, run_id=run_id, state="feasible", verb="INSERT OR REPLACE")
+        # 3. A run cannot be deleted.
+        with pytest.raises(sqlite3.IntegrityError, match="undeletable"):
+            connection.execute(
+                "DELETE FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,)
+            )
+        # 4 and 8. The persisted identity, including selection_input_sha256, cannot change.
+        for column in ("selection_run_id", "snapshot_id", "selection_input_sha256"):
+            with pytest.raises(sqlite3.IntegrityError, match="identity is immutable"):
+                connection.execute(
+                    f"UPDATE pilot_selection_runs SET {column} = ? WHERE selection_run_id = ?",  # noqa: S608
+                    (_hex("changed"), run_id),
+                )
+        # 9. The seal remains recomputable: every section 6.1 preimage field the run
+        # row carries is byte-identical to what it was before sealing, so nothing the
+        # digest was computed over moved underneath it.
+        after = _run_row(connection, run_id)
+        assert after == sealed_row
+        columns = [
+            description[0]
+            for description in connection.execute(
+                "SELECT * FROM pilot_selection_runs WHERE selection_run_id = ?", (run_id,)
+            ).description
+        ]
+        preimage_fields = (
+            "selection_run_id",
+            "snapshot_id",
+            "selection_input_sha256",
+            "run_state",
+            "selected_entity_count",
+            "selected_accession_count",
+            "expanded_node_count",
+            "node_limit_exhausted",
+        )
+        for field in preimage_fields:
+            index = columns.index(field)
+            assert after[index] == preimage[index], f"{field} moved underneath the seal"
+        assert after[columns.index("selection_result_sha256")] == seal

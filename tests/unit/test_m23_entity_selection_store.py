@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -51,11 +52,98 @@ def _hex(seed: str) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+#: Catalogs built by :func:`_migrated_database` for the test now running. The corruption
+#: fixture below accepts nothing else, so it cannot touch a real catalog even by mistake.
+_SCRATCH_CATALOGS: set[Path] = set()
+
+
+@pytest.fixture(autouse=True)
+def _scratch_catalog_lifecycle() -> Iterator[None]:
+    """Scope every scratch-catalog registration to the test that created it.
+
+    Registrations are discarded at teardown, so the corruption helper can never be handed
+    a path left over from an earlier test -- the same fail-closed lifecycle the accession
+    suite's ``db`` fixture uses.
+    """
+    _SCRATCH_CATALOGS.clear()
+    try:
+        yield
+    finally:
+        _SCRATCH_CATALOGS.clear()
+
+
 def _migrated_database(tmp_path: Path) -> Path:
     path = tmp_path / "catalog.db"
     with connect(path, writer=True) as connection:
         apply_migrations(connection, migrations=available_migrations())
+    _SCRATCH_CATALOGS.add(path.resolve())
     return path
+
+
+def _require_scratch_catalog(path: Path) -> str:
+    """Refuse to hand back anything but a catalog this suite itself created.
+
+    The helper below deliberately removes a lifecycle guard, so it must be
+    structurally incapable of running against a real catalog. This is an allowlist
+    rather than a location test: a path qualifies only because
+    :func:`_migrated_database` built it and registered it in
+    :data:`_SCRATCH_CATALOGS`. A repository or production catalog can never be in
+    that set, and, unlike a check against the interpreter's temporary root, this
+    holds under ``--basetemp``, ``PYTEST_DEBUG_TEMPROOT``, a relocated ``TMPDIR``,
+    and xdist alike.
+    """
+    resolved = path.resolve()
+    if resolved not in _SCRATCH_CATALOGS:
+        message = (
+            f"refusing to disable a lifecycle guard on {resolved}: corruption fixtures "
+            "run only against a throwaway catalog created by this suite's own fixture"
+        )
+        raise AssertionError(message)
+    return str(resolved)
+
+
+def _corrupt_stored_run_identity(path: Path, sql: str, parameters: tuple[object, ...]) -> None:
+    """Rewrite a stored ``pilot_selection_runs`` identity column out of band.
+
+    Migration 0013 trigger 8 ``pilot_selection_run_identity_guard`` makes
+    ``selection_run_id``, ``snapshot_id``, and ``selection_input_sha256`` immutable
+    on every ordinary connection (Decision 021 section 15.5), and
+    ``tests/unit/test_m23_pilot_schema.py`` proves that directly for all three
+    columns. Historically corrupted storage must still fail closed anyway: a row
+    whose bytes were altered before that guard existed, or by something that is not
+    this application, has to be refused by same-ID replay rather than trusted or
+    silently overwritten. That state is no longer reachable through the guarded
+    path, so it is constructed here instead -- on a raw connection to the throwaway
+    per-test catalog, in autocommit, with foreign keys ON and exactly one trigger
+    dropped. Every other guard stays installed, so the resulting row is precisely
+    what the ordinary pre-0013 write produced and nothing else was relaxed to
+    obtain it.
+
+    The trigger is reinstalled from its own captured ``sqlite_master`` definition in
+    a ``finally`` block before the caller regains control, so the bypass lasts
+    exactly one statement and every assertion the calling test then makes runs
+    against a fully guarded catalog.
+    """
+    raw = sqlite3.connect(_require_scratch_catalog(path), isolation_level=None)
+    try:
+        raw.execute("PRAGMA foreign_keys = ON")
+        definition = raw.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            ("pilot_selection_run_identity_guard",),
+        ).fetchone()
+        assert definition is not None, "pilot_selection_run_identity_guard is not installed"
+        raw.execute("DROP TRIGGER pilot_selection_run_identity_guard")
+        try:
+            raw.execute(sql, parameters)
+        finally:
+            raw.execute(str(definition[0]))
+        restored = raw.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            ("pilot_selection_run_identity_guard",),
+        ).fetchone()[0]
+        assert restored == 1, "the identity guard was not reinstalled after the corruption"
+    finally:
+        raw.close()
 
 
 def _seed_reason_codes(connection: sqlite3.Connection) -> None:
@@ -941,12 +1029,11 @@ def test_same_id_stored_content_mismatch_is_rejected_not_overwritten(tmp_path: P
         _seed_job(connection)
         build_minimal_feasible_snapshot(connection, snapshot_id=snapshot_id)
         result = _persist(connection, snapshot_id)
-        with transaction(connection) as c:
-            c.execute(
-                "UPDATE pilot_selection_runs SET selection_input_sha256 = ? "
-                "WHERE selection_run_id = ?",
-                (_hex("tampered-input-hash"), result.selection_run_id),
-            )
+        _corrupt_stored_run_identity(
+            path,
+            "UPDATE pilot_selection_runs SET selection_input_sha256 = ? WHERE selection_run_id = ?",
+            (_hex("tampered-input-hash"), result.selection_run_id),
+        )
         with pytest.raises(GateFailureError, match="different stored selection_input_sha256"):
             _persist(connection, snapshot_id)
         # the tampered row was not silently replaced

@@ -79,10 +79,91 @@ authorized is carried by that contract's own status and by `IMPLEMENTATION_AUTHO
 `STATUS.md`, not by the fact that the marker names a path.** A completed or superseded contract stays
 on record as its stage's scope statement and never authorizes new work.
 
-**No contract in this directory currently authorizes implementation.** All three S5 contracts are
-accepted and closed. The next stage, S6, has no contract yet and needs one, together with its own owner
-authorization, before any S6 work begins.
+**No contract in this directory currently authorizes implementation**, S6 included — but for a
+different reason than before: **every contract here is now accepted and closed**, and a completed
+contract authorizes nothing further (see the rule above). All three S5 contracts and the S6 contract
+are `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`.
 
+**Nothing in this directory authorizes Stage S7, Milestone 3, live SEC work, real pilot execution,
+publication, or manifest approval.** No S7 contract exists. **The next authorized action is a
+separate governance-only Milestone 2 / Milestone 3 boundary session**, which will move the former
+S7–S10 obligations into Milestone 3 while preserving every gate, and which authorizes no
+implementation of its own. The final independent integrated Milestone 2 audit follows that session,
+and Milestone 2 is not closed until that audit passes.
+
+- [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
+  publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,
+  `IMPLEMENTATION_AUTHORIZATION: NO`, active blocker **none**. Its controlling record,
+  [Decision 021](../../Docs/Decisions/decision_021_m23_s6_manifest_construction.md), is at **v0.5**
+  and **`ACCEPTED`** (owner approved 2026-07-30); item-46 applicability is controlled by
+  [Decision 022](../../Docs/Decisions/decision_022_m23_s6_reserve_rank_applicability.md); and
+  **owner acceptance of the stage is recorded in
+  [Decision 023](../../Docs/Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md)**
+  (`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome `M23_STAGE_S6_ACCEPTED_AND_COMPLETE`). **All three
+  gating conditions are satisfied**: the focused independent governance review of Decision 021 v0.5
+  (complete 2026-07-30, `ACCEPT_DECISION_021_V05_FOR_OWNER_APPROVAL`); owner acceptance of v0.5
+  recorded in the registry; and the separately issued bounded implementation authorizations, which
+  were issued and exercised. Implemented under those bounded prompts, corrected once under Decision
+  022, rereviewed independently (`ACCEPT_M23_S6_IMPLEMENTATION_FOR_ACCEPTANCE_REVIEW`), and accepted
+  on the final independent recommendation **`ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING`** with no
+  blockers. Delivered the new `release/pilot_manifest.py` and `sec/pilot_manifest_store.py`, the
+  DDL-only migration `0013_m23_manifest_lifecycle_guards.sql` — **eight triggers**, reproducing the
+  Decision 021 §15.1 SQL byte-for-byte and its nine §15.3 digests — two new test modules, and bounded
+  edits to `tests/unit/test_m23_pilot_schema.py` and `tests/unit/test_migration_provenance.py`.
+  **The contract authorized seven paths; the delivered set is ten**, the extra three being
+  `tests/unit/test_storage_catalog.py`, `tests/unit/test_m23_entity_selection_store.py`, and
+  `tests/unit/test_m23_accession_selection_store.py` — forced consequences of migration `0013`,
+  ratified retroactively by Decision 023 §4 and **not a general widening**. Checkpointed at
+  `m2.3-s6-complete`, supplementing the immutable `m2.3-s5-complete` and `m2.3-s5.4-complete`. It
+  authorized and still authorizes **no** manifest approval, publication, CLI surface, live metadata
+  work, real candidate snapshot, or Stage S7–S10 activity. **It authorizes no new S6 implementation**;
+  a future S6 change requires a new explicit owner authorization.
+
+  **Contract revision without status change (2026-07-30).** This contract was revised in place when
+  Decision 021 moved from v0.1 to v0.2, again to v0.3, to v0.4, and again to v0.5 — to carry in turn the
+  four-trigger migration, the complete manifest document contract, the explicit residual schema
+  exclusions, the six-field manifest-identity immutability ruling, the CLI and S7–S10 boundary, the
+  five-column structural-fingerprint rule, the **exhaustive 81-item milestone-plan §10 crosswalk**,
+  and finally the **eight-trigger** migration and its §15.5 append-once and identity guarantee. Its
+  **seven authorized paths are unchanged across every one of those revisions**; its status and
+  implementation authorization stayed unchanged through all of them and moved only on 2026-07-30,
+  when the owner approved Decision 021 v0.5. This is the normal shape of a contract revision: a
+  contract tracks its controlling record, and tracking it is never itself an authorization. **Three
+  focused independent governance reviews ran against this stage before it was accepted — of
+  Decision 021 v0.1, v0.3, and v0.4 — and all three returned `REQUIRES_OWNER_CLARIFICATION`. The
+  fourth, of v0.5, returned `ACCEPT_DECISION_021_V05_FOR_OWNER_APPROVAL` with no governance blockers,
+  and the owner approved the record the same day.**
+
+  **Second controlling record, added 2026-07-31 —
+  [Decision 022](../../Docs/Decisions/decision_022_m23_s6_reserve_rank_applicability.md),
+  `ACCEPTED — OWNER APPROVED 2026-07-31`.** A fresh independent S6 implementation audit found that a
+  lawful, accepted, feasible, sealed S5 run with **zero compatible reserve packages** was refused at
+  document verification, because crosswalk item 46's `reserves.packages[].reserve_rank` leaf cannot
+  exist with zero packages — even though Decision 020 §7.1 and Decision 021 §11.2 both make that run
+  manifest-eligible. The audit stopped under Decision 021 §§21 and 13.3 and returned
+  `REQUIRES_OWNER_CLARIFICATION`. Decision 022 rules that reserve rank is applicable **once per
+  persisted reserve package** and is **structurally not applicable** for a target carrying the
+  `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` disposition instead, that item 70 remains the total per-target
+  coverage requirement, and that no synthetic package or invented rank may be created or serialized.
+  **This contract's authorized paths are unchanged by it** — the correction lands inside
+  `release/pilot_manifest.py`, `sec/pilot_manifest_store.py`, and the two S6 test modules, all
+  already listed. Decision 021 is **not** amended: it remains `ACCEPTED`, and its crosswalk, counts,
+  preimages, digests, and migration SQL are untouched. As always, a clarification is not an
+  acceptance — a fresh independent S6 rereview and the separate final S6 acceptance review had both
+  to pass before Stage S6 could be accepted, and neither could be run by a session that wrote the
+  work it reviews. **Both ran and both passed**, which is what Decision 023 records.
+
+  **Third controlling record, added 2026-07-31 —
+  [Decision 023](../../Docs/Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md),
+  `ACCEPTED — OWNER APPROVED 2026-07-31`.** It records formal owner acceptance of Stage S6
+  (`M23_STAGE_S6_ACCEPTED_AND_COMPLETE`), ratifies the three forced-consequence test paths named
+  above, records the four accepted nonblocking limitations O1–O4, and authorizes exactly one commit,
+  one push, the annotated tag `m2.3-s6-complete`, and one tag push. It adds no architecture: Decision
+  021 remains controlling for the S6 architecture and Decision 022 for item-46 applicability, and no
+  hash preimage, digest, crosswalk row, classification total, migration byte, or S4/S5 behaviour
+  changed at acceptance. **It grants no Stage-S7 and no Milestone 3 authority**, and defers the
+  Milestone 2 / Milestone 3 boundary reorganization and the final integrated Milestone 2 audit to
+  separate later sessions.
 - [`m23_s5_4.md`](m23_s5_4.md) — Stage S5.4 (reserve packages, quota-contribution membership, and
   replacement signatures). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,
   `IMPLEMENTATION_AUTHORIZATION: NO`, active blocker **none**. Implemented under a separately issued

@@ -68,7 +68,8 @@ catalog integrity tests named in the table above.
 
 Reserve paths (Stage S5.4) are implemented and accepted — see the next section. Manifest paths
 (Stage S6) are **implemented and accepted** — see "Stage S6 impact paths" below. **Publication,
-approval, live-metadata, and CLI paths remain unimplemented and unauthorized** (Stages S7–S10).
+approval, live-metadata, and CLI paths remain unimplemented and unauthorized** — **Milestone 3
+phases M3.1–M3.4**, formerly Stages S7–S10 (Decision 024 §5.1).
 
 ## Stage S5.4 impact paths (implemented and accepted)
 
@@ -253,9 +254,41 @@ that is the generalizable lesson this row records.
 **Not authorized, and appearing nowhere in this map:** owner approval of a manifest, publication,
 Gate F live-metadata safety work, live SEC metadata execution, a real candidate snapshot, the exact
 real-data manifest instance, **any CLI surface**, and any projection-recovery writer. Those are
-Stages S7–S10 and later operational work (Decision 021 §§16, 17). `release/hashing.py`,
+**Milestone 3 phases M3.1–M3.4** and later operational work — the stages Decision 021 §§16 and 17
+called S7–S10, renamed without substantive change by Decision 024 §5.1. `release/hashing.py`,
 `release/manifest.py`, `paths.py`, `pilot_policy.py`, `reasons.py`, `cli.py`, and every accepted
 S4/S5 module are **reused or regressed, never edited**.
+
+## Decision 024 — the Milestone 2 / Milestone 3 boundary (governance only, zero impact)
+
+[Decision 024](Decisions/decision_024_m2_m3_boundary_governance.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`) fixes accepted M2.3 S6 as the end of Milestone 2
+implementation and transfers the obligations formerly called S7–S10 into Milestone 3 as **M3.1–M3.4**,
+adding **M3.5** for integrated real-pilot acceptance and Milestone 3 closeout.
+
+**It is governance only, and its impact set is empty.** The boundary session changed exactly these
+files, all of them governance or navigation:
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_024_m2_m3_boundary_governance.md` | new decision record | Markdown link-check only |
+| `Docs/Decisions/decision_registry.md` | registry — index row and controlling-record row | Markdown link-check only |
+| `Docs/decision_index.md` | topic index — Decision 024 section and the S7–S10 → M3.x retargeting | Markdown link-check only |
+| `Docs/architecture_map.md` | new §0 governance-boundary layer; S7–S10 references retargeted | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | current-state ledger and machine-readable markers | `make context` resolves the markers |
+| `Milestones/contracts/README.md` | contract index — Decision 024 identified as governance, not a contract | Markdown link-check only |
+| `README.md` | the single live `**Status:**` line, which named M2.2 as Milestone 2's furthest completed stage and became false at accepted S6 | Markdown link-check only |
+
+**Zero impact, stated explicitly:** no production module, test, migration, or configuration file
+changed; no methodology, hash preimage, canonicalization rule, crosswalk row, or classification total
+changed; no data was read, written, acquired, or published; no network boundary moved; no publication
+or approval path was created; and **no implementation authority was granted** — implementation
+authorization is `NO` for every Milestone 3 phase, and assignment to Milestone 3 is not authorization
+to begin it (Decision 024 §8).
+
+**The accepted S6 delivered-path record above is unchanged** and remains the authority on what Stage
+S6 shipped and which gates each of its ten paths triggers.
 
 ## Notes on reading this table
 

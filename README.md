@@ -48,11 +48,19 @@ subsequent operating performance—occurred across preregistered historical peri
 A preregistered temporal-reliability study of U.S. Form 10-K disclosure narratives.
 
 **Status:** Milestone 0 (novelty audit, preregistration, definition freeze) and Milestone 1
-(reproducible engineering foundation) are complete. Milestone 2 has completed **Stage M2.2**:
-approved-source retrieval policy, immutable source observations, defensive bulk-archive handling,
-source-native parsers, the transactional registrant census, restart recovery, deterministic QA,
-and R3 durability and provenance hardening are implemented. **No SEC data has been downloaded, no
-filing body is permitted at this stage, and no modeling or outcome code exists.**
+(reproducible engineering foundation) are complete. **Milestone 2 implementation is complete**
+through accepted Stage **M2.3 S6**: the M2.2 offline foundation — approved-source retrieval policy,
+immutable source observations, defensive bulk-archive handling, source-native parsers, the
+transactional registrant census, restart recovery, deterministic QA, and R3 durability and provenance
+hardening — plus the M2.3 deterministic pilot architecture: the candidate/selection/manifest schema,
+entity selection, joint entity–accession selection, reserve packages and dispositions, persistence,
+reconstruction and replay, and pilot-manifest construction with terminal result identity, lifecycle
+enforcement, verification, and atomicity. **Milestone 2 is not yet formally closed** — one final
+independent integrated audit of Milestones 1 and 2 remains, followed by closeout. The remaining
+live-execution obligations are defined at the Milestone 3 governance boundary and are **not
+authorized and not begun**. **No SEC data has been downloaded, no filing body is permitted at this
+stage, no real pilot sample exists, no manifest root has been approved or published, and no modeling
+or outcome code exists.**
 
 ## Formal preregistered research question
 

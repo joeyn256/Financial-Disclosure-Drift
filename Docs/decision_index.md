@@ -28,7 +28,7 @@ on it. See `Docs/Decisions/decision_registry.md` for how supersession between de
 | Schema and lifecycle (candidate/selection/manifest tables, state machines) | [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §3, §5 | `src/disclosure_drift/storage/migrations/0009_m23_pilot_schema.sql` | `0009` | Approved; Stage S3 schema exists for both entity and accession tables, but accession tables have no writer yet |
 | Hashing (manifest / content-hash contract) | [013](Decisions/decision_013_pilot_selection_mechanics.md) §7 (D12); [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §8; [018](Decisions/decision_018_m23_s5_accession_selection_policy.md) §5 (canonical dashed accession, tie-break formula), §26 (hashing/identity impact); [021](Decisions/decision_021_m23_s6_manifest_construction.md) §§5–10 (the exact manifest and terminal-result preimages) | `src/disclosure_drift/release/hashing.py`; `src/disclosure_drift/sec/accession_selection_store.py` (S5 run identity); `src/disclosure_drift/sec/reserve_selector.py` (reserve signatures and package identity); `src/disclosure_drift/release/pilot_manifest.py` (the manifest and terminal-result preimages) | `0009`, `0013` | Precedent, boundaries, canonical accession representation, S5 run identity, and reserve identity all approved and **implemented**; the **manifest and terminal-result preimages are frozen by Decision 021 v0.5 (`ACCEPTED`, owner approved 2026-07-30) and are now implemented and accepted** at Stage S6 (Decision 023, `M23_STAGE_S6_ACCEPTED_AND_COMPLETE`) |
 | Reserves | [013](Decisions/decision_013_pilot_selection_mechanics.md) §6 (D11); [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §7; [020](Decisions/decision_020_m23_s5_4_reserve_architecture.md) (controlling) | `src/disclosure_drift/sec/reserve_selector.py`; persistence in `src/disclosure_drift/sec/accession_selection_store.py` | `0009`, `0012` | Approved and **implemented** — Stage S5.4, owner-accepted 2026-07-30, checkpointed at `m2.3-s5.4-complete`; reserves are not a manifest input before Stage S6 |
-| Manifest construction, terminal result identity, and the publication boundary | [013](Decisions/decision_013_pilot_selection_mechanics.md) §§7–8 (D12, D13); [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §§5, 8; [`milestone_2_3_pilot_selection_plan.md`](../Milestones/milestone_2_3_pilot_selection_plan.md) §10 (required manifest contents) and §16 (staged decomposition); [021](Decisions/decision_021_m23_s6_manifest_construction.md) v0.5 (**controlling; ACCEPTED 2026-07-30**) | `src/disclosure_drift/release/pilot_manifest.py` (pure — digests, root, `manifest_id`, document schema, canonical JSON) and `src/disclosure_drift/sec/pilot_manifest_store.py` (persistence, sealing, verification, replay). `src/disclosure_drift/release/manifest.py` is the **general SEC-inventory** release manifest, a distinct artifact that the pilot manifest never reuses | `0009` (`pilot_manifest_versions` schema); `0013` — **eight triggers**, reproducing the Decision 021 §15.1 SQL byte-for-byte | Approval semantics approved (Decision 013 §8); the S6 architecture is frozen by Decision 021 v0.5, **`ACCEPTED`, owner approved 2026-07-30**. Implementation is **Stage S6 — implemented, independently accepted, and checkpointed** at `m2.3-s6-complete` ([023](Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md), `M23_STAGE_S6_ACCEPTED_AND_COMPLETE`, owner approved 2026-07-31). S6 defines and fixture-tests the complete manifest document schema and creates only a `proposed` manifest; the exact real-data instance and CLI output are Stage S9 and owner approval of the root hash is Stage S10 — **none of which is authorized**. **For crosswalk item 46's reserve-rank applicability on a target with no compatible reserve package, [022](Decisions/decision_022_m23_s6_reserve_rank_applicability.md) controls** (`ACCEPTED — OWNER APPROVED 2026-07-31`); Decision 021 controls item 46 in every other respect |
+| Manifest construction, terminal result identity, and the publication boundary | [013](Decisions/decision_013_pilot_selection_mechanics.md) §§7–8 (D12, D13); [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §§5, 8; [`milestone_2_3_pilot_selection_plan.md`](../Milestones/milestone_2_3_pilot_selection_plan.md) §10 (required manifest contents) and §16 (staged decomposition); [021](Decisions/decision_021_m23_s6_manifest_construction.md) v0.5 (**controlling; ACCEPTED 2026-07-30**) | `src/disclosure_drift/release/pilot_manifest.py` (pure — digests, root, `manifest_id`, document schema, canonical JSON) and `src/disclosure_drift/sec/pilot_manifest_store.py` (persistence, sealing, verification, replay). `src/disclosure_drift/release/manifest.py` is the **general SEC-inventory** release manifest, a distinct artifact that the pilot manifest never reuses | `0009` (`pilot_manifest_versions` schema); `0013` — **eight triggers**, reproducing the Decision 021 §15.1 SQL byte-for-byte | Approval semantics approved (Decision 013 §8); the S6 architecture is frozen by Decision 021 v0.5, **`ACCEPTED`, owner approved 2026-07-30**. Implementation is **Stage S6 — implemented, independently accepted, and checkpointed** at `m2.3-s6-complete` ([023](Decisions/decision_023_m23_s6_acceptance_and_path_ratification.md), `M23_STAGE_S6_ACCEPTED_AND_COMPLETE`, owner approved 2026-07-31). S6 defines and fixture-tests the complete manifest document schema and creates only a `proposed` manifest; the exact real-data instance and CLI output are **Milestone 3 phase M3.3** and owner approval of the root hash is **M3.4** ([024](Decisions/decision_024_m2_m3_boundary_governance.md) §5.1; formerly Stages S9 and S10) — **neither of which is authorized, and neither has begun**. **For crosswalk item 46's reserve-rank applicability on a target with no compatible reserve package, [022](Decisions/decision_022_m23_s6_reserve_rank_applicability.md) controls** (`ACCEPTED — OWNER APPROVED 2026-07-31`); Decision 021 controls item 46 in every other respect |
 | Quota-policy version | [017](Decisions/decision_017_s4_quota_policy_and_control_evidence.md) | `src/disclosure_drift/pilot_policy.py` (`PILOT_QUOTA_POLICY_VERSION`) | `0010` | Approved and implemented |
 | Control structural evidence | [017](Decisions/decision_017_s4_quota_policy_and_control_evidence.md) §3 | `src/disclosure_drift/sec/entity_selector.py` (`CONTROL_QUOTAS`) | `0009`, `0010` | Approved and implemented |
 
@@ -122,7 +122,7 @@ The section numbers below are pointers into that record; this index supplies no 
 | Schema ruling and the complete frozen **eight-block** migration-`0013` SQL, its nine digests, and verification | §15 |
 | **The append-once and identity guarantee** — nine clauses across every direct SQLite write path | §15.5 |
 | No new reason code, projection-recovery writer, or policy constant; **the CLI narrowing of milestone plan §16** | §16 |
-| **The Stage S7–S10 boundary** and the Milestone 2 review timing (after S10) | §17 |
+| **The Stage S7–S10 boundary** and the review timing after it — the scope definitions [024](Decisions/decision_024_m2_m3_boundary_governance.md) §5.1 renames to **M3.1–M3.4** without altering their substance | §17 |
 | Accepted limitations, and the **§19.11 finding — CLOSED at v0.5** — on `pilot_selection_runs` row replacement, deletion, and identity mutation | §19 |
 | Test obligations, and the foreseeable bounded test-fixture consequence | §20 |
 | Implementation stop conditions | §21 |
@@ -187,6 +187,43 @@ the document contract, the crosswalk, migration `0013` — read **Decision 021**
 **Decision 022**. For whether the stage is accepted, which paths the delivered change set
 legitimately contains, what limitations the project has agreed to live with, and what the checkpoint
 authorizes, read **Decision 023**.
+
+## Decision 024 — ACCEPTED (Milestone 2 boundary and Milestone 3 obligation transfer)
+
+[Decision 024](Decisions/decision_024_m2_m3_boundary_governance.md) is
+**`ACCEPTED — OWNER APPROVED 2026-07-31`** and **binding**. It **supersedes and amends nothing**:
+Decisions 021, 022, and 023 all remain `ACCEPTED`, unchanged, and controlling for what they govern.
+It is a **boundary and naming** record — **governance only, granting no implementation authority**.
+Formal outcome: **`M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED`**.
+
+| Topic | Decision 024 section |
+|---|---|
+| Why the record exists — the boundary the stopped integrated audit required | §1 |
+| **Accepted S6 is the end of Milestone 2 implementation**, with the checkpoint identifiers | §2 |
+| **The final scope of Milestone 2** — M2.1, M2.2, and M2.3 through accepted S6 | §3 |
+| **Milestone 2 is not closed** — open only for the audit, bounded correction, rereview, and closeout | §4 |
+| **The obligation transfer** and the **M3.1–M3.5 phase map** | §5, §5.1 |
+| **The traceability table** — per phase: inherited gates, prohibitions, owner decision, validation, implementation authorization | §5.2 |
+| Confirmation that every former obligation is preserved intact | §5.3 |
+| **What Milestone 3 inherits** — frozen definitions, temporal authority, identifiers, SEC controls, data-source prohibitions, leakage controls, S4/S5/S6, Decisions 013–024, accepted limitations | §6 |
+| **Authority separation** — which of 021 / 022 / 023 / 024 controls what | §7 |
+| **No implementation authority**; assignment to Milestone 3 is not authorization; the five entry conditions | §8 |
+| **What happens next, in order** — audit, correction, closeout, then planning | §9 |
+| Negative confirmations — nothing began, nothing live, nothing real, nothing approved, nothing published | §10 |
+| What this record does not change | §11 |
+| Checkpoint authorization — one commit, one push, **no tag** | §13 |
+
+**Where the former S7–S10 obligations went.** Decision 021 §17 defined them as Stages S7–S10 and
+that text stands as written; Decision 024 §5.1 renames them without altering their substance. Read
+Decision 021 §17 for the scope of each, and Decision 024 §5.2 for what each carries.
+
+| Former | Now | One-line scope |
+|---|---|---|
+| S7 | **M3.1** | Controlled live-operation readiness; Gate F; no live access before every gate passes |
+| S8 | **M3.2** | Controlled **metadata-only** SEC acquisition; Gate H; no filing body, CompanyFacts, Frames, outcome, or publication |
+| S9 | **M3.3** | Frozen real pilot snapshot, deterministic execution, the exact real-data manifest and the CLI output deferred from S6, and the exact root hash — **no approval, no publication** |
+| S10 | **M3.4** | **Explicit** owner approval of the exact root hash; no implied approval |
+| — | **M3.5** | Integrated real-pilot acceptance and Milestone 3 closeout (**new at Decision 024**) |
 
 ## Full chronological registry
 

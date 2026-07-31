@@ -84,12 +84,27 @@ different reason than before: **every contract here is now accepted and closed**
 contract authorizes nothing further (see the rule above). All three S5 contracts and the S6 contract
 are `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`.
 
-**Nothing in this directory authorizes Stage S7, Milestone 3, live SEC work, real pilot execution,
-publication, or manifest approval.** No S7 contract exists. **The next authorized action is a
-separate governance-only Milestone 2 / Milestone 3 boundary session**, which will move the former
-S7–S10 obligations into Milestone 3 while preserving every gate, and which authorizes no
-implementation of its own. The final independent integrated Milestone 2 audit follows that session,
-and Milestone 2 is not closed until that audit passes.
+**Nothing in this directory authorizes Milestone 3, live SEC work, real pilot execution, publication,
+or manifest approval.** No S7 contract exists and no Milestone 3 contract exists.
+
+**The Milestone 2 / Milestone 3 boundary is recorded**, in
+[Decision 024](../../Docs/Decisions/decision_024_m2_m3_boundary_governance.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome `M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED`). It fixes
+accepted M2.3 S6 as the final implementation stage of Milestone 2 and transfers the obligations
+formerly called S7–S10 **intact** into Milestone 3 as **M3.1–M3.4**, adding **M3.5** for integrated
+real-pilot acceptance and Milestone 3 closeout.
+
+**Decision 024 is governance only — it is a decision record, not a contract, and it appears nowhere
+in this index as one.** It grants no implementation authority, and **assignment of an obligation to
+Milestone 3 is not authorization to begin Milestone 3.** Each Milestone 3 phase will require its own
+bounded implementation contract in this directory, a separate accepted governance record where
+applicable, explicit owner authorization, exact path authorization, and satisfaction of its inherited
+prerequisite gates — and none may begin before Milestone 1 and Milestone 2 closeout is complete.
+
+**The next authorized action is the final independent integrated Milestones 1 and 2 audit**
+(`FINAL_INDEPENDENT_INTEGRATED_MILESTONES_1_AND_2_AUDIT`), which is read-only, records no closeout,
+and authorizes no implementation. Formal Milestone 1 and Milestone 2 closeout follows only if that
+audit passes, in its own governance-only session, and **Milestone 2 is not closed until then**.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,
@@ -116,7 +131,9 @@ and Milestone 2 is not closed until that audit passes.
   ratified retroactively by Decision 023 §4 and **not a general widening**. Checkpointed at
   `m2.3-s6-complete`, supplementing the immutable `m2.3-s5-complete` and `m2.3-s5.4-complete`. It
   authorized and still authorizes **no** manifest approval, publication, CLI surface, live metadata
-  work, real candidate snapshot, or Stage S7–S10 activity. **It authorizes no new S6 implementation**;
+  work, real candidate snapshot, or Stage S7–S10 activity — the obligations Decision 024 §5.1 renamed
+  to **Milestone 3 phases M3.1–M3.4**, none of which is authorized or has begun. **It authorizes no
+  new S6 implementation**;
   a future S6 change requires a new explicit owner authorization.
 
   **Contract revision without status change (2026-07-30).** This contract was revised in place when

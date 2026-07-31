@@ -8,6 +8,25 @@ record, migration, or module docstring disagree, the decision/migration/module c
 
 Data flows top to bottom through the sections below; later sections depend on earlier ones.
 
+## 0. Milestone boundary — what is built, and what is only defined
+
+Added at [Decision 024](Decisions/decision_024_m2_m3_boundary_governance.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`), which fixes where Milestone 2 implementation ends. This
+section is a **governance orientation layer**: it names no module, migration, table, CLI command, or
+runtime path that does not already appear below.
+
+| Milestone | What it is | State |
+|---|---|---|
+| **Milestone 1** | Foundational configuration, frozen cohort definitions, CLI and exit-code boundary, logging, packaging, and the offline safety baseline — §§1 and 9 below | **Implemented and accepted.** In production use since Milestone 1 |
+| **Milestone 2** | SEC source policy and the offline census (§2); raw-object, inventory, and catalog layers (§3); the candidate/selection/manifest schema (§4); entity selection (§5); joint accession selection (§6); reserve packages (§7); and pilot-manifest construction, terminal result identity, lifecycle enforcement, verification, and atomicity (§8) | **Implementation complete** through accepted Stage M2.3 S6, checkpointed at `m2.3-s6-complete`. **Not formally closed** — one final independent integrated Milestones 1–2 audit, bounded correction, rereview where required, and formal closeout remain (Decision 024 §4) |
+| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** live-operation readiness and Gate F; **M3.2** controlled metadata-only SEC acquisition and Gate H; **M3.3** the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **Governance-defined only** (Decision 024 §5.1, transferring the obligations formerly called S7–S10). **Not planned in implementation detail, not contracted, not authorized, and not begun.** No Milestone 3 module, migration, table, CLI command, network allowlist, real snapshot, real manifest, approved root, or publication path exists |
+
+**Assignment to Milestone 3 is not authorization to begin it** (Decision 024 §8). Every Milestone 3
+phase additionally requires a separate accepted governance record where applicable, a bounded
+implementation contract, explicit owner authorization, exact path authorization, and satisfaction of
+its inherited prerequisite gates — and none may begin before Milestone 1 and Milestone 2 closeout is
+complete.
+
 ## 1. Configuration and cohorts
 
 **Purpose:** load typed, validated project configuration and expose the frozen temporal research
@@ -272,8 +291,9 @@ already used for non-pilot releases, and (b) the pilot-specific manifest Stage S
   [`Milestones/contracts/m23_s6.md`](../Milestones/contracts/m23_s6.md), is now
   `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO` and authorizes nothing further. S6
   delivered **machinery plus the complete manifest document schema, fixture-tested**, and can create
-  only a `proposed` manifest: the exact real-data instance and CLI output belong to Stage S9, owner
-  approval of the root hash to Stage S10, and Gate F live-metadata safety to Stage S7 — **none
+  only a `proposed` manifest: the exact real-data instance and CLI output belong to **M3.3**, owner
+  approval of the root hash to **M3.4**, and Gate F live-metadata safety to **M3.1** — the phases
+  Decision 024 §5.1 renamed from Stages S9, S10, and S7 — **none
   authorized**, and all unreachable while no candidate-snapshot builder and no production catalog
   exist (Decision 021 §17). Decision 023 §7 records four accepted nonblocking limitations: an empty
   sole-carrier crosswalk family fails closed (**O1**), the release root is assumed owner-controlled
@@ -321,10 +341,13 @@ S4 implementation; it does not introduce any new state or transition.
   (Decision 013 §7) are Stage S6, together with the complete document schema Decision 021 §13 freezes
   from milestone plan §10 and enumerates item by item in §13.2.1; the **owner-approval workflow
   (Decision 013 §8) is not** — Decision 021 §11.1 confines S6 code to creating a `proposed` manifest,
-  and §17 places Gate F safety at Stage S7, live metadata at S8, the exact real-data manifest
-  instance and CLI output at S9, and owner approval of the root hash at S10. S6 requires a `feasible`
-  S5 joint run, which exists as an implemented path. **S6 is implemented, accepted, and
-  checkpointed** (Decision 023); **Stages S7–S10 have not begun and are not authorized**, no S7
-  contract exists, and no Milestone 3 implementation exists. The Milestone 2 / Milestone 3 boundary
-  reorganization and the final integrated Milestone 2 audit are separate later sessions, and
-  **Milestone 2 is not closed by S6 acceptance**.
+  and §17 places Gate F safety, live metadata, the exact real-data manifest instance and CLI output,
+  and owner approval of the root hash in the four stages it called S7, S8, S9, and S10 — now
+  **M3.1, M3.2, M3.3, and M3.4** under Decision 024 §5.1, which renamed them and altered none of
+  their substance. S6 requires a `feasible` S5 joint run, which exists as an implemented path.
+  **S6 is implemented, accepted, and checkpointed** (Decision 023), and **accepted S6 is the end of
+  Milestone 2 implementation** (Decision 024 §2). **No Milestone 3 phase has begun and none is
+  authorized**; no S7 or Milestone 3 contract exists and no Milestone 3 implementation exists. The
+  **Milestone 2 / Milestone 3 boundary is now recorded** (Decision 024); the final independent
+  integrated Milestones 1–2 audit is the next authorized action, and **Milestone 2 is not closed by
+  S6 acceptance or by the boundary record**.

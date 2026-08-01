@@ -2,8 +2,11 @@
 
 Which quarters are required is decided from explicit plan inputs only — a coverage window
 and an as-of date. Nothing here reads the clock, so the same request produces the same
-plan on any later day. Closed quarters are required, the quarter containing the as-of date
-is provisional, and a quarter beginning after the as-of date is simply not planned.
+plan on any later day. Under ``quarterly-index-instances/2.0`` the classification is a total
+order (Decision 028 §4): a quarter beginning after the as-of date is not planned; otherwise a
+quarter ending on or before it is closed and required; otherwise it is the provisional open
+quarter. An as-of date falling exactly on a quarter end therefore closes that quarter and
+leaves no open quarter (M3-L12).
 """
 
 from __future__ import annotations
@@ -77,7 +80,11 @@ def test_an_invalid_quarter_is_refused() -> None:
     [
         ("first day of a quarter", "2024-01-01", 0, "2024QTR1"),
         ("middle of a quarter", "2024-02-15", 0, "2024QTR1"),
-        ("last day of a quarter", "2024-03-31", 0, "2024QTR1"),
+        # M3-L12 / Decision 028 §4: an exact quarter end closes that quarter, and the
+        # next quarter begins after the as-of date, so no quarter is open. Before the
+        # planner v2 correction this row asserted ``0`` closed and ``2024QTR1`` open,
+        # which is the inherited defect Decision 028 §4 orders corrected.
+        ("last day of a quarter", "2024-03-31", 1, None),
         ("first day after quarter close", "2024-04-01", 1, "2024QTR2"),
         ("leap day", "2024-02-29", 0, "2024QTR1"),
         ("mid-year", "2024-08-15", 2, "2024QTR3"),
@@ -87,12 +94,15 @@ def test_as_of_date_decides_closed_and_open_quarters(
     label: str,
     as_of: str,
     closed: int,
-    open_key: str,
+    open_key: str | None,
 ) -> None:
     plan = plan_index_instances(window("2024-01-01", "2024-12-31", as_of))
     assert len(plan.required_closed) == closed, label
-    assert plan.provisional_open is not None
-    assert plan.provisional_open.instance_key == open_key, label
+    if open_key is None:
+        assert plan.provisional_open is None, label
+    else:
+        assert plan.provisional_open is not None
+        assert plan.provisional_open.instance_key == open_key, label
 
 
 def test_the_quarter_containing_the_as_of_date_is_never_required_by_default() -> None:
@@ -102,6 +112,58 @@ def test_the_quarter_containing_the_as_of_date_is_never_required_by_default() ->
     assert open_instance.kind == "provisional_open_quarter"
     assert not open_instance.required
     assert not open_instance.is_finalized_period
+
+
+def test_an_exact_quarter_end_as_of_date_closes_that_quarter() -> None:
+    """M3-L12: a quarter whose end equals the as-of date is closed, never provisional.
+
+    Decision 013 §1 requires the closed 2026 Q2 quarter at as-of ``2026-06-30``. The
+    total order Decision 028 §4 fixes is: begins after the as-of date -> not planned;
+    else ends on or before it -> closed; else open. The containing-quarter test must
+    never precede the ``end <= as_of_date`` test.
+    """
+    plan = plan_index_instances(window("2026-01-01", "2026-06-30", "2026-06-30"))
+
+    assert plan.provisional_open is None, "an exact quarter end leaves no open quarter"
+
+    q2 = [i for i in plan.instances if (i.year, i.quarter) == (2026, 2)]
+    assert len(q2) == 1
+    assert q2[0].kind == "required_closed_quarter"
+    assert q2[0].required
+    assert q2[0].is_finalized_period
+    assert q2[0].period_end == date(2026, 6, 30)
+
+
+@pytest.mark.parametrize(
+    ("as_of", "year", "quarter"),
+    [
+        ("2024-03-31", 2024, 1),
+        ("2024-06-30", 2024, 2),
+        ("2024-09-30", 2024, 3),
+        ("2024-12-31", 2024, 4),
+    ],
+)
+def test_every_exact_quarter_end_closes_its_own_quarter(
+    as_of: str, year: int, quarter: int
+) -> None:
+    """The exact-quarter-end rule holds on all four calendar boundaries."""
+    plan = plan_index_instances(window(f"{year}-01-01", as_of, as_of))
+
+    assert plan.provisional_open is None
+    instance = next(i for i in plan.instances if (i.year, i.quarter) == (year, quarter))
+    assert instance.kind == "required_closed_quarter"
+    assert instance.required
+
+
+def test_a_day_before_the_quarter_end_leaves_that_quarter_open() -> None:
+    """The boundary is exact: one day earlier is still the provisional open quarter."""
+    plan = plan_index_instances(window("2026-01-01", "2026-06-29", "2026-06-29"))
+
+    open_instance = plan.provisional_open
+    assert open_instance is not None
+    assert (open_instance.year, open_instance.quarter) == (2026, 2)
+    assert open_instance.kind == "provisional_open_quarter"
+    assert not open_instance.required
 
 
 def test_the_open_quarter_can_be_requested_explicitly_and_stays_provisional() -> None:
@@ -244,3 +306,46 @@ def test_a_missing_open_quarter_does_not_fail_closed_quarter_coverage() -> None:
     assert summary["provisional_open_quarter_retrieved"] is False
     assert summary["closed_quarter_coverage_complete"] is True
     assert summary["provisional_reconciliation_coverage"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Policy-version boundary (Decision 028 §4)
+# --------------------------------------------------------------------------- #
+def test_the_executable_index_plan_policy_is_version_two() -> None:
+    """M3.1 executes ``quarterly-index-instances/2.0`` and nothing earlier."""
+    assert INDEX_PLAN_POLICY_VERSION == "quarterly-index-instances/2.0"
+
+
+def test_a_window_records_the_executable_policy_version_by_default() -> None:
+    assert window("2024-01-01", "2024-12-31", "2024-08-15").policy_version == (
+        INDEX_PLAN_POLICY_VERSION
+    )
+    record = window("2024-01-01", "2024-12-31", "2024-08-15").as_record()
+    assert record["policy_version"] == INDEX_PLAN_POLICY_VERSION
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "quarterly-index-instances/1.0",
+        "quarterly-index-instances/3.0",
+        "index-retrieval-orchestration/1.0",
+        "",
+    ],
+)
+def test_a_mismatching_caller_policy_version_is_refused(requested: str) -> None:
+    """The superseded version cannot be requested and no plan is mislabelled."""
+    with pytest.raises(ValueError, match="policy_version"):
+        CoverageWindow(
+            coverage_start=date(2024, 1, 1),
+            coverage_end=date(2024, 12, 31),
+            as_of_date=date(2024, 8, 15),
+            policy_version=requested,
+        )
+
+
+def test_the_superseded_version_cannot_be_reintroduced_through_the_plan_hash() -> None:
+    """A v2 plan hashes under v2; v1 is unreachable, so the hashes cannot collide."""
+    plan = plan_index_instances(window("2024-01-01", "2024-12-31", "2024-08-15"))
+    assert plan.window.policy_version == INDEX_PLAN_POLICY_VERSION
+    assert plan.window.as_record()["policy_version"] == "quarterly-index-instances/2.0"

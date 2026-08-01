@@ -6,21 +6,28 @@ as-of date — never from the current clock. Reading the clock inside planning w
 the same coverage request produce different plans on different days, and would silently
 turn an unfinished quarter into a missing one.
 
-Three instance kinds, with different obligations:
-
-``required_closed_quarter``
-    The quarter's final calendar date is on or before ``as_of_date``. It is required for
-    census completion, and a missing, failed, malformed, unavailable, or unreconciled
-    instance blocks completion.
-
-``provisional_open_quarter``
-    The quarter containing ``as_of_date``. Optional by default, retrieved only when
-    explicitly included. It is never described as finalized coverage, is reported
-    separately, and its failure never fails closed-quarter historical completion.
+Classification is a **total order**, evaluated in exactly this sequence under policy
+``quarterly-index-instances/2.0`` (Decision 028 §4). The order is normative: testing the
+containing quarter before the ``end <= as_of_date`` test misclassifies an exact quarter
+end as provisional, which is the inherited defect M3-L12 records.
 
 ``not_planned``
-    A quarter beginning after ``as_of_date``. Not requested, not missing, and not a
+    The quarter begins after ``as_of_date``. Not requested, not missing, and not a
     completion failure.
+
+``required_closed_quarter``
+    Otherwise, the quarter's final calendar date is **on or before** ``as_of_date``. It is
+    required for census completion, and a missing, failed, malformed, unavailable, or
+    unreconciled instance blocks completion. An as-of date falling exactly on a quarter
+    end closes that quarter — Decision 013 §1 requires the closed 2026 Q2 quarter at
+    as-of ``2026-06-30``.
+
+``provisional_open_quarter``
+    Otherwise the quarter contains ``as_of_date`` without having ended. Optional by
+    default, retrieved only when explicitly included. It is never described as finalized
+    coverage, is reported separately, and its failure never fails closed-quarter
+    historical completion. When ``as_of_date`` is an exact quarter end there is no open
+    quarter at all.
 
 An annual index is never a substitute for a missing required quarterly instance. Any
 future annual support is an additional reconciliation layer only.
@@ -47,7 +54,7 @@ __all__ = [
     "quarter_start",
 ]
 
-INDEX_PLAN_POLICY_VERSION: Final = "quarterly-index-instances/1.0"
+INDEX_PLAN_POLICY_VERSION: Final = "quarterly-index-instances/2.0"
 
 InstanceKind = Literal[
     "required_closed_quarter",
@@ -100,7 +107,19 @@ class CoverageWindow:
     policy_version: str = INDEX_PLAN_POLICY_VERSION
 
     def __post_init__(self) -> None:
-        """Reject a window that cannot describe a coherent request."""
+        """Reject a window that cannot describe a coherent request.
+
+        A caller-supplied ``policy_version`` that is not the executable version is
+        refused rather than honoured, so a v2 plan can never be labelled v1 and a
+        caller cannot request the superseded v1 classification (Decision 028 §4).
+        """
+        if self.policy_version != INDEX_PLAN_POLICY_VERSION:
+            message = (
+                f"policy_version {self.policy_version!r} is not the executable index-plan "
+                f"policy {INDEX_PLAN_POLICY_VERSION!r}; the superseded version cannot be "
+                f"requested and a plan is never labelled with a version it did not use"
+            )
+            raise ValueError(message)
         if self.coverage_end < self.coverage_start:
             message = (
                 f"coverage_end {self.coverage_end.isoformat()} precedes coverage_start "
@@ -240,9 +259,6 @@ def plan_index_instances(window: CoverageWindow) -> PlannedIndexInstances:
     instances: list[IndexInstancePlan] = []
     excluded: list[str] = []
 
-    open_year = window.as_of_date.year
-    open_quarter = quarter_of(window.as_of_date)
-
     year = window.coverage_start.year
     quarter = quarter_of(window.coverage_start)
     while True:
@@ -251,20 +267,16 @@ def plan_index_instances(window: CoverageWindow) -> PlannedIndexInstances:
         if start > window.coverage_end:
             break
 
+        # Total order fixed by Decision 028 §4, under policy version
+        # ``quarterly-index-instances/2.0``. It is evaluated in exactly this sequence,
+        # and the containing-quarter test never precedes the ``end <= as_of_date`` test:
+        #   1. begins after the as-of date -> not planned;
+        #   2. else ends on or before the as-of date -> closed and required;
+        #   3. else -> the provisional open quarter.
+        # An exact quarter end is therefore closed, never provisional (M3-L12).
         if start > window.as_of_date:
             # Begins after the as-of date: not requested, not missing, not a failure.
             excluded.append(f"{year}QTR{quarter}")
-        elif (year, quarter) == (open_year, open_quarter):
-            instances.append(
-                IndexInstancePlan(
-                    year=year,
-                    quarter=quarter,
-                    kind="provisional_open_quarter",
-                    required=window.include_open_quarter,
-                    period_start=start,
-                    period_end=end,
-                )
-            )
         elif end <= window.as_of_date:
             instances.append(
                 IndexInstancePlan(
@@ -276,7 +288,7 @@ def plan_index_instances(window: CoverageWindow) -> PlannedIndexInstances:
                     period_end=end,
                 )
             )
-        else:  # pragma: no cover - defensive; a quarter is closed, open, or future
+        else:
             instances.append(
                 IndexInstancePlan(
                     year=year,

@@ -1,9 +1,9 @@
 # Milestones/STATUS.md — concrete-state ledger
 
 **Purpose:** a short, current-state record of where the project stands — **Milestones 0, 1, and 2 are
-formally closed; Milestone 3 master planning is complete at Decision 027 v0.2; proposed Decision 028
-contains the bounded readiness corrections now awaiting a fresh independent rereview. Milestone 3
-implementation is not authorized and has not begun.** This file records
+formally closed; Milestone 3 master planning is complete at Decision 027 v0.2; Decision 028 is
+accepted after a passing fresh independent rereview; and the bounded M3.1 contract is drafted for
+independent review. Milestone 3 implementation is not authorized and has not begun.** This file records
 workflow state; it never overrides a decision record, a migration, or `src/disclosure_drift/`. When
 this file and an authoritative source (`Docs/Decisions/` — with
 `Docs/Decisions/decision_registry.md` authoritative for which decisions exist and their approval
@@ -32,7 +32,7 @@ remaining**.
 | **Milestone 0** — research question, novelty boundary, preregistration, frozen definitions, registers | **`FORMALLY_CLOSED`** | Decision 026 §6 | `m0-complete` |
 | **Milestone 1** — reproducible engineering foundation | **`FORMALLY_CLOSED`** | Decision 026 §7 | `m1-complete` |
 | **Milestone 2** — M2.1 offline SEC policy, M2.2 controlled live-metadata readiness, M2.3 through accepted S6 | **`FORMALLY_CLOSED`** | Decision 026 §§8–10 | `m2-complete` |
-| **Milestone 3** — M3.1–M3.5 | **Master planning is complete at Decision 027 v0.2; proposed Decision 028 correction package pending fresh independent rereview.** Implementation **not authorized** and **not begun** | Decision 024 §5.1 (phase map); Decision 026 §§17–21; [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md) **v0.2**; proposed [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md) | — |
+| **Milestone 3** — M3.1–M3.5 | **Master planning complete; Decision 028 accepted; bounded M3.1 contract drafted and pending independent review.** Implementation **not authorized** and **not begun** | Decision 024 §5.1; Decision 027 v0.2; accepted [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md); draft [`contracts/m3_1.md`](contracts/m3_1.md) | — |
 
 **M2.3 Stage S6 is accepted and immutable at `m2.3-s6-complete`.** The three completion tags
 **supplement** every earlier checkpoint tag and move, replace, or re-point none of them.
@@ -71,13 +71,12 @@ no real snapshot or real manifest exists, no root has been approved, and nothing
 ## Current phase
 
 **Milestones 0, 1, and 2 are formally closed (Decision 026). Milestone 3 master planning is complete
-at Decision 027 v0.2. The rereview did not pass; proposed Decision 028 now records the bounded
-planner-v2, corrected A1–A12, reason-code, receipt-v2, budget, ceiling, recovery, and M3-L11
-corrections. A fresh
-`INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE` is the next action. There is no active
-implementation contract or implementation authorization, and Milestone 3 implementation has not
-begun.** The rest of this section is the accepted historical record of how Milestone 2.3 reached
-that point.
+at Decision 027 v0.2. Decision 028 records the accepted planner-v2, corrected A1–A12, reason-code,
+receipt-v2, budget, ceiling, recovery, and M3-L11 rulings after
+`INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`. The bounded M3.1 contract now exists as a draft pending
+fresh independent review and owner acceptance; implementation authorization remains `NO`, and
+Milestone 3 implementation has not begun.** The rest of this section is the accepted historical
+record of how Milestone 2.3 reached that point.
 
 M2.3 (deterministic pilot selection). Stage S4 (entity-only selection) is accepted. Decision 018
 (Stage S5 accession selection policy) and Decision 019 (Stage S5 frozen-storage-to-pure-input
@@ -392,14 +391,15 @@ and its rereviews are now complete, and **Milestone 2 is formally closed** (Deci
   implementation authority is granted**. It authorized one governance-only correction commit and one
   push, and **no tag**. **Next authorized action: `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`.**
 
-- **Decision 028 — proposed 2026-08-01, not yet accepted.** The Decision 027 v0.2 rereview did not
-  pass. Decision 028 records the bounded reconciled corrections: planner policy
+- **Decision 028 — accepted 2026-08-01.** The Decision 027 v0.2 rereview did not pass. Decision 028
+  records the bounded reconciled corrections: planner policy
   `quarterly-index-instances/2.0`; the corrected A1–A12 matrix; future reason codes
   `SEC_REQUEST_CEILING_EXHAUSTED` and `SEC_ACQUISITION_INTERRUPTED`; ceiling equality; read-only
   M3.1 recovery inspection; `m3-execution-receipt/2.0`; corrected request-budget arithmetic; and the
   three-layer M3-L11 protection. It preserves Decision 013 and Decision 024, creates no contract,
-  and grants no implementation or network authority. The next action is
-  `INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`.
+  and grants no implementation or network authority. Its fresh independent rereview returned
+  `INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`; formal outcome
+  `M3_1_READINESS_CORRECTIONS_ACCEPTED`.
 
 - **Milestone 3 master planning** — **complete at v0.2.** Delivered under Decision 027 across fourteen
   planning documents plus the navigation and status updates they require:
@@ -423,7 +423,7 @@ and its rereviews are now complete, and **Milestone 2 is formally closed** (Deci
   under [`Docs/m3/templates/`](../Docs/m3/templates/request_budget.md), including the new public
   [`evidence_index.md`](../Docs/m3/templates/evidence_index.md). **No implementation, no contract, no
   network access, no metadata acquisition, no snapshot, no pilot run, no manifest, no approval, and no
-  publication occurred, and no M3.1 contract has been drafted.**
+  publication occurred; at that planning checkpoint no M3.1 contract had been drafted.**
 
 ## Bounded documentation fix — complete, rereviewed, and accepted
 
@@ -477,12 +477,11 @@ implementation authorization is active.**
 **Milestones 0, 1, and 2 are `FORMALLY_CLOSED` (Decision 026,
 `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`), tagged `m0-complete`, `m1-complete`, and
 `m2-complete` at the closeout commit. Milestone 3 master planning is `COMPLETE` at **Decision 027
-v0.2** (`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`). The rereview returned
-`NEEDS_CORRECTION`; proposed Decision 028 contains the reconciled correction package and is pending a
-fresh independent rereview and owner acceptance. There is no active implementation contract and
-`IMPLEMENTATION_AUTHORIZATION` is `NO`. The next action is
-`INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`; Milestone 3 implementation is not
-authorized and has not begun.** Nothing below is an active work item — the rest of this section is
+v0.2** (`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`). Decision 028 is accepted after
+`INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`. The bounded M3.1 contract is drafted but not accepted,
+and `IMPLEMENTATION_AUTHORIZATION` is `NO`. The next action is
+`INDEPENDENT_M3_1_CONTRACT_REVIEW`; Milestone 3 implementation is not authorized and has not begun.**
+Nothing below is an active work item — the rest of this section is
 the accepted record of the last implementation stage Milestone 2 closed over.
 
 **M2.3 Stage S6 (pilot manifest construction, terminal result identity, and the publication
@@ -788,26 +787,26 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**`INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`** — a fresh read-only pass in a
-**new session**, at Opus Max effort, performed by a reviewer that authored none of proposed Decision
-028 or its companion corrections
-([Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md) §13).
+**`INDEPENDENT_M3_1_CONTRACT_REVIEW`** — a fresh read-only review of
+[`contracts/m3_1.md`](contracts/m3_1.md), performed by a reviewer that authored none of the contract.
+The review is limited to behavior-affecting contract defects; editorial findings are recorded for
+the one implementation sweep.
 
 Milestones 0, 1, and 2 are formally closed
 ([Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md),
 `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`), the closeout commit is pushed, and the three
 annotated completion tags `m0-complete`, `m1-complete`, and `m2-complete` exist at it. **Milestone 3
-master planning is complete at Decision 027 v0.2; proposed Decision 028 is a correction record, not
-an implementation contract.**
+master planning is complete at Decision 027 v0.2; accepted Decision 028 is a correction record, not
+an implementation contract, and the separate M3.1 contract is a draft pending review.**
 
-**The review chain has not yet produced the required pass.** The Decision 027 v0.1 review's eleven
+**The Decision 028 review chain produced the required pass.** The Decision 027 v0.1 review's eleven
 corrections were recorded at v0.2. Later bounded documentation corrections were committed and pushed
 at `c91af08`; they are not “uncommitted.” The subsequent focused architecture review and Sol
 reconciliation found additional issues: M3-L12 is an inherited planner defect, A5 and A11 need
 registered reasons, A1–A12 need corrected semantics, receipts must become v2 before the first
 receipt exists, budget and ceiling language must be repaired, and M3-L11 needs three-layer
-implementation protection. Proposed Decision 028 records those rulings. **It remains unaccepted
-until this fresh rereview passes.**
+implementation protection. Accepted Decision 028 records those rulings, and its fresh rereview
+returned `INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`.
 
 **The focused rereview must verify** (Decision 027 §23):
 
@@ -837,20 +836,19 @@ until this fresh rereview passes.**
 - **no implementation authority was granted**;
 - **no live access occurred.**
 
-**Only after that rereview passes** may the owner accept Decision 028 and checkpoint the corrected
-governance package. Only then may a separate session be authorized to **draft** the bounded M3.1
-implementation contract (Decision 027 §24; Decision 028 §14) — and that contract is itself only one
-of the five Decision 024 §8 entry conditions, not implementation authority.
+That sequence is complete through Decision 028 §14 step 4: Decision 028 passed review, was accepted,
+validated, checkpointed, and the bounded M3.1 contract is now drafted. The contract must still pass
+fresh independent review and owner acceptance before explicit implementation authorization may be
+issued under all five Decision 024 §8 conditions.
 
 **No Milestone 3 implementation authority exists.** Closure satisfied only the precondition
 Decision 024 §8 imposed, and planning satisfied none of the five conditions at all. All five still
 apply to every phase (a separate accepted governance record where required, a bounded implementation
 contract, explicit owner authorization, exact path authorization, and satisfaction of that phase's
-inherited prerequisite gates), `IMPLEMENTATION_AUTHORIZATION` remains `NO`, no Milestone 3 contract
-exists, and **no live SEC access, real pilot execution, real snapshot, real manifest construction,
+inherited prerequisite gates), `IMPLEMENTATION_AUTHORIZATION` remains `NO`, the M3.1 contract is an
+unaccepted draft, and **no live SEC access, real pilot execution, real snapshot, real manifest construction,
 root approval, or publication is authorized.** **No Gate F has passed, neither offline rehearsal has
-been run, no live acquisition occurred, no Gate H has passed, and no M3.1 contract has been
-drafted.**
+been run, no live acquisition occurred, and no Gate H has passed.**
 
 **Two conditions are unresolved and owner-facing.** **D023-O1** is inherited and referred only if a
 real run reaches it. **M3-L12** — the accepted planner classifies 2026 Q2 as the provisional open
@@ -989,17 +987,17 @@ script behaviour.
 MILESTONE_0_STATUS: FORMALLY_CLOSED — Decision 026 section 6; annotated tag m0-complete; frozen research definitions and standing limitations remain binding
 MILESTONE_1_STATUS: FORMALLY_CLOSED — Decision 026 section 7; annotated tag m1-complete
 MILESTONE_2_STATUS: FORMALLY_CLOSED — Decision 026 sections 8 to 10; accepted implementation ends at M2.3 Stage S6; annotated tag m2-complete; no live SEC pilot was executed
-MILESTONE_3_STATUS: MASTER PLANNING COMPLETE AT DECISION 027 v0.2; PROPOSED DECISION 028 CORRECTION PACKAGE PENDING FRESH INDEPENDENT REREVIEW; IMPLEMENTATION NOT AUTHORIZED AND NOT BEGUN
+MILESTONE_3_STATUS: MASTER PLANNING COMPLETE; DECISION 028 ACCEPTED AFTER INDEPENDENT PASS; M3.1 CONTRACT DRAFTED PENDING INDEPENDENT REVIEW; IMPLEMENTATION NOT AUTHORIZED AND NOT BEGUN
 DECISION_026_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED; controls formal closeout and completion tags; grants no Milestone 3 authority
-DECISION_027_STATUS: v0.2; ACCEPTED — OWNER APPROVED 2026-07-31; outcome M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED; controls the accepted Milestone 3 master plan subject to the proposed Decision 028 bounded correction; grants no implementation authority
-DECISION_028_STATUS: PROPOSED — PENDING INDEPENDENT REREVIEW AND OWNER ACCEPTANCE; records planner-v2, corrected A1-A12, two future reason codes, receipt-v2, budget, ceiling, recovery-ownership, and M3-L11 rulings; not yet binding; grants no implementation or network authority
-CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; MILESTONE 3 MASTER PLANNING COMPLETE AT DECISION 027 v0.2; PROPOSED DECISION 028 PACKAGE READY FOR FRESH READ-ONLY OPUS MAX REREVIEW; NO ACTIVE IMPLEMENTATION CONTRACT; IMPLEMENTATION NOT AUTHORIZED OR BEGUN
-ACTIVE_BLOCKER: INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE MUST PASS BEFORE DECISION 028 MAY BE ACCEPTED OR AN M3.1 CONTRACT MAY BE DRAFTED; M3-L12 AND M3-L11 REMAIN ACTIVE AND WILL BLOCK GATE F UNTIL THEIR FUTURE BOUNDED IMPLEMENTATION, TESTS, ACCEPTANCE, AND CHECKPOINT
+DECISION_027_STATUS: v0.2; ACCEPTED — OWNER APPROVED 2026-07-31; outcome M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED; controls the accepted Milestone 3 master plan as narrowly corrected by accepted Decision 028; grants no implementation authority
+DECISION_028_STATUS: ACCEPTED — OWNER APPROVED 2026-08-01; outcome M3_1_READINESS_CORRECTIONS_ACCEPTED; independent rereview PASS; records planner-v2, corrected A1-A12, two future reason codes, receipt-v2, budget, ceiling, recovery-ownership, and M3-L11 rulings; grants no implementation or network authority
+CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; DECISION 028 ACCEPTED; M3.1 CONTRACT INDEPENDENTLY REVIEWED, CORRECTED, AND ACCEPTED; M3.1 IMPLEMENTATION AUTHORIZED AND NOT YET BEGUN. NO GATE F HAS PASSED; NEITHER OFFLINE REHEARSAL HAS BEEN RUN; NO LIVE ACQUISITION OCCURRED; NO GATE H HAS PASSED
+ACTIVE_BLOCKER: M3-L12 AND M3-L11 REMAIN ACTIVE AND BLOCK GATE F UNTIL IMPLEMENTATION, TESTS, ACCEPTANCE, AND CHECKPOINT; D023-O1 REMAINS THE SOLE UNRESOLVED OWNER-RULING CONDITION
 DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controls crosswalk item 46 reserve-rank applicability only
 DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; controls S6 acceptance, delivered-path ratification, limitations O1-O4, and checkpoint authorization
 DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED; controls the M2 to M3 phase boundary and five entry conditions; grants no implementation authority
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED
-IMPLEMENTATION_AUTHORIZATION: NO — no Milestone 3 contract exists; proposed Decision 028 is governance only; no Gate F implementation, network enablement, live acquisition, real snapshot, real manifest, root approval, or publication is authorized
-ACTIVE_STAGE_CONTRACT: Milestones/contracts/m23_s6.md
-NEXT_AUTHORIZED_ACTION: INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE — fresh read-only Opus 5 Max review of the frozen documentation package; required outcome INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS; no edits, implementation, network access, live data, contract drafting, commit, push, or tag during the review
+IMPLEMENTATION_AUTHORIZATION: YES — bounded strictly to the exact paths in Milestones/contracts/m3_1.md sections 6 and 7, issued under the owner's delegation of owner authority recorded 2026-08-01. No network enablement, live acquisition, real snapshot, real manifest, root approval, publication, tag, or any M3.2 work is authorized
+ACTIVE_STAGE_CONTRACT: Milestones/contracts/m3_1.md
+NEXT_AUTHORIZED_ACTION: M3_1A_OFFLINE_IMPLEMENTATION — bounded implementation under Milestones/contracts/m3_1.md sections 6 and 7, beginning with the failing M3-L12 planner test; network permission NONE for M3.1A; no tag
 ```

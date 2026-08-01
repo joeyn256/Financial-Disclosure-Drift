@@ -4,7 +4,7 @@
 **Applies to:** every Milestone 3 command that runs against real inputs, and every live command
 without exception.
 **Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§§9, 17, 18, 19, as narrowly corrected by proposed
+§§9, 17, 18, 19, as narrowly corrected by accepted
 [Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§9–10.
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 

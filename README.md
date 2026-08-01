@@ -251,7 +251,7 @@ the serial suite: at this size the worker start-up cost is not worth the added v
 ## Repository structure
 
 ```text
-Docs/                    Research record: preregistration, registers, Decisions 001-027, SEC dictionary
+Docs/                    Research record: preregistration, registers, Decisions 001-028, SEC dictionary
 Docs/m3/                 Milestone 3 operational-readiness pack: runbook, specs, templates (planning only)
 Literature/              Literature matrix, search log, bibliography, competitor audit
 Milestones/              Milestone specifications and completion records

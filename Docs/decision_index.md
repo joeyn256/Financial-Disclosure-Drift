@@ -337,7 +337,7 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 | **Commit and tag policy** — one implementation commit per phase; frozen future tag names | §13 |
 | **The focused independent-review policy** — no repeated broad audits, no self-review | §14 |
 | **Request-volume values may not be invented, and none is frozen** | §15 |
-| **`CURRENT_PLANNER_DISCREPANCY`** — the planner and Decision 013 §1 disagree on 2026 Q2; **Gate F cannot pass while unresolved** | §15.1 |
+| **M3-L12 planner-v2 correction** — owner ruling recorded by Decision 028; implementation and acceptance still block Gate F | §15.1 |
 | **How a deferred count is resolved** — `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | §15.2 |
 | **Maximum physical attempts is derived from the implemented state machine**, not asserted | §16 |
 | **Operational receipts are outside the accepted S5 and S6 identity graphs** | §17 |
@@ -370,21 +370,21 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 
 **What the planning pack does not claim.** No Gate F has passed. **Neither offline rehearsal has been
 run.** No live acquisition occurred. No Gate H has passed. No real snapshot, selection, manifest, or
-approval exists. **No Milestone 3 implementation contract exists and none has been drafted, and
-implementation authorization is `NO` for every phase.**
+approval exists. **The M3.1 contract exists only as a draft pending independent review, and
+implementation authorization remains `NO`.**
 
 **D023-O1 remains the sole unresolved owner-ruling condition** and is referred only if a real run
-reaches it. Proposed Decision 028 records the owner rulings for **M3-L11** and **M3-L12**, preserving
+reaches it. Accepted Decision 028 records the owner rulings for **M3-L11** and **M3-L12**, preserving
 Decision 013 and requiring the planner-v2 and private-evidence protections. Those entries remain
 active until implementation, tests, independent acceptance, and checkpoint; Gate F cannot pass
 while M3-L12 remains active.
 
-## Decision 028 — PROPOSED (Milestone 3.1 readiness corrections and owner rulings)
+## Decision 028 — ACCEPTED (Milestone 3.1 readiness corrections and owner rulings)
 
-[Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md) is **`PROPOSED — PENDING
-INDEPENDENT REREVIEW AND OWNER ACCEPTANCE`**. It records the bounded correction required after the
-independent Decision 027 v0.2 rereview returned `NEEDS_CORRECTION`. It is not binding yet and grants
-no implementation, contract, network, data, approval, publication, commit, push, or tag authority.
+[Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md) is **`ACCEPTED — OWNER APPROVED
+2026-08-01`** after `INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`. It records the bounded correction
+required after the independent Decision 027 v0.2 rereview returned `NEEDS_CORRECTION`. It is binding
+for what it governs and grants no implementation, network, data, approval, or publication authority.
 
 | Topic | Decision 028 section |
 |---|---|
@@ -402,11 +402,10 @@ no implementation, contract, network, data, approval, publication, commit, push,
 | Acceptance/checkpoint sequence and next action | §§14–15 |
 | Negative confirmations | §16 |
 
-Decision 028 narrowly supersedes affected Decision 027 operational language **only if accepted**.
-It does not amend Decision 013 or Decision 024, reopen Milestone 2, rewrite any historical v1 hash,
-or create an M3.1 contract. The next action is
-`INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`; only a `PASS` permits owner
-acceptance and later, separate M3.1 contract drafting.
+Decision 028 narrowly supersedes the affected Decision 027 operational language. It does not amend
+Decision 013 or Decision 024, reopen Milestone 2, rewrite any historical v1 hash, or grant
+implementation authority. Its rereview passed and it is accepted. The separate M3.1 contract now
+exists as a draft; the next action is `INDEPENDENT_M3_1_CONTRACT_REVIEW`.
 
 ## Deviation register — where deviations are recorded
 

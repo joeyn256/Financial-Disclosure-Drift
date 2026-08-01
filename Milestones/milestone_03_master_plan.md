@@ -1,15 +1,15 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
-**Status:** `BOUNDED_DECISION_028_CORRECTION_PENDING_INDEPENDENT_REREVIEW`
+**Status:** `DECISION_028_ACCEPTED_M3_1_CONTRACT_DRAFT_PENDING_INDEPENDENT_REVIEW`
 **Implementation authorization:** `NO` — for every phase, without exception
 **Controlling records:** [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 (`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
-`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`), as narrowly corrected by proposed
+`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`), as narrowly corrected by accepted
 [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md).
-**Next authorized action:** `INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`
+**Next authorized action:** `INDEPENDENT_M3_1_CONTRACT_REVIEW`
 
 **This document is a governance roadmap, not an authorization.** It plans five phases. It starts
-none of them. No Milestone 3 contract exists, no Milestone 3 implementation exists, no SEC network
+none of them. The M3.1 contract exists only as an unaccepted draft; no Milestone 3 implementation exists, no SEC network
 access has occurred, no real snapshot or manifest exists, no root has been approved, and nothing has
 been published.
 
@@ -399,7 +399,7 @@ window's plan does not exist until M3.2A freezes its objects.
 [Decision 024](../Docs/Decisions/decision_024_m2_m3_boundary_governance.md) §§5.1, 5.2 (the S7 row),
 6, 8; [Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md) §§19–21;
 [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md);
-[Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md), once accepted;
+[Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md), accepted;
 [Decision 021](../Docs/Decisions/decision_021_m23_s6_manifest_construction.md) §17 (the S7 scope
 definition Decision 024 renamed); [Decision 007](../Docs/Decisions/decision_007_sec_universe.md)
 (approved sources); [Decision 009](../Docs/Decisions/decision_009_raw_data_governance.md) (raw-data
@@ -635,7 +635,7 @@ ending its required set at 2026 QTR1.
 2026 Q2 satisfies both conditions at once: it **ends on** the as-of date and it **contains** the
 as-of date. The planner resolves that tie one way; Decision 013 §1 states the other.
 
-Proposed Decision 028 classifies this as an inherited implementation defect and records the
+Decision 028 classifies this as an inherited implementation defect and records the
 controlling total order: a quarter beginning after `as_of_date` is unplanned; otherwise a quarter
 ending on or before `as_of_date` is required and closed; otherwise it is provisional and open. The
 corrected implementation uses `quarterly-index-instances/2.0`, refuses a caller-supplied mismatching
@@ -646,12 +646,12 @@ Until Decision 028 is accepted and the bounded M3.1 implementation and tests mak
 with that authority, **Gate F cannot pass** — a request plan that disagrees with the accepted
 coverage cutoff is not a plan a budget can be approved against.
 
-**How the M3.2B counts get resolved.** The zero-request planning command
-(**`PLANNED — NOT YET IMPLEMENTED`**, interface in the operator runbook) is run a **second** time
-after M3.2A, over the frozen bootstrap objects. It enumerates the historical-file references those
-objects actually name and the explicit reconciliation set the operator supplies, prints the complete
-per-route table, and emits the second request-plan hash — **while making zero requests**. Its output
-is the second budget the owner approves.
+**How the M3.2B counts get resolved.** The separate M3.2 `m3 derive-dependent-plan` command
+(**`PLANNED — NOT YET IMPLEMENTED`**, interface in the operator runbook) runs after M3.2A, over the
+frozen bootstrap objects. It enumerates the historical-file references those objects actually name
+and the explicit reconciliation set the operator supplies, prints the complete per-route table, and
+emits the second request-plan hash — **while making zero requests**. Its output is the second budget
+the owner approves. M3.1's `m3 plan-requests` command plans M3.2A only.
 
 ### 16. Hard request ceiling
 
@@ -2248,10 +2248,10 @@ that would exceed that window's ceiling, and **a ceiling is never increased duri
 window**. A complete run may finish exactly at the ceiling; equality with work remaining is a
 governed ceiling stop and Gate H failure.
 
-**The M3-L12 owner ruling is recorded in proposed Decision 028** (M3.1 §15.1): exact-quarter-end
+**The M3-L12 owner ruling is recorded in accepted Decision 028** (M3.1 §15.1): exact-quarter-end
 classification is an inherited planner defect; Decision 013 stays unchanged; corrected behaviour is
-`quarterly-index-instances/2.0`. **Gate F cannot pass until that decision is accepted and the
-contracted correction and tests are accepted.**
+`quarterly-index-instances/2.0`. **Gate F cannot pass until the contracted correction and tests are
+implemented and accepted.**
 
 ---
 

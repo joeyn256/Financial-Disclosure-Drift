@@ -2,7 +2,7 @@
 
 **Status:** documentation only. **No step here is authorized to run against the SEC network.**
 **Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§7, as narrowly corrected by proposed
+§7, as narrowly corrected by accepted
 [Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md).
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 
@@ -231,7 +231,9 @@ Expect:
 **`PLANNED — NOT YET IMPLEMENTED (M3.1)`**
 
 ```
-python -m disclosure_drift m3 rehearse --scenarios A1-A12 --evidence-out <private-path>
+python -m disclosure_drift m3 rehearse --scenarios all \
+  --evidence-root <absolute-external-path> \
+  --evidence-out <relative-path> --receipt-out <relative-path>
 ```
 
 **Intended interface contract:**
@@ -241,7 +243,7 @@ python -m disclosure_drift m3 rehearse --scenarios A1-A12 --evidence-out <privat
 | Purpose | Run the **acquisition** scenarios A1–A12 in [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md) §5 against scripted responses and synthetic fixtures. **Not** the snapshot, selection, reserve, sealing, manifest, or root scenarios — those are E1–E8 at M3.3A, where the production paths exist |
 | Network | **None.** Opens no socket; asserts none was opened |
 | Clock | Deterministic clock inputs supplied explicitly; nothing read from the system clock into any recorded identity |
-| Arguments | `--scenarios {all,<id>[,<id>…]}`; `--evidence-out <relative-path>`; `--config <path>` |
+| Arguments | `--scenarios {all,<id>[,<id>…]}`; required `--evidence-root <absolute-external-path>`; `--evidence-out <relative-path>` and `--receipt-out <relative-path>` below that root; `--config <path>` |
 | Stdout | One line per scenario: `id`, name, outcome, reason code; then a summary line with counts |
 | Side effects | Writes only under an isolated synthetic data root and the named evidence path |
 | Exit codes | `0` all scenarios passed · `1` configuration error · `2` usage · `3` stage not enabled · `4` gate failure (any scenario failed) |
@@ -252,7 +254,8 @@ python -m disclosure_drift m3 rehearse --scenarios A1-A12 --evidence-out <privat
 **`PLANNED — NOT YET IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
 
 ```
-python -m disclosure_drift m3 rehearse-report --evidence <relative-path>
+python -m disclosure_drift m3 rehearse-report \
+  --evidence-root <absolute-external-path> --evidence <relative-path>
 ```
 
 **Intended interface contract:** read-only; prints the per-scenario matrix — setup, expected reason
@@ -285,18 +288,19 @@ expensive later.
 ```
 python -m disclosure_drift m3 plan-requests \
   --coverage-start 2009-01-01 --coverage-end 2026-06-30 --as-of 2026-06-30 \
-  --calendar-year <YEAR> \
-  --plan-out <relative-path>
+  --calendar-year <YEAR> --calendar-evidence-manifest <relative-path> \
+  --catalog <relative-path> --evidence-root <absolute-external-path> \
+  --plan-out <relative-path> --receipt-out <relative-path>
 ```
 
 **Intended interface contract:**
 
 | Aspect | Contract |
 |---|---|
-| Purpose | Enumerate the **M3.2A bootstrap window's** logical requests and emit that window's request plan and hash. Run a **second** time after M3.2A to derive the M3.2B plan from the frozen objects |
+| Purpose | Enumerate the **M3.2A bootstrap window's** logical requests and emit that window's request plan and hash. M3.2B derivation belongs only to the later `m3 derive-dependent-plan` command under an M3.2 contract |
 | Network | **Zero requests.** Constructs no transport; resolves no host |
 | Clock | Never reads today's date; all three coverage dates and the calendar year are explicit and required together |
-| Arguments | `--coverage-start`, `--coverage-end`, `--as-of` (all three required together); `--calendar-year YEAR`; `--reconciliation-set <relative-path>` (optional, for `sec_submissions_entity`); `--plan-out <relative-path>`; `--config <path>` |
+| Arguments | `--coverage-start`, `--coverage-end`, `--as-of` (all three required together); `--calendar-year YEAR`; `--calendar-evidence-manifest <relative-path>`; `--catalog <relative-path>`; required `--evidence-root <absolute-external-path>`; `--plan-out <relative-path>` and `--receipt-out <relative-path>` below that root; `--config <path>`. **No `--reconciliation-set`, `--live`, or M3.2B mode** |
 | Stdout | The per-route table — `source_id`, planned unique logical requests, maximum physical attempts, maximum new raw objects — then the totals and the **request-plan hash** |
 | Side effects | Writes only the named plan file. Touches no catalog |
 | Exit codes | `0` plan produced · `1` configuration error · `2` usage · `3` stage not enabled · `4` gate failure |
@@ -336,7 +340,8 @@ means a plan input is being read from the environment or the clock rather than s
 **`PLANNED — NOT YET IMPLEMENTED (M3.1)`**
 
 ```
-python -m disclosure_drift m3 show-budget --plan <relative-path>
+python -m disclosure_drift m3 show-budget \
+  --evidence-root <absolute-external-path> --plan <relative-path>
 ```
 
 **Intended interface contract:** read-only; renders the eight budget quantities per route and in
@@ -623,13 +628,18 @@ Work through [`templates/interrupted_run_recovery.md`](templates/interrupted_run
 resuming anything:
 
 ```
-python -m disclosure_drift m3 recovery-state --run <run-id>
+python -m disclosure_drift m3 recovery-state \
+  --evidence-root <absolute-external-path> \
+  --plan <relative-path> --receipt-chain-head <relative-path> \
+  --catalog <relative-path> --data-root <relative-path>
 ```
 
-**Intended interface contract:** read-only; reports the last successful receipt, the interruption
-point, database state, raw-store state, partial-file state, the consumed request count, and a
+**Intended interface contract:** read-only over the explicit plan, receipt-chain head, catalog, and
+data-root inputs; reports the last successful receipt, the interruption point, database state,
+raw-store state, partial-file state, the consumed request count, and a
 **safe-resume determination** of `SAFE`, `UNSAFE`, or `UNDETERMINED`. It never adopts, quarantines,
 rebuilds, reconciles, resumes, or calls `observation_catalog.reconcile()`. Exit `0` only for `SAFE`.
+There is no `--run` shortcut and no repair flag.
 
 On `UNSAFE`, stop. A separately authorized M3.2 repair command may apply the deterministic action;
 then run `recovery-state` again and require `SAFE`. Inspection itself never repairs.

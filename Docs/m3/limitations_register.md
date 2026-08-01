@@ -773,7 +773,7 @@ Every Milestone 3 phase:
 
 | Field | Value |
 |---|---|
-| **Origin** | Decision 027 v0.2 §10.1; owner ruling recorded by proposed Decision 028 §11 |
+| **Origin** | Decision 027 v0.2 §10.1; owner ruling recorded by accepted Decision 028 §11 |
 | **Description** | The two-layer evidence model requires completed operational evidence to live in an owner-controlled private evidence root **outside the repository**. `.gitignore` has **not** been updated to defend against an accidental in-tree private root, because `.gitignore` is a configuration file and the planning sessions are documentation-only |
 | **Affected M3 phase** | M3.1 onward — every phase that produces evidence |
 | **Status** | `ACTIVE` — owner ruling recorded; implementation and committed validation pending |
@@ -784,7 +784,7 @@ Every Milestone 3 phase:
 | **Publication impact** | An accidental commit of a root-approval packet **is** a publication, and cannot be retracted from public history |
 | **Mitigation** | The private root is outside the repository by policy; staging is by exact path, never `git add -A`; Decision 028 requires the root `.gitignore` rule `/.m3-private-evidence`, an explicit hygiene refusal for any object at that reserved path, and resolved-path refusal in every M3 evidence-output CLI |
 | **Stop condition** | A completed evidence artifact found tracked, or an evidence root found inside the checkout |
-| **Required owner action** | Accept Decision 028, then authorize its exact three-layer protection under the bounded M3.1 contract |
+| **Required owner action** | Accept the bounded M3.1 contract after independent review, then issue exact-path implementation authorization |
 | **Closure evidence** | The exact `.gitignore` entry, hygiene refusal for a file/directory/symlink at the reserved path, resolved-path CLI tests including ancestor and symlink bypasses, full validation, independent M3.1 acceptance, and a committed checkpoint |
 | **Closable before M3.5** | **yes**, once the authorized configuration change lands |
 
@@ -792,7 +792,7 @@ Every Milestone 3 phase:
 
 | Field | Value |
 |---|---|
-| **Origin** | Decision 027 v0.2 §15.1; owner ruling recorded by proposed Decision 028 §4 |
+| **Origin** | Decision 027 v0.2 §15.1; owner ruling recorded by accepted Decision 028 §4 |
 | **Description** | [Decision 013](../Decisions/decision_013_pilot_selection_mechanics.md) §1 requires closed 2026 Q2 at as-of `2026-06-30`. The planner checks “containing quarter” before `quarter_end <= as_of_date`, contrary to its own module contract, and misclassifies an exact quarter end as provisional. Decision 028 preserves Decision 013 and requires the total order `start > as_of` → unplanned; else `end <= as_of` → closed; else open, under `quarterly-index-instances/2.0` |
 | **Affected M3 phase** | **M3.1B (Gate F)**, then M3.2A |
 | **Status** | **`ACTIVE` — owner ruling recorded; implementation, tests, acceptance, and checkpoint pending** |
@@ -803,7 +803,7 @@ Every Milestone 3 phase:
 | **Publication impact** | Any coverage claim must rest on the resolved position, not on whichever component happened to be consulted |
 | **Mitigation** | Decision 028 records the correction and policy-version boundary without editing Decision 013. **v0.1's derived counts, which were faithful to the defective planner and not to Decision 013 §1, remain withdrawn** |
 | **Stop condition** | Gate F attempting to pass with the discrepancy open; or **any change to Decision 013 made to accommodate the planner** |
-| **Required owner action** | Accept Decision 028, then authorize the bounded M3.1 implementation. **Decision 013 remains byte-for-byte unchanged** |
+| **Required owner action** | Accept the bounded M3.1 contract after independent review, then authorize implementation. **Decision 013 remains byte-for-byte unchanged** |
 | **Closure evidence** | Planner v2 implementation; exact-quarter-end, interior-date, future-quarter, open-quarter, and version-mismatch tests; full validation; independent M3.1 acceptance; committed checkpoint; and a Gate F plan whose required-quarter set matches accepted authority |
 | **Closable before M3.5** | **yes — and it must close before Gate F passes** |
 
@@ -813,6 +813,6 @@ It closes nothing. It changes no accepted decision, methodology, identity, or li
 authority. **Every entry marked `ACTIVE` is live and binds the phases it names.**
 
 **D023-O1 is the sole unresolved owner-ruling condition** and is referred only if a real run reaches
-it. The owner rulings for **M3-L11** and **M3-L12** are recorded by proposed Decision 028, but both
+it. The owner rulings for **M3-L11** and **M3-L12** are recorded by accepted Decision 028, but both
 entries remain active until their bounded implementation, tests, acceptance, and committed
 checkpoint exist. Gate F cannot pass while M3-L12 remains active.

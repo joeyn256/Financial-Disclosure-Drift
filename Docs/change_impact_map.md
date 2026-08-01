@@ -519,7 +519,8 @@ exactly these files:
 - **zero data impact**, **zero network impact**, **zero publication impact**;
 - **no tag** — none created, moved, or deleted;
 - **next action `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`**;
-- **no Milestone 3 implementation authority**, no contract created, and **no M3.1 contract drafted**.
+- **no Milestone 3 implementation authority** and, at the Decision 028 correction checkpoint, no
+  contract created and no M3.1 contract drafted.
 
 **What the corrections withdrew, and why it matters to a future reader.** The v0.1 derived request
 counts, subtotal, plan hash, `A_max = 12`, `planned × 12`, and the 10% contingency **no longer appear
@@ -528,21 +529,22 @@ faithful to the accepted planner but **not** to Decision 013 §1, and `A_max` wa
 three guards rather than derived from and tested against the implemented state machine. **Neither
 class of value may be reintroduced without deriving it and testing it.**
 
-## Proposed Decision 028 — M3.1 readiness corrections (planning only, zero runtime impact)
+## Accepted Decision 028 and the M3.1 contract draft (zero runtime impact)
 
 [Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md) is
-`PROPOSED — PENDING INDEPENDENT REREVIEW AND OWNER ACCEPTANCE`. It responds to the independent
-Decision 027 v0.2 rereview outcome `NEEDS_CORRECTION`. It records owner rulings and corrects the
-planning package only; it is not yet binding and authorizes no implementation, network access,
-contract, commit, push, or tag.
+`ACCEPTED — OWNER APPROVED 2026-08-01` after `INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`. It responds
+to the independent Decision 027 v0.2 rereview outcome `NEEDS_CORRECTION`, is binding for its bounded
+owner rulings, and authorizes no implementation or network access. The exact-path
+[`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md) now exists as
+`DRAFT_PENDING_INDEPENDENT_REVIEW` with implementation authorization `NO`.
 
 The proposed correction package changes exactly these documentation paths:
 
 | Path | Kind | Gates it triggers |
 |---|---|---|
-| `Docs/Decisions/decision_028_m3_1_readiness_corrections.md` | new proposed decision record | Markdown link-check; fresh independent rereview |
-| `Docs/Decisions/decision_registry.md` | proposed Decision 028 registry and topic rows | Markdown link-check; mechanical table-structure check |
-| `Docs/decision_index.md` | proposed Decision 028 topic index | Markdown link-check only |
+| `Docs/Decisions/decision_028_m3_1_readiness_corrections.md` | accepted decision status and completed review/checkpoint sequence | Markdown link-check; registry consistency |
+| `Docs/Decisions/decision_registry.md` | accepted Decision 028 registry and topic rows | Markdown link-check; mechanical table-structure check |
+| `Docs/decision_index.md` | accepted Decision 028 topic index and M3.1 state | Markdown link-check only |
 | `Docs/architecture_map.md` | Milestone 3 state, receipt-v2, M3-L11, and M3-L12 navigation | Markdown link-check only |
 | `Docs/change_impact_map.md` | this exact-path and zero-impact record | Markdown link-check only |
 | `Docs/m3/execution_receipt_spec.md` | pre-first-receipt v2 field timing and validation | Markdown link-check; prohibited-field scan |
@@ -553,8 +555,9 @@ The proposed correction package changes exactly these documentation paths:
 | `Docs/m3/templates/gate_h_checklist.md` | ceiling equality plus complete-plan requirement | Markdown link-check only |
 | `Docs/m3/templates/interrupted_run_recovery.md` | read-only inspection, separate repair, and cumulative-ceiling rules | Markdown link-check only |
 | `Docs/m3/templates/request_budget.md` | no double-subtracted cache hits; maximum objects; spacing floor | Markdown link-check only |
-| `Milestones/STATUS.md` | live proposed-correction and rereview state | `make context` marker check |
-| `Milestones/contracts/README.md` | Decision 028 is not a contract; corrected contract-drafting gate | Markdown link-check only |
+| `Milestones/STATUS.md` | accepted Decision 028 and draft-contract state | `make context` marker check |
+| `Milestones/contracts/README.md` | contract index and draft-review gate | Markdown link-check only |
+| `Milestones/contracts/m3_1.md` | exact-path bounded contract draft; implementation authorization `NO` | fresh independent contract review; all master-plan §16 fields |
 | `Milestones/milestone_03_master_plan.md` | corrected M3.1 scope, formulas, receipt v2, scenarios, and progression gates | five-phases × 36-fields check; Markdown link-check |
 | `README.md` | live Milestone 3 status | Markdown link-check only |
 
@@ -568,14 +571,13 @@ Zero impact is explicit:
   canonicalization rule, accepted S5/S6 identity, or publication boundary changes;
 - no data is read, written, acquired, or derived; no transport is constructed and no SEC request is
   placed;
-- no M3.1 contract is drafted, no Milestone 3 implementation is authorized, and no Gate F or Gate H
-  passes; and
+- the M3.1 contract is drafted but unaccepted, no Milestone 3 implementation is authorized, and no
+  Gate F or Gate H passes; and
 - no commit, push, or tag occurs unless the rereview passes and a later acceptance/checkpoint step
   separately authorizes it.
 
-The next action is `INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`. Only
-`INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS` permits owner acceptance of Decision 028 and the later,
-separate authorization to draft the bounded M3.1 contract.
+The next action is `INDEPENDENT_M3_1_CONTRACT_REVIEW`. Only a fresh PASS and owner acceptance of the
+contract permit the later, separate exact-path M3.1 implementation authorization.
 
 ## Notes on reading this table
 

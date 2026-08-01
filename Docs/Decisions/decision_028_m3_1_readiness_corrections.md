@@ -1,12 +1,12 @@
 # Decision 028 — Milestone 3.1 Readiness Corrections and Owner Rulings
 
 **Date:** 2026-08-01  
-**Status:** PROPOSED — PENDING INDEPENDENT REREVIEW AND OWNER ACCEPTANCE  
+**Status:** ACCEPTED — OWNER APPROVED 2026-08-01
 **Type:** Bounded Milestone 3 operational-governance correction. **Not** a preregistration
 deviation. It changes no hypothesis, cohort window, maturity gate, outcome definition, threshold,
 seed, selection methodology, S5 or S6 identity, hash preimage, migration byte, or publication
 boundary. It authorizes no implementation and no network access.  
-**Narrowly supersedes on acceptance:** only the affected operational-planning language in
+**Narrowly supersedes:** only the affected operational-planning language in
 [Decision 027](decision_027_m3_master_plan_and_operational_readiness.md) concerning the M3-L12
 classification, A1–A12 scenario expectations, execution-receipt schema, request-budget arithmetic,
 ceiling equality, recovery inspection, and M3-L11 protection.  
@@ -16,7 +16,7 @@ research cutoff and the M2 → M3 phase boundary respectively.
 **Related:** Decisions 009, 013, 024, 026, and 027;
 [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md);
 [`Docs/m3/`](../m3/operator_runbook.md).  
-**Governs on acceptance:** the bounded correction required for the independent M3 master-plan
+**Governs:** the bounded correction required for the independent M3 master-plan
 rereview to pass, and the exact owner rulings a future M3.1 contract must implement.
 
 ---
@@ -282,7 +282,7 @@ contract may name the exact paths required for:
 Any edit to an inherited M2 implementation path is a forward M3.1 correction to a defect that blocks
 Gate F. It does not reopen an accepted M2 contract, rewrite an M2 tag, or relax an M2 invariant.
 
-## 13. Required independent rereview
+## 13. Required independent rereview — passed
 
 Before this record may be accepted and before an M3.1 contract may be drafted, a fresh Opus Max
 reviewer that authored none of this correction package must verify at least:
@@ -306,28 +306,45 @@ INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS
 
 Anything else returns the package for bounded correction and another fresh review.
 
+The fresh independent rereview completed with zero blocking findings and returned exactly:
+
+```text
+INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS
+```
+
 ## 14. Acceptance and checkpoint sequence
 
-If §13 passes, the sequence is:
+With §13 passed, the sequence is:
 
-1. record owner acceptance of this decision and the corrected A1–A12 matrix;
-2. run the documentation and repository validation gates;
-3. create one governance-only commit and push to `main`; **no tag**;
-4. in a separate fresh session, draft the bounded M3.1 contract with exact paths;
+1. record owner acceptance of this decision and the corrected A1–A12 matrix — **recorded by this
+   change**, to be checkpointed by the acceptance commit descending from
+   `1dbba3d12b5d8e42daf3db5e7eeba2dcc20611e3`;
+2. run the documentation and repository validation gates — **complete** (`make check`: 2324
+   passed, 2 skipped);
+3. create one governance-only commit and push to `main`; **no tag** — the correction package was
+   committed and pushed at `1dbba3d12b5d8e42daf3db5e7eeba2dcc20611e3`, which carries the corrected
+   documents but **not** this acceptance; that commit's message asserted the acceptance ahead of the
+   record. The acceptance recording is checkpointed by the commit that descends from it;
+4. in a separate fresh session, draft the bounded M3.1 contract with exact paths — **complete**
+   (`Milestones/contracts/m3_1.md`, `STATUS: DRAFT_PENDING_INDEPENDENT_REVIEW`);
 5. independently review and accept that contract; and only then
 6. issue explicit M3.1 implementation authorization under all five Decision 024 §8 conditions.
 
-## 15. Current outcome and next action
-
-This draft records no formal accepted outcome yet. The next authorized action is:
+## 15. Formal outcome and next action
 
 ```text
-INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE
+M3_1_READINESS_CORRECTIONS_ACCEPTED
+```
+
+The next authorized action is:
+
+```text
+INDEPENDENT_M3_1_CONTRACT_REVIEW
 ```
 
 ## 16. Negative confirmations
 
-Verified true for this correction package:
+Verified true for the correction checkpoint at `1dbba3d`:
 
 - no production code, test, migration, configuration, or `.gitignore` byte is changed;
 - Decision 013 is unchanged;

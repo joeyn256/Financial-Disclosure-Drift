@@ -163,11 +163,12 @@ against the real catalog prohibited.
 Like Decisions 024, 025, and 026 before it, it authorizes no implementation and **creates no
 contract**. **Every contract in this directory remains closed**, unchanged by planning.
 
-The independent Decision 027 v0.2 rereview did not pass. Proposed
+The independent Decision 027 v0.2 rereview did not pass. Accepted
 [Decision 028](../../Docs/Decisions/decision_028_m3_1_readiness_corrections.md) records the bounded
 planner-v2, corrected A1–A12, reason-code, receipt-v2, budget, ceiling, recovery, and M3-L11 rulings
-needed to correct the package. **Decision 028 is also a decision record, not a contract. It is not
-yet accepted and authorizes no implementation.**
+needed to correct the package. Its fresh independent rereview returned
+`INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS`, and the owner accepted it on 2026-08-01. **Decision 028
+is also a decision record, not a contract. It authorizes no implementation.**
 
 **The master plan is a plan, not an authorization.** It fixes, for each of M3.1–M3.5, the objective,
 scope, non-scope, controlling decisions, required owner decisions, prerequisites, inputs, outputs,
@@ -182,25 +183,26 @@ storage/migration/identity effects, test requirements, targeted and phase-end va
 proof, failure and rollback behaviour, commit and tag policy, completion report format, and the exact
 completion token.
 
-**The next authorized action is
-`INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`** — read-only and focused, in a fresh
-session, by a reviewer who authored none of the correction package (Decision 028 §13). **Only after
-that rereview passes and the owner accepts Decision 028** may a separate session be authorized to
-**draft** the bounded M3.1 implementation contract (Decision 027 §24; Decision 028 §14). That
-contract is itself only one of Decision 024 §8's five entry conditions, never implementation
-authority on its own. When a Milestone 3 phase is eventually authorized, it gets **its own bounded
-contract in this directory**, written to the required-sections shape above **and** to the master
-plan's §16 additions.
+**The next authorized action is the independent review and owner acceptance of the new bounded
+[`m3_1.md`](m3_1.md) contract.** The contract is currently
+`DRAFT_PENDING_INDEPENDENT_REVIEW` with `IMPLEMENTATION_AUTHORIZATION: NO`. It is only one of
+Decision 024 §8's five entry conditions and never grants implementation authority on its own. Every
+Milestone 3 phase gets its own contract in this directory, written to the required-sections shape
+above and to the master plan's §16 additions.
 
 **No Gate F has passed, neither offline rehearsal has been run, no live acquisition occurred, no
-Gate H has passed, and no real snapshot, selection, manifest, or approval exists. No M3.1 contract
-has been drafted.**
+Gate H has passed, and no real snapshot, selection, manifest, or approval exists. The M3.1 contract
+exists only as an unaccepted draft and authorizes no implementation.**
 
 **Two active corrections block Gate F.** M3-L12 is an inherited exact-quarter-end planner defect:
 the future contract must implement `quarterly-index-instances/2.0` while leaving Decision 013
 byte-unchanged. M3-L11 requires the reserved-path ignore, hygiene refusal, and resolved-path CLI
-protections. Their owner rulings are recorded by proposed Decision 028, but neither closes until
+protections. Their owner rulings are recorded by accepted Decision 028, but neither closes until
 implementation, tests, independent acceptance, and a committed checkpoint exist.
+
+- [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F.
+  **Draft pending independent review.** `STATUS: DRAFT_PENDING_INDEPENDENT_REVIEW`,
+  `IMPLEMENTATION_AUTHORIZATION: NO`; no network access and no implementation are authorized.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

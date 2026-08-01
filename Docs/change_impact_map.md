@@ -349,8 +349,57 @@ at `7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595`.
 tables, migration `0012` introduced **one** more (`pilot_selection_entity_reasons`), and the catalog
 through `0013` therefore holds **22**. All 22 now carry the complete §6.1 schedule.
 
-**The independent rereview of this fix has not yet run.** The next authorized action is
-`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`; Milestones 0, 1, and 2 remain open.
+**That rereview has since run and passed** — see the Decision 026 section below, which records formal
+closeout.
+
+## Decision 026 — final closeout of Milestones 0, 1, and 2 (governance and navigation only, zero impact)
+
+[Decision 026](Decisions/decision_026_milestones_0_1_2_final_closeout.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`) records the final fresh independent rereview outcome
+`ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT` and the formal closeout of
+**Milestone 0**, **Milestone 1**, and **all of Milestone 2** — M2.1, M2.2, and M2.3 through accepted
+Stage S6. Formal outcome `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`.
+
+**It is governance and navigation only, and its impact set is empty.** The closeout session changed
+exactly these files:
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md` | new decision record | Markdown link-check only |
+| `Docs/Decisions/decision_registry.md` | registry — Index row `026` (added without a preceding blank line, so rows `001`–`026` stay one continuous table) + one controlling-record row | Markdown link-check; mechanical table-structure check |
+| `Docs/decision_index.md` | topic index — Decision 026 section and the closeout-sequence wording | Markdown link-check only |
+| `Docs/architecture_map.md` | §0 milestone-status layer only — Milestone 0 added, Milestones 0/1/2 marked formally closed, Milestone 3 marked next planning phase; plus the closing lifecycle note's stale next-action sentence | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | current-state ledger and machine-readable markers | `make context` resolves the markers |
+| `Milestones/contracts/README.md` | contract index — closure recorded; Decision 026 identified as a decision record, not a contract | Markdown link-check only |
+| `README.md` | the live `**Status:**` block, whose "one final independent integrated audit … remains" sentence became false at this commit; plus the stale `Decisions 001-010` navigation line in "Repository structure" | Markdown link-check only |
+
+**Zero impact, stated explicitly:**
+
+- **zero production impact** — no module under `src/` changed;
+- **zero test impact** — no file under `tests/` changed;
+- **zero migration impact** — migrations `0001`–`0013` are byte-identical to `m2.3-s6-complete`, the
+  chain is contiguous with nothing beyond `0013`, and `0013`'s normative region remains 10939 bytes
+  over 186 lines at `7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595`;
+- **zero configuration impact** — `configs/`, `pyproject.toml`, `Makefile`, and `.github/` unchanged;
+- **zero methodology impact** — no hypothesis, cohort window, maturity gate, outcome definition,
+  threshold, seed, selection rule, reserve rule, or manifest rule changed;
+- **zero identity impact** — no hash preimage, digest, `manifest_id`, run identity, canonicalization
+  rule, crosswalk row, or classification total changed;
+- **zero data impact** — no data was read, written, acquired, or derived;
+- **zero network impact** — no network boundary moved and no SEC access occurred;
+- **zero publication impact** — no root was approved and nothing was published;
+- **three annotated completion tags** — `m0-complete`, `m1-complete`, and `m2-complete`, all created
+  at the closeout commit; every earlier tag is immutable and unmoved, and `m2.3-s6-complete` remains
+  at `5c53412d820fe20a7bd727eac333ae2fb8724cd6`;
+- **next action `MILESTONE_3_MASTER_PLANNING`**;
+- **no Milestone 3 implementation authority** — closure satisfies only the precondition Decision 024
+  §8 imposed; its five entry conditions all still apply, implementation authorization remains `NO`
+  for every phase, and no Milestone 3 contract exists or was created.
+
+`Docs/preregistration.md`, `Docs/sec_data_dictionary.md`, Decisions 001–025, `CLAUDE.md`, and every
+completed contract are **byte-unchanged**. **Every prior delivered-path record above is preserved**
+and remains the authority on what each stage shipped and which gates each of its paths triggers.
 
 ## Notes on reading this table
 

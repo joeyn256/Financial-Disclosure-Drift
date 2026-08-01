@@ -118,14 +118,34 @@ registry-rendering issue. **Both are corrected**, with three non-material precis
 documentation-only pass under the authority Decision 025 §6.1 already granted. **No new decision
 record was required and none was created**, and **no contract in this directory changed.**
 
-**The next authorized action is `FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`** — a fresh
-independent session, which must not have authored the bounded fix it reviews. It is read-only,
-records no closeout, and authorizes no implementation; it also explicitly completes the outstanding
-**Milestone 0** closeout classification. **The rereview has not run and nothing here claims it
-passed.** Formal Milestone 0, 1, and 2 closeout follows only if it passes, in its own
-governance-only session which controls the closeout tags, and **Milestones 0, 1, and 2 are not
-closed until then**. **Milestone 3 remains not contracted, not authorized, and not begun, and no
-implementation authorization is active.**
+**That rereview has run and passed.** `FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW` returned
+**`ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT`**, confirming
+`INTEGRATED_ACCEPTANCE_CONFIRMED` for Milestone 0, Milestone 1, M2.1, M2.2, M2.3, and Milestone 2
+integrated, and `VERIFIED_COMPLETE` across the data dictionary, deviation register, governance,
+reproducibility, security and leakage, test adequacy, and documentation — with **no remaining
+closeout blocker**. It also explicitly completed the outstanding **Milestone 0** closeout
+classification.
+
+**Milestones 0, 1, and 2 are therefore formally closed**, under
+[Decision 026](../../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
+`MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`), with the annotated completion tags `m0-complete`,
+`m1-complete`, and `m2-complete` at the closeout commit.
+
+**Decision 026 is a decision record, not a contract, and it appears nowhere in this index as one.**
+Like Decisions 024 and 025 before it, it authorizes no implementation and creates no contract.
+**Every contract in this directory remains closed** — all three S5 contracts and the S6 contract are
+`ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`, unchanged by closeout — and **none
+currently authorizes implementation**. **No Milestone 3 implementation contract exists, none was
+created at closeout, and no Milestone 3 implementation is authorized**: closure satisfied only the
+precondition Decision 024 §8 imposed, and all five of that record's entry conditions still apply to
+every phase.
+
+**The next authorized action is `MILESTONE_3_MASTER_PLANNING`** — planning only, in a fresh session.
+It may not implement, may not create an implementation-authorizing contract, and may not enable
+network access, acquire metadata, create a snapshot, run a pilot, construct a manifest, approve a
+root, or publish anything (Decision 026 §§19–20). When a Milestone 3 phase is eventually authorized,
+it gets **its own bounded contract in this directory**, written to the required-sections shape above.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

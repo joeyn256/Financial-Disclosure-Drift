@@ -1,6 +1,7 @@
 # Milestones/STATUS.md — concrete-state ledger
 
-**Purpose:** a short, current-state record of where Milestone 2.3 stands. This file records
+**Purpose:** a short, current-state record of where the project stands — **Milestones 0, 1, and 2 are
+formally closed, and Milestone 3 master planning is next.** This file records
 workflow state; it never overrides a decision record, a migration, or `src/disclosure_drift/`. When
 this file and an authoritative source (`Docs/Decisions/` — with
 `Docs/Decisions/decision_registry.md` authoritative for which decisions exist and their approval
@@ -16,9 +17,37 @@ was edited. They are not live. For the current branch, HEAD, tag, and migration 
 `scripts/context_snapshot.sh` (or `make context`) — it reads Git directly and cannot go stale the way
 a hand-maintained hash can.
 
+## Milestone closure state
+
+Recorded by [Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`), on
+the final fresh independent rereview
+`ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT`, with **no closeout blocker
+remaining**.
+
+| Milestone | State | Closure record | Completion tag |
+|---|---|---|---|
+| **Milestone 0** — research question, novelty boundary, preregistration, frozen definitions, registers | **`FORMALLY_CLOSED`** | Decision 026 §6 | `m0-complete` |
+| **Milestone 1** — reproducible engineering foundation | **`FORMALLY_CLOSED`** | Decision 026 §7 | `m1-complete` |
+| **Milestone 2** — M2.1 offline SEC policy, M2.2 controlled live-metadata readiness, M2.3 through accepted S6 | **`FORMALLY_CLOSED`** | Decision 026 §§8–10 | `m2-complete` |
+| **Milestone 3** — M3.1–M3.5 | **Master planning is next.** Implementation **not authorized** and **not begun** | Decision 024 §5.1 (phase map); Decision 026 §§17–21 | — |
+
+**M2.3 Stage S6 is accepted and immutable at `m2.3-s6-complete`.** The three completion tags
+**supplement** every earlier checkpoint tag and move, replace, or re-point none of them.
+
+**Closure closed the milestones, not their obligations.** Every accepted limitation stays active and
+is inherited by Milestone 3 — Decision 020 §19.1, Decision 021 §19, Decision 022's applicability
+boundary, and Decision 023 §7's **O1**–**O4**, with **O1** still an unresolved future owner-ruling
+condition (Decision 026 §12). **The project is not complete**: no live SEC pilot has been executed,
+no real snapshot or real manifest exists, no root has been approved, and nothing has been published.
+
 ## Accepted baseline
 
 - Branch: `main`.
+- Closeout commit: the commit created by the 2026-07-31 governance-only closeout session
+  ("Close Milestones 0 1 and 2"), carrying the three annotated completion tags `m0-complete`,
+  `m1-complete`, and `m2-complete`. This file records no hash for it by design; resolve it live with
+  `make context`.
 - Accepted methodological checkpoint tag: `m2.3-s6-complete` -> the commit created by the 2026-07-31
   acceptance-recording session ("Complete M2.3 S6 deterministic pilot manifest"). This file records
   no hash for it by design; resolve it live with `make context`.
@@ -38,6 +67,11 @@ a hand-maintained hash can.
   `src/disclosure_drift/storage/migrations/` for the authoritative list.
 
 ## Current phase
+
+**Milestones 0, 1, and 2 are formally closed (Decision 026). There is no active implementation
+contract and no implementation authorization. Milestone 3 master planning is the next authorized
+action; Milestone 3 implementation is not authorized and has not begun.** The rest of this section is
+the accepted historical record of how Milestone 2.3 reached that point.
 
 M2.3 (deterministic pilot selection). Stage S4 (entity-only selection) is accepted. Decision 018
 (Stage S5 accession selection policy) and Decision 019 (Stage S5 frozen-storage-to-pure-input
@@ -85,9 +119,9 @@ S7–S10 **intact** into Milestone 3 as **M3.1–M3.4**, adding **M3.5** for int
 acceptance and Milestone 3 closeout. **No Milestone 3 phase has begun and none is authorized**: no
 publication, approval, CLI, live-metadata, real-snapshot, or Milestone 3 work exists, and no S7 or
 Milestone 3 contract exists. **No S5 selection and no reserve is a published or owner-approved
-input** — S6 creates only a `proposed` manifest, over fixtures. The next authorized action is the
-**final independent integrated Milestones 1 and 2 audit**; formal closeout follows only if it passes,
-and **Milestone 2 is not closed**. See "Current stage" below.
+input** — S6 creates only a `proposed` manifest, over fixtures. That audit, its bounded corrections,
+and its rereviews are now complete, and **Milestone 2 is formally closed** (Decision 026). See
+"Milestone closure state" above and "Current stage" below.
 
 ## Completed stages
 
@@ -249,7 +283,36 @@ and **Milestone 2 is not closed**. See "Current stage" below.
   disclosure** that the same conversation authored Decisions 023 and 024, which establishes no
   technical defect but requires a **fresh independent verification** before closeout.
 
-## Bounded documentation fix — complete, rereview outstanding
+- **Decision 026** — accepted by project owner (2026-07-31),
+  `Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md`. The **formal closeout of
+  Milestones 0, 1, and 2**, recorded on the final fresh independent rereview
+  `ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT` with **no closeout
+  blocker remaining**. It records the closeout baseline, the eleven-step review chain from the
+  stage-level implementation reviews through the explicit **Milestone 0** standalone audit, all
+  sixteen final classifications, and what each milestone's closure covers: **Milestone 0** (§6)
+  research question and framing, novelty review, preregistration, frozen cohorts, frozen outcome
+  cutoffs, bootstrap seed `20260725`, the leakage register, the deviation register and D001, and the
+  accepted governance foundation; **Milestone 1** (§7) repository and packaging foundation,
+  configuration, cohort mirror enforcement, CLI and exit-code behaviour, offline safety, and secret
+  and hygiene controls; **Milestone 2.1** (§8) offline SEC policy, identifier and temporal policy,
+  response and rate-limit policy, the storage/provenance/schema-drift/release/forecast boundaries,
+  and the CompanyFacts-disabled and Frames-prohibited policy; **Milestone 2.2** (§9) controlled
+  live-metadata readiness, SEC identity requirements, transport isolation, deterministic request
+  governance, raw-store provenance, and offline test and CI boundaries; and **Milestone 2.3 through
+  S6** (§10) deterministic candidate and snapshot identity, entity and accession selection, reserves
+  and dispositions, persistence, reconstruction and replay, selection-result sealing, manifest
+  construction, canonical serialization, lifecycle enforcement, verification and atomicity, and the
+  accepted limitations. Formal outcome **`MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`**. It
+  authorizes the three annotated completion tags `m0-complete`, `m1-complete`, and `m2-complete` at
+  the closeout commit, confirms every existing implementation-stage tag immutable, leaves the
+  **inherited limitations register active** (§12), records the nonblocking `pilot_reserves`
+  PK-superset UNIQUE presentation observation as requiring no correction (§13), and makes
+  **`MILESTONE_3_MASTER_PLANNING`** the next authorized action. **Governance only**: it changed no
+  production, test, migration, configuration, or CI byte, edits no earlier decision, and **grants no
+  Milestone 3 implementation authority** — closure satisfies only the precondition Decision 024 §8
+  imposed, and all five of that record's entry conditions still apply in full.
+
+## Bounded documentation fix — complete, rereviewed, and accepted
 
 The fresh independent verification required by Decision 025 §§8–9 has **run**. It confirmed
 **Decisions 023, 024, and 025 independently** — each `INDEPENDENT_ACCEPTANCE_CONFIRMED` — and found
@@ -280,13 +343,31 @@ the complete schedule**, and the count distinction is preserved: **21** introduc
 hash, or database-behaviour byte changed; Decisions 021–025, every completed contract, and
 `Docs/preregistration.md` are byte-unchanged; no tag was created or moved.
 
-**The independent rereview of this fix has not run, and nothing here claims it passed.** The next
-authorized action is **`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`**, which must also
-explicitly complete the outstanding **Milestone 0** closeout classification. **Milestones 0, 1, and
-2 remain open and are not formally closed.** **Milestone 3 remains not contracted, not authorized,
-and not begun**, and **no implementation authorization is active.**
+**The independent rereview of this fix has since run and passed.**
+`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW` returned
+**`ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT`**, confirming
+`INTEGRATED_ACCEPTANCE_CONFIRMED` for Milestone 0, Milestone 1, M2.1, M2.2, M2.3, and Milestone 2
+integrated; `INDEPENDENT_ACCEPTANCE_CONFIRMED` for Decisions 023, 024, and 025; and
+`VERIFIED_COMPLETE` for the data dictionary, the deviation register, project governance,
+reproducibility, security and leakage, test adequacy, and documentation — with closeout readiness
+`READY_FOR_FORMAL_CLOSEOUT` and **no remaining closeout blocker**. It also explicitly completed the
+outstanding **Milestone 0** closeout classification. **Milestones 0, 1, and 2 are now formally
+closed** ([Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md)). Its one
+nonblocking presentation observation — `pilot_reserves` carrying a UNIQUE that is a superset of its
+own primary key, present so the run/snapshot-scoped children have a declared composite FK target —
+affects no schema correctness, reproducibility, methodology, or closeout and required no correction
+(Decision 026 §13). **Milestone 3 remains not contracted, not authorized, and not begun**, and **no
+implementation authorization is active.**
 
 ## Current stage
+
+**Milestones 0, 1, and 2 are `FORMALLY_CLOSED` (Decision 026,
+`MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`), tagged `m0-complete`, `m1-complete`, and
+`m2-complete` at the closeout commit. There is no active implementation contract and
+`IMPLEMENTATION_AUTHORIZATION` is `NO`. The next authorized action is
+`MILESTONE_3_MASTER_PLANNING`; Milestone 3 implementation is not authorized and has not begun.**
+Nothing below is an active work item — the rest of this section is the accepted record of the last
+implementation stage Milestone 2 closed over.
 
 **M2.3 Stage S6 (pilot manifest construction, terminal result identity, and the publication
 boundary) — complete, owner-accepted, and checkpointed.** Stage S5 is finished end to end: S5.1,
@@ -580,8 +661,9 @@ authorized.** No manifest approval, publication, CLI, live-metadata, real-snapsh
 authorized (Decision 018 §22, Decision 021 §§4, 11.1, 16, 17; Decision 023 §9; Decision 024 §8); see
 `Docs/architecture_map.md` §0 and §8. **No S5 selection and no reserve is a published or
 owner-approved input** — the only manifest S6 can create is `proposed`, over fixtures. The **final
-independent integrated Milestones 1 and 2 audit is the next authorized action**, and formal closeout
-follows only if it passes. **Milestone 2 is not closed.**
+independent integrated Milestones 1 and 2 audit ran, its bounded corrections and rereviews completed,
+and Milestone 2 is now formally closed** (Decision 026). Closure created no publication, approval,
+CLI, live-metadata, or release authority — every prohibition above still stands.
 
 **The S4 entity-only draft is unchanged.** It stays in `running` state, remains non-publishable, and
 is excluded from S5 run identity and from every manifest input. It is never promoted, mutated,
@@ -590,36 +672,38 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**Run the fresh independent bounded-documentation rereview —
-`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`.** The fresh independent verification
-(`FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION`) has **run** and returned
-`REQUIRES_BOUNDED_VERIFICATION_FIXES`, confirming **Decisions 023, 024, and 025 independently** with
-**no methodological, implementation, test, or governance defect** and one closeout blocker plus one
-cosmetic documentation issue. **Both are corrected** — see "Bounded documentation fix" above.
+**`MILESTONE_3_MASTER_PLANNING`** — in a **new chat and a fresh planning session**. Milestones 0, 1,
+and 2 are formally closed
+([Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md),
+`MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`), the closeout commit is pushed, and the three
+annotated completion tags `m0-complete`, `m1-complete`, and `m2-complete` exist at it. **The sequence
+Decisions 024 §9 and 025 §9 fixed is now complete**: the final independent integrated audit ran, its
+bounded corrections were made, the first independent verification ran, its two findings were fixed,
+and the final fresh independent rereview returned
+`ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT`.
 
-The next session is **fresh and independent**, and must not have authored the bounded fix it
-reviews. It verifies:
+**Milestone 3 master planning may** (Decision 026 §19):
 
-- that `pilot_projection_recovery_events` now carries the complete per-table schedule;
-- that **all 22** `pilot_*` tables satisfy Decision 025 §6.1, against migrations `0001`–`0013`;
-- **DOC-2** and the three precision corrections;
-- that **no implementation behaviour changed**;
-- **the outstanding Milestone 0 closeout classification**, explicitly completed;
-- and whether Milestones 0, 1, and 2 are ready for formal closeout.
+- define **M3.1–M3.5** in planning detail, within the scope Decision 024 §5.1 already fixed;
+- map the inherited gates and obligations of Decision 024 §§5.2 and 6;
+- design the **operator runbook** for controlled live operation;
+- define the **evidence packets** each phase must produce;
+- define the **offline rehearsal requirements** that must be provable with no network access;
+- propose future bounded contracts and owner decisions, **as proposals** requiring separate owner
+  acceptance.
 
-**The sequence from here, in order:**
+**Milestone 3 master planning may not** (Decision 026 §20): implement production behaviour; create
+an implementation-authorizing contract; enable SEC network access; acquire live metadata; create a
+real snapshot; run a real pilot; construct a real manifest; approve a root; or publish anything.
 
-1. `FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW` — the next authorized action;
-2. **further bounded fixes and rereview**, if it returns findings;
-3. **formal closeout of Milestones 0, 1, and 2**, in a separate governance-only session, **only
-   after the rereview passes**. That session controls the closeout tags; none has been authorized;
-4. **Milestone 3 planning** only after closeout, and Milestone 3 implementation only under
-   Decision 024 §8's five entry conditions.
-
-**Milestones 0, 1, and 2 are not closed**, and **nothing here claims the rereview has passed**.
-Until closeout completes, **no Milestone 3 implementation may begin**, and no live SEC access, real
-pilot execution, real snapshot, real manifest construction, root approval, or publication is
-authorized.
+**No Milestone 3 implementation authority exists.** Closure satisfied only the precondition
+Decision 024 §8 imposed — that Milestone 1 and Milestone 2 closeout must precede any Milestone 3
+implementation — and satisfied nothing else. All five of its entry conditions still apply to every
+phase (a separate accepted governance record where required, a bounded implementation contract,
+explicit owner authorization, exact path authorization, and satisfaction of that phase's inherited
+prerequisite gates), `IMPLEMENTATION_AUTHORIZATION` remains `NO`, no Milestone 3 contract exists, and
+**no live SEC access, real pilot execution, real snapshot, real manifest construction, root approval,
+or publication is authorized.**
 
 **Historical — the approval path that closed the first two gates.**
 S6 governance is drafted and has been through **three** full review cycles: the v0.1 review returned
@@ -666,11 +750,24 @@ new explicit owner authorization.
 - **Milestone 2 / Milestone 3 boundary governance** — **complete.** Recorded in Decision 024,
   `ACCEPTED — OWNER APPROVED 2026-07-31`, outcome `M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED`. Governance
   only; it authorized no implementation and no tag.
-- **Final independent integrated Milestones 1 and 2 audit** — **the next authorized action.**
-  Read-only and adversarial; it records no closeout and authorizes no implementation.
-- **Formal Milestone 1 and Milestone 2 closeout** — not started; a separate governance-only session,
-  contingent on that audit passing. It controls the final closeout tags.
-- **Milestone 3 planning and governance** — not started; only after closeout is complete.
+- **Final independent integrated Milestones 1 and 2 audit** — **complete.** Read-only and
+  adversarial; it returned `REQUIRES_BOUNDED_INTEGRATED_FIXES` with nine categories
+  `INTEGRATED_ACCEPTANCE_CONFIRMED` and one bounded documentation finding, recorded in Decision 025.
+  It recorded no closeout and authorized no implementation.
+- **Bounded correction, independent verification, final bounded fix, and fresh rereview** —
+  **complete.** The rereview returned
+  `ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT` with no remaining
+  closeout blocker, and explicitly completed the outstanding **Milestone 0** classification.
+- **Formal Milestone 0, Milestone 1, and Milestone 2 closeout** — **complete.** Recorded in
+  [Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md),
+  `ACCEPTED — OWNER APPROVED 2026-07-31`, outcome `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`.
+  Governance only; it authorized one commit, one push, and the three annotated completion tags
+  `m0-complete`, `m1-complete`, and `m2-complete`, and granted no implementation authority.
+- **Milestone 3 master planning and governance** — **not started; it is the next authorized action.**
+  Planning only: it may not implement, contract, enable network access, acquire metadata, snapshot,
+  run a pilot, build a manifest, approve a root, or publish (Decision 026 §§19–20).
+- **Milestone 3 implementation** — not started and **not authorized**. It requires all five
+  Decision 024 §8 entry conditions, per phase.
 
 ## Nonblocking maintenance notes
 
@@ -716,14 +813,25 @@ the named contract's own status**, which now read `NO` and `ACCEPTED_AND_COMPLET
 script needs a resolvable path, **not** because it authorizes anything. No stage contract currently
 authorizes implementation.
 
+The `MILESTONE_0_STATUS`, `MILESTONE_1_STATUS`, `MILESTONE_2_STATUS`, `MILESTONE_3_STATUS`, and
+`DECISION_026_STATUS` markers were added at closeout in the same single-line `KEY: value` form. The
+snapshot script reads only `CURRENT_STAGE`, `ACTIVE_BLOCKER`, `ACTIVE_STAGE_CONTRACT`, and
+`NEXT_AUTHORIZED_ACTION`; the rest are for a reader or a future tool, and adding one changes no
+script behaviour.
+
 ```
-CURRENT_STAGE: MILESTONE 2 IMPLEMENTATION COMPLETE AT ACCEPTED M2.3 STAGE S6, MILESTONE 2 NOT FORMALLY CLOSED, MILESTONE 3 BOUNDARY DEFINED BY DECISION 024 AND NOT AUTHORIZED — Decision 024 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED) fixes accepted S6 as the final implementation stage of Milestone 2, whose final scope is M2.1 offline SEC policy/storage/provenance/governance, M2.2 controlled live-metadata readiness, and M2.3 through accepted S6, and transfers the obligations formerly called S7 to S10 intact into Milestone 3 as M3.1 controlled live-operation readiness with Gate F, M3.2 controlled metadata-only SEC acquisition with Gate H, M3.3 frozen real pilot snapshot and deterministic execution carrying the CLI output deferred from S6, and M3.4 exact root-hash owner approval, adding new M3.5 integrated real-pilot acceptance and Milestone 3 checkpoint, with no gate, prohibition, owner ruling, validation requirement, identity, methodology, or accepted limitation removed, weakened, renumbered, or rewritten, and implementation authorization NO for every phase; Milestone 2 remains open only for the final independent integrated Milestones 1 and 2 audit, bounded correction, fresh rereview where required, and formal closeout. M2.3 Stage S6 remains COMPLETE, OWNER-ACCEPTED 2026-07-31, AND CHECKPOINTED at m2.3-s6-complete, which supplements the immutable m2.3-s5-complete and m2.3-s5.4-complete; acceptance is recorded in Decision 023 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE) on the final independent recommendation ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING with no methodological findings, no implementation defects, no test defects, no outstanding owner clarifications, and no acceptance blockers, following the fresh independent S6 rereview ACCEPT_M23_S6_IMPLEMENTATION_FOR_ACCEPTANCE_REVIEW; Decision 021 v0.5 remains ACCEPTED (owner approved 2026-07-30) and controlling for the S6 architecture, and Decision 022 remains ACCEPTED (owner approved 2026-07-31) and controlling for crosswalk item-46 applicability; delivered were the eight component digests and root_manifest_sha256 at their frozen preimages, selection_result_sha256 and its append-once sealing, manifest_id and six-field identity immutability, the complete thirteen-block document with all 81 atomic section 10 items bound item by item at totals 42 direct / 30 transitive / 8 operationally excluded / 1 deferred to S9 / 0 deferred to S10 / 0 unclassified, canonical JSON under DataTree.releases/pilot with a content-derived filename, historical S5 reconstruction, one proposed manifest row written atomically with its document, public verification, write-free idempotent replay, and DDL-only migration 0013 reproducing the Decision 021 section 15.1 eight-block SQL byte-for-byte over 10939 bytes and 186 lines with all nine section 15.3 digests including region digest 7f473802; the delivered path set is ten — the contract's seven plus three forced-consequence test paths ratified by Decision 023 section 4 (tests/unit/test_storage_catalog.py, tests/unit/test_m23_entity_selection_store.py, tests/unit/test_m23_accession_selection_store.py); final accepted suite 2324 passed and 2 skipped, reproduced under parallel and alternate-temp-root runs; migration chain ends at 0013_m23_manifest_lifecycle_guards.sql; four accepted nonblocking limitations O1 to O4 are recorded in Decision 023 section 7; S6 creates only a proposed manifest over fixtures and no production catalog, candidate-snapshot builder, or real snapshot exists; Stage S5.4 remains complete and owner-accepted 2026-07-30 at m2.3-s5.4-complete, and S5.1, S5.2, and the combined S5.1-S5.3 checkpoint remain owner-accepted at m2.3-s5-complete
-ACTIVE_BLOCKER: none — Stage S6 is implemented, independently rereviewed, independently accepted, owner-accepted 2026-07-31 through Decision 023, validated, committed, pushed, and tagged m2.3-s6-complete, and the Milestone 2 to Milestone 3 boundary is recorded in Decision 024 (M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED); Decisions 021, 022, 023, and 024 are all ACCEPTED; Decision 021 section 19.11 is closed and no open schema finding remains; both required independent S6 reviews ran and passed and neither was performed by a session that wrote the work it reviewed; no S5, S5.4, or S6 acceptance or checkpoint blocker remains; Milestone 2 implementation is complete but Milestone 2 is NOT formally closed and its final independent integrated audit has not yet run; no Milestone 3 phase has begun and none is authorized
+MILESTONE_0_STATUS: FORMALLY_CLOSED — closed by Decision 026 section 6 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED) on the final fresh independent rereview ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT with classification INTEGRATED_ACCEPTANCE_CONFIRMED; closure covers the research question and framing, the novelty review and its prohibited-claims boundary, the approved preregistration, the frozen cohorts, the frozen outcome cutoffs and both maturity gates, bootstrap seed 20260725, the leakage register, the deviation register in Docs/preregistration.md section 25 with D001 as its only entry, and the accepted governance foundation of Decisions 001 to 006; annotated completion tag m0-complete at the closeout commit; the frozen research definitions remain frozen and closure unfreezes none of them, and Decision 001's final literature refresh before publication and Milestone 0's standing limitations remain open
+MILESTONE_1_STATUS: FORMALLY_CLOSED — closed by Decision 026 section 7 with classification INTEGRATED_ACCEPTANCE_CONFIRMED; closure covers the repository and packaging foundation, typed configuration, cohort mirror enforcement with configuration loading hard-failing on divergence from src/disclosure_drift/cohorts.py, the CLI and its exit-code behaviour 0 success 1 configuration error 2 usage 3 stage not enabled 4 gate failure, offline safety, and the secret and hygiene controls; annotated completion tag m1-complete at the closeout commit
+MILESTONE_2_STATUS: FORMALLY_CLOSED — closed by Decision 026 sections 8 to 10 with M2.1, M2.2, M2.3, and Milestone 2 integrated each INTEGRATED_ACCEPTANCE_CONFIRMED; final scope is M2.1 offline SEC policy, identifier and temporal policy, response and rate-limit policy, storage/provenance/schema-drift/release/forecast boundaries, and the CompanyFacts-disabled and Frames-prohibited policy; M2.2 controlled live-metadata readiness, SEC identity requirements, transport isolation, deterministic request governance, raw-store provenance, and offline test and CI boundaries, checkpointed at m2.2-r3-complete; and M2.3 through accepted Stage S6 deterministic candidate and snapshot identity, entity and accession selection, reserves and dispositions, persistence, reconstruction and replay, selection-result sealing, manifest construction, canonical serialization, lifecycle enforcement, verification and atomicity, and the accepted limitations; M2.3 S6 is accepted and immutable at m2.3-s6-complete and Decision 024 fixes it as the final implementation stage of Milestone 2; annotated completion tag m2-complete at the closeout commit; the migration chain ends at 0013 with every migration byte-identical to m2.3-s6-complete, the accepted suite is 2324 passed and 2 skipped, and NO live SEC pilot has been executed — S6 creates only a proposed manifest over fixtures, no real snapshot or real manifest exists, no root has been approved, and nothing has been published
+MILESTONE_3_STATUS: MASTER PLANNING IS THE NEXT AUTHORIZED ACTION; IMPLEMENTATION NOT AUTHORIZED AND NOT BEGUN — the M3.1 to M3.5 phase map is governance-defined by Decision 024 section 5.1 and is not redefined by closeout; no Milestone 3 contract, module, test, migration, CLI surface, network allowlist, real snapshot, real manifest, approved root, or publication path exists; master planning may define M3.1 to M3.5 in planning detail, map the inherited gates and obligations of Decision 024 sections 5.2 and 6, design the operator runbook, define evidence packets, define offline rehearsal requirements, and propose future bounded contracts and owner decisions as proposals requiring separate owner acceptance; master planning may NOT implement production behaviour, create an implementation-authorizing contract, enable SEC network access, acquire live metadata, create a real snapshot, run a real pilot, construct a real manifest, approve a root, or publish anything; closure satisfied only the precondition Decision 024 section 8 imposed and granted no implementation authority, all five of that record's entry conditions still apply to every phase, and implementation authorization is NO for every phase
+DECISION_026_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; formal outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED; the controlling record for the formal closeout of Milestones 0, 1, and 2, the final integrated acceptance, the authorization of the three annotated completion tags, and the Milestone 3 master-planning handoff; recorded on the final fresh independent rereview ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT with Milestone 0, Milestone 1, M2.1, M2.2, M2.3, and Milestone 2 integrated each INTEGRATED_ACCEPTANCE_CONFIRMED, Decisions 023, 024, and 025 each INDEPENDENT_ACCEPTANCE_CONFIRMED, and the data dictionary, deviation register, project governance, project reproducibility, project security and leakage, project test adequacy, and project documentation each VERIFIED_COMPLETE, closeout readiness READY_FOR_FORMAL_CLOSEOUT, and no remaining closeout blocker; the closeout baseline is commit 65a57f40ddc92853ba756bb8eea23c2b64fdfff2 subject Complete pilot data dictionary coverage on branch main with HEAD equal to origin/main and a clean working tree; it confirms all authorized implementation complete, every accepted migration immutable, the migration chain ending at 0013, the full suite at 2324 passed and 2 skipped, and all final static, SQLite, secret, hygiene, context, and documentation checks passed; the inherited limitations register REMAINS ACTIVE and no accepted limitation is closed or erased by closure, with Decision 023 O1 still a future owner-ruling condition; the nonblocking pilot_reserves PK-superset UNIQUE presentation observation affects no schema correctness, reproducibility, methodology, or closeout and requires no correction; existing implementation-stage tags remain immutable and the three completion tags supplement them; it supersedes and amends nothing, supersedes no methodology record, changes no production code, test, migration, configuration, CI workflow, preregistration, data dictionary, completed contract, hypothesis, cohort window, maturity gate, outcome definition, threshold, seed, SEC policy, identifier, temporal policy, leakage control, selection methodology, reserve, disposition, hash preimage, manifest identity, digest, crosswalk row, or S4/S5/S6 behaviour, and GRANTS NO MILESTONE 3 IMPLEMENTATION AUTHORITY; it authorized one governance-only closeout commit, one push to origin/main, three annotated completion tags m0-complete, m1-complete, and m2-complete at that commit, and one push of those tags
+CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; NO ACTIVE IMPLEMENTATION CONTRACT; MILESTONE 3 MASTER PLANNING IS NEXT AND MILESTONE 3 IMPLEMENTATION IS NOT AUTHORIZED AND NOT BEGUN — Decision 026 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED) records the formal closeout of Milestone 0, Milestone 1, and all of Milestone 2 including M2.1, M2.2, and M2.3 through accepted Stage S6, on the final fresh independent rereview ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT with no remaining closeout blocker, and authorizes the three annotated completion tags m0-complete, m1-complete, and m2-complete at the closeout commit; the closeout baseline is commit 65a57f40ddc92853ba756bb8eea23c2b64fdfff2 subject Complete pilot data dictionary coverage; closure is governance only and changed no production, test, migration, configuration, or CI byte, and it GRANTS NO MILESTONE 3 IMPLEMENTATION AUTHORITY — it satisfied only the precondition Decision 024 section 8 imposed, all five of that record's entry conditions still apply per phase, and implementation authorization is NO everywhere; every accepted limitation remains ACTIVE and inherited by Milestone 3, including Decision 020 section 19.1, Decision 021 section 19, Decision 022's applicability boundary, and Decision 023 section 7 O1 to O4 with O1 still an unresolved future owner-ruling condition. The project is NOT complete: no live SEC pilot has been executed, no real candidate snapshot or real manifest exists, no root has been approved, and nothing has been published. Historical implementation state, unchanged by closure — Decision 024 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED) fixes accepted S6 as the final implementation stage of Milestone 2, whose final scope is M2.1 offline SEC policy/storage/provenance/governance, M2.2 controlled live-metadata readiness, and M2.3 through accepted S6, and transfers the obligations formerly called S7 to S10 intact into Milestone 3 as M3.1 controlled live-operation readiness with Gate F, M3.2 controlled metadata-only SEC acquisition with Gate H, M3.3 frozen real pilot snapshot and deterministic execution carrying the CLI output deferred from S6, and M3.4 exact root-hash owner approval, adding new M3.5 integrated real-pilot acceptance and Milestone 3 checkpoint, with no gate, prohibition, owner ruling, validation requirement, identity, methodology, or accepted limitation removed, weakened, renumbered, or rewritten, and implementation authorization NO for every phase; the final independent integrated Milestones 1 and 2 audit, its bounded correction, the independent verification, the final bounded fix, and the fresh rereview have all completed, and Milestone 2 is now formally closed by Decision 026. M2.3 Stage S6 remains COMPLETE, OWNER-ACCEPTED 2026-07-31, AND CHECKPOINTED at m2.3-s6-complete, which supplements the immutable m2.3-s5-complete and m2.3-s5.4-complete; acceptance is recorded in Decision 023 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE) on the final independent recommendation ACCEPT_M23_S6_FOR_OWNER_ACCEPTANCE_RECORDING with no methodological findings, no implementation defects, no test defects, no outstanding owner clarifications, and no acceptance blockers, following the fresh independent S6 rereview ACCEPT_M23_S6_IMPLEMENTATION_FOR_ACCEPTANCE_REVIEW; Decision 021 v0.5 remains ACCEPTED (owner approved 2026-07-30) and controlling for the S6 architecture, and Decision 022 remains ACCEPTED (owner approved 2026-07-31) and controlling for crosswalk item-46 applicability; delivered were the eight component digests and root_manifest_sha256 at their frozen preimages, selection_result_sha256 and its append-once sealing, manifest_id and six-field identity immutability, the complete thirteen-block document with all 81 atomic section 10 items bound item by item at totals 42 direct / 30 transitive / 8 operationally excluded / 1 deferred to S9 / 0 deferred to S10 / 0 unclassified, canonical JSON under DataTree.releases/pilot with a content-derived filename, historical S5 reconstruction, one proposed manifest row written atomically with its document, public verification, write-free idempotent replay, and DDL-only migration 0013 reproducing the Decision 021 section 15.1 eight-block SQL byte-for-byte over 10939 bytes and 186 lines with all nine section 15.3 digests including region digest 7f473802; the delivered path set is ten — the contract's seven plus three forced-consequence test paths ratified by Decision 023 section 4 (tests/unit/test_storage_catalog.py, tests/unit/test_m23_entity_selection_store.py, tests/unit/test_m23_accession_selection_store.py); final accepted suite 2324 passed and 2 skipped, reproduced under parallel and alternate-temp-root runs; migration chain ends at 0013_m23_manifest_lifecycle_guards.sql; four accepted nonblocking limitations O1 to O4 are recorded in Decision 023 section 7; S6 creates only a proposed manifest over fixtures and no production catalog, candidate-snapshot builder, or real snapshot exists; Stage S5.4 remains complete and owner-accepted 2026-07-30 at m2.3-s5.4-complete, and S5.1, S5.2, and the combined S5.1-S5.3 checkpoint remain owner-accepted at m2.3-s5-complete
+ACTIVE_BLOCKER: none — Milestones 0, 1, and 2 are FORMALLY CLOSED by Decision 026 (ACCEPTED — OWNER APPROVED 2026-07-31, outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED) on the final fresh independent rereview ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT, with NO REMAINING CLOSEOUT BLOCKER; the full sequence completed in order — stage-level implementation reviews, M2.3 S6 acceptance, Decision 023, Decision 024 boundary governance, the final independent integrated Milestones 1 and 2 audit, Decision 025 documentation corrections, the bounded correction, the first independent verification, the final bounded fix, the final fresh independent rereview, and the explicit Milestone 0 standalone audit; Decisions 021, 022, 023, 024, 025, and 026 are all ACCEPTED, and Decisions 023, 024, and 025 were each independently confirmed by a session that authored none of them; Decision 021 section 19.11 is closed and no open schema finding remains; both required independent S6 reviews ran and passed and neither was performed by a session that wrote the work it reviewed; no S5, S5.4, or S6 acceptance or checkpoint blocker remains; the only nonblocking observation from the final rereview is the pilot_reserves PK-superset UNIQUE presentation note, which requires no correction; every accepted limitation remains ACTIVE and inherited by Milestone 3, with Decision 023 O1 still a future owner-ruling condition; no Milestone 3 phase has begun and none is authorized, and Milestone 3 master planning is the next authorized action
 DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controlling for crosswalk item 46 reserve-rank applicability only; reserve rank is applicable once per persisted reserve package and structurally not applicable for a selected target carrying the persisted REVIEW_PILOT_NO_COMPATIBLE_RESERVE disposition; structural non-applicability never makes a feasible S5 run manifest-ineligible; item 70 remains the total per-target reserve-coverage requirement; no synthetic package, reserve_rank 0, null, N/A, placeholder, or invented rank may be created or serialized; it supersedes and amends nothing, and changes no crosswalk row, item number, classification total, digest binding, hash preimage, manifest identity, canonicalization rule, or migration SQL byte
 DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; the controlling record for Stage S6 acceptance, delivered-path ratification, accepted limitations, and checkpoint authorization; formal outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; it ratifies retroactively the three forced-consequence test paths tests/unit/test_storage_catalog.py, tests/unit/test_m23_entity_selection_store.py, and tests/unit/test_m23_accession_selection_store.py as unavoidable consequences of authorized migration 0013, verified to change no production path, no S4 or S5 methodology, and no assertion's strength, with the rewritten corruption fixtures narrower and more fail-closed than the code they replaced, and it is a ratification of three named paths and never a general widening; it records accepted nonblocking limitations O1 empty sole-carrier crosswalk family fails closed, O2 owner-controlled release root, O3 atomicity governs newly created artifacts only, and O4 item-46 defence in depth; it confirms unchanged all 81 crosswalk rows, the totals D42 T30 X8 S9-1 S10-0 unclassified-0, every hash preimage, all nine migration 0013 digests, all eight triggers, migrations 0001 to 0012, and accepted S4 and S5 behaviour; it supersedes and amends nothing, adds no architecture, and grants no Stage S7, S8, S9, S10, or Milestone 3 authority
 DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; formal outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED; the controlling record for the Milestone 2 completion boundary, the transfer of the obligations formerly called S7 to S10 into Milestone 3, the Milestone 3 phase map M3.1 to M3.5, and the integrated-audit handoff; accepted M2.3 Stage S6 (commit 5c53412d820fe20a7bd727eac333ae2fb8724cd6, annotated tag m2.3-s6-complete, outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE) is the final implementation stage of Milestone 2; Milestone 2 is implementation-complete but NOT formally closed and remains open only for the final independent integrated Milestones 1 and 2 audit, bounded correction, fresh rereview where required, and formal closeout; the transfer preserves every gate, prohibition, owner ruling, validation requirement, identity, methodology, and accepted limitation intact and renames nothing else; Milestone 3 inherits frozen cohort windows and cutoffs, seed 20260725, official filing-date authority, acceptance-date audit-only treatment, plain and dashed accession rules, SEC user-agent requirements, rate limiting, response policy, raw-store and provenance rules, schema-drift rules, CompanyFacts-disabled policy, the Frames API prohibition, the external-corpora validation-only boundary, the leakage register including L01 L04 L10 and L18, accepted S4 isolation, accepted S5 and S6 behaviour, Decisions 013 016 018 019 020 021 022 023 and 024, and all accepted nonblocking limitations including Decision 023 O1 to O4; it supersedes and amends nothing, adds no architecture, changes no cohort boundary, cutoff, seed, SEC policy, identifier, temporal policy, leakage control, selection methodology, reserve, disposition, hash preimage, manifest identity, migration byte, or S4/S5/S6 behaviour, and GRANTS NO IMPLEMENTATION AUTHORITY — assignment of an obligation to Milestone 3 is not authorization to begin Milestone 3, implementation authorization is NO for every phase, each phase additionally requires a separate accepted governance record where applicable, a bounded implementation contract, explicit owner authorization, exact path authorization, and satisfaction of its inherited prerequisite gates, and Milestone 3 implementation may not begin before Milestone 1 and Milestone 2 closeout is complete; it authorized one governance-only commit and one push and NO tag
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; formal outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED; records the final independent integrated Milestones 1 and 2 audit result REQUIRES_BOUNDED_INTEGRATED_FIXES with Milestone 1, M2.1, M2.2, M2.3, Milestone 2 integrated, project governance, project reproducibility, project security and leakage, and project test adequacy all INTEGRATED_ACCEPTANCE_CONFIRMED, the Milestone 3 boundary GOVERNANCE_READY_IMPLEMENTATION_NOT_AUTHORIZED, and the single PROJECT_DOCUMENTATION_CLASSIFICATION REQUIRES_BOUNDED_FIX; the audit found no implementation, methodology, migration, hashing, selection, manifest, leakage, security, or test defect; the documentation defect was that Docs/sec_data_dictionary.md declared a scope covering the operational SQLite catalog while documenting only migrations 0001 to 0008, omitting the 21 pilot tables of migration 0009, the 0010 and 0011 policy rows, the one further table and four triggers of 0012 bringing the catalog to 22 pilot tables, and the eight triggers of 0013; the navigation defect was that Docs/preregistration.md section 25 was not clearly reachable as the deviation register; both are corrected; it supersedes and amends nothing, changes no schema, migration, database behaviour, production code, test, configuration, CI, methodology, selection rule, reserve rule, manifest rule, hash preimage, accepted decision outcome, or S4/S5/S6 behaviour, does not edit Docs/preregistration.md, and GRANTS NO IMPLEMENTATION AUTHORITY; it records the independence disclosure that the same conversation authored Decisions 023 and 024, which establishes no technical defect but requires a fresh independent verification by a session that authored none of Decisions 023, 024, 025 or the corrections before Milestones 1 and 2 may close; it authorized one documentation and governance commit and one push and NO tag
 IMPLEMENTATION_AUTHORIZATION: NO — every stage contract in Milestones/contracts/ is closed: m23_s6.md, m23_s5_4.md, m23_s5_2.md, and m23_s5_1.md are all ACCEPTED_AND_COMPLETE or accepted and superseded, and a completed contract authorizes nothing further; no Milestone 3 contract exists and Decision 024 is governance only, not a contract, and grants no implementation authority; all three S6 gates were satisfied and Stage S6 is accepted and checkpointed; any future S6 or S5.4 change requires a new explicit owner authorization and its own contract; no S5 selection or reserve is a published or owner-approved input and S6 creates only a proposed manifest over fixtures; Milestone 3 phases M3.1 to M3.5 (formerly S7 to S10 plus the new integrated acceptance phase) are defined at the governance boundary only — not planned in implementation detail, not contracted, not authorized, and not begun — no S7 contract exists, no Gate F implementation or live-metadata allowlist exists, no real candidate snapshot or real manifest exists, no root was approved, and no publication authority exists
 ACTIVE_STAGE_CONTRACT: Milestones/contracts/m23_s6.md
-NEXT_AUTHORIZED_ACTION: FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW — a fresh independent session, which must not have authored the bounded documentation fix it reviews, verifies that pilot_projection_recovery_events now carries the complete per-table schedule Decision 025 section 6.1 requires, that all 22 pilot_* tables satisfy that schedule against migrations 0001 to 0013, the DOC-2 registry rendering correction and the three precision corrections, that no implementation behaviour changed, the outstanding Milestone 0 closeout classification explicitly completed, and whether Milestones 0, 1, and 2 are ready for formal closeout. The fresh independent verification FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION has already run and returned REQUIRES_BOUNDED_VERIFICATION_FIXES, confirming Decisions 023, 024, and 025 each INDEPENDENT_ACCEPTANCE_CONFIRMED with no methodological, implementation, test, or governance defect, and raising exactly one closeout blocker DOC-1 plus one cosmetic issue DOC-2; both are corrected in this documentation-only pass under the authority Decision 025 section 6.1 already granted, with no new decision record required or created, and the rereview of that fix has NOT run and is not claimed to have passed. After it, in order: further bounded fixes and rereview if required; then formal closeout of Milestones 0, 1, and 2 in a separate governance-only session contingent on the rereview passing, which controls the closeout tags since none has been authorized; then Milestone 3 planning; and only then, separately, any Milestone 3 implementation authorization under Decision 024 section 8. Milestones 0, 1, and 2 are NOT closed, Milestone 3 is not contracted, not authorized, and not begun, no implementation authorization is active, and until closeout completes no Milestone 3 implementation may begin and no live SEC access, real pilot execution, real snapshot, real manifest construction, root approval, or publication is authorized
+NEXT_AUTHORIZED_ACTION: MILESTONE_3_MASTER_PLANNING — in a new chat and a fresh planning session, per Decision 026 sections 17 to 20. Milestones 0, 1, and 2 are formally closed (Decision 026, MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED), the closeout commit is pushed, and the three annotated completion tags m0-complete, m1-complete, and m2-complete exist at it; the sequence Decisions 024 section 9 and 025 section 9 fixed is complete, the final fresh independent rereview returned ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT, and no closeout blocker remains. Milestone 3 master planning MAY define M3.1 to M3.5 in planning detail within the scope Decision 024 section 5.1 already fixed, map the inherited gates and obligations of Decision 024 sections 5.2 and 6, design the operator runbook, define evidence packets, define offline rehearsal requirements, and propose future bounded contracts and owner decisions as proposals requiring separate owner acceptance. It MAY NOT implement production behaviour, create an implementation-authorizing contract, enable SEC network access, acquire live metadata, create a real snapshot, run a real pilot, construct a real manifest, approve a root, or publish anything. NO MILESTONE 3 IMPLEMENTATION AUTHORITY EXISTS — closure satisfied only the precondition Decision 024 section 8 imposed and granted nothing else, all five of that record's entry conditions still apply to every phase, implementation authorization is NO, no Milestone 3 contract exists, and no live SEC access, real pilot execution, real snapshot, real manifest construction, root approval, or publication is authorized
 ```

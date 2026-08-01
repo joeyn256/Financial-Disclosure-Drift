@@ -201,7 +201,7 @@ Formal outcome: **`M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED`**.
 | Why the record exists — the boundary the stopped integrated audit required | §1 |
 | **Accepted S6 is the end of Milestone 2 implementation**, with the checkpoint identifiers | §2 |
 | **The final scope of Milestone 2** — M2.1, M2.2, and M2.3 through accepted S6 | §3 |
-| **Milestone 2 is not closed** — open only for the audit, bounded correction, rereview, and closeout | §4 |
+| **Milestone 2 is not closed** *(as Decision 024 stood — the four steps §4 named are now complete and closure is recorded in Decision 026)* — open only for the audit, bounded correction, rereview, and closeout | §4 |
 | **The obligation transfer** and the **M3.1–M3.5 phase map** | §5, §5.1 |
 | **The traceability table** — per phase: inherited gates, prohibitions, owner decision, validation, implementation authorization | §5.2 |
 | Confirmation that every former obligation is preserved intact | §5.3 |
@@ -212,6 +212,12 @@ Formal outcome: **`M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED`**.
 | Negative confirmations — nothing began, nothing live, nothing real, nothing approved, nothing published | §10 |
 | What this record does not change | §11 |
 | Checkpoint authorization — one commit, one push, **no tag** | §13 |
+
+**Decision 024 remains controlling for the Milestone 2 → Milestone 3 obligation transfer**, and its
+§§2, 3, 5–8, and 11 stand exactly as approved. Only its §§4 and 9 sequencing has been *completed*
+rather than changed: the audit, the bounded corrections, and the rereviews all ran, and
+**Milestone 2 is now formally closed** by Decision 026. Decision 024 §8's five entry conditions for
+Milestone 3 implementation are **unaffected** and still apply in full.
 
 **Where the former S7–S10 obligations went.** Decision 021 §17 defined them as Stages S7–S10 and
 that text stands as written; Decision 024 §5.1 renames them without altering their substance. Read
@@ -248,6 +254,51 @@ schema, migration, code, test, configuration, methodology, hash, or accepted dec
 | **The independence disclosure** and why it is recorded rather than absorbed | §8 |
 | **The required sequence** — correction, fresh verification, closeout, then Milestone 3 planning | §9 |
 | Checkpoint authorization — one commit, one push, **no tag** | §11 |
+
+**That sequence is now complete.** The fresh verification ran, the bounded fixes it required were
+made, the fresh independent rereview of those fixes passed, and formal closeout is recorded in
+**Decision 026** below.
+
+## Decision 026 — ACCEPTED (final closeout of Milestones 0, 1, and 2)
+
+[Decision 026](Decisions/decision_026_milestones_0_1_2_final_closeout.md) is
+**`ACCEPTED — OWNER APPROVED 2026-07-31`** and **binding**. It **supersedes and amends nothing**:
+Decisions 001–025 all retain the authority they already hold, and **Decision 026 supersedes no
+methodology record**. It is a **closeout** record — **governance only, granting no Milestone 3
+implementation authority**. Formal outcome:
+**`MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`**.
+
+| Topic | Decision 026 section |
+|---|---|
+| Why the record exists — closure must bind, and a completion narrative does not | §1 |
+| **The closeout baseline** — commit `65a57f40…`, branch `main`, `HEAD == origin/main`, clean tree, chain through `0013` | §2 |
+| **The full review chain** — stage reviews, S6 acceptance, Decisions 023–025, the integrated audit, the bounded correction, the first independent verification, the final bounded fix, the final fresh rereview, and the explicit Milestone 0 standalone audit | §3 |
+| **The final rereview outcome** `ACCEPT_BOUNDED_FIXES_AND_AUTHORIZE_MILESTONES_0_1_AND_2_FORMAL_CLOSEOUT` | §4 |
+| **The sixteen final classifications**, recorded verbatim | §5 |
+| **Formal closeout of Milestone 0** — research question, novelty review, preregistration, frozen cohorts, outcome cutoffs, seed `20260725`, leakage register, deviation register and D001, governance foundation | §6 |
+| **Formal closeout of Milestone 1** — packaging, configuration, cohort mirror enforcement, CLI and exit codes, offline safety, secret and hygiene controls | §7 |
+| **Formal closeout of Milestone 2.1** — offline SEC policy, identifiers and temporal policy, response and rate-limit policy, storage/provenance/schema-drift/release/forecast boundaries, CompanyFacts-disabled and Frames-prohibited | §8 |
+| **Formal closeout of Milestone 2.2** — live-metadata readiness, SEC identity, transport isolation, request governance, raw-store provenance, offline test and CI boundaries | §9 |
+| **Formal closeout of Milestone 2.3 through Stage S6** — candidate and snapshot identity, selection, reserves and dispositions, persistence, reconstruction and replay, sealing, manifest construction, canonical serialization, lifecycle enforcement, verification and atomicity, accepted limitations | §10 |
+| **Completion confirmations** — implementation complete, migrations immutable, chain ends at `0013`, suite **2324 passed / 2 skipped**, all checks passed, no blocker | §11 |
+| **The inherited limitations register stays ACTIVE** — nothing is closed or erased by closure; **O1 remains a future owner-ruling condition** | §12 |
+| The nonblocking `pilot_reserves` PK-superset UNIQUE presentation observation — no correction required | §13 |
+| **The formal outcome** `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED` | §14 |
+| **Tag authorization** — the three annotated tags `m0-complete`, `m1-complete`, `m2-complete` | §15 |
+| Existing implementation-stage tags remain immutable; the completion tags supplement them | §16 |
+| **Milestone 3 becomes the next planning phase**, and **the next authorized action is `MILESTONE_3_MASTER_PLANNING`** | §§17–18 |
+| **What Milestone 3 master planning may do** — define M3.1–M3.5, map inherited gates, the operator runbook, evidence packets, offline rehearsal requirements, proposed contracts and decisions | §19 |
+| **What it may not do** — implement, create an authorizing contract, enable network access, acquire metadata, create a snapshot, run a pilot, construct a manifest, approve a root, publish | §20 |
+| **No Milestone 3 implementation authority** — closure satisfies only Decision 024 §8's precondition; all five entry conditions still apply | §21 |
+| Checkpoint authorization — one commit, one push, three annotated tags, one tag push | §22 |
+| Negative confirmations and what this record does not change | §§23–24 |
+
+**Which record answers which closeout question.** For whether a milestone is closed, what closure
+covers, and what is authorized next, read **Decision 026**. For where Milestone 2 implementation ends
+and where the former S7–S10 obligations went, read **Decision 024** — still controlling. For the
+integrated audit's findings and the documentation corrections, read **Decision 025** — still
+controlling. For the S6 architecture, item-46 applicability, and S6 acceptance, read **Decisions 021,
+022, and 023** respectively.
 
 ## Deviation register — where deviations are recorded
 

@@ -46,7 +46,7 @@ None is a module, a migration, a table, a CLI command, or a runtime path, and no
 | [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled `AVAILABLE NOW` or `PLANNED — NOT YET IMPLEMENTED` |
 | [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **Neither implemented and neither run** |
 | [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The versioned receipt for every live command — permitted fields, prohibited fields, serialization, storage, retention, redaction, replay, recovery, versioning, validation. **Creates no code and no table** |
-| [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus thirteen new Milestone 3 entries. **Closes none** |
+| [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus twelve new Milestone 3 entries. **Closes none** |
 | [`Docs/m3/templates/`](m3/templates/request_budget.md) | The eight frozen operational templates: request budget, Gate F, Gate H, schema-drift incident, interrupted-run recovery, real-snapshot evidence, root-hash approval, and the public evidence index |
 
 **Two rules these artifacts add to this map.**

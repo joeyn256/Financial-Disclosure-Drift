@@ -283,7 +283,7 @@ does **not** make them part of any governed preimage.
 3. **A prohibited field is a fail-closed condition**, not a warning: the receipt renderer refuses to
    emit, and the inspection command exits `4`.
 4. The prohibited-field scan is proven **non-vacuous** by a positive control — a deliberately
-   contaminated receipt that the scan must reject (offline rehearsal scenario R19).
+   contaminated receipt that the scan must reject (offline rehearsal scenario A12(a)).
 5. `reason_detail` is the only free-text field, is one short sentence, and is subject to the same
    scan.
 
@@ -296,7 +296,7 @@ does **not** make them part of any governed preimage.
 - The receipts of two replays of the same run **differ from each other** — different `receipt_id`,
   different timestamps, different elapsed seconds — while every governed identity and every document
   byte is **identical**.
-- **That difference is the proof, not a defect.** Offline rehearsal scenario R20 asserts exactly this:
+- **That difference is the proof, not a defect.** Offline rehearsal scenario A12(b) asserts exactly this:
   vary every operational value and no governed identity moves.
 - Replay never writes a receipt into the catalog, into the manifest document, or into any digest
   preimage.
@@ -382,7 +382,7 @@ Every receipt is validated at construction and again at inspection:
 | **Accounting consistency** | `actual_physical_attempt_count >= actual_logical_request_count`; `actual_physical_attempt_count <= approved_request_ceiling` for that window; per-route totals summing to the reported totals |
 | **Classification completeness** | Every response accounted for in exactly one classification bucket; no residual |
 | **Zero-network modes** | **`rehearsal`, `dry_run`, `offline_execution`, and `approval` receipts must report `actual_logical_request_count = 0` and `actual_physical_attempt_count = 0`.** A non-zero value is a fail-closed error, not a reporting convention (§4.5.1) |
-| **Simulated totals separated** | A `rehearsal` receipt carries `rehearsal_evidence_reference` and **no** simulated traffic in any actual-network field |
+| **Simulated totals separated** | A `rehearsal` receipt carries `rehearsal_evidence_reference` and **no** simulated traffic or object-accounting total in any actual-network or `C: live` field; those values exist only in the rehearsal evidence report |
 | **Window scoping** | A `live` receipt names its `acquisition_window`, and its ceiling and plan hash are that window's |
 | **Recovery chain** | `recovery_predecessor_receipt_id`, where present, resolves to a readable receipt |
 | **Canonical form** | Re-serializing the parsed receipt reproduces the file byte-for-byte |

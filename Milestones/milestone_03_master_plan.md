@@ -1,11 +1,11 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
-**Status:** `PLANNING_COMPLETE_PENDING_INDEPENDENT_REVIEW`
+**Status:** `PLANNING_COMPLETE_PENDING_INDEPENDENT_REREVIEW`
 **Implementation authorization:** `NO` — for every phase, without exception
 **Controlling record:** [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 (`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
 `M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`)
-**Next authorized action:** `INDEPENDENT_M3_MASTER_PLAN_REVIEW`
+**Next authorized action:** `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`
 
 **This document is a governance roadmap, not an authorization.** It plans five phases. It starts
 none of them. No Milestone 3 contract exists, no Milestone 3 implementation exists, no SEC network
@@ -171,7 +171,7 @@ fixes.
 
 **Every phase needs its own bounded contract** under `Milestones/contracts/`, written to the shape
 [`contracts/README.md`](contracts/README.md) requires and to the additional mandatory contents in
-§18 below. **This plan creates no contract.**
+§16 below. **This plan creates no contract.**
 
 Anticipated owner decisions, as proposals requiring separate acceptance:
 
@@ -789,8 +789,9 @@ retained. No raw object produced by a real retrieval exists to preserve, because
 
 ### 28. Recovery procedure
 
-An interrupted rehearsal is restarted from a clean synthetic data root; scenarios 6–10 of the
-rehearsal exist precisely to prove that restart is safe. An interrupted dry run is simply re-run: it
+An interrupted rehearsal is restarted from a clean synthetic data root; acquisition scenarios
+A9–A11 prove duplicate reconciliation, changed-body preservation, and interruption recovery. An
+interrupted dry run is simply re-run: it
 holds no state and writes no catalog row. If two dry runs disagree, **do not re-run until they
 agree** — the disagreement is the finding.
 
@@ -1460,18 +1461,18 @@ Stop and report on any of:
 2. **M3.3B beginning before M3.3A has passed its independent review**;
 3. any execution-rehearsal scenario E1–E8 failing, or being unimplemented, skipped, or `xfail`ed;
 4. snapshot-freeze validation failing any Decision 019 §9 obligation;
-3. stored identity corruption detected during reconstruction;
-4. the reconstructed result disagreeing with the persisted result on any field;
-5. replay performing any write;
-6. re-serialization not being byte-identical;
-7. any digest not recomputing from persisted rows;
-8. any of the seven Decision 021 §11.2 eligibility conditions failing;
-9. an empty sole-carrier crosswalk family (**O1** — refer, never resolve);
-10. infeasibility of the frozen design against the real candidate universe;
-11. any attempt to use the S4 draft as an input, or to mutate, delete, or promote it;
-12. any operational value reaching a governed identity;
-13. a manifest state beyond `proposed` being written, or any approval or publication field being set;
-14. any reserve substitution, discretionary trimming, or second selector appearing.
+5. stored identity corruption detected during reconstruction;
+6. the reconstructed result disagreeing with the persisted result on any field;
+7. replay performing any write;
+8. re-serialization not being byte-identical;
+9. any digest not recomputing from persisted rows;
+10. any of the seven Decision 021 §11.2 eligibility conditions failing;
+11. an empty sole-carrier crosswalk family (**O1** — refer, never resolve);
+12. infeasibility of the frozen design against the real candidate universe;
+13. any attempt to use the S4 draft as an input, or to mutate, delete, or promote it;
+14. any operational value reaching a governed identity;
+15. a manifest state beyond `proposed` being written, or any approval or publication field being set;
+16. any reserve substitution, discretionary trimming, or second selector appearing.
 
 ### 18. Retry and response-policy boundary
 
@@ -1918,8 +1919,10 @@ M3.4A commit.
 
 ### 33. Governance acceptance-commit policy
 
-**One bounded governance commit** carrying the approval decision record, the completed packet, and the
-status and navigation updates.
+**One bounded governance commit** carrying the approval decision record — which references the
+completed packet only by its SHA-256 and non-sensitive reference identifier, never the root — the
+public evidence-index update, and the status and navigation updates. **The completed packet is
+retained in the private evidence root (§12) and is never committed.**
 
 ### 34. Annotated tag policy
 
@@ -2056,13 +2059,13 @@ Stop and report on any of:
 3. **a completed evidence artifact found tracked in the public repository**, or an index entry whose
    digest does not match the private artifact it names;
 4. a Gate F or Gate H item not `PASS`;
-4. an identity that does not reproduce at review time;
-5. an approval that is not exact-hash specific;
-6. a limitation silently closed;
-7. a leakage control unproven;
-8. Git or tag state disagreeing with the record;
-9. a reviewer who wrote the work being asked to review it;
-10. publication or outcome analysis being proposed as part of acceptance.
+5. an identity that does not reproduce at review time;
+6. an approval that is not exact-hash specific;
+7. a limitation silently closed;
+8. a leakage control unproven;
+9. Git or tag state disagreeing with the record;
+10. a reviewer who wrote the work being asked to review it;
+11. publication or outcome analysis being proposed as part of acceptance.
 
 ### 18. Retry and response-policy boundary
 

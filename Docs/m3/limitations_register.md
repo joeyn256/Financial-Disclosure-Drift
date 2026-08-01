@@ -53,8 +53,8 @@ Every Milestone 3 phase:
 | Decision 023 §7 — S6 acceptance | 4 | 3 `ACTIVE`, **O1** `ACTIVE — OWNER RULING PENDING` |
 | Decision 024 — boundary consequences | 2 | all `ACTIVE` |
 | Decision 026 — standing obligations | 3 | all `ACTIVE` |
-| Milestone 3 — new at planning | 13 | all `ACTIVE`; **M3-L12** is `ACTIVE — OWNER RULING PENDING` |
-| **Total** | **38 active, 1 closed** | |
+| Milestone 3 — new at planning | 12 | all `ACTIVE`; **M3-L12** is `ACTIVE — OWNER RULING PENDING` |
+| **Total** | **37 active, 1 closed** | |
 
 ---
 
@@ -704,7 +704,7 @@ Every Milestone 3 phase:
 | **Security impact** | None |
 | **Operational impact** | Recovery requires the receipt chain, the raw-store state, and the catalog state to agree |
 | **Publication impact** | None |
-| **Mitigation** | Rehearsal scenarios R6–R8 and R10 model interruption at each boundary and prove duplicate prevention; the recovery template is mandatory |
+| **Mitigation** | Rehearsal scenario A11's four abort/recovery variants (a)–(d) model interruption at each boundary and prove duplicate prevention; the recovery template is mandatory |
 | **Stop condition** | **A safe-resume determination of `UNDETERMINED`.** Recovery uncertainty is a stop condition, not a judgement call |
 | **Required owner action** | A ruling on any `UNDETERMINED` state |
 | **Closure evidence** | A recovery record showing a clean resume with duplicate prevention proven, or a run that was never interrupted |

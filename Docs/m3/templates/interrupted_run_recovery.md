@@ -172,12 +172,12 @@ Complete **before** resuming. A resume without this proof is not authorized.
 |---|---|---|---|
 | 9.1 | Every already-committed logical request is identifiable by its request identity | `PROVEN` / `NOT PROVEN` | `_______` |
 | 9.2 | The resumed plan **excludes** every already-committed logical request | `PROVEN` / `NOT PROVEN` | `_______` |
-| 9.3 | A byte-identical body would reconcile to the existing object rather than create a second | `PROVEN` / `NOT PROVEN` | rehearsal R9(a) |
-| 9.4 | A differing body would become a **new observation**, never an overwrite | `PROVEN` / `NOT PROVEN` | rehearsal R9(b) |
-| 9.5 | An adopted orphan does not produce a second object or a second row | `PROVEN` / `NOT PROVEN` | rehearsal R7 |
-| 9.6 | Re-running an already-committed retrieval issues **zero** requests | `PROVEN` / `NOT PROVEN` | rehearsal R8 |
+| 9.3 | A byte-identical body would reconcile to the existing object rather than create a second | `PROVEN` / `NOT PROVEN` | rehearsal A9 |
+| 9.4 | A differing body would become a **new observation**, never an overwrite | `PROVEN` / `NOT PROVEN` | rehearsal A10 |
+| 9.5 | An adopted orphan does not produce a second object or a second row | `PROVEN` / `NOT PROVEN` | rehearsal A11(b) |
+| 9.6 | Re-running an already-committed retrieval issues **zero** requests | `PROVEN` / `NOT PROVEN` | rehearsal A11(d) |
 | 9.7 | For a selection: an identical restatement is idempotent and a differing one is refused | `PROVEN` / `NOT PROVEN` / `N/A` | accepted guards |
-| 9.8 | The final state after resume equals the state an uninterrupted run would have produced | `PROVEN` / `NOT PROVEN` | rehearsal R10 |
+| 9.8 | The final state after resume equals the state an uninterrupted run would have produced | `PROVEN` / `NOT PROVEN` | rehearsal A11(d) |
 
 ## 10. Resume authorization and execution
 

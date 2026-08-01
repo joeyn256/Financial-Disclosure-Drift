@@ -44,10 +44,12 @@ the production path it exercises.** Hence two rehearsals:
    disabled. An unimplemented scenario is a phase failure.
 7. **Reason codes come from the registered registry.** A scenario needing a code the registry does
    not contain is a stop-and-report condition, not licence to add one.
-8. **Receipts are produced for every rehearsal command**, `invocation_mode = "rehearsal"`, and in
-   that mode the **actual network counts are `0`** — simulated request and response totals belong to
-   the rehearsal evidence report, never to the receipt's actual-network fields
-   ([`execution_receipt_spec.md`](execution_receipt_spec.md) §4.5).
+8. **Receipts are produced for every rehearsal command.** Acquisition scenarios A1–A12 use
+   `invocation_mode = "rehearsal"`; execution scenarios E1–E8 use
+   `invocation_mode = "offline_execution"`. In both modes the **actual network counts are `0`**.
+   Simulated request, response, and object-accounting totals belong to the rehearsal evidence
+   report, never to receipt fields classified for `live` mode
+   ([`execution_receipt_spec.md`](execution_receipt_spec.md) §§4.5, 14).
 9. **No accepted module is modified** to make a scenario pass. A rehearsal exercises the accepted
    code; it does not adapt it.
 10. **All rehearsal evidence is private evidence.** Completed records live in the owner-controlled
@@ -260,7 +262,7 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Expected reason code** | `SOURCE_CONTENT_UNCHANGED` and `SOURCE_SNAPSHOT_REUSED` |
 | **Expected persisted state** | **One** object, a reuse recorded, **no** second object and **no** second observation row claiming new content |
 | **Expected files** | Exactly one raw object and one lineage sibling |
-| **Expected receipt** | `duplicate_object_count` incremented; `raw_object_count` **not** incremented on the second pass |
+| **Expected receipt** | `invocation_mode = "rehearsal"`; actual network counts `0`; the `C: live` fields `duplicate_object_count` and `raw_object_count` are **absent**. The simulated duplicate/new-object accounting is recorded in the rehearsal evidence report |
 | **Expected rollback** | none |
 | **Expected recovery** | none |
 | **Expected validation** | Content-addressing collapses identical bodies by identity, not by filename or timestamp |
@@ -277,7 +279,7 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Expected reason code** | `REMOTE_CONTENT_CHANGED` for the `living` source; `SOURCE_DATED_ARTIFACT_CHANGED` for the closed-quarter snapshot; `SOURCE_IMMUTABLE_IDENTITY_MUTATED` for the immutable identity. `SOURCE_CORRECTION_EXPLAINED` only where an official explanation is supplied |
 | **Expected persisted state** | A **new observation**, with the earlier observation retained and the supersession lineage recorded and non-cyclic |
 | **Expected files** | **Two** raw objects — **the first is never overwritten** |
-| **Expected receipt** | `raw_object_count` incremented; the change recorded |
+| **Expected receipt** | `invocation_mode = "rehearsal"`; actual network counts `0`; the `C: live` field `raw_object_count` is **absent**. The simulated new-object accounting and changed-body observation are recorded in the rehearsal evidence report |
 | **Expected rollback** | none |
 | **Expected recovery** | none |
 | **Expected validation** | **A differing later response is always a new observation and never an overwrite** (CLAUDE.md rule 6); a change at an immutable identity or a closed dated snapshot is an **anomaly requiring review**, not an ordinary update |
@@ -383,7 +385,7 @@ builder.** They cannot run at M3.1: the production paths do not exist there.
 | **Expected reason code** | `PILOT_CANDIDATE_SNAPSHOT_FROZEN` |
 | **Expected persisted state** | Candidate snapshot, entity, accession, registrant, and evidence rows written; the snapshot marked frozen and thereafter **immutable** |
 | **Expected files** | none beyond the catalog |
-| **Expected receipt** | `resulting_snapshot_id` recorded; rehearsal-mode network counts `0` |
+| **Expected receipt** | `invocation_mode = "offline_execution"`; `resulting_snapshot_id` recorded; actual network counts `0` |
 | **Expected rollback** | A failed freeze leaves **no** partial snapshot — the transaction is atomic |
 | **Expected recovery** | Re-attempt from the same inputs; the identity must be identical |
 | **Expected validation** | **Freezing twice from identical inputs yields an identical `snapshot_id`**; the frozen snapshot rejects mutation; the declared candidate-table component digests agree with the rows the snapshot actually contains (limitation **D021-L2**) |

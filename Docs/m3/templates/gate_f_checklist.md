@@ -156,7 +156,7 @@ Each family asserted refused, with a representative probe path that is rejected.
 | 9.5 | Expected request-class totals stated where derivable | `PASS`/`FAIL` | budget §4 |
 | 9.6 | Expected elapsed window stated | `PASS`/`FAIL` | budget §8 |
 | 9.7 | **Hard ceiling computed from the stated formula** | `PASS`/`FAIL` | budget §7 |
-| 9.8 | **Stop-before-overflow behaviour asserted**, not stop-after | `PASS`/`FAIL` | rehearsal R4 |
+| 9.8 | **Stop-before-overflow behaviour asserted**, not stop-after | `PASS`/`FAIL` | rehearsal A5 |
 
 **Acquisition window budgeted:** `M3.2A`
 **Planned unique logical requests:** `____`  **Hard ceiling:** `____`
@@ -186,7 +186,9 @@ after M3.2A freezes its bootstrap objects and is approved separately.
 | 11.4 | No pilot membership or stratification informed anything | `PASS`/`FAIL` |
 | 11.5 | The exact read set for this phase is stated below | `PASS`/`FAIL` |
 
-## 11.1 `CURRENT_PLANNER_DISCREPANCY` — must be resolved before Gate F passes
+**Exact read set:** `_______`
+
+## 12. `CURRENT_PLANNER_DISCREPANCY` — must be resolved before Gate F passes
 
 Decision 013 §1 states that coverage extends through the **closed 2026 Q2** quarter. The accepted
 planner classifies 2026 Q2 as the **provisional open quarter** and, with `include_open_quarter =
@@ -194,17 +196,15 @@ false`, **excludes** it.
 
 | # | Item | Result | Evidence |
 |---|---|---|---|
-| 11.1a | The discrepancy was diagnosed and its cause identified | `PASS`/`FAIL` | `_______` |
-| 11.1b | **Resolved** — the planner agrees with Decision 013 §1, **or** a new owner-approved decision changed that authority | `PASS`/`FAIL` | `_______` |
-| 11.1c | **Decision 013 was not silently changed** to accommodate the planner | `PASS`/`FAIL` | `_______` |
-| 11.1d | The request plan's required-quarter set matches accepted authority | `PASS`/`FAIL` | `_______` |
+| 12.1 | The discrepancy was diagnosed and its cause identified | `PASS`/`FAIL` | `_______` |
+| 12.2 | **Resolved** — the planner agrees with Decision 013 §1, **or** a new owner-approved decision changed that authority | `PASS`/`FAIL` | `_______` |
+| 12.3 | **Decision 013 was not silently changed** to accommodate the planner | `PASS`/`FAIL` | `_______` |
+| 12.4 | The request plan's required-quarter set matches accepted authority | `PASS`/`FAIL` | `_______` |
 
-**Gate F cannot pass while 11.1b is `FAIL`.** A request plan that disagrees with the accepted coverage
+**Gate F cannot pass while 12.2 is `FAIL`.** A request plan that disagrees with the accepted coverage
 cutoff is not a plan a budget can be approved against.
 
-**Exact read set:** `_______`
-
-## 12. Operator readiness acknowledgement
+## 13. Operator readiness acknowledgement
 
 > I have read the operator runbook end to end. I understand which commands exist and which are
 > labelled `PLANNED — NOT YET IMPLEMENTED`. I understand that the identity is never printed, that a
@@ -216,7 +216,7 @@ cutoff is not a plan a budget can be approved against.
 | Date (UTC) | `_______` |
 | Acknowledged | `YES` / `NO` |
 
-## 13. Blockers
+## 14. Blockers
 
 | # | Blocker | Severity | Resolution required | Resolved |
 |---|---|---|---|---|
@@ -224,7 +224,7 @@ cutoff is not a plan a budget can be approved against.
 
 **Any `FAIL`, any `UNKNOWN`, or any unresolved blocker means Gate F does not pass.**
 
-## 14. Owner sign-off
+## 15. Owner sign-off
 
 > I confirm that every item above is `PASS` or a justified `N/A`, that no live SEC request has been
 > placed, that the `CURRENT_PLANNER_DISCREPANCY` is resolved, and that the **M3.2A** request budget

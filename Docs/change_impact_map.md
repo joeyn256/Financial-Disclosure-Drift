@@ -486,7 +486,7 @@ exactly these files:
 | `Docs/m3/limitations_register.md` | **M3-L10** rewritten; **M3-L11** and **M3-L12** added | Markdown link-check only |
 | `Docs/m3/templates/evidence_index.md` | **new** — the public index of private evidence artifacts | Markdown link-check only |
 | `Docs/m3/templates/request_budget.md` | per-window; `A_reachable` derivation; contingency removed | Markdown link-check only |
-| `Docs/m3/templates/gate_f_checklist.md` | A1–A12; `A_reachable`; §11.1 planner-discrepancy gate | Markdown link-check only |
+| `Docs/m3/templates/gate_f_checklist.md` | A1–A12; `A_reachable`; §12 planner-discrepancy gate | Markdown link-check only |
 | `Docs/m3/templates/gate_h_checklist.md` | per-window reconciliation; §2.1 between-windows freeze and derivation | Markdown link-check only |
 | `Docs/m3/templates/schema_drift_incident.md` | window scoping | Markdown link-check only |
 | `Docs/m3/templates/interrupted_run_recovery.md` | window scoping; ceiling never raised mid-window | Markdown link-check only |

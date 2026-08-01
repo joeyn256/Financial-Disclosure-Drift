@@ -46,3 +46,11 @@ dist/
 
 .idea/
 .vscode/
+
+# Milestone 3 reserved operational-evidence path (M3-L11, Decision 028 section 11).
+# Completed operational evidence lives in an owner-controlled private root OUTSIDE this
+# repository. This entry is layer 1 of three and only stops accidental staging; because an
+# ignored path is invisible to `git ls-files --exclude-standard`, scripts/check_repo_hygiene.py
+# refuses this exact path explicitly (layer 2), and the M3 evidence-root validator refuses any
+# root inside, equal to, or containing the checkout (layer 3).
+/.m3-private-evidence

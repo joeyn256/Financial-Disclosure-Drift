@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Final, NamedTuple
 
 ALLOWED_DATA_FILES: Final[frozenset[str]] = frozenset({"data/README.md"})
+
+#: Reserved Milestone 3 operational-evidence path (M3-L11, Decision 028 section 11). Never a
+#: lawful evidence root, and never tracked. Kept in sync with
+#: ``disclosure_drift.m3.evidence_paths.RESERVED_EVIDENCE_DIRNAME``; the hygiene gate is a
+#: standalone script and does not import the package.
+RESERVED_EVIDENCE_DIRNAME: Final[str] = ".m3-private-evidence"
 FORBIDDEN_SUFFIXES: Final[tuple[str, ...]] = (
     ".sqlite",
     ".sqlite3",
@@ -67,6 +73,28 @@ def candidate_files(root: Path) -> list[str]:
     return sorted(entry for entry in completed.stdout.split("\0") if entry)
 
 
+def check_reserved_evidence_path(root: Path) -> list[Finding]:
+    """Refuse the reserved Milestone 3 evidence path, however it appears.
+
+    This check exists *because* ``/.m3-private-evidence`` is in ``.gitignore``. ``candidate_files``
+    enumerates with ``git ls-files --exclude-standard``, so an ignored path never appears in that
+    list -- the ignore rule alone would hide the very directory this gate must refuse. The check
+    therefore looks at the filesystem directly, and refuses a file, a directory, or a symlink at
+    the reserved path (M3-L11, Decision 028 section 11).
+    """
+    reserved = root / RESERVED_EVIDENCE_DIRNAME
+    if not reserved.exists() and not reserved.is_symlink():
+        return []
+    kind = "symlink" if reserved.is_symlink() else ("directory" if reserved.is_dir() else "file")
+    return [
+        Finding(
+            RESERVED_EVIDENCE_DIRNAME,
+            f"reserved Milestone 3 evidence path exists as a {kind}; completed operational "
+            f"evidence must live in an owner-controlled private root outside this repository",
+        )
+    ]
+
+
 def check_paths(files: list[str]) -> list[Finding]:
     """Return findings for forbidden paths and suffixes."""
     findings: list[Finding] = []
@@ -77,6 +105,10 @@ def check_paths(files: list[str]) -> list[Finding]:
             findings.append(Finding(entry, "generated or database artifact must not be tracked"))
         if entry == ".env":
             findings.append(Finding(entry, "environment file must not be tracked"))
+        if entry == RESERVED_EVIDENCE_DIRNAME or entry.startswith(f"{RESERVED_EVIDENCE_DIRNAME}/"):
+            findings.append(
+                Finding(entry, "reserved Milestone 3 evidence path must never be tracked")
+            )
     return findings
 
 
@@ -107,7 +139,9 @@ def main() -> int:
     """Run the hygiene gate and return a process exit code."""
     root = repository_root()
     files = candidate_files(root)
-    findings = check_paths(files) + check_home_paths(root, files)
+    findings = (
+        check_paths(files) + check_home_paths(root, files) + check_reserved_evidence_path(root)
+    )
 
     if findings:
         print(f"Repository hygiene FAILED: {len(findings)} finding(s).")

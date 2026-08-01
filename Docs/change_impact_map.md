@@ -320,6 +320,38 @@ pointed at, not altered. Decisions 021–024 and every completed contract are by
 **When Milestone 3 introduces schema, `Docs/sec_data_dictionary.md` must be extended in the same
 pass** — that is the standing lesson this correction records.
 
+## Bounded verification fix — completing the pilot data-dictionary coverage (documentation only, zero impact)
+
+The fresh independent verification required by [Decision 025](Decisions/decision_025_integrated_audit_documentation_corrections.md)
+§§8–9 confirmed Decisions 023, 024, and 025 independently and found the engineering, migrations,
+tests, methodology, hashing, reproducibility, security, and leakage controls sound. It returned
+`REQUIRES_BOUNDED_VERIFICATION_FIXES` on **one** closeout blocker and one cosmetic issue, both
+documentation-only, and both corrected here under the authority Decision 025 §6.1 already granted.
+**No new decision record is required, and none was created.**
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/sec_data_dictionary.md` | **DOC-1** — new §13.5 giving `pilot_projection_recovery_events` the complete per-table schedule §6.1 requires (migration `0009`; purpose; owning stage; `Operational-only` state class; 12 columns; PK `event_id`; FK `manifest_id` → `pilot_manifest_versions`; the exact uniqueness position; every material CHECK; append-only lifecycle and both immutability triggers; writer none; reader none; digest role none; the explicit input exclusions; the future-stage boundary). Plus three precision corrections — the `uq_pilot_candidate_accession_single_anchor` partial predicate, the candidate-entity strata index's leading `snapshot_id`, and the migration-`0012` feasible-transition trigger's declared event | Markdown link-check; verify against `sqlite_master` and `PRAGMA` output on a scratch `0001`–`0013` catalog |
+| `Docs/Decisions/decision_registry.md` | **DOC-2** — removes only the three blank lines that terminated the Markdown Index table before rows `023`, `024`, and `025`, so rows `001`–`025` render as one continuous table. No row content, status, title, date, supersession field, or summary changed | Markdown link-check; mechanical table-structure check |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | current-state ledger and machine-readable markers | `make context` resolves the markers |
+| `Milestones/contracts/README.md` | next-authorized-action pointer | Markdown link-check only |
+
+**Zero impact:** no production module, test, migration, configuration, or CI file changed; no
+methodology, schema, database behaviour, hash preimage, canonicalization rule, crosswalk row, or
+classification total changed; no data read, written, acquired, or published; no network boundary
+moved; **no implementation authority granted**. Decisions 021–025, every completed contract, and
+`Docs/preregistration.md` are byte-unchanged. The migration chain remains contiguous through `0013`
+with nothing beyond it, and migration `0013`'s normative region remains 10939 bytes over 186 lines
+at `7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595`.
+
+**The count distinction this correction preserves:** migration `0009` introduced **21** `pilot_*`
+tables, migration `0012` introduced **one** more (`pilot_selection_entity_reasons`), and the catalog
+through `0013` therefore holds **22**. All 22 now carry the complete §6.1 schedule.
+
+**The independent rereview of this fix has not yet run.** The next authorized action is
+`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`; Milestones 0, 1, and 2 remain open.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

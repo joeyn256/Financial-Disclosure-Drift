@@ -109,13 +109,23 @@ documentation finding. That correction is complete and recorded in
 (`INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED`), which is a decision record, **not a
 contract**, and grants no implementation authority.
 
-**The next authorized action is
-`FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION`** — a fresh independent
-session, which must have authored none of Decisions 023, 024, or 025 nor the documentation
-corrections. It is read-only, records no closeout, and authorizes no implementation. Formal
-Milestone 1 and Milestone 2 closeout follows only if that verification passes, in its own
-governance-only session which controls the closeout tags, and **Milestones 1 and 2 are not closed
-until then**.
+**That verification has run.** It confirmed **Decisions 023, 024, and 025 independently** — each
+`INDEPENDENT_ACCEPTANCE_CONFIRMED`, with **no methodological, implementation, test, or governance
+defect** — and returned `REQUIRES_BOUNDED_VERIFICATION_FIXES` on two documentation items: one
+closeout blocker (`Docs/sec_data_dictionary.md` gave 21 of 22 `pilot_*` tables the complete
+Decision 025 §6.1 schedule; `pilot_projection_recovery_events` was incomplete) and one cosmetic
+registry-rendering issue. **Both are corrected**, with three non-material precision notes, in a
+documentation-only pass under the authority Decision 025 §6.1 already granted. **No new decision
+record was required and none was created**, and **no contract in this directory changed.**
+
+**The next authorized action is `FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`** — a fresh
+independent session, which must not have authored the bounded fix it reviews. It is read-only,
+records no closeout, and authorizes no implementation; it also explicitly completes the outstanding
+**Milestone 0** closeout classification. **The rereview has not run and nothing here claims it
+passed.** Formal Milestone 0, 1, and 2 closeout follows only if it passes, in its own
+governance-only session which controls the closeout tags, and **Milestones 0, 1, and 2 are not
+closed until then**. **Milestone 3 remains not contracted, not authorized, and not begun, and no
+implementation authorization is active.**
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

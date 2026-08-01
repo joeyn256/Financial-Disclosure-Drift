@@ -249,6 +249,43 @@ and **Milestone 2 is not closed**. See "Current stage" below.
   disclosure** that the same conversation authored Decisions 023 and 024, which establishes no
   technical defect but requires a **fresh independent verification** before closeout.
 
+## Bounded documentation fix — complete, rereview outstanding
+
+The fresh independent verification required by Decision 025 §§8–9 has **run**. It confirmed
+**Decisions 023, 024, and 025 independently** — each `INDEPENDENT_ACCEPTANCE_CONFIRMED` — and found
+**no methodological, implementation, test, or governance defect**: the migration chain, the nine
+migration-`0013` digests, the 81-item crosswalk and its totals, the ten delivered S6 paths and the
+three ratified forced-consequence test paths, the obligation transfer into M3.1–M3.5, the deviation
+register, and the correction commit's nonchange were all reproduced independently rather than
+inherited. It returned **`REQUIRES_BOUNDED_VERIFICATION_FIXES`** on exactly two documentation items:
+
+- **DOC-1 (the closeout blocker).** `Docs/sec_data_dictionary.md` gave 21 of the 22 `pilot_*` tables
+  the complete per-table schedule Decision 025 §6.1 requires;
+  **`pilot_projection_recovery_events`** carried only its name, state class, and no-writer status.
+- **DOC-2 (cosmetic, pre-existing).** Blank lines before registry rows `023`, `024`, and `025`
+  terminated the Markdown Index table.
+
+**Both are now corrected**, together with three non-material precision notes, under the authority
+Decision 025 §6.1 already granted. **No new decision record was required and none was created.**
+`Docs/sec_data_dictionary.md` gains §13.5 covering `pilot_projection_recovery_events` in full —
+migration `0009`, purpose, owning stage, `Operational-only` state class, 12 columns, PK `event_id`,
+FK `manifest_id` → `pilot_manifest_versions`, the exact uniqueness position, every material CHECK,
+the append-only lifecycle and both immutability triggers, writer none, reader none, digest role
+none, the explicit exclusion from every manifest, component-digest, selection-result, root, and
+manifest-identity input, and an explicit future-stage boundary. **All 22 `pilot_*` tables now carry
+the complete schedule**, and the count distinction is preserved: **21** introduced by migration
+`0009`, **one** more by `0012`, **22** through `0013`.
+
+**Documentation only.** No production, test, migration, configuration, CI, methodology, schema,
+hash, or database-behaviour byte changed; Decisions 021–025, every completed contract, and
+`Docs/preregistration.md` are byte-unchanged; no tag was created or moved.
+
+**The independent rereview of this fix has not run, and nothing here claims it passed.** The next
+authorized action is **`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`**, which must also
+explicitly complete the outstanding **Milestone 0** closeout classification. **Milestones 0, 1, and
+2 remain open and are not formally closed.** **Milestone 3 remains not contracted, not authorized,
+and not begun**, and **no implementation authorization is active.**
+
 ## Current stage
 
 **M2.3 Stage S6 (pilot manifest construction, terminal result identity, and the publication
@@ -553,35 +590,36 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**Run the fresh independent verification —
-`FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION`.** The final independent
-integrated Milestones 1 and 2 audit has run and returned `REQUIRES_BOUNDED_INTEGRATED_FIXES`,
-confirming integrated acceptance in **nine** categories with **no implementation, methodology,
-migration, hashing, selection, manifest, leakage, security, or test defect**, and identifying one
-bounded documentation defect. That correction is complete and recorded in
-[Decision 025](../Docs/Decisions/decision_025_integrated_audit_documentation_corrections.md).
+**Run the fresh independent bounded-documentation rereview —
+`FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW`.** The fresh independent verification
+(`FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION`) has **run** and returned
+`REQUIRES_BOUNDED_VERIFICATION_FIXES`, confirming **Decisions 023, 024, and 025 independently** with
+**no methodological, implementation, test, or governance defect** and one closeout blocker plus one
+cosmetic documentation issue. **Both are corrected** — see "Bounded documentation fix" above.
 
-The next session is **fresh and independent**, and must have authored none of Decisions 023, 024, or
-025, nor the documentation corrections. It verifies:
+The next session is **fresh and independent**, and must not have authored the bounded fix it
+reviews. It verifies:
 
-- the corrected `Docs/sec_data_dictionary.md` against migrations `0001`–`0013`;
-- the deviation-register navigation to `Docs/preregistration.md` §25;
-- **Decisions 023, 024, and 025** independently;
-- that no implementation behaviour changed;
-- and whether Milestones 1 and 2 may advance to formal closeout.
+- that `pilot_projection_recovery_events` now carries the complete per-table schedule;
+- that **all 22** `pilot_*` tables satisfy Decision 025 §6.1, against migrations `0001`–`0013`;
+- **DOC-2** and the three precision corrections;
+- that **no implementation behaviour changed**;
+- **the outstanding Milestone 0 closeout classification**, explicitly completed;
+- and whether Milestones 0, 1, and 2 are ready for formal closeout.
 
-**The sequence from here, in order** (Decision 025 §9):
+**The sequence from here, in order:**
 
-1. `FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION` — the next authorized action;
-2. **bounded fixes and rereview**, if it returns findings;
-3. **formal closeout of Milestones 1 and 2**, in a separate governance-only session, **only after
-   verification passes**. That session controls the closeout tags; none has been authorized;
+1. `FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW` — the next authorized action;
+2. **further bounded fixes and rereview**, if it returns findings;
+3. **formal closeout of Milestones 0, 1, and 2**, in a separate governance-only session, **only
+   after the rereview passes**. That session controls the closeout tags; none has been authorized;
 4. **Milestone 3 planning** only after closeout, and Milestone 3 implementation only under
    Decision 024 §8's five entry conditions.
 
-**Milestones 1 and 2 are not closed.** Until closeout completes, **no Milestone 3 implementation may
-begin**, and no live SEC access, real pilot execution, real snapshot, real manifest construction,
-root approval, or publication is authorized.
+**Milestones 0, 1, and 2 are not closed**, and **nothing here claims the rereview has passed**.
+Until closeout completes, **no Milestone 3 implementation may begin**, and no live SEC access, real
+pilot execution, real snapshot, real manifest construction, root approval, or publication is
+authorized.
 
 **Historical — the approval path that closed the first two gates.**
 S6 governance is drafted and has been through **three** full review cycles: the v0.1 review returned
@@ -687,5 +725,5 @@ DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; formal outcome M2_M
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; formal outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED; records the final independent integrated Milestones 1 and 2 audit result REQUIRES_BOUNDED_INTEGRATED_FIXES with Milestone 1, M2.1, M2.2, M2.3, Milestone 2 integrated, project governance, project reproducibility, project security and leakage, and project test adequacy all INTEGRATED_ACCEPTANCE_CONFIRMED, the Milestone 3 boundary GOVERNANCE_READY_IMPLEMENTATION_NOT_AUTHORIZED, and the single PROJECT_DOCUMENTATION_CLASSIFICATION REQUIRES_BOUNDED_FIX; the audit found no implementation, methodology, migration, hashing, selection, manifest, leakage, security, or test defect; the documentation defect was that Docs/sec_data_dictionary.md declared a scope covering the operational SQLite catalog while documenting only migrations 0001 to 0008, omitting the 21 pilot tables of migration 0009, the 0010 and 0011 policy rows, the one further table and four triggers of 0012 bringing the catalog to 22 pilot tables, and the eight triggers of 0013; the navigation defect was that Docs/preregistration.md section 25 was not clearly reachable as the deviation register; both are corrected; it supersedes and amends nothing, changes no schema, migration, database behaviour, production code, test, configuration, CI, methodology, selection rule, reserve rule, manifest rule, hash preimage, accepted decision outcome, or S4/S5/S6 behaviour, does not edit Docs/preregistration.md, and GRANTS NO IMPLEMENTATION AUTHORITY; it records the independence disclosure that the same conversation authored Decisions 023 and 024, which establishes no technical defect but requires a fresh independent verification by a session that authored none of Decisions 023, 024, 025 or the corrections before Milestones 1 and 2 may close; it authorized one documentation and governance commit and one push and NO tag
 IMPLEMENTATION_AUTHORIZATION: NO — every stage contract in Milestones/contracts/ is closed: m23_s6.md, m23_s5_4.md, m23_s5_2.md, and m23_s5_1.md are all ACCEPTED_AND_COMPLETE or accepted and superseded, and a completed contract authorizes nothing further; no Milestone 3 contract exists and Decision 024 is governance only, not a contract, and grants no implementation authority; all three S6 gates were satisfied and Stage S6 is accepted and checkpointed; any future S6 or S5.4 change requires a new explicit owner authorization and its own contract; no S5 selection or reserve is a published or owner-approved input and S6 creates only a proposed manifest over fixtures; Milestone 3 phases M3.1 to M3.5 (formerly S7 to S10 plus the new integrated acceptance phase) are defined at the governance boundary only — not planned in implementation detail, not contracted, not authorized, and not begun — no S7 contract exists, no Gate F implementation or live-metadata allowlist exists, no real candidate snapshot or real manifest exists, no root was approved, and no publication authority exists
 ACTIVE_STAGE_CONTRACT: Milestones/contracts/m23_s6.md
-NEXT_AUTHORIZED_ACTION: FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION — a fresh independent session, which must have authored none of Decisions 023, 024, or 025 nor the documentation corrections, verifies the corrected Docs/sec_data_dictionary.md against migrations 0001 to 0013, the deviation-register navigation to Docs/preregistration.md section 25, Decisions 023, 024, and 025 independently, that no implementation behaviour changed, and whether Milestones 1 and 2 may advance to formal closeout. The final independent integrated Milestones 1 and 2 audit has already run and returned REQUIRES_BOUNDED_INTEGRATED_FIXES with nine categories confirmed INTEGRATED_ACCEPTANCE_CONFIRMED and no implementation, methodology, migration, hashing, selection, manifest, leakage, security, or test defect; its single bounded documentation finding is corrected and recorded in Decision 025. After it, in order: bounded fixes and rereview if required; then formal closeout of Milestones 1 and 2 in a separate governance-only session contingent on verification passing, which controls the closeout tags since none has been authorized; then Milestone 3 planning; and only then, separately, any Milestone 3 implementation authorization under Decision 024 section 8. Milestones 1 and 2 are NOT closed, and until closeout completes no Milestone 3 implementation may begin and no live SEC access, real pilot execution, real snapshot, real manifest construction, root approval, or publication is authorized
+NEXT_AUTHORIZED_ACTION: FRESH_INDEPENDENT_BOUNDED_DOCUMENTATION_REREVIEW — a fresh independent session, which must not have authored the bounded documentation fix it reviews, verifies that pilot_projection_recovery_events now carries the complete per-table schedule Decision 025 section 6.1 requires, that all 22 pilot_* tables satisfy that schedule against migrations 0001 to 0013, the DOC-2 registry rendering correction and the three precision corrections, that no implementation behaviour changed, the outstanding Milestone 0 closeout classification explicitly completed, and whether Milestones 0, 1, and 2 are ready for formal closeout. The fresh independent verification FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION has already run and returned REQUIRES_BOUNDED_VERIFICATION_FIXES, confirming Decisions 023, 024, and 025 each INDEPENDENT_ACCEPTANCE_CONFIRMED with no methodological, implementation, test, or governance defect, and raising exactly one closeout blocker DOC-1 plus one cosmetic issue DOC-2; both are corrected in this documentation-only pass under the authority Decision 025 section 6.1 already granted, with no new decision record required or created, and the rereview of that fix has NOT run and is not claimed to have passed. After it, in order: further bounded fixes and rereview if required; then formal closeout of Milestones 0, 1, and 2 in a separate governance-only session contingent on the rereview passing, which controls the closeout tags since none has been authorized; then Milestone 3 planning; and only then, separately, any Milestone 3 implementation authorization under Decision 024 section 8. Milestones 0, 1, and 2 are NOT closed, Milestone 3 is not contracted, not authorized, and not begun, no implementation authorization is active, and until closeout completes no Milestone 3 implementation may begin and no live SEC access, real pilot execution, real snapshot, real manifest construction, root approval, or publication is authorized
 ```

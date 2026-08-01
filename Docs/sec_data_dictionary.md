@@ -321,7 +321,7 @@ column carries `CHECK (length(x) = 64 AND x NOT GLOB '*[^0-9a-f]*')`.
 | **Quota state** | `pilot_quota_results`, `pilot_quota_result_members`, `pilot_selected_entity_quota_contributions`, `pilot_selected_accession_quota_contributions` |
 | **Reserve state** | `pilot_reserves`, `pilot_reserve_accessions`, `pilot_reserve_quota_contributions`, `pilot_selection_entity_reasons` |
 | **Manifest state** | `pilot_manifest_versions` |
-| **Operational-only** | `pilot_projection_recovery_events` (no writer; Decision 021 §16) |
+| **Operational-only** | `pilot_projection_recovery_events` (no writer; Decision 021 §16 — documented in §13.5) |
 
 ### 9.2 Stage boundaries
 
@@ -349,9 +349,9 @@ tables; accepted tests populate them from fixtures.
 | Table | PK | Key uniqueness / FKs | Material CHECKs | Role |
 |---|---|---|---|---|
 | `pilot_candidate_snapshots` | `snapshot_id` (64-hex, content-derived) | FK `census_run_id` → `ops_ingestion_jobs`; FK `invalidated_reason_code` → `reference_reason_codes` | `snapshot_state IN ('building','frozen','invalidated')`; `include_open_quarter = 0`; each declared `*_sha256` 64-hex-or-NULL; state-conditional presence of counts and digests | Frozen snapshot header. Its 22 declared fields are the entire `candidate_tables_sha256` preimage (Decision 021 §8.2) |
-| `pilot_candidate_entities` | (`snapshot_id`, `cik_numeric`) | FK → `pilot_candidate_snapshots`; idx on tie-break and on (`size_stratum`,`industry_family`,`history_class`) | `candidate_category IN ('operating','control','ineligible')`; control ⇔ `control_kind`; `primary_universe_eligible` requires operating + provisional evidence; paired `(value IS NULL) = (resolution_sha256 IS NULL)` for size/industry/history | Candidate entity state. Feeds `entity_content_sha256` → `selection_input_sha256` |
+| `pilot_candidate_entities` | (`snapshot_id`, `cik_numeric`) | FK → `pilot_candidate_snapshots`; idx on tie-break and on (`snapshot_id`,`size_stratum`,`industry_family`,`history_class`) | `candidate_category IN ('operating','control','ineligible')`; control ⇔ `control_kind`; `primary_universe_eligible` requires operating + provisional evidence; paired `(value IS NULL) = (resolution_sha256 IS NULL)` for size/industry/history | Candidate entity state. Feeds `entity_content_sha256` → `selection_input_sha256` |
 | `pilot_candidate_accessions` | (`snapshot_id`, `accession_plain`) | UNIQUE (`snapshot_id`,`accession_number_dashed`); FK → snapshot, `reference_form_types` | `filing_date_precedence IS NULL OR = 2`; cohort/xbrl/amendment evidence-level enums; `is_amendment = 1` ⇔ linkage state present; four `*_eligible` flags | Candidate accession state. **`accession_plain` is the database and FK identity; `accession_number_dashed` is the canonical form for hashing and presentation** (Decision 018 §5) |
-| `pilot_candidate_accession_registrants` | (`snapshot_id`,`accession_plain`,`registrant_cik_numeric`) | **UNIQUE `uq_pilot_candidate_accession_single_anchor` (`snapshot_id`,`accession_plain`)** — one anchor per accession | `role IN ('anchor','associated','submitter_only')`; `(role='anchor') = (is_anchor=1)` | Multi-registrant relationships |
+| `pilot_candidate_accession_registrants` | (`snapshot_id`,`accession_plain`,`registrant_cik_numeric`) | **partial UNIQUE `uq_pilot_candidate_accession_single_anchor` (`snapshot_id`,`accession_plain`) `WHERE is_anchor = 1`** — one anchor per accession | `role IN ('anchor','associated','submitter_only')`; `(role='anchor') = (is_anchor=1)` | Multi-registrant relationships |
 | `pilot_candidate_entity_evidence` | `evidence_id` | FK → `pilot_candidate_entities`; idx on (`snapshot_id`,`cik_numeric`,`classification_dimension`) | `classification_dimension IN ('size','industry','history','primary_universe','identity')`; `evidence_role IN ('winning','competing','supporting')`; `precedence >= 1` | Source evidence (Decision 014; Decision 019 conversions) |
 | `pilot_candidate_accession_evidence` | `evidence_id` | FK → `pilot_candidate_accessions` | as above, over the accession dimensions | Source evidence |
 | `pilot_candidate_entity_reasons` | (`snapshot_id`,`cik_numeric`,`reason_scope`,`reason_code`) | FK `reason_code` → `reference_reason_codes` | `reason_scope IN ('eligibility','size','industry','history','primary_universe','identity')` | Candidate audit trail; §10 crosswalk items 44 and 76 |
@@ -397,7 +397,7 @@ never overwrites, and a stored-content mismatch is a `GateFailureError`.
 | `pilot_selection_entity_reasons_insert_guard` | `pilot_selection_entity_reasons` | `BEFORE INSERT` | a disposition may be written only inside the run's `running` window |
 | `pilot_selection_entity_reasons_update_guard` | `pilot_selection_entity_reasons` | `BEFORE UPDATE` | `selection_run_id`, `snapshot_id`, and `cik_numeric` immutable; checks **both** the OLD and the NEW associated run |
 | `pilot_selection_entity_reasons_delete_guard` | `pilot_selection_entity_reasons` | `BEFORE DELETE` | dispositions are not deleted outside the `running` window |
-| `pilot_selection_run_feasible_requires_reserve_disposition` | `pilot_selection_runs` | `BEFORE UPDATE` (`running → feasible`) | **total, mutually exclusive** reserve coverage for every selected target before the run may reach `feasible` |
+| `pilot_selection_run_feasible_requires_reserve_disposition` | `pilot_selection_runs` | `BEFORE UPDATE OF run_state` | **total, mutually exclusive** reserve coverage for every selected target before the run may reach `feasible`. Its `WHEN` condition narrows the trigger to the single transition `NEW.run_state = 'feasible' AND OLD.run_state = 'running'`; the declared event itself is the unqualified `BEFORE UPDATE OF run_state` |
 
 **Coverage rule (Decision 020 §7.1, Decision 022).** Every selected target carries **exactly one**
 of: one rank-1 package, or one `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` disposition. Never both, never
@@ -490,6 +490,47 @@ byte-identical on re-serialization. **The row and the file commit together or no
 injected fault leaves no new row and no new file. `verify_pilot_manifest` re-derives every digest,
 the root, `manifest_id`, and the document from persisted rows and fails closed on any difference.
 **Idempotent replay reads, reconstructs, compares, and returns without writing.**
+
+### 13.5 `pilot_projection_recovery_events` — schema ahead of its writer
+
+The twenty-second pilot table, and the only one with **no writer, no reader, and no digest role**.
+Migration `0009` created it as part of the Decision 016 §5 table family; Decision 016 rejected reusing
+`census_projection_recovery_events` for pilot-manifest projection faults and required a **dedicated**
+table, so that a pilot fault and a census fault never contend for the same identifier space or
+detection logic. **Decision 021 §16 leaves it unwritten at Stage S6, and writing it is an explicit S6
+stop condition (§21).** It is documented here because it exists in the catalog, not because anything
+populates it.
+
+| Table | Migration | PK | Key uniqueness / FKs | Material CHECKs | Lifecycle / role |
+|---|---|---|---|---|---|
+| `pilot_projection_recovery_events` | `0009` | `event_id` | no UNIQUE beyond the primary key; FK `manifest_id` → `pilot_manifest_versions` (`manifest_id`), `ON DELETE NO ACTION`; non-unique idx `idx_pilot_projection_recovery_manifest` (`manifest_id`,`resolution_state`) | `expected_count` / `observed_count` each NULL-or-`>= 0`; `resolution_state IN ('blocked','resolved')`; `release_blocking_before_resolution IN (0,1)`; `release_blocking_after_resolution` NULL-or-`IN (0,1)`; **`(resolution_state = 'resolved') = (resolved_at_utc IS NOT NULL)`**; `resolution_state = 'blocked' OR release_blocking_after_resolution IS NOT NULL` | **Append-only.** Twelve columns. Two migration-`0009` triggers — `pilot_projection_recovery_events_immutable_update` (`BEFORE UPDATE`) and `pilot_projection_recovery_events_immutable_delete` (`BEFORE DELETE`) — both unconditional `RAISE(ABORT, 'pilot projection recovery events are append-only')`. A recorded event is never edited and never removed |
+
+**Identity columns.** `event_id` is the row identity and **may be a UUID**: Decision 016 §1 permits
+that for operational event IDs precisely because event identity is excluded from every deterministic
+hash. `manifest_id` is the only relationship the table carries.
+
+**Owning stage.** The operational S6 boundary: the table is the deferred projection-recovery surface
+governed by [Decision 021](Decisions/decision_021_m23_s6_manifest_construction.md) §16, which leaves
+it unwritten. No accepted record assigns it an implementing stage.
+
+**Accepted writer: none currently implemented. Accepted reader: none currently implemented.** No
+module in `src/` references this table at all (§9.2) — neither to write it nor to read it. There is
+therefore no reconstruction path over it, because there is nothing persisted to reconstruct.
+
+**Digest or identity role: none, explicitly.** It is **not a manifest input, not a component-digest
+input, not a `selection_result_sha256` input, not a `root_manifest_sha256` input, and not a
+`manifest_id` input.** It appears nowhere in the §13.3 dependency map. Decision 021 §10 exclusion 5
+states that `pilot_projection_recovery_events` **is never hashed into any digest**, because it is
+operational and S6 writes it not at all; its `event_id`, its free-text `detail`, and its timestamps
+are each independently in Decision 016 §8's excluded-from-hashing set.
+
+**State class:** Operational-only (§9.1).
+
+**Future-stage boundary.** **Documenting this table authorizes nothing.** It creates no writer, no
+reader, no CLI surface, no publication action, and no Milestone 3 implementation. A writer for it
+requires its own accepted governance record, a bounded implementation contract, and explicit owner
+authorization, exactly as [Decision 024](Decisions/decision_024_m2_m3_boundary_governance.md) §8
+requires of every Milestone 3 phase — none of which has begun or is authorized.
 
 ## 14. Migration-to-dictionary coverage
 

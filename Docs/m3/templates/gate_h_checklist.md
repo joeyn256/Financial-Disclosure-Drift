@@ -22,7 +22,10 @@ and that nothing beyond acquisition has happened yet.
 
 ## 0. Handling
 
-- **Non-secret document.** Counts, route names, hashes, reason codes, and outcomes only.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **Non-secret content even so.** Counts, route names, hashes, reason codes, and outcomes only.
 - **Never record** the SEC identity, any credential, any absolute personal path, or any response
   body. Cite a `receipt_id` and a reason code, not a payload.
 - **Every item is `PASS`, `FAIL`, or `N/A` with a reason.**
@@ -39,10 +42,14 @@ and that nothing beyond acquisition has happened yet.
 | Repository baseline commit | `_______` |
 | Baseline tag | `_______` |
 | Governing contract | `_______` |
-| Acquisition run identifier | `_______` |
-| **Approved request-plan hash** | `_______` |
-| **Approved hard ceiling** | `____` |
-| Request-budget document reference | `_______` |
+| M3.2A acquisition run identifier | `_______` |
+| M3.2B acquisition run identifier | `_______` |
+| **M3.2A approved request-plan hash** | `_______` |
+| **M3.2A approved hard ceiling** | `____` |
+| **M3.2B approved request-plan hash** | `_______` |
+| **M3.2B approved hard ceiling** | `____` |
+| M3.2A request-budget reference | `_______` |
+| M3.2B request-budget reference | `_______` |
 | Gate F checklist reference | `_______` |
 | Execution receipt identifiers (all) | `_______` |
 
@@ -58,6 +65,19 @@ and that nothing beyond acquisition has happened yet.
 | 2.6 | **No stale `.part` files** | `PASS`/`FAIL` | `_______` |
 | 2.7 | **No unresolved recovery events** | `PASS`/`FAIL` | `_______` |
 | 2.8 | Approved plan hash saved | `PASS`/`FAIL` | hash |
+| 2.9 | Pre-run state re-established **before each window**, not once for both | `PASS`/`FAIL` | `_______` |
+
+## 2.1 Between-windows freeze and derivation
+
+| # | Item | Result | Evidence |
+|---|---|---|---|
+| 2.1a | **Transport disabled after M3.2A**, before any derivation | `PASS`/`FAIL` | `_______` |
+| 2.1b | Bootstrap raw objects **frozen and identified** by content-addressed identity | `PASS`/`FAIL` | `_______` |
+| 2.1c | Historical-submission references **derived from the frozen bulk-submissions object** | `PASS`/`FAIL` | `_______` |
+| 2.1d | Entity reconciliation set derived from the frozen objects | `PASS`/`FAIL` | `_______` |
+| 2.1e | **Second zero-request plan produced**, with its own hash | `PASS`/`FAIL` | `_______` |
+| 2.1f | **Second exact owner approval recorded** before M3.2B opened | `PASS`/`FAIL` | `_______` |
+| 2.1g | The derived set matches what the frozen objects actually name | `PASS`/`FAIL` | `_______` |
 
 ## 3. Actual versus planned requests
 
@@ -77,9 +97,11 @@ and that nothing beyond acquisition has happened yet.
 | # | Item | Result |
 |---|---|---|
 | 3.1 | Every divergence is explained by a plan rule (retry, redirect, cooldown, cache hit, not-modified) | `PASS`/`FAIL` |
-| 3.2 | **Actual physical attempts strictly below the approved ceiling** | `PASS`/`FAIL` |
-| 3.3 | **No unexplained request was placed** | `PASS`/`FAIL` |
-| 3.4 | The plan hash the run consumed equals the approved plan hash | `PASS`/`FAIL` |
+| 3.2 | **Actual physical attempts strictly below each window's approved ceiling** | `PASS`/`FAIL` |
+| 3.3 | **No unexplained request was placed** in either window | `PASS`/`FAIL` |
+| 3.4 | Each window consumed its own approved plan hash | `PASS`/`FAIL` |
+| 3.5 | **No dependent request in M3.2A, and no bootstrap request in M3.2B** | `PASS`/`FAIL` |
+| 3.6 | **No M3.2B request was issued under the M3.2A approval** | `PASS`/`FAIL` |
 
 ## 4. Route compliance
 
@@ -240,7 +262,7 @@ and that nothing beyond acquisition has happened yet.
 |---|---|---|---|
 | 14.1 | **Network is disabled again** in the effective configuration | `PASS`/`FAIL` | `network: disabled (safe default)` |
 | 14.2 | The live flag is not set in any persisted configuration | `PASS`/`FAIL` | `_______` |
-| 14.3 | Verified **after** the last request and **before** this checklist was signed | `PASS`/`FAIL` | `_______` |
+| 14.3 | Verified **after each window's last request**, and again before this checklist was signed | `PASS`/`FAIL` | `_______` |
 
 ## 15. Catalog integrity
 

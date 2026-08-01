@@ -4,11 +4,15 @@
 Copy it, fill every field, and retain the completed copy as evidence. Do not edit this template in
 place.
 
-**Purpose:** to state, route by route, exactly how many requests a network-capable phase intends to
-place, how many it could physically place in the worst case, what it will store, how long it will
+**Purpose:** to state, route by route, exactly how many requests **one acquisition window** intends
+to place, how many it could physically place in the worst case, what it will store, how long it will
 take, and the exact integer above which it must stop — and to carry the owner's explicit approval of
 those numbers.
-**Phase:** M3.1B (constructed) → M3.2 (executed under it)
+
+**One budget per window.** The **M3.2A** budget is constructed at M3.1B and approved at Gate F. The
+**M3.2B** budget is derived **after** M3.2A freezes its bootstrap objects, and is approved separately.
+**Neither approval covers the other window.**
+**Phase:** M3.1B → M3.2A · then between the windows → M3.2B
 **Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 §§15–16; [Decision 013](../../Decisions/decision_013_pilot_selection_mechanics.md) §1;
 [Decision 007](../../Decisions/decision_007_sec_universe.md);
@@ -20,7 +24,10 @@ those numbers.
 
 ## 0. Handling
 
-- **Non-secret document.** It contains counts, route names, and hashes only.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **Non-secret content even so.** It contains counts, route names, and hashes only.
 - **Never record** the SEC identity, any credential, any absolute personal path, or any response body.
 - **No invented integers.** Every count is produced by the zero-request planning command or written
   `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`.
@@ -31,6 +38,7 @@ those numbers.
 | Field | Value |
 |---|---|
 | Budget document version | `_______` |
+| **Acquisition window** | `M3.2A` / `M3.2B` — **exactly one** |
 | Phase | `_______` |
 | Owner | `_______` |
 | Date prepared (UTC) | `_______` |
@@ -78,15 +86,29 @@ One row per registered route. **Every route appears, including routes planning z
 | `sec_submissions_entity` | `data.sec.gov` | `____` | `____` | `____` | `_______` |
 | **TOTAL** | | `____` | `____` | `____` | |
 
-**Any cell still reading `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` blocks approval.**
-The dry run resolves it, or the budget is not ready.
+**Rows belonging to the other window read `n/a — other window`, not `0`.** M3.2A budgets the seven
+bootstrap routes; M3.2B budgets `sec_submissions_historical` and `sec_submissions_entity` only.
+
+**Any cell still reading `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` blocks approval.** For
+M3.2A the zero-request dry run resolves it. For M3.2B it is resolved by **deriving** the count from
+the frozen M3.2A objects — never by estimating it.
+
+### 3.1 For an M3.2B budget only — derivation provenance
+
+| Field | Value |
+|---|---|
+| Frozen bootstrap object identities the derivation used | `_______` |
+| Historical-file references enumerated from the frozen bulk-submissions object | `____` |
+| Entity reconciliation set size, and how it was determined | `_______` |
+| Transport confirmed disabled during derivation | `YES` / `NO` |
+| Derivation reproduces from the same frozen objects | `YES` / `NO` |
 
 ## 4. The eight budget quantities
 
 | Quantity | Value | Derivation |
 |---|---:|---|
 | Planned unique logical requests | `____` | `Σ U(route)` from §3 |
-| Maximum physical attempts | `____` | `planned × A_max`, `A_max = 1 + MAX_REDIRECT_DEPTH + max_transient_retries + 1` |
+| Maximum physical attempts | `____` | `Σ ( U(route) × A_reachable(route) )` from §4.1 — **never a single asserted multiplier** |
 | Expected successful responses | `____` | logical requests expected to classify `proceed` |
 | Expected cache hits | `____` | instances already satisfied and therefore **not** planned |
 | Expected not-modified responses | `____` | conditional re-validations expected to return `304` |
@@ -94,8 +116,22 @@ The dry run resolves it, or the budget is not ready.
 | Maximum raw objects | `____` | planned − not-modified − cache hits − duplicate bodies |
 | Maximum elapsed acquisition window | `____` | limiter floor `(attempts − 1) ÷ requests_per_second`, plus the stated transfer component |
 
-**`A_max` used:** `____`  **Value of `MAX_REDIRECT_DEPTH`:** `____`
-**Value of `max_transient_retries`:** `____`
+### 4.1 `A_reachable` per route — derived, not asserted
+
+**`A_reachable(route)` is the maximum reachable physical attempts for that route, derived from the
+implemented response-policy state machine and independently tested against its worst reachable path.**
+It is **never** assumed to be the sum of the retry, redirect, and cooldown bounds — those mechanisms
+interact inside one loop, and the composition is a property of the code, not of arithmetic.
+
+| `source_id` | `A_reachable` | Derived from | Worst-path test reference |
+|---|---:|---|---|
+| `_______` | `____` | `_______` | `_______` |
+
+| Field | Value |
+|---|---|
+| Method used to derive `A_reachable` | `_______` |
+| Independent worst-reachable-path test passed | `YES` / `NO` |
+| Derived bound agrees with the tested bound | `YES` / `NO` |
 
 ## 5. Retry allowance
 
@@ -110,25 +146,32 @@ The dry run resolves it, or the budget is not ready.
 
 ## 6. Contingency
 
+**No contingency allowance exists, and none may be added.**
+
+The v0.1 10% contingency is withdrawn. It existed only because v0.1 tried to acquire, in one window,
+requests whose count depended on an object it had not yet retrieved. **The two-window split removes
+that cause**: M3.2A's count is derivable before access, and M3.2B's is derived from frozen evidence.
+A budget that needs slack is a budget whose inputs are not yet frozen — which is a signal to split,
+not to pad.
+
 | Field | Value |
 |---|---|
-| Contingency rate | `____` |
-| Contingency, in physical attempts | `____` |
-| **Exactly what the contingency covers** | `_______` |
-| **What it does not cover** | everything else. It is not general slack |
+| Contingency applied | **none — prohibited** |
+| Confirmed no padding of any kind | `YES` / `NO` |
 
 ## 7. Hard request ceiling
 
 ```
-HARD_REQUEST_CEILING = ceil( (1 + contingency_rate) × maximum_physical_attempts )
+HARD_REQUEST_CEILING(window) = Σ_over_routes_in_window ( U(route) × A_reachable(route) )
 ```
 
 | Field | Value |
 |---|---|
-| Computed ceiling | `____` |
+| Computed ceiling for **this window** | `____` |
 | **Approved ceiling (exact integer)** | `____` |
-| Ceiling behaviour | The run **refuses the attempt that would exceed** this value |
-| May the ceiling be raised mid-run? | **No.** Raising it requires stopping, re-planning, and a new approval |
+| Ceiling behaviour | The run **refuses the attempt that would exceed** this value — it stops before, never after |
+| May the ceiling be raised mid-window? | **No.** Raising it requires stopping, re-planning, and a new owner approval |
+| Does this ceiling bind the other window? | **No.** Each window carries its own |
 
 ## 8. Expected elapsed acquisition window
 
@@ -144,13 +187,18 @@ HARD_REQUEST_CEILING = ceil( (1 + contingency_rate) × maximum_physical_attempts
 
 | Check | Result | Note |
 |---|---|---|
-| Every route listed, including zero-count routes | `PASS` / `FAIL` | `_______` |
+| Exactly one window named in §1 | `PASS` / `FAIL` | `_______` |
+| Every route listed; other-window rows marked `n/a — other window` | `PASS` / `FAIL` | `_______` |
 | No cell reads `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | `PASS` / `FAIL` | `_______` |
 | No count is a guess; each has a stated basis | `PASS` / `FAIL` | `_______` |
-| Max physical attempts equals `planned × A_max` | `PASS` / `FAIL` | `_______` |
+| **`A_reachable` derived per route and independently tested** | `PASS` / `FAIL` | `_______` |
+| Max physical attempts equals `Σ ( U(route) × A_reachable(route) )` | `PASS` / `FAIL` | `_______` |
+| **No contingency or padding applied** | `PASS` / `FAIL` | `_______` |
 | Two dry runs produced identical plan hashes | `PASS` / `FAIL` | `_______` |
+| For M3.2B: counts derived from the frozen M3.2A objects | `PASS` / `FAIL` / `N/A` | `_______` |
 | Ceiling computed from the stated formula | `PASS` / `FAIL` | `_______` |
 | No secret, identity, or personal path in this document | `PASS` / `FAIL` | `_______` |
+| Completed copy stored privately; only its digest indexed publicly | `PASS` / `FAIL` | `_______` |
 
 ## 10. Blockers
 
@@ -162,15 +210,17 @@ HARD_REQUEST_CEILING = ceil( (1 + contingency_rate) × maximum_physical_attempts
 
 ## 11. Owner approval
 
-> I approve, for the phase and repository baseline named in §1, exactly these two integers:
+> I approve, for the **acquisition window**, phase, and repository baseline named in §1, exactly
+> these two integers:
 >
 > **Planned unique logical requests:** `____`
 > **Hard request ceiling:** `____`
 >
-> This approval applies to this exact budget document and this exact request-plan hash. It does not
-> transfer to a re-planned budget, a changed coverage window, a changed as-of date, or a different
-> plan hash. **Network enablement is authorized only for the command named in the governing
-> contract, and only under these numbers.**
+> This approval applies to this exact budget document, this exact window, and this exact
+> request-plan hash. It does **not** transfer to the other acquisition window, a re-planned budget, a
+> changed coverage window, a changed as-of date, or a different plan hash. **Network enablement is
+> authorized only for the command named in the governing contract, only for this window, and only
+> under these numbers.**
 
 | Field | Value |
 |---|---|

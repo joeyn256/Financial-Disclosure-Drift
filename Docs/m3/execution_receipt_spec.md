@@ -67,92 +67,120 @@ catalog — those are covered by the receipt of the command whose output they in
 ## 4. Permitted fields
 
 The complete permitted set. A field not listed here is not added without a new accepted decision.
-Every field is optional unless marked required; a field that does not apply to a phase is **omitted**,
-not filled with a placeholder.
+
+**Every field carries exactly one classification, and there is no "optional" class:**
+
+| Class | Meaning |
+|---|---|
+| **`R`** — required in all modes | Must be present in every receipt, whatever the invocation mode |
+| **`C:<modes>`** — conditionally required | Must be present in the named modes; **omitted** in every other mode |
+| **`P:<modes>`** — prohibited | Must be **absent** in the named modes; presence is a fail-closed validation error |
+
+A field that is neither required nor conditionally required for the current mode is **omitted**, never
+rendered as `null` or a placeholder. Validation (§14) enforces exactly this table — v0.1 described
+nearly every field as optional and then validated several as mandatory, which is corrected here.
+
+**The five invocation modes:** `rehearsal`, `dry_run`, `live`, `offline_execution`, `approval`.
 
 ### 4.1 Identity and provenance of the receipt itself
 
-| Field | Type | Required | Meaning |
+| Field | Type | Class | Meaning |
 |---|---|---|---|
-| `receipt_schema_version` | string | **yes** | The receipt schema this document version defines (§12) |
-| `receipt_id` | string | **yes** | A content-derived identifier over the receipt's own canonical bytes excluding this field; never a random value, never a timestamp |
-| `command_name` | string | **yes** | The invoked command, e.g. `m3 acquire` |
-| `command_version` | string | **yes** | The command's declared version, independent of the package version |
-| `phase` | string | **yes** | One of `M3.1A`, `M3.1B`, `M3.2`, `M3.3`, `M3.4`, `M3.5` |
-| `invocation_mode` | string | **yes** | One of `rehearsal`, `dry_run`, `live`, `offline_execution`, `approval` |
-| `configuration_fingerprint` | string | **yes** | A digest over the effective non-secret configuration. **Never the configuration itself, and never any resolved secret** |
+| `receipt_schema_version` | string | **`R`** | The receipt schema this document version defines (§12) |
+| `receipt_id` | string | **`R`** | **The single integrity identity.** `SHA256(canonical receipt bytes with `receipt_id` omitted)` — see §13. Never a random value, never a timestamp |
+| `command_name` | string | **`R`** | The invoked command, e.g. `m3 acquire` |
+| `command_version` | string | **`R`** | The command's declared version, independent of the package version |
+| `phase` | string | **`R`** | One of `M3.1A`, `M3.1B`, `M3.2A`, `M3.2B`, `M3.3A`, `M3.3B`, `M3.4A`, `M3.4B`, `M3.5` |
+| `invocation_mode` | string | **`R`** | One of `rehearsal`, `dry_run`, `live`, `offline_execution`, `approval` |
+| `configuration_fingerprint` | string | **`R`** | A digest over the effective non-secret configuration. **Never the configuration itself, and never any resolved secret** |
 
 ### 4.2 Policy and definition versions
 
-| Field | Type | Meaning |
-|---|---|---|
-| `source_registry_version` | string | `M22_SOURCE_REGISTRY_VERSION` in force |
-| `quota_policy_version` | string | `PILOT_QUOTA_POLICY_VERSION` in force |
-| `joint_selector_policy_version` | string | `PILOT_JOINT_SELECTOR_POLICY_VERSION` in force |
-| `replacement_signature_policy_version` | string | `PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION` in force |
-| `manifest_hash_policy_version` | string | `PILOT_MANIFEST_HASH_POLICY_VERSION` in force |
-| `selection_input_schema_version` | string | `ACCESSION_SELECTION_INPUT_SCHEMA_VERSION` in force |
-| `parser_versions` | object | Parser identifier to version, for every parser the command used |
-| `cohort_definition_digest` | string | A digest over the frozen cohort definitions, where the command consumes them. **Recorded as a version fact, and bound to nothing** |
-| `migration_chain_head` | string | The highest applied migration name |
+| Field | Type | Class | Meaning |
+|---|---|---|---|
+| `source_registry_version` | string | **`C:`** `dry_run`, `live` | `M22_SOURCE_REGISTRY_VERSION` in force |
+| `quota_policy_version` | string | **`C:`** `offline_execution` | `PILOT_QUOTA_POLICY_VERSION` in force |
+| `joint_selector_policy_version` | string | **`C:`** `offline_execution` | `PILOT_JOINT_SELECTOR_POLICY_VERSION` in force |
+| `replacement_signature_policy_version` | string | **`C:`** `offline_execution` | `PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION` in force |
+| `manifest_hash_policy_version` | string | **`C:`** `offline_execution`, `approval` | `PILOT_MANIFEST_HASH_POLICY_VERSION` in force |
+| `selection_input_schema_version` | string | **`C:`** `offline_execution` | `ACCESSION_SELECTION_INPUT_SCHEMA_VERSION` in force |
+| `parser_versions` | object | **`C:`** `live`, `offline_execution` | Parser identifier to version, for every parser the command used |
+| `cohort_definition_digest` | string | **`C:`** `offline_execution` | A digest over the frozen cohort definitions, where the command consumes them. **Recorded as a version fact, and bound to nothing** |
+| `migration_chain_head` | string | **`R`** | The highest applied migration name |
 
 ### 4.3 Timing
 
-| Field | Type | Meaning |
-|---|---|---|
-| `started_at_utc` | string | RFC 3339 UTC, `Z` suffix |
-| `completed_at_utc` | string | RFC 3339 UTC, `Z` suffix |
-| `elapsed_seconds` | number | Wall-clock duration |
+| Field | Type | Class | Meaning |
+|---|---|---|---|
+| `started_at_utc` | string | **`R`** | RFC 3339 UTC, `Z` suffix |
+| `completed_at_utc` | string | **`R`** | RFC 3339 UTC, `Z` suffix |
+| `elapsed_seconds` | number | **`R`** | Wall-clock duration |
 
 **Every timestamp here is operational.** None enters a governed identity, exactly as Decision 013 §7
 already excludes `generated_at` from the manifest content hash.
 
 ### 4.4 Request plan and budget
 
-| Field | Type | Meaning |
-|---|---|---|
-| `request_plan_id` | string | The plan's identity |
-| `request_plan_sha256` | string | The plan hash the run consumed |
-| `approved_request_ceiling` | integer | The owner-approved hard ceiling in force |
-| `planned_logical_request_count` | integer | From the approved plan |
-| `maximum_physical_attempt_count` | integer | From the approved plan |
-| `planned_per_route` | object | `source_id` to planned unique logical requests |
+| Field | Type | Class | Meaning |
+|---|---|---|---|
+| `acquisition_window` | string | **`C:`** `live` | `M3.2A` or `M3.2B`. **Each window has its own plan, budget, and ceiling** |
+| `request_plan_id` | string | **`C:`** `dry_run`, `live` | That window's plan identity |
+| `request_plan_sha256` | string | **`C:`** `dry_run`, `live` | The plan hash the run consumed |
+| `approved_request_ceiling` | integer | **`C:`** `dry_run`, `live` | The owner-approved hard ceiling for **that window** |
+| `planned_logical_request_count` | integer | **`C:`** `dry_run`, `live` | From that window's approved plan |
+| `maximum_physical_attempt_count` | integer | **`C:`** `dry_run`, `live` | From that window's approved plan, **derived per route from the implemented state machine** — never from an asserted constant |
+| `planned_per_route` | object | **`C:`** `dry_run`, `live` | `source_id` to planned unique logical requests |
 
 ### 4.5 Actual execution accounting
 
-| Field | Type | Meaning |
-|---|---|---|
-| `actual_logical_request_count` | integer | Distinct logical requests issued |
-| `actual_physical_attempt_count` | integer | HTTP requests placed, including redirect hops, retries, and the controlled post-cooldown request |
-| `actual_per_route` | object | `source_id` to actual logical requests and physical attempts |
-| `response_classification_totals` | object | Counts keyed by `proceed`, `retry`, `retry_after`, `cooldown`, `fail`, `quarantine` — **every response is in exactly one bucket, and there is no `unclassified` bucket** |
-| `status_code_totals` | object | Counts keyed by HTTP status |
-| `raw_object_count` | integer | New content-addressed objects created |
-| `duplicate_object_count` | integer | Byte-identical bodies reconciled to an existing object |
-| `cache_hit_count` | integer | Instances already satisfied and therefore not requested |
-| `not_modified_count` | integer | Conditional re-validations returning `304` |
-| `quarantined_object_count` | integer | Objects quarantined and preserved |
-| `redirect_hop_count` | integer | Validated hops followed by the policy layer |
-| `cooldown_count` | integer | Aggregate traffic halts |
+**These fields record actual NETWORK activity and nothing else.**
+
+| Field | Type | Class | Meaning |
+|---|---|---|---|
+| `actual_logical_request_count` | integer | **`R`** | Distinct logical **network** requests issued. **Must be `0` in `rehearsal`, `dry_run`, `offline_execution`, and `approval`** |
+| `actual_physical_attempt_count` | integer | **`R`** | HTTP requests actually placed on the wire, including redirect hops, retries, and controlled post-cooldown requests. **Must be `0` in `rehearsal`, `dry_run`, `offline_execution`, and `approval`** |
+| `actual_per_route` | object | **`C:`** `live` | `source_id` to actual logical requests and physical attempts |
+| `response_classification_totals` | object | **`C:`** `live` | Counts keyed by `proceed`, `retry`, `retry_after`, `cooldown`, `fail`, `quarantine` — **every response is in exactly one bucket, and there is no `unclassified` bucket** |
+| `status_code_totals` | object | **`C:`** `live` | Counts keyed by HTTP status |
+| `raw_object_count` | integer | **`C:`** `live` | New content-addressed objects created |
+| `duplicate_object_count` | integer | **`C:`** `live` | Byte-identical bodies reconciled to an existing object |
+| `cache_hit_count` | integer | **`C:`** `live` | Instances already satisfied and therefore not requested |
+| `not_modified_count` | integer | **`C:`** `live` | Conditional re-validations returning `304` |
+| `quarantined_object_count` | integer | **`C:`** `live` | Objects quarantined and preserved |
+| `redirect_hop_count` | integer | **`C:`** `live` | Validated hops followed by the policy layer |
+| `cooldown_count` | integer | **`C:`** `live` | Aggregate traffic halts |
+
+### 4.5.1 Simulated activity is not actual activity
+
+**A rehearsal or dry run places no request, so its actual network counts are `0` — always, without
+exception.**
+
+Scripted responses, injected retries, simulated cooldowns, and fixture-driven object counts are
+**rehearsal facts, not network facts**. They belong to the **rehearsal evidence report**, which is a
+separate private artifact, and they never appear in the fields above.
+
+v0.1's rehearsal scenarios described receipts whose actual-network fields carried simulated traffic,
+contradicting v0.1's own zero-request rule. **A receipt that reports a non-zero actual network count
+in a non-`live` mode is a fail-closed validation error** (§14), not a reporting convention.
 
 ### 4.6 Gate and drift outcomes
 
-| Field | Type | Meaning |
-|---|---|---|
-| `schema_drift_outcome` | string | One of `none`, `unknown_fields_retained`, `blocked` |
-| `schema_drift_event_count` | integer | Total drift events, blocking and non-blocking |
-| `gate_f_outcome` | string | `pass`, `fail`, or `not_applicable` |
-| `gate_h_outcome` | string | `pass`, `fail`, or `not_applicable` |
+| Field | Type | Class | Meaning |
+|---|---|---|---|
+| `schema_drift_outcome` | string | **`C:`** `live`, `rehearsal` | One of `none`, `unknown_fields_retained`, `blocked` |
+| `schema_drift_event_count` | integer | **`C:`** `live`, `rehearsal` | Total drift events, blocking and non-blocking |
+| `gate_f_outcome` | string | **`C:`** `dry_run` | `pass`, `fail`, or `not_applicable` |
+| `gate_h_outcome` | string | **`C:`** `live` | `pass`, `fail`, or `not_applicable` |
 
 ### 4.7 Resulting governed identities, recorded as references
 
-| Field | Type | Meaning |
-|---|---|---|
-| `resulting_snapshot_id` | string | Where the command produced one |
-| `resulting_selection_run_id` | string | Where the command produced one |
-| `resulting_selection_result_sha256` | string | Where the command sealed one |
-| `resulting_root_manifest_sha256` | string | Where the command constructed one |
-| `resulting_manifest_id` | string | Where the command constructed one |
+| Field | Type | Class | Meaning |
+|---|---|---|---|
+| `resulting_snapshot_id` | string | **`C:`** `offline_execution` | Where the command produced one |
+| `resulting_selection_run_id` | string | **`C:`** `offline_execution` | Where the command produced one |
+| `resulting_selection_result_sha256` | string | **`C:`** `offline_execution` | Where the command sealed one |
+| `resulting_root_manifest_sha256` | string | **`C:`** `offline_execution`, `approval` | Where the command constructed or re-derived one |
+| `resulting_manifest_id` | string | **`C:`** `offline_execution`, `approval` | Where the command constructed or re-derived one |
 
 **These are references, and the direction is one-way.** The receipt names what the run produced. **The
 produced identity does not name, contain, or commit the receipt.** Recording an identity in a receipt
@@ -160,14 +188,15 @@ is not the identity depending on the receipt.
 
 ### 4.8 Completion and recovery
 
-| Field | Type | Required | Meaning |
+| Field | Type | Class | Meaning |
 |---|---|---|---|
-| `completion_status` | string | **yes** | One of `complete`, `failed`, `interrupted`, `stopped_at_ceiling`, `stopped_by_gate` |
-| `reason_code` | string | on non-`complete` | A **registered** reason code from `src/disclosure_drift/reasons.py`. An unregistered code is a defect, not a new code |
-| `reason_detail` | string | optional | One short non-secret sentence. **Never a response body and never a path** |
-| `interruption_state` | string | on `interrupted` | One of `before_raw_store_write`, `after_raw_store_write_before_catalog_commit`, `after_catalog_commit`, `during_selection`, `during_manifest_write` |
-| `recovery_predecessor_receipt_id` | string | on a resumed run | The `receipt_id` this run resumed from |
-| `consumed_request_count_carried_forward` | integer | on a resumed run | Physical attempts already spent against the ceiling |
+| `completion_status` | string | **`R`** | One of `complete`, `failed`, `interrupted`, `stopped_at_ceiling`, `stopped_by_gate` |
+| `reason_code` | string | **`C:`** every non-`complete` status | A **registered** reason code from `src/disclosure_drift/reasons.py`. An unregistered code is a defect, not a new code |
+| `reason_detail` | string | **`C:`** every non-`complete` status | One short non-secret sentence. **Never a response body and never a path** |
+| `interruption_state` | string | **`C:`** `completion_status = "interrupted"` | One of `before_raw_store_write`, `after_raw_store_write_before_catalog_commit`, `after_catalog_commit`, `during_selection`, `during_manifest_write` |
+| `recovery_predecessor_receipt_id` | string | **`C:`** a resumed run | The `receipt_id` this run resumed from |
+| `consumed_request_count_carried_forward` | integer | **`C:`** a resumed `live` run | Physical attempts already spent against **that window's** ceiling |
+| `rehearsal_evidence_reference` | string | **`C:`** `rehearsal` | The non-sensitive reference identifier of the private rehearsal evidence report holding the simulated totals (§4.5.1) |
 
 ## 5. Prohibited fields
 
@@ -218,16 +247,21 @@ does **not** make them part of any governed preimage.
 
 ## 7. Storage location policy
 
-1. Receipts are written under the **data root**, never inside the repository working tree, in a
-   directory dedicated to receipts.
+**The repository is public. A receipt is never tracked in it.**
+
+1. Receipts are written to the **owner-controlled private evidence root**, outside the repository
+   working tree, in a directory dedicated to receipts.
 2. The filename is **content-derived** from `receipt_id`, so two identical receipts collide by
    identity and two different runs never collide.
 3. **Receipts are never committed to Git.** `scripts/check_repo_hygiene.py` already refuses tracked
-   artifacts under `data/`, and that boundary is deliberate.
-4. A receipt is written **once** and is thereafter **immutable**. A correction is a new receipt that
+   artifacts under `data/`, and the private evidence root is outside the repository entirely.
+4. **Only the receipt's type, phase, status, `receipt_id`, and its own SHA-256 reach the public
+   [evidence index](templates/evidence_index.md)** — never its contents, and never an absolute path.
+5. A receipt is written **once** and is thereafter **immutable**. A correction is a new receipt that
    names the corrected one, never an edit.
-5. An evidence packet **quotes fields** from a receipt and cites its `receipt_id`. It never embeds
+6. An evidence packet **quotes fields** from a receipt and cites its `receipt_id`. It never embeds
    the file and never rewrites it.
+7. **Private receipts require a separate owner-controlled backup** (master plan §12.4).
 
 ## 8. Retention policy
 
@@ -291,33 +325,48 @@ does **not** make them part of any governed preimage.
    m3-execution-receipt/1.0
    ```
 
-3. **Adding an optional field is a minor version increment.** Removing a field, renaming one,
-   changing a type, or changing a field's meaning is a **major** increment.
+3. **Adding a conditionally-required field is a minor version increment.** Removing a field,
+   renaming one, changing a type, changing a field's meaning, or **changing a field's
+   classification** is a **major** increment.
 4. **A new major version requires a new accepted decision record.** The field set is frozen by
    Decision 027 §10; it is not extended by an implementation session.
 5. **Old receipts are never rewritten to a new schema.** A reader dispatches on the version it finds.
 6. Receipt-schema evolution is a recorded limitation
    ([`limitations_register.md`](limitations_register.md), **M3-L09**), because a version change
    during Milestone 3 would make receipts from different phases non-comparable.
+7. **This document is at `m3-execution-receipt/1.0`.** The v0.2 corrections — removing
+   `receipt_content_sha256`, classifying every field by invocation mode, and forcing zero actual
+   network counts outside `live` — were made **before any receipt was ever produced**, so no receipt
+   exists at an earlier shape and no migration is required.
 
-## 13. Optional receipt-level integrity digest
+## 13. The single receipt integrity identity
 
-A receipt **may** carry a self-digest, and if it does:
+**There is exactly one, and it is `receipt_id`.**
+
+```
+receipt_id = SHA256( canonical receipt bytes with `receipt_id` omitted )
+```
 
 | Rule | Statement |
 |---|---|
-| **Name** | `receipt_content_sha256` |
-| **Preimage** | The receipt's canonical bytes with `receipt_content_sha256` itself **excluded** |
-| **Purpose** | To detect a receipt that was altered after it was written |
+| **Name** | `receipt_id` |
+| **Preimage** | The receipt's canonical bytes (§6) with the `receipt_id` field itself **excluded** |
+| **Purpose** | It identifies the receipt **and** detects a receipt altered after it was written. One value serves both |
 | **Scope** | **Operational only.** It proves the receipt is intact; it proves nothing about the run's content |
 | **Prohibition** | **It enters no accepted S5 or S6 identity.** It is not a component digest, is not committed by `root_manifest_sha256`, is not part of `manifest_id`, and appears in no digest preimage anywhere in the project |
-| **Prohibition** | It is never used as a manifest input, a selection input, a snapshot input, or an eligibility condition |
-| **Prohibition** | It never gates approval. A valid receipt digest is not evidence that a root may be approved |
+| **Prohibition** | It is never a manifest input, a selection input, a snapshot input, or an eligibility condition |
+| **Prohibition** | It never gates approval. A valid `receipt_id` is not evidence that a root may be approved |
 
-**Stated once more, because it is the field most likely to be mistaken for something governed:**
-`receipt_content_sha256` is a checksum over an operational artifact. It has the same standing as the
-modification time of a log file — useful, verifiable, and **entirely outside** the identity graph
-Decision 021 §§6–10 fixes.
+**The v0.1 optional `receipt_content_sha256` is removed.** It was a second digest over nearly the same
+preimage as `receipt_id`, differing only in which field was excluded. Two integrity identities over
+one object is ambiguous — a verifier cannot know which is authoritative — and this project's digest
+discipline (Decision 021 §§6–10) admits exactly one preimage per identity. **No second
+receipt-integrity field may be added without a new accepted decision.**
+
+**Stated once more, because this is the field most likely to be mistaken for something governed:**
+`receipt_id` is a checksum over an operational artifact. It has the same standing as the modification
+time of a log file — useful, verifiable, and **entirely outside** the identity graph Decision 021
+§§6–10 fixes.
 
 ## 14. Validation policy
 
@@ -325,17 +374,20 @@ Every receipt is validated at construction and again at inspection:
 
 | Check | Rule |
 |---|---|
-| **Required fields present** | `receipt_schema_version`, `receipt_id`, `command_name`, `command_version`, `phase`, `invocation_mode`, `configuration_fingerprint`, `completion_status` |
+| **Class conformance** | **Every `R` field present; every `C` field present in its named modes and absent outside them; every `P` field absent in its named modes.** This is the §4 table, enforced exactly |
+| **No placeholder** | An inapplicable field is **omitted**, never `null`, an empty string, `0`, or `"N/A"` |
 | **Enumerations valid** | `phase`, `invocation_mode`, `completion_status`, `schema_drift_outcome`, `gate_*_outcome`, `interruption_state` each within their fixed value sets |
 | **Reason code registered** | Any `reason_code` must exist in `src/disclosure_drift/reasons.py` |
 | **Prohibited-field scan** | Every §5 class scanned for, over the serialized bytes, failing closed |
-| **Accounting consistency** | `actual_physical_attempt_count >= actual_logical_request_count`; `actual_physical_attempt_count <= approved_request_ceiling`; per-route totals summing to the reported totals |
+| **Accounting consistency** | `actual_physical_attempt_count >= actual_logical_request_count`; `actual_physical_attempt_count <= approved_request_ceiling` for that window; per-route totals summing to the reported totals |
 | **Classification completeness** | Every response accounted for in exactly one classification bucket; no residual |
-| **Zero-request modes** | `dry_run` and `rehearsal` receipts must report `actual_logical_request_count = 0` and `actual_physical_attempt_count = 0` |
+| **Zero-network modes** | **`rehearsal`, `dry_run`, `offline_execution`, and `approval` receipts must report `actual_logical_request_count = 0` and `actual_physical_attempt_count = 0`.** A non-zero value is a fail-closed error, not a reporting convention (§4.5.1) |
+| **Simulated totals separated** | A `rehearsal` receipt carries `rehearsal_evidence_reference` and **no** simulated traffic in any actual-network field |
+| **Window scoping** | A `live` receipt names its `acquisition_window`, and its ceiling and plan hash are that window's |
 | **Recovery chain** | `recovery_predecessor_receipt_id`, where present, resolves to a readable receipt |
 | **Canonical form** | Re-serializing the parsed receipt reproduces the file byte-for-byte |
-| **Self-digest** | Where present, `receipt_content_sha256` recomputes over the excluding preimage |
-| **Non-contamination** | Asserted at the suite level, not per receipt: governed identities are byte-identical with receipts enabled, disabled, and varied (rehearsal R20) |
+| **Single integrity identity** | `receipt_id` recomputes over its excluding preimage, and **no second receipt-integrity field exists** |
+| **Non-contamination** | Asserted at the suite level, not per receipt: governed identities are byte-identical with receipts enabled, disabled, and varied (rehearsal **A12**) |
 
 **Any failed check is fail-closed.** The renderer refuses to emit; the inspector exits `4`.
 

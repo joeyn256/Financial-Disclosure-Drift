@@ -19,7 +19,10 @@ progress, and what would close it.
 
 ## 0. Handling
 
-- **Non-secret document.** Field paths, types, counts, identities, and reason codes only.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **Non-secret content even so.** Field paths, types, counts, identities, and reason codes only.
 - **Never record** the raw response body, an excerpt of it, the SEC identity, any credential, or any
   absolute personal path. Describe the **shape**, not the payload.
 - **The incident stops the phase.** It is not a warning to be noted and passed.
@@ -35,6 +38,7 @@ progress, and what would close it.
 | Date opened (UTC) | `_______` |
 | Opened by (operator / session) | `_______` |
 | Acquisition run identifier | `_______` |
+| Acquisition window | `M3.2A` / `M3.2B` / `n/a` |
 | Execution receipt ID at the stop | `_______` |
 | Repository baseline commit | `_______` |
 | Governing contract | `_______` |
@@ -166,6 +170,7 @@ has violated the fail-closed rule.
 | Must the offline rehearsal be re-run? | `YES` / `NO` |
 | Must the acquisition be re-planned? | `YES` / `NO` |
 | **Is a new request budget and ceiling approval required?** | `YES` / `NO` |
+| Which window's budget, if so | `M3.2A` / `M3.2B` / `both` |
 | Does replay resume from the predecessor receipt, or start fresh? | `_______` |
 | Predecessor receipt ID for the resume | `_______` |
 | Duplicate-prevention proof for the resume | `_______` |

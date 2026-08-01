@@ -61,13 +61,13 @@ with terminal result identity, lifecycle enforcement, verification, and atomicit
 **What is complete is a deterministic offline architecture** — through manifest construction,
 verification, and replay. **No live SEC pilot has been executed.**
 
-**Milestone 3 master planning is complete and recorded** (Decision 027, 2026-07-31): the five-phase
-roadmap in `Milestones/milestone_03_master_plan.md` and the operational-readiness pack in `Docs/m3/` —
-the Mac operator runbook, the offline-rehearsal specification, the execution-receipt specification,
-the limitations register, and seven operational templates. **That is a plan, not an authorization.**
-An independent review of the master plan is the next authorized action, and **Milestone 3
-implementation is not authorized and not begun** — no Milestone 3 contract, module, migration, or CLI
-command exists. **No SEC data has been downloaded, no filing body is permitted at this stage, no real
+**Milestone 3 master planning is complete and recorded** (Decision 027 v0.2, 2026-07-31): the
+five-phase roadmap in `Milestones/milestone_03_master_plan.md` and the operational-readiness pack in
+`Docs/m3/` — the Mac operator runbook, two offline-rehearsal specifications, the execution-receipt
+specification, the limitations register, and eight operational templates. **That is a plan, not an
+authorization.** A fresh independent rereview of the corrected plan is the next authorized action, and
+**Milestone 3 implementation is not authorized and not begun** — no Milestone 3 contract, module,
+migration, or CLI command exists. **No SEC data has been downloaded, no filing body is permitted at this stage, no real
 pilot sample exists, no manifest root has been approved or published, and no modeling or outcome code
 exists.**
 

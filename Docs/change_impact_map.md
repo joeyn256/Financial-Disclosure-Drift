@@ -465,6 +465,69 @@ and remains the authority on what each stage shipped.
 **When Milestone 3 implementation is eventually authorized, its impact paths get their own section
 here** — written by that phase's session, under its own contract, and never in advance.
 
+## Decision 027 v0.2 — Milestone 3 planning corrections (planning only, zero impact)
+
+[Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md) was revised in
+place to **v0.2** on 2026-07-31, applying eleven bounded owner corrections issued after the required
+independent review of v0.1. **The record has been `ACCEPTED` since v0.1; v0.2 does not change that**,
+and creates no second numbered decision. Formal outcome unchanged:
+`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`.
+
+**It is planning and navigation only, and its impact set is empty.** The correction session changed
+exactly these files:
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md` | in-place revision to v0.2 — new §0 revision history; corrected §§5, 6, 8, 10, 15, 16, 22, 23, 24, 25 | Markdown link-check only |
+| `Milestones/milestone_03_master_plan.md` | corrected phase map and subdivisions; withdrawn counts and `A_max`; two-layer evidence model; corrected root re-derivation | Markdown link-check only |
+| `Docs/m3/offline_rehearsal_spec.md` | **restructured** — twenty `R` scenarios become **A1–A12** (M3.1A acquisition) and **E1–E8** (M3.3A execution) | Markdown link-check only |
+| `Docs/m3/execution_receipt_spec.md` | single integrity identity; per-mode field classification; zero actual network counts outside `live`; private storage | Markdown link-check; prohibited-field scan |
+| `Docs/m3/operator_runbook.md` | two-layer evidence section; step 18a between-windows freeze/derive/approve; corrected budget and approval wording | Markdown link-check; command-status label check |
+| `Docs/m3/limitations_register.md` | **M3-L10** rewritten; **M3-L11** and **M3-L12** added | Markdown link-check only |
+| `Docs/m3/templates/evidence_index.md` | **new** — the public index of private evidence artifacts | Markdown link-check only |
+| `Docs/m3/templates/request_budget.md` | per-window; `A_reachable` derivation; contingency removed | Markdown link-check only |
+| `Docs/m3/templates/gate_f_checklist.md` | A1–A12; `A_reachable`; §11.1 planner-discrepancy gate | Markdown link-check only |
+| `Docs/m3/templates/gate_h_checklist.md` | per-window reconciliation; §2.1 between-windows freeze and derivation | Markdown link-check only |
+| `Docs/m3/templates/schema_drift_incident.md` | window scoping | Markdown link-check only |
+| `Docs/m3/templates/interrupted_run_recovery.md` | window scoping; ceiling never raised mid-window | Markdown link-check only |
+| `Docs/m3/templates/real_snapshot_evidence_packet.md` | M3.3A/M3.3B split; deterministic re-derivation | Markdown link-check only |
+| `Docs/m3/templates/root_hash_approval_packet.md` | deterministic re-derivation; M3.4A entry point; manual SQL prohibited | Markdown link-check only |
+| `Docs/Decisions/decision_registry.md` | row `027` marked v0.2 with the correction summary; controlling-record row updated | Markdown link-check; table-structure check |
+| `Docs/decision_index.md` | Decision 027 v0.2 section and the corrected topic table | Markdown link-check only |
+| `Docs/architecture_map.md` | §0 Milestone 3 row and planning-artifact layer; the determinism and planner-discrepancy notes | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | current-state ledger and machine-readable markers | `make context` resolves the markers |
+| `Milestones/contracts/README.md` | v0.2 correction summary; next-action pointer | Markdown link-check only |
+| `README.md` | the live `**Status:**` block's Milestone 3 sentence | Markdown link-check only |
+
+**Zero impact, stated explicitly:**
+
+- **zero production impact** — no module under `src/` changed;
+- **zero test impact** — no file under `tests/` changed;
+- **zero migration impact** — migrations `0001`–`0013` byte-identical, chain contiguous with nothing
+  beyond `0013`, and `0013`'s normative region still 10939 bytes over 186 lines at
+  `7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595`;
+- **zero configuration impact** — `configs/`, `pyproject.toml`, `Makefile`, `.github/`, **and
+  `.gitignore`** unchanged. The private-evidence-root ignore entry is deliberately **not** made here
+  and is carried as limitations-register entry **M3-L11**;
+- **zero CLI impact** — every Milestone 3 command remains `PLANNED — NOT YET IMPLEMENTED`;
+- **zero methodology impact** — no hypothesis, cohort window, maturity gate, outcome definition,
+  threshold, seed, selection rule, reserve rule, or manifest rule changed. **`Docs/Decisions/decision_013_pilot_selection_mechanics.md`
+  is byte-unchanged**, and the planner discrepancy is recorded rather than resolved;
+- **zero identity impact** — no hash preimage, digest, `manifest_id`, run identity, canonicalization
+  rule, crosswalk row, or classification total changed;
+- **zero data impact**, **zero network impact**, **zero publication impact**;
+- **no tag** — none created, moved, or deleted;
+- **next action `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`**;
+- **no Milestone 3 implementation authority**, no contract created, and **no M3.1 contract drafted**.
+
+**What the corrections withdrew, and why it matters to a future reader.** The v0.1 derived request
+counts, subtotal, plan hash, `A_max = 12`, `planned × 12`, and the 10% contingency **no longer appear
+as accepted values anywhere in the planning pack.** Two were wrong in different ways: the counts were
+faithful to the accepted planner but **not** to Decision 013 §1, and `A_max` was inferred by reading
+three guards rather than derived from and tested against the implemented state machine. **Neither
+class of value may be reintroduced without deriving it and testing it.**
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

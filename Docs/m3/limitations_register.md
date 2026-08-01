@@ -53,8 +53,8 @@ Every Milestone 3 phase:
 | Decision 023 §7 — S6 acceptance | 4 | 3 `ACTIVE`, **O1** `ACTIVE — OWNER RULING PENDING` |
 | Decision 024 — boundary consequences | 2 | all `ACTIVE` |
 | Decision 026 — standing obligations | 3 | all `ACTIVE` |
-| Milestone 3 — new at planning | 10 | all `ACTIVE` |
-| **Total** | **35 active, 1 closed** | |
+| Milestone 3 — new at planning | 13 | all `ACTIVE`; **M3-L12** is `ACTIVE — OWNER RULING PENDING` |
+| **Total** | **38 active, 1 closed** | |
 
 ---
 
@@ -601,8 +601,8 @@ Every Milestone 3 phase:
 | Field | Value |
 |---|---|
 | **Origin** | Milestone 3 master planning |
-| **Description** | The offline rehearsal proves the **workflow** against synthetic fixtures and scripted responses. It does not prove that real SEC payloads have the shapes the fixtures assume |
-| **Affected M3 phase** | M3.1A, and it is what M3.2 tests against reality |
+| **Description** | The offline rehearsals prove the **workflow** against synthetic fixtures and scripted responses. They do not prove that real SEC payloads have the shapes the fixtures assume, or that a real candidate universe behaves like a real-shaped one |
+| **Affected M3 phase** | M3.1A (acquisition, A1–A12) and M3.3A (execution, E1–E8); M3.2 and M3.3B test them against reality |
 | **Status** | `ACTIVE` |
 | **Methodology impact** | None — fixtures inform no research artifact |
 | **Reproducibility impact** | A fixture that is unlike a real payload could leave a real failure mode unrehearsed |
@@ -746,32 +746,72 @@ Every Milestone 3 phase:
 | **Stop condition** | A receipt whose schema version the reader does not recognize |
 | **Required owner action** | Accept a new decision before any major version change |
 | **Closure evidence** | M3.5 confirming one schema version across the whole milestone |
+| **v0.2 note** | The v0.2 corrections — removing `receipt_content_sha256`, classifying every field by invocation mode, and forcing zero actual network counts outside `live` — were made **before any receipt was ever produced**, so no receipt exists at an earlier shape and no migration is required |
 | **Closable before M3.5** | no |
 
-## M3-L10 — Request-budget estimation uncertainty
+## M3-L10 — Request-budget derivation dependency
 
 | Field | Value |
 |---|---|
-| **Origin** | Milestone 3 master planning; master plan §15 |
-| **Description** | Two M3.2 routes cannot be counted offline — `sec_submissions_historical`, whose count depends on the historical-file references named inside the retrieved bulk archive, and `sec_submissions_entity`, whose count depends on the reconciliation set actually needed. Both are marked `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`. Additionally, the bulk submissions archive is a `living` source, so references may appear between the dry run and the live run |
-| **Affected M3 phase** | M3.1B, M3.2 |
+| **Origin** | Milestone 3 master planning; revised at Decision 027 v0.2 |
+| **Description** | Two M3.2 routes cannot be counted before access — `sec_submissions_historical`, whose count depends on the historical-file references named inside the bulk-submissions object, and `sec_submissions_entity`, whose count depends on the reconciliation set actually needed. **v0.2 resolves this by derivation rather than estimation:** M3.2A acquires only sources whose count is derivable beforehand; transport is then disabled, the bootstrap objects are frozen, the dependent references are **derived from them**, and a **second** plan and ceiling are separately owner-approved before M3.2B |
+| **Affected M3 phase** | M3.1B, M3.2A, M3.2B |
 | **Status** | `ACTIVE` |
 | **Methodology impact** | None |
-| **Reproducibility impact** | The derivable component reproduces exactly — 69 required closed quarterly instances plus five one-shot routes, plan hash `25257d75…` at the accepted as-of. The deferred component does not, by construction |
+| **Reproducibility impact** | The M3.2B count is reproducible **given the frozen M3.2A objects**, and not before. That dependency is structural, not an estimate |
 | **Security impact** | None |
-| **Operational impact** | **The budget is only exact once the Gate F dry run resolves both routes.** The 10% contingency covers exactly one nameable cause: newly appearing historical-file references |
+| **Operational impact** | **Two owner approvals, not one.** M3.2A's approval never covers M3.2B. The bulk-submissions archive is a `living` source, so a re-run of M3.2A may name a different reference set — which is why the derivation happens after the freeze, over fixed bytes |
 | **Publication impact** | None |
-| **Mitigation** | **No integer is invented.** The formula, every count input, and the deferral marker are stated; the hard ceiling binds regardless of what the formula resolves to; the run stops **before** the attempt that would exceed it |
-| **Stop condition** | Reaching the hard ceiling; or a resolved count exceeding the approved budget without owner re-approval |
-| **Required owner action** | **Approve the exact budget and the exact ceiling before network enablement** |
-| **Closure evidence** | A Gate F plan resolving both routes, owner-approved, and a Gate H reconciliation showing actual within plan |
-| **Closable before M3.5** | **no** — the estimation method's uncertainty outlives one successful run |
+| **Mitigation** | **No integer is invented and no contingency exists.** The v0.1 10% allowance is withdrawn: it padded for exactly this dependency instead of removing it. Each window's count is derived from explicit inputs or frozen objects; the hard ceiling binds regardless; the run stops **before** the attempt that would exceed it |
+| **Stop condition** | Reaching a window's ceiling; M3.2B beginning without its own derived plan and recorded approval; or the derived set disagreeing with what the frozen objects name |
+| **Required owner action** | **Approve an exact budget and ceiling per window, before that window's network enablement** |
+| **Closure evidence** | Both windows planned, approved, executed, and reconciled at Gate H with no divergence the plans do not explain |
+| **Closable before M3.5** | **no** — the derivation dependency is permanent even after one successful run |
 
----
+## M3-L11 — The private evidence root is not yet git-ignored
+
+| Field | Value |
+|---|---|
+| **Origin** | Decision 027 v0.2 §10.1 |
+| **Description** | The two-layer evidence model requires completed operational evidence to live in an owner-controlled private evidence root **outside the repository**. `.gitignore` has **not** been updated to defend against an accidental in-tree private root, because `.gitignore` is a configuration file and the planning sessions are documentation-only |
+| **Affected M3 phase** | M3.1 onward — every phase that produces evidence |
+| **Status** | `ACTIVE` — **open follow-up requiring its own authorization** |
+| **Methodology impact** | None |
+| **Reproducibility impact** | None |
+| **Security impact** | **Material.** The repository is public. Without the ignore entry, an evidence root created inside the checkout could be staged by a careless `git add`, publishing completed packets — including an unpublished root — irreversibly |
+| **Operational impact** | Until it is closed, the defence is procedural: the private root lives **outside** the checkout, and `make hygiene` plus explicit-path staging catch the rest |
+| **Publication impact** | An accidental commit of a root-approval packet **is** a publication, and cannot be retracted from public history |
+| **Mitigation** | The private root is outside the repository by policy; `scripts/check_repo_hygiene.py` refuses tracked artifacts under `data/`; staging is by exact path, never `git add -A`; the pre-commit inspection checks for evidence artifacts |
+| **Stop condition** | A completed evidence artifact found tracked, or an evidence root found inside the checkout |
+| **Required owner action** | **Authorize a bounded configuration change adding the private-root ignore entry**, in the M3.1 contract or separately |
+| **Closure evidence** | The `.gitignore` entry committed under an authorized contract, plus a test or hygiene assertion that an in-tree evidence root is refused |
+| **Closable before M3.5** | **yes**, once the authorized configuration change lands |
+
+## M3-L12 — Planner and accepted authority disagree on 2026 Q2
+
+| Field | Value |
+|---|---|
+| **Origin** | Decision 027 v0.2 §15.1, found during the v0.1 independent review |
+| **Description** | [Decision 013](../Decisions/decision_013_pilot_selection_mechanics.md) §1 states that coverage extends through the **closed 2026 Q2** quarter at as-of `2026-06-30`, with `include_open_quarter = false`. The accepted planner classifies **2026 Q2 as the provisional open quarter** — because `2026-06-30` falls *inside* it — and therefore **excludes** it, ending its required set at 2026 QTR1. 2026 Q2 both **ends on** and **contains** the as-of date; the planner resolves that tie one way and Decision 013 §1 states the other |
+| **Affected M3 phase** | **M3.1B (Gate F)**, then M3.2A |
+| **Status** | **`ACTIVE — OWNER RULING PENDING`** |
+| **Methodology impact** | **Material.** One quarter of accepted coverage is either included or excluded, changing the candidate universe the pilot is drawn from |
+| **Reproducibility impact** | Both behaviours are deterministic. The problem is not nondeterminism — it is that the deterministic answer disagrees with the accepted record |
+| **Security impact** | None |
+| **Operational impact** | **Gate F cannot pass while they disagree.** A request plan that disagrees with the accepted coverage cutoff is not a plan a budget can be approved against |
+| **Publication impact** | Any coverage claim must rest on the resolved position, not on whichever component happened to be consulted |
+| **Mitigation** | Recorded rather than silently resolved. **v0.1's derived counts, which were faithful to the planner and not to Decision 013 §1, are withdrawn** |
+| **Stop condition** | Gate F attempting to pass with the discrepancy open; or **any change to Decision 013 made to accommodate the planner** |
+| **Required owner action** | **A ruling.** Either the planner is corrected to agree with Decision 013 §1, or a new owner-approved decision changes that authority. **Decision 013 is not edited by an implementation session** |
+| **Closure evidence** | Either a reviewed code change making the planner agree with Decision 013 §1, or a new accepted decision record changing the coverage rule — plus a Gate F plan whose required-quarter set matches accepted authority |
+| **Closable before M3.5** | **yes — and it must close before Gate F passes** |
 
 ## What this register does not do
 
 It closes nothing. It changes no accepted decision, methodology, identity, or limitation. It adds no
-authority. **Every entry marked `ACTIVE` is live and binds the phases it names**, and **D023-O1**
-remains an unresolved future owner-ruling condition that Milestone 3 inherits and must refer if a real
-run reaches it.
+authority. **Every entry marked `ACTIVE` is live and binds the phases it names.**
+
+**Two entries are unresolved owner-ruling conditions:** **D023-O1**, inherited and referred only if a
+real run reaches it; and **M3-L12**, the planner/authority disagreement over 2026 Q2, which **must be
+ruled on before Gate F can pass**. **M3-L11** is an open configuration follow-up requiring its own
+authorization.

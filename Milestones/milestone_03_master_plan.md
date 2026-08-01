@@ -144,15 +144,23 @@ These hold in **every** Milestone 3 phase, and no phase contract may weaken one.
 
 | Phase | Former stage | Scope | Network | Token | Future tag |
 |---|---|---|---|---|---|
-| **M3.1A** | part of S7 | Offline operator-workflow rehearsal | **NONE** | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` | none |
+| **M3.1A** | part of S7 | Offline **acquisition-path and operator** rehearsal | **NONE** | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` | none |
 | **M3.1B** | part of S7 | Gate F and zero-request controlled-live readiness | **ZERO LIVE REQUESTS** | `M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION` | `m3.1-complete` |
-| **M3.2** | S8 | Controlled metadata-only SEC acquisition and Gate H | **CONTROLLED, EXPLICITLY AUTHORIZED** | `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` | `m3.2-complete` |
-| **M3.3** | S9 | Frozen real snapshot, deterministic selection, persistence, reconstruction, replay, exact real manifest | **OFF** | `M3_3_REAL_PILOT_MANIFEST_CONSTRUCTED_READY_FOR_ROOT_APPROVAL` | `m3.3-complete` |
-| **M3.4** | S10 | Exact root-hash owner approval | **NONE** | `M3_4_EXACT_ROOT_OWNER_APPROVED_READY_FOR_INTEGRATED_ACCEPTANCE` | `m3.4-complete` |
-| **M3.5** | new | Integrated real-pilot acceptance and the Milestone 3 checkpoint | **NONE** (see §12.5) | `M3_5_REAL_PILOT_ACCEPTED_MILESTONE_3_COMPLETE` | `m3-complete` |
+| **M3.2A** | part of S8 | Bootstrap acquisition window — sources whose complete logical-request set is derivable before access | **CONTROLLED, EXPLICITLY AUTHORIZED** | — (internal) | none |
+| **M3.2B** | part of S8 | Dependent acquisition window — the historical/entity requests derived from the frozen M3.2A objects; then Gate H over both | **CONTROLLED, EXPLICITLY AUTHORIZED** | `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` | `m3.2-complete` |
+| **M3.3A** | part of S9 | Candidate-snapshot **builder** plus the offline execution rehearsal | **OFF** | — (internal) | none |
+| **M3.3B** | part of S9 | Real snapshot freeze, deterministic real execution, exact real manifest | **OFF** | `M3_3_REAL_PILOT_MANIFEST_CONSTRUCTED_READY_FOR_ROOT_APPROVAL` | `m3.3-complete` |
+| **M3.4A** | part of S10 | Approval-recording entry point, validated against synthetic catalogs | **NONE** | — (internal) | none |
+| **M3.4B** | part of S10 | Exact root-hash owner approval and the single governed write | **NONE** | `M3_4_EXACT_ROOT_OWNER_APPROVED_READY_FOR_INTEGRATED_ACCEPTANCE` | `m3.4-complete` |
+| **M3.5** | new | Integrated real-pilot acceptance and the Milestone 3 checkpoint | **NONE** (see M3.5 field 11) | `M3_5_REAL_PILOT_ACCEPTED_MILESTONE_3_COMPLETE` | `m3-complete` |
 
-**M3.1A and M3.1B are two sequential internal parts of M3.1. They create no new milestone and no new
-phase** (Decision 027 §6).
+**Every `A`/`B` pair above is two sequential internal parts of one phase. They create no new milestone
+and no new phase, and the Decision 024 §5.1 map M3.1–M3.5 is unchanged** (Decision 027 §6). **Only a
+phase takes a tag; an internal part never does.**
+
+**The rule that produced these subdivisions, and that governs any future one:** the second part
+depends on something the first part must build, freeze, or prove, and **no scenario may be placed in
+a phase that lacks the production path it exercises.**
 
 ## 8. Decision and contract policy
 
@@ -238,20 +246,65 @@ Git-level rollback is a separate matter: an unaccepted phase commit is reverted 
 explicit owner instruction, and a pushed commit is corrected by a forward commit, never by a
 history rewrite.
 
-## 12. Evidence-retention policy
+## 12. Evidence-storage and retention policy — the two-layer model
 
-1. **Every phase produces its evidence packet from the template frozen for it** in
-   [`Docs/m3/templates/`](../Docs/m3/templates/request_budget.md).
+**The repository is public. Completed operational evidence is not committed to it.** Git history is
+permanent: a completed root-approval packet pushed to a public remote publishes an unpublished
+`root_manifest_sha256` irreversibly, while publication authority is `NOT_AUTHORIZED`. The two layers
+exist to make that impossible rather than merely discouraged.
+
+### 12.1 Tracked publicly
+
+- **blank templates** under [`Docs/m3/templates/`](../Docs/m3/templates/request_budget.md);
+- planning and governance records;
+- the [limitations register](../Docs/m3/limitations_register.md);
+- non-sensitive status and navigation;
+- the **evidence index**
+  ([`Docs/m3/templates/evidence_index.md`](../Docs/m3/templates/evidence_index.md)) — artifact type,
+  phase, status, the completed artifact's own **SHA-256**, and a **non-sensitive reference
+  identifier**.
+
+### 12.2 Held privately, outside the repository
+
+In an **owner-controlled private evidence root**, git-ignored and never tracked:
+
+execution receipts; request budgets; Gate F and Gate H packets; interrupted-run records;
+schema-drift records; real-snapshot evidence packets; root-approval packets; raw objects; catalogs;
+candidate, selection, reserve, and manifest artifacts; and **every unpublished governed identity**.
+
+### 12.3 The digest workflow
+
+The operator computes a completed artifact's digest with:
+
+```bash
+shasum -a 256 <private-evidence-file>
+```
+
+and enters **only that digest and non-sensitive metadata** into the public evidence index. **No
+absolute private path is ever recorded publicly.**
+
+**A public acceptance decision may reference the SHA-256 of a private evidence artifact. It may not
+expose an unpublished root or any substantive row.**
+
+### 12.4 Retention
+
+1. **Every phase produces its evidence packet from the template frozen for it**, and stores the
+   completed copy privately.
 2. **Evidence is retained for the life of the project** and is never edited after the phase is
    accepted; a correction is a new dated entry, not an overwrite.
 3. **Execution receipts are retained indefinitely** and are the operational record of what ran.
 4. **Raw objects and their provenance are append-only and are never deleted** (CLAUDE.md rule 6).
-5. **Evidence never contains a secret, a full SEC identity, an absolute personal path, a raw
-   response body, filing text, an outcome value, or a governed row's substantive content** beyond
-   the identities already committed by the manifest.
-6. **Nothing under `data/` is committed** except `data/README.md`; `scripts/check_repo_hygiene.py`
-   enforces this. Evidence packets live in the repository as documentation; the artifacts they
-   describe do not.
+5. **Completed private evidence requires a separate owner-controlled backup.** A private root with
+   no backup is a single point of loss for the only record of a run that cannot be re-run.
+6. **Even privately, evidence never contains a secret, a full SEC identity, an absolute personal
+   path, a raw response body, filing text, or an outcome value.** Privacy is defence in depth, not a
+   licence to record prohibited content.
+7. **Nothing under `data/` is committed** except `data/README.md`; `scripts/check_repo_hygiene.py`
+   enforces this.
+
+**`.gitignore` is not edited by the planning sessions.** Creating the private root's ignore entry is
+a configuration change requiring its own authorization, and is carried as an open follow-up in the
+limitations register (**M3-L11**).
 
 ## 13. Model assignment
 
@@ -276,32 +329,50 @@ history rewrite.
 
 ---
 
-# Phase M3.1 — Gate F and controlled-live readiness
+# Phase M3.1 — Acquisition-path rehearsal and Gate F
 
-Planned in two sequential internal parts: **M3.1A** offline operator-workflow rehearsal, then
-**M3.1B** Gate F and zero-request readiness. Where a field differs between them, both are stated.
+Planned in two sequential internal parts: **M3.1A** offline acquisition-path and operator rehearsal,
+then **M3.1B** Gate F and zero-request readiness. Where a field differs between them, both are
+stated.
 
 ### 1. Objective
 
-Prove, with no live request, that the complete operator workflow works end to end and that the
-project is ready to place its first SEC request — and obtain the owner's approval of the exact
-request budget and hard ceiling that will bind it.
+Prove, with no live request, that the **acquisition path and the operator workflow** work end to end,
+and that the project is ready to place its first SEC request — then obtain the owner's approval of
+the exact request budget and hard ceiling that will bind the first acquisition window.
 
 ### 2. Exact scope
 
-**M3.1A.** Implement and run one end-to-end offline rehearsal to the specification in
-[`Docs/m3/offline_rehearsal_spec.md`](../Docs/m3/offline_rehearsal_spec.md): all twenty scenarios,
-using scripted responses and synthetic fixtures only, opening no socket, with deterministic clock
-inputs wherever an operational timestamp is required. Produce the rehearsal evidence, including the
-proof that receipt content enters no governed identity.
+**M3.1A.** Implement and run the **acquisition rehearsal** specified in
+[`Docs/m3/offline_rehearsal_spec.md`](../Docs/m3/offline_rehearsal_spec.md) §5 — all twelve
+acquisition scenarios A1–A12, using scripted responses and synthetic fixtures only, opening no
+socket, with deterministic clock inputs wherever an operational timestamp is required. Produce the
+rehearsal evidence, including the proof that receipt content enters no governed identity.
+
+**M3.1A rehearses only acquisition and operator operations:** request planning and ordering;
+request-budget enforcement; rate limiting; retries, redirects, `Retry-After`, cooldowns, block pages,
+and terminal responses; route allowlist and denylist enforcement; raw storage and provenance;
+duplicate and changed-body handling; parser and schema-drift behaviour; catalog transactionality;
+interruption and recovery; execution receipts and prohibited-field scanning.
+
+**M3.1 must not rehearse or implement candidate-snapshot construction, snapshot freeze, S5 selection,
+reserves, dispositions, selection-result sealing, S6 manifest construction, or root computation.**
+Those production paths do not exist at M3.1 — no candidate-snapshot builder exists anywhere in the
+repository — and they are rehearsed at **M3.3A**, which builds them. **No scenario may be placed in a
+phase that lacks the production path it exercises** (Decision 027 §6.1).
 
 **M3.1B.** Verify the `[sec]` extra is installed; validate the SEC identity locally without printing
 it; confirm network is disabled by default; define and assert the exact route allowlist and denylist;
-implement the zero-request request-plan command; produce a deterministic request plan and its plan
-hash; run the dry run twice and compare plan hashes; construct the proposed request budget and the
-hard ceiling; record policy versions and the expected raw-object count; obtain operator
-acknowledgement; obtain **owner approval of the exact budget and ceiling**; produce the Gate F
-evidence packet.
+implement the zero-request request-plan command; **diagnose the `CURRENT_PLANNER_DISCREPANCY`**
+(§15.1) and either reconcile the planner with accepted authority or stop and refer it; produce a
+deterministic request plan for the **M3.2A window** and its plan hash; run the dry run twice and
+compare plan hashes; construct the proposed request budget and the hard ceiling from the **derived**
+maximum-attempt bound (§16); record policy versions and the expected raw-object count; obtain
+operator acknowledgement; obtain **owner approval of the exact M3.2A budget and ceiling**; produce
+the Gate F evidence packet.
+
+**M3.1B approves the M3.2A window only.** The M3.2B budget and ceiling do not exist yet — they are
+derived after M3.2A freezes its objects, and approved separately (§6.2 of Decision 027).
 
 **The four acts M3.1B keeps separate, and never conflates:**
 
@@ -314,10 +385,13 @@ evidence packet.
 
 ### 3. Explicit non-scope
 
-No live request of any kind. No metadata acquisition. No real candidate snapshot. No selection run
-over real data. No manifest. No approval. No publication. No change to any accepted S4, S5, or S6
-module, migration, identity, preimage, or methodology. No new selector. No schema change unless a
-separately accepted decision authorizes one and the contract names it.
+No live request of any kind. No metadata acquisition. **No candidate-snapshot builder, in
+implementation or in rehearsal. No snapshot freeze. No S5 selection. No reserves or dispositions. No
+selection-result sealing. No S6 manifest construction. No root computation.** No real candidate
+snapshot. No manifest. No approval. No publication. No change to any accepted S4, S5, or S6 module,
+migration, identity, preimage, or methodology. No new selector. No schema change unless a separately
+accepted decision authorizes one and the contract names it. **No M3.2B budget or ceiling** — that
+window's plan does not exist until M3.2A freezes its objects.
 
 ### 4. Controlling decisions
 
@@ -334,14 +408,17 @@ Gate F, §12 (rate limiting, retry, quarantine, rollback, audit).
 ### 5. Required owner decisions
 
 1. **The bounded M3.1 contract**, with its exact authorized paths.
-2. **Acceptance of the rehearsal scenario matrix** as the required coverage set.
-3. **Approval of the exact request budget and the exact hard request ceiling** — a Gate F exit
+2. **Acceptance of the acquisition-rehearsal scenario matrix** (A1–A12) as the required coverage set.
+3. **A ruling on the `CURRENT_PLANNER_DISCREPANCY`** (§15.1) — either the planner is corrected to
+   agree with Decision 013 §1, or a new owner-approved decision changes that authority. **Gate F
+   cannot pass while they disagree.**
+4. **Approval of the exact M3.2A request budget and the exact hard request ceiling** — a Gate F exit
    condition, and the single most consequential decision in the phase.
-4. **Authorization to proceed to M3.2** — separate from 3, and not implied by it.
+5. **Authorization to proceed to M3.2A** — separate from 4, and not implied by it.
 
 ### 6. Prerequisites
 
-- Decision 027 accepted; `INDEPENDENT_M3_MASTER_PLAN_REVIEW` passed.
+- Decision 027 accepted at v0.2; `INDEPENDENT_M3_MASTER_PLAN_REREVIEW` passed.
 - A bounded M3.1 contract exists, accepted, with exact paths.
 - Explicit owner authorization to begin M3.1.
 - Live baseline re-verified with `make context`: branch `main`, `HEAD == origin/main`, clean tree,
@@ -372,17 +449,22 @@ Gate F, §12 (rate limiting, retry, quarantine, rollback, audit).
 
 ### 8. Exact outputs
 
-**M3.1A.** A passing rehearsal across all twenty scenarios; per-scenario recorded reason codes,
-persisted state, files, receipts, rollback, recovery, and validation; the identity-noncontamination
-proof; the rehearsal evidence record; the token `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED`.
+**M3.1A.** A passing acquisition rehearsal across all twelve scenarios A1–A12; per-scenario recorded
+reason codes, persisted state, files, receipts, rollback, recovery, and validation; the
+identity-noncontamination proof; the **derived and independently tested per-route maximum reachable
+physical-attempt bound** (§16); the rehearsal evidence record; the token
+`M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED`.
 
-**M3.1B.** A deterministic request plan; its request-plan hash; two dry-run outputs with identical
-plan hashes; the completed
-[`Docs/m3/templates/request_budget.md`](../Docs/m3/templates/request_budget.md); the owner-approved
-hard ceiling; the recorded policy versions; the expected raw-object count; the expected
-request-class totals where derivable; the completed
+**M3.1B.** A deterministic **M3.2A** request plan; its request-plan hash; two dry-run outputs with
+identical plan hashes; a recorded diagnosis of the `CURRENT_PLANNER_DISCREPANCY`; the completed
+[`Docs/m3/templates/request_budget.md`](../Docs/m3/templates/request_budget.md) for the M3.2A window;
+the owner-approved hard ceiling; the recorded policy versions; the expected raw-object count; the
+expected request-class totals where derivable; the completed
 [`Docs/m3/templates/gate_f_checklist.md`](../Docs/m3/templates/gate_f_checklist.md); one execution
 receipt per dry run; the token `M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION`.
+
+**Every completed artifact above is private evidence** (§12); the repository records only its type,
+phase, status, SHA-256, and reference identifier in the public evidence index.
 
 ### 9. Authorized future path categories
 
@@ -448,15 +530,20 @@ source.
 **M3.1A: exactly 0.** **M3.1B: exactly 0.** Both parts are zero-request by definition, and a
 non-zero count is a Gate F failure, not a variance.
 
-The volume M3.1B *plans* (for M3.2 to execute) is in §15.
+The volume M3.1B *plans* — for the **M3.2A window only** — is in §15.
 
 ### 15. Request-volume formula
 
-For the M3.2 acquisition M3.1B budgets:
+**No count is frozen in this plan.** Every count below is produced by the accepted planner from
+explicit inputs at the time the plan is produced, and approved by the owner as an exact integer for
+that window. The v0.1 derived totals, subtotal, plan hash, and maximum-attempt product are
+**withdrawn** (Decision 027 §0 items 5–6).
+
+For the **M3.2A bootstrap window** M3.1B budgets:
 
 ```
-planned_unique_logical_requests
-  = Σ_over_routes  U(route)
+planned_unique_logical_requests(M3.2A)
+  = Σ_over_bootstrap_routes  U(route)
 
 U(sec_bulk_submissions)          = 1
 U(sec_company_tickers_exchange)  = 1
@@ -466,29 +553,43 @@ U(sec_edgar_filing_calendar)     = 1                       # one instance per ex
 U(sec_edgar_calendar_announcement)
                                  = |CALENDAR_EVIDENCE_MANIFEST|
 U(sec_full_index_company)        = |required_closed_quarters(coverage, as_of, include_open_quarter)|
-U(sec_submissions_historical)    = EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN
-U(sec_submissions_entity)        = EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN
 
-max_physical_attempts
-  = planned_unique_logical_requests × A_max
+max_physical_attempts(window)
+  = Σ_over_routes_in_window  U(route) × A_reachable(route)
 
-A_max = 1                       # the initial attempt
-      + MAX_REDIRECT_DEPTH      # 5 — each validated hop is a separate physical attempt
-      + max_transient_retries   # 5 — the accepted retry budget
-      + 1                       # the single controlled post-cooldown request
-      = 12
+A_reachable(route)
+  = the maximum reachable physical attempts for that route, DERIVED from the implemented
+    response-policy state machine and INDEPENDENTLY TESTED against its worst reachable path.
+    It is never asserted from constants, and never assumed to be the sum of the retry,
+    redirect, and cooldown bounds. See §16.
 
-max_raw_objects  = planned_unique_logical_requests
-                   − expected_not_modified − expected_cache_hits − expected_duplicate_bodies
+max_raw_objects(window)
+  = planned_unique_logical_requests(window)
+    − expected_not_modified − expected_cache_hits − expected_duplicate_bodies
 
 elapsed_floor_seconds = (total_physical_attempts − 1) ÷ requests_per_second
 ```
 
+The **M3.2B dependent window** has its own plan, derived after M3.2A freezes its objects:
+
+```
+planned_unique_logical_requests(M3.2B)
+  = U(sec_submissions_historical) + U(sec_submissions_entity)
+
+U(sec_submissions_historical)
+  = |historical-file references enumerated from the FROZEN M3.2A bulk-submissions object|
+U(sec_submissions_entity)
+  = |the explicit entity reconciliation set derived from the frozen M3.2A objects|
+```
+
+**Both M3.2B counts are `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` until M3.2A completes.**
+They are then **derived, not estimated** — which is why no contingency allowance exists.
+
 **Count inputs, by name:** the coverage window (`coverage_start`, `coverage_end`, `as_of_date`,
 `include_open_quarter`); the explicit `--calendar-year`; the calendar-evidence manifest entry set;
-the historical-file references named inside the retrieved bulk submissions archive; the controlled
-reconciliation set; the catalog's already-satisfied instance set; `requests_per_second`;
-`max_transient_retries`; `MAX_REDIRECT_DEPTH`.
+the frozen M3.2A bulk-submissions object and the historical-file references it names; the explicit
+entity reconciliation set; the catalog's already-satisfied instance set; `requests_per_second`; and
+the response-policy state machine from which `A_reachable` is derived.
 
 **Treatment rules, stated exactly:**
 
@@ -497,60 +598,74 @@ reconciliation set; the catalog's already-satisfied instance set; `requests_per_
 | **Deduplication** | Two retrievals collapse to one logical request only when `request_identity(source_id, normalized_url, parameters)` is identical. Nothing else deduplicates. |
 | **Cache hit** | An instance already satisfied in the catalog is **not** planned and consumes no logical request. The dry run reports it as `already satisfied (reused)`. |
 | **Conditional request** | A conditional re-validation is one logical request and at least one physical attempt. A `304 Not Modified` closes it, produces **no** new raw object, and creates no new observation. |
-| **Retry** | A retry consumes **no** additional logical request and **one** additional physical attempt. Retries are bounded by `max_transient_retries`. |
-| **Redirect** | Each validated hop is **one** additional physical attempt against the **same** logical request. Bounded by `MAX_REDIRECT_DEPTH`; a loop or an over-depth chain fails closed. |
-| **Cooldown** | A `403`, or a `429` without a usable `Retry-After`, halts **aggregate** traffic for `COOLDOWN_SECONDS` and permits exactly **one** controlled further request; a second cooldown is terminal. |
+| **Retry** | A retry consumes **no** additional logical request and **one** additional physical attempt. Bounded by the accepted retry budget. |
+| **Redirect** | Each validated hop is **one** additional physical attempt against the **same** logical request. Bounded by the accepted redirect depth; a loop or an over-depth chain fails closed. |
+| **Cooldown** | A `403`, or a `429` without a usable `Retry-After`, halts **aggregate** traffic and permits exactly **one** controlled further request; a second cooldown is terminal. |
 | **Already-present raw object** | A byte-identical body reconciles to the existing content-addressed object and creates **no** second object. A differing body at the same identity is a **new observation**, never an overwrite. |
 
-**Derivable planned totals, computed offline from accepted inputs** at the Decision 013 §1 as-of
-(`coverage 2009-01-01 → 2026-06-30`, `as_of 2026-06-30`, `include_open_quarter = false`):
+### 15.1 `CURRENT_PLANNER_DISCREPANCY` — unresolved, and blocking Gate F
 
-| Route | `U(route)` | Basis |
-|---|---:|---|
-| `sec_bulk_submissions` | 1 | one bulk archive per census run |
-| `sec_company_tickers_exchange` | 1 | one bulk document |
-| `sec_company_tickers` | 1 | one bulk document |
-| `sec_sic_code_list` | 1 | one bulk document |
-| `sec_edgar_filing_calendar` | 1 | one annual instance per explicit `--calendar-year` |
-| `sec_edgar_calendar_announcement` | 0 | `CALENDAR_EVIDENCE_MANIFEST` currently holds **0** entries |
-| `sec_full_index_company` | **69** | required closed quarters `2009QTR1`–`2026QTR1`; `2026QTR2` is the provisional open quarter and is excluded |
-| `sec_submissions_historical` | `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | depends on the historical-file references inside the retrieved bulk archive |
-| `sec_submissions_entity` | `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | controlled reconciliation only; depends on the observed reconciliation set |
-| **Derivable subtotal** | **74** | |
+**The accepted planner and accepted authority currently disagree about the 2026 Q2 quarter.**
 
-The quarterly-index component is reproducible: the accepted planner yields 69 required closed
-instances, 70 planned instances in total, no excluded future quarters, and plan hash
-`25257d753295ecb1befc23ff2a54cf37052c873ba425efd0717118b6c8a4a0b6` at those inputs.
+[Decision 013](../Docs/Decisions/decision_013_pilot_selection_mechanics.md) §1 fixes the as-of date
+at **2026-06-30** and states that **coverage extends through the closed 2026 Q2 quarter**, with
+`include_open_quarter = false` and no open-2026-Q3 retrieval. The milestone plan's Gate G rule reads
+"quarters ending on or before the as-of date are required."
 
-**Derivable maximum physical attempts:** `74 × 12 = 888`, before the two deferred routes are
-resolved.
+The accepted planner, at exactly those inputs, classifies **2026 Q2 as the provisional open quarter**
+— because 2026-06-30 falls *inside* 2026 Q2 — and with `include_open_quarter = false` **excludes it**,
+ending its required set at 2026 QTR1.
 
-**How the deferred counts get resolved.** The Gate F zero-request planning command
-(**`PLANNED — NOT YET IMPLEMENTED`**, interface in §16 of
-[`Docs/m3/operator_runbook.md`](../Docs/m3/operator_runbook.md)) enumerates every route, resolves
-`sec_submissions_historical` from the references the plan can enumerate without retrieving anything
-and marks any residue as ceiling-bounded, resolves `sec_submissions_entity` from the explicit
-reconciliation set the operator supplies, prints the complete per-route table, and emits the
-request-plan hash — **while making zero requests**. Its output is the budget the owner approves.
+2026 Q2 satisfies both conditions at once: it **ends on** the as-of date and it **contains** the
+as-of date. The planner resolves that tie one way; Decision 013 §1 states the other.
+
+**This plan does not resolve it, and Decision 013 is unchanged and controlling.**
+
+**The bounded M3.1 contract must diagnose this discrepancy.** Until the planner's behaviour agrees
+with accepted authority, or a new owner-approved decision changes that authority, **Gate F cannot
+pass** — a request plan that disagrees with the accepted coverage cutoff is not a plan a budget can
+be approved against.
+
+**How the M3.2B counts get resolved.** The zero-request planning command
+(**`PLANNED — NOT YET IMPLEMENTED`**, interface in the operator runbook) is run a **second** time
+after M3.2A, over the frozen bootstrap objects. It enumerates the historical-file references those
+objects actually name and the explicit reconciliation set the operator supplies, prints the complete
+per-route table, and emits the second request-plan hash — **while making zero requests**. Its output
+is the second budget the owner approves.
 
 ### 16. Hard request ceiling
 
 **M3.1A and M3.1B: `0`.** One physical attempt is a phase failure.
 
-The ceiling M3.1B *sets for M3.2*:
+The ceiling M3.1B *sets for the M3.2A window*:
 
 ```
-HARD_REQUEST_CEILING = ceil( 1.10 × Σ_over_all_routes ( U(route) × A_max ) )
+HARD_REQUEST_CEILING(window)
+  = Σ_over_routes_in_window ( U(route) × A_reachable(route) )
 ```
 
-evaluated over **all** routes once the Gate F dry run has resolved the two deferred ones. The 10%
-contingency covers exactly one nameable cause: `sec_submissions_historical` references that appear
-between the dry run and the live run, because the bulk submissions archive is a `living` source. It
-covers nothing else.
+**No contingency multiplier is applied.** The v0.1 10% allowance is withdrawn: it existed only
+because v0.1 tried to acquire, in one window, requests whose count depended on an object it had not
+yet retrieved. The two-window split (M3.2A → freeze → derive → M3.2B) removes that cause, so each
+window's count is derived rather than padded.
 
-**The ceiling is a hard stop, not a target.** It is approved by the owner as an exact integer before
-network enablement, is recorded in the request budget and the Gate F checklist, and is **never raised
-mid-run**. Raising it requires stopping, re-planning, and a new owner approval.
+**`A_reachable(route)` is derived, never asserted.** The future implementation must:
+
+1. **derive the maximum reachable physical attempts per route** from the implemented response-policy
+   state machine as written — not from a formula that assumes retries, redirects, and cooldowns are
+   simply additive;
+2. **count every redirect hop, every retry, and every controlled post-cooldown request** as a
+   physical attempt;
+3. **test the worst reachable path independently**, rather than deriving the bound only by reading;
+4. **produce an exact per-window integer**;
+5. **obtain explicit owner approval** of that integer;
+6. **refuse the request that would exceed the approved ceiling** — stop before, never after;
+7. **never increase a ceiling during a running window.**
+
+**The ceiling is a hard stop, not a target.** It is approved by the owner as an exact integer per
+window before that window's network enablement, is recorded in that window's request budget and in
+the Gate F record, and is **never raised mid-window**. Raising it requires stopping, re-planning, and
+a new owner approval.
 
 ### 17. Stop conditions
 
@@ -561,13 +676,19 @@ Stop and report — do not work around — on any of:
 3. the SEC identity being absent, malformed, or rejected by the boundary validator;
 4. network being enabled in the effective configuration at any point in M3.1;
 5. a route present in the plan that is not in the allowlist, or a denylisted route reachable;
-6. any rehearsal scenario failing, or any scenario being unimplemented, skipped, or `xfail`ed;
+6. any acquisition-rehearsal scenario failing, or any scenario being unimplemented, skipped, or
+    `xfail`ed;
 7. a receipt containing a prohibited field;
 8. any evidence that receipt content reached a governed identity;
-9. the request-budget formula being unresolvable and no ceiling being derivable;
-10. the live baseline disagreeing with the contract's stated baseline;
-11. a full SEC identity or an absolute personal path appearing in any output, log, or artifact;
-12. the owner declining to approve the exact budget or ceiling.
+9. `A_reachable` being underivable, or the derived bound disagreeing with the independently tested
+    worst reachable path;
+10. **the `CURRENT_PLANNER_DISCREPANCY` (§15.1) remaining unresolved** — Gate F cannot pass while the
+    planner and Decision 013 §1 disagree about 2026 Q2;
+11. the live baseline disagreeing with the contract's stated baseline;
+12. a full SEC identity or an absolute personal path appearing in any output, log, or artifact;
+13. the owner declining to approve the exact M3.2A budget or ceiling;
+14. any attempt to rehearse or implement a snapshot, selection, reserve, sealing, manifest, or root
+    path in this phase.
 
 ### 18. Retry and response-policy boundary
 
@@ -625,7 +746,11 @@ Both must satisfy every prohibition in
 
 - Two dry runs, executed independently, producing **byte-identical plan output and identical plan
   hashes**.
-- All twenty rehearsal scenarios implemented and passing, none skipped or `xfail`ed.
+- All twelve acquisition-rehearsal scenarios A1–A12 implemented and passing, none skipped or
+  `xfail`ed.
+- **The independently tested worst reachable path per route**, producing `A_reachable` and agreeing
+  with the derived bound.
+- A recorded diagnosis of the `CURRENT_PLANNER_DISCREPANCY`.
 - An assertion that no socket is opened during the rehearsal.
 - An assertion that the receipt schema contains **no** prohibited field.
 - An assertion that the S5 and S6 identity functions produce identical values with and without a
@@ -635,10 +760,12 @@ Both must satisfy every prohibition in
 
 ### 24. Offline tests
 
-The whole phase is offline. The minimum test categories: rehearsal-scenario tests (one per scenario);
-request-plan determinism and plan-hash stability tests; allowlist/denylist boundary tests; receipt
-construction, serialization, and redaction tests; the identity non-contamination test; and the
-existing `tests/integration/test_no_network.py` assertions, unchanged and still passing.
+The whole phase is offline. The minimum test categories: acquisition-rehearsal scenario tests (one
+per scenario A1–A12); **worst-reachable-path tests deriving `A_reachable` per route from the
+implemented state machine**; request-plan determinism and plan-hash stability tests;
+allowlist/denylist boundary tests; receipt construction, serialization, mode-classification, and
+redaction tests; the identity non-contamination test; and the existing
+`tests/integration/test_no_network.py` assertions, unchanged and still passing.
 
 ### 25. Full phase-end validation
 
@@ -676,12 +803,18 @@ codes, and the same identities, and re-running a completed scenario performs **n
 
 ### 30. Required evidence packet
 
+**Every item below is private evidence** (§12). Only its type, phase, status, SHA-256, and reference
+identifier are recorded publicly, in
+[`Docs/m3/templates/evidence_index.md`](../Docs/m3/templates/evidence_index.md).
+
 - [`Docs/m3/templates/gate_f_checklist.md`](../Docs/m3/templates/gate_f_checklist.md), completed and
   owner-signed.
 - [`Docs/m3/templates/request_budget.md`](../Docs/m3/templates/request_budget.md), completed and
-  owner-approved with the exact ceiling.
-- The rehearsal evidence record: per-scenario outcomes, the twenty reason-code results, the
-  non-contamination proof, and the receipt sample set with prohibited fields shown absent.
+  owner-approved with the exact M3.2A ceiling.
+- The acquisition-rehearsal evidence record: per-scenario outcomes for A1–A12, their reason-code
+  results, the derived and tested `A_reachable` per route, the non-contamination proof, and the
+  receipt sample set with prohibited fields shown absent.
+- The recorded `CURRENT_PLANNER_DISCREPANCY` diagnosis.
 - The two dry-run outputs and their identical plan hashes.
 - One execution receipt per rehearsal command and per dry run.
 
@@ -717,29 +850,58 @@ M3.2 contract.
 
 ### 36. Conditions preventing progression
 
-M3.2 may not begin while **any** of these holds: the rehearsal has not passed; the two dry runs
-disagree; the request budget is unapproved; the hard ceiling is unapproved; the allowlist or denylist
-is unasserted; the SEC identity is unvalidated or has been printed; network is enabled outside an
-authorized window; the independent M3.1 review has not passed; the M3.2 contract does not exist; or
-any Gate F checklist item is `FAIL` or `UNKNOWN`.
+M3.2A may not begin while **any** of these holds: the acquisition rehearsal has not passed; the two
+dry runs disagree; **the `CURRENT_PLANNER_DISCREPANCY` is unresolved**; `A_reachable` is underived or
+untested; the M3.2A request budget is unapproved; the hard ceiling is unapproved; the allowlist or
+denylist is unasserted; the SEC identity is unvalidated or has been printed; network is enabled
+outside an authorized window; the independent M3.1 review has not passed; the M3.2 contract does not
+exist; or any Gate F checklist item is `FAIL` or `UNKNOWN`.
 
 ---
 
 # Phase M3.2 — Controlled metadata-only SEC acquisition and Gate H
 
+**One phase, two sequential acquisition windows.** M3.2A retrieves only sources whose complete
+logical-request set is derivable before any network access; M3.2B retrieves only the dependent
+requests **derived from the frozen M3.2A objects**. Gate H integrates both.
+
+**Each window carries its own plan identity, budget, hard ceiling, owner approval, execution
+receipts, and stop-before-overflow enforcement.** A window's approval never covers the other window.
+
 ### 1. Objective
 
-Acquire, under an approved budget and an approved ceiling, exactly the already-approved SEC
-**metadata** needed to build a real candidate snapshot — and prove afterwards, at Gate H, that the
-run stayed inside every boundary it was given.
+Acquire, under a per-window approved budget and ceiling, exactly the already-approved SEC
+**metadata** needed to build a real candidate snapshot — deriving the dependent requests from frozen
+evidence rather than estimating them — and prove afterwards, at Gate H, that both windows stayed
+inside every boundary they were given.
 
 ### 2. Exact scope
 
-Enable the network for one named, authorized command. Execute the bounded metadata acquisition over
-the approved route set. Store every retrieved object content-addressably with immutable provenance.
-Classify every response. Enforce the budget and stop before the ceiling. Detect schema drift and fail
-closed. Survive interruption and resume without duplicate substantive writes. Emit one execution
-receipt per live command. Disable the network again. Run Gate H and produce its evidence.
+**M3.2A — bootstrap window.** Enable the network for one named, authorized command. Acquire **only**
+the bootstrap sources whose complete logical-request set was derivable before access:
+`sec_bulk_submissions`, `sec_company_tickers_exchange`, `sec_company_tickers`, `sec_sic_code_list`,
+`sec_edgar_filing_calendar`, `sec_edgar_calendar_announcement` (manifest-resolved only), and
+`sec_full_index_company`.
+
+**Between the windows, in this exact order:**
+
+1. **disable transport**;
+2. **freeze and identify the exact bootstrap raw objects** by their content-addressed identities;
+3. **derive** the historical-submission references **from the frozen bulk-submissions object**;
+4. **derive** the explicit entity reconciliation set from the frozen objects;
+5. **produce a second zero-request request plan** covering only those dependent requests;
+6. **obtain a second exact owner approval** of that plan's budget and hard ceiling.
+
+**M3.2B — dependent window.** Re-enable the network for one named, authorized command. Acquire
+**only** the `sec_submissions_historical` and `sec_submissions_entity` requests enumerated by that
+second plan — nothing the second plan does not name.
+
+**In both windows:** store every retrieved object content-addressably with immutable provenance;
+classify every response; enforce that window's budget and stop before that window's ceiling; detect
+schema drift and fail closed; survive interruption and resume without duplicate substantive writes;
+emit one execution receipt per live command; and **disable the network again** at the window's end.
+
+**After M3.2B:** run Gate H over both windows together and produce its evidence.
 
 ### 3. Explicit non-scope
 
@@ -747,6 +909,13 @@ No filing body, primary document, accession index, complete submission, SGML hea
 XBRL artifact. No CompanyFacts. No Frames API. No outcome data. **No candidate snapshot** — freezing
 one is M3.3. **No selection run.** **No manifest.** **No approval.** **No publication.** No change to
 any accepted S4, S5, or S6 identity, preimage, or methodology.
+
+**No dependent request in M3.2A**, and **no bootstrap request in M3.2B**. Neither window may issue a
+request the other window's plan owns. **No M3.2B request may be issued under the M3.2A approval** —
+the second window requires its own owner-approved budget and ceiling, derived after the freeze.
+
+**No contingency allowance in either window.** Counts are derived from explicit inputs and frozen
+source objects, never padded.
 
 ### 4. Controlling decisions
 
@@ -764,12 +933,16 @@ Gate H, 12, 13.
 
 ### 5. Required owner decisions
 
-1. **The bounded M3.2 contract**, with exact authorized paths and an explicit network authorization.
-2. **Confirmation of the exact request budget and hard ceiling** approved at Gate F, restated at
-   M3.2 entry — a stale budget is not an approved budget.
-3. **Authorization to freeze a real candidate snapshot** — taken at Gate H exit, not at entry, and
-   not implied by acquisition succeeding.
-4. **A ruling on any schema-drift incident** the run raises.
+1. **The bounded M3.2 contract**, with exact authorized paths and an explicit per-window network
+   authorization.
+2. **Confirmation of the exact M3.2A request budget and hard ceiling** approved at Gate F, restated
+   at M3.2A entry — a stale budget is not an approved budget.
+3. **A second exact owner approval, between the windows**, of the derived M3.2B plan, its budget, and
+   its hard ceiling. **M3.2B may not begin without it**, and it cannot be given before M3.2A's
+   objects are frozen.
+4. **Authorization to freeze a real candidate snapshot** — taken at Gate H exit, not at entry, and
+   not implied by either window succeeding.
+5. **A ruling on any schema-drift incident** either window raises.
 
 ### 6. Prerequisites
 
@@ -777,30 +950,50 @@ Gate H, 12, 13.
   `m3.1-complete` created.
 - A bounded M3.2 contract, accepted, with explicit network authorization and exact paths.
 - The Gate F checklist complete, every item `PASS`, owner-signed.
-- The request budget and hard ceiling approved as exact integers.
-- Gate H **pre-run** state established: an isolated M3.2 data root; a consistent SQLite backup of any
-  accepted prior state; recorded available storage; confirmed quarantine and staging paths; the
-  confirmed single-writer lock; **no** stale `.part` files and **no** unresolved recovery events; the
-  approved plan hash saved.
+- **The `CURRENT_PLANNER_DISCREPANCY` resolved** — the planner agrees with Decision 013 §1, or a new
+  owner-approved decision has changed that authority.
+- The **M3.2A** request budget and hard ceiling approved as exact integers.
+- Gate H **pre-run** state established, before **each** window: an isolated M3.2 data root; a
+  consistent SQLite backup of any accepted prior state; recorded available storage; confirmed
+  quarantine and staging paths; the confirmed single-writer lock; **no** stale `.part` files and
+  **no** unresolved recovery events; that window's approved plan hash saved.
 - `[sec]` extra installed; SEC identity valid; live baseline re-verified with `make context`.
+- **M3.2B additionally requires**: M3.2A complete; transport disabled; the bootstrap objects frozen
+  and identified; the dependent references derived from them; the second zero-request plan produced;
+  and the **second owner approval** recorded.
 
 ### 7. Exact inputs
 
-The Gate F request plan and its hash; the approved budget and ceiling; the approved coverage window
-and as-of inputs; the explicit `--calendar-year`; the accepted source registry and URL family
-policies; the accepted response, retry, cooldown, and rate-limit policy; the accepted raw-store and
-provenance rules; the accepted schema-drift policy; the validated SEC user-agent, resolved on demand
-and never printed; the isolated data root and its catalog at migration `0013`.
+**M3.2A:** the Gate F request plan and its hash; the approved M3.2A budget and ceiling; the approved
+coverage window and as-of inputs; the explicit `--calendar-year`; the accepted source registry and
+URL family policies; the accepted response, retry, cooldown, and rate-limit policy; the accepted
+raw-store and provenance rules; the accepted schema-drift policy; the validated SEC user-agent,
+resolved on demand and never printed; the isolated data root and its catalog at migration `0013`.
+
+**M3.2B additionally:** the **frozen** M3.2A raw objects and their content-addressed identities; the
+historical-submission references **derived from the frozen bulk-submissions object**; the explicit
+entity reconciliation set; the second zero-request plan and its hash; and the **second** owner-approved
+budget and ceiling.
 
 ### 8. Exact outputs
 
-Immutable raw objects for every successful logical retrieval, content-addressed with full lineage;
-one source-observation row per retrieval with its validated redirect chain; parsed source records
-with parser versions and QA state; quarantined objects where the policy quarantines; the accession
-and registrant metadata the approved sources yield; the recorded actual logical-request count, actual
-physical-attempt count, and response-classification totals; the drift outcome; the completed
-[`Docs/m3/templates/gate_h_checklist.md`](../Docs/m3/templates/gate_h_checklist.md); one execution
-receipt per live command; the token `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED`.
+**Per window:** immutable raw objects for every successful logical retrieval, content-addressed with
+full lineage; one source-observation row per retrieval with its validated redirect chain; parsed
+source records with parser versions and QA state; quarantined objects where the policy quarantines;
+that window's recorded actual logical-request count, actual physical-attempt count, and
+response-classification totals; that window's drift outcome; and one execution receipt per live
+command.
+
+**Between the windows:** the frozen bootstrap object identities; the derived historical-submission
+reference set; the derived entity reconciliation set; the second zero-request plan and its hash; and
+the recorded second owner approval.
+
+**After M3.2B:** the accession and registrant metadata the approved sources yield; the completed
+[`Docs/m3/templates/gate_h_checklist.md`](../Docs/m3/templates/gate_h_checklist.md) integrating both
+windows; and the token `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED`.
+
+**Every completed artifact above is private evidence** (§12); the public repository records only its
+type, phase, status, SHA-256, and reference identifier in the evidence index.
 
 ### 9. Authorized future path categories
 
@@ -823,14 +1016,28 @@ route.
 
 ### 11. Network permission
 
-**CONTROLLED AND EXPLICITLY AUTHORIZED.** Network is disabled by default and is enabled **only** for
-the one named acquisition command, **only** for the duration of the authorized window, and **only**
-with the approved budget and ceiling in force. It is **disabled again** immediately after acquisition
-and before Gate H concludes.
+**CONTROLLED AND EXPLICITLY AUTHORIZED, per window.** Network is disabled by default and is enabled
+**only** for the one named acquisition command, **only** for the duration of that window, and
+**only** with that window's approved budget and ceiling in force.
+
+**It is disabled again at the end of each window** — after M3.2A, before the freeze and derivation
+step, and again after M3.2B, before Gate H concludes. **Transport is off while the dependent plan is
+being derived**, which is what makes that derivation an offline act over frozen evidence.
+
+**M3.2A's authorization does not extend to M3.2B.** Each window is separately enabled under its own
+owner approval.
 
 ### 12. Permitted SEC routes or source classes
 
-Exactly the nine registered families in the M3.1 §12 table, on hosts `www.sec.gov` and
+**M3.2A:** the seven bootstrap families only — `sec_bulk_submissions`,
+`sec_company_tickers_exchange`, `sec_company_tickers`, `sec_sic_code_list`,
+`sec_edgar_filing_calendar`, `sec_edgar_calendar_announcement` (manifest-resolved only), and
+`sec_full_index_company`.
+
+**M3.2B:** the two dependent families only — `sec_submissions_historical` and
+`sec_submissions_entity` — and only the exact requests the second plan enumerates.
+
+All from the nine registered families in the M3.1 §12 table, on hosts `www.sec.gov` and
 `data.sec.gov`, method `GET` only. Expected content types by route: `zip` for
 `sec_bulk_submissions`; `json` for `sec_company_tickers_exchange`, `sec_company_tickers`,
 `sec_submissions_entity`, `sec_submissions_historical`; `html` for `sec_sic_code_list`,
@@ -854,32 +1061,38 @@ source. **External corpora remain validation-only and are not retrieved here at 
 
 ### 14. Expected request volume
 
-Exactly the Gate F approved plan. At the accepted as-of inputs the derivable component is **74
-planned unique logical requests** (1 + 1 + 1 + 1 + 1 + 0 + 69) with a derivable maximum of **888
-physical attempts**, plus the two routes marked
-`EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` and resolved before entry.
+**M3.2A:** exactly the Gate F approved plan for that window. **M3.2B:** exactly the second approved
+plan, derived after the freeze. **No count is stated here**; each is produced by the accepted planner
+from explicit inputs and approved as an exact integer for its window (Decision 027 §15).
 
-**A deviation from the approved plan is a finding, not a variance.** Actual counts are recorded and
-compared item by item at Gate H.
+**A deviation from a window's approved plan is a finding, not a variance.** Actual counts are
+recorded per window and compared item by item at Gate H.
 
 ### 15. Request-volume formula
 
-Identical to M3.1 §15, evaluated once at Gate F and **not recomputed during the run**. The run
-consumes the approved plan; it does not re-derive one.
+Identical to M3.1 §15. **Each window's plan is evaluated once, before that window opens, and is not
+recomputed during the run.** The run consumes its approved plan; it does not re-derive one.
+
+The M3.2B formula's inputs do not exist until M3.2A's objects are frozen — which is the whole reason
+the phase has two windows.
 
 ### 16. Hard request ceiling
 
-The exact owner-approved integer from Gate F, in force for the whole phase. **The acquisition stops
-before placing the attempt that would exceed it** — it does not stop after exceeding it. Reaching the
-ceiling is a stop condition and a Gate H failure; it is never raised mid-run, and a re-plan requires
-a new owner approval.
+**One exact owner-approved integer per window**, in force for that window only. **The acquisition
+refuses the attempt that would exceed it** — it stops before, never after. Reaching a ceiling is a
+stop condition and a Gate H failure; it is **never raised mid-window**, and a re-plan requires a new
+owner approval.
+
+**M3.2A's ceiling does not bind or budget M3.2B, and M3.2B's does not extend M3.2A.** Consumed counts
+are tracked per window and reconciled together at Gate H.
 
 ### 17. Stop conditions
 
 Stop and report on any of:
 
-1. reaching the hard request ceiling;
-2. any request to a prohibited host, method, or route, attempted or constructed;
+1. reaching that window's hard request ceiling;
+2. any request to a prohibited host, method, or route, attempted or constructed — including a
+   dependent request issued in M3.2A, or a bootstrap request issued in M3.2B;
 3. any response the accepted policy cannot classify;
 4. a second aggregate cooldown, or a `403`/block-page signature after one controlled retry;
 5. unresolved schema drift of any blocking kind;
@@ -891,7 +1104,10 @@ Stop and report on any of:
 9. any `.part` file, orphan, or unresolved recovery event that recovery cannot resolve deterministically;
 10. the SEC identity being invalid, or appearing in any log or artifact;
 11. the catalog failing quick, integrity, or foreign-key checks;
-12. actual counts diverging from the approved plan in a way the plan does not account for.
+12. actual counts diverging from that window's approved plan in a way the plan does not account for;
+13. transport still enabled when the between-windows freeze and derivation step begins;
+14. M3.2B beginning without its own derived plan and its own recorded owner approval;
+15. the derived M3.2B reference set disagreeing with what the frozen bootstrap objects actually name.
 
 ### 18. Retry and response-policy boundary
 
@@ -956,19 +1172,23 @@ path, and no substantive row content.
 
 ### 23. Validation requirements
 
-Planned versus actual reconciliation, per route and in total; raw-store completeness against the
-plan; provenance completeness on every stored object; response-policy compliance with no unclassified
-response; zero prohibited-route attempts; zero budget overflow; zero unresolved drift; zero secret or
-identity leakage in logs and artifacts; catalog quick, integrity, and foreign-key checks passing;
-migration integrity verified before further writes; and confirmation that **no snapshot, no selection,
-and no manifest exists yet**.
+Planned versus actual reconciliation **per window**, per route and in total; raw-store completeness
+against each plan; provenance completeness on every stored object; response-policy compliance with no
+unclassified response; zero prohibited-route attempts in either window; zero budget overflow in
+either window; zero unresolved drift; zero secret or identity leakage in logs and artifacts; catalog
+quick, integrity, and foreign-key checks passing; migration integrity verified before further writes;
+**proof that the M3.2B plan was derived from the frozen M3.2A objects and matches what they name**;
+**proof that transport was disabled between the windows**; and confirmation that **no snapshot, no
+selection, and no manifest exists yet**.
 
 ### 24. Offline tests
 
 Every new or edited code path ships with offline tests using scripted responses — never live ones:
-budget enforcement and the stop-before-ceiling boundary; ceiling arithmetic; per-route allowlist and
-denylist enforcement; resumability with no duplicate substantive write; duplicate-object
-reconciliation; drift refusal; receipt field completeness and redaction; and the unchanged
+per-window budget enforcement and the stop-before-ceiling boundary; ceiling derivation from the
+implemented state machine; per-route allowlist and denylist enforcement, including window-scoped
+route separation; resumability with no duplicate substantive write; duplicate-object reconciliation;
+drift refusal; derivation of the dependent plan from a frozen object fixture; receipt field
+completeness, mode classification, and redaction; and the unchanged
 `tests/integration/test_no_network.py` assertions for every non-authorized path.
 
 ### 25. Full phase-end validation
@@ -1014,11 +1234,17 @@ logical requests. The acquisition is restartable at every boundary the rehearsal
 
 ### 30. Required evidence packet
 
+**Every item below is private evidence** (§12); the public repository records only its type, phase,
+status, SHA-256, and reference identifier in
+[`Docs/m3/templates/evidence_index.md`](../Docs/m3/templates/evidence_index.md).
+
 [`Docs/m3/templates/gate_h_checklist.md`](../Docs/m3/templates/gate_h_checklist.md), completed and
-owner-signed; the request-accounting reconciliation (planned versus actual, per route); the raw-store
-and provenance completeness report; the response-classification totals; the drift outcome, with any
-incident record; the recovery record if the run was interrupted; every execution receipt from the
-phase; and the confirmation that network is disabled again.
+owner-signed, integrating **both** windows; the request-accounting reconciliation per window (planned
+versus actual, per route); the **second** window's request budget and its recorded owner approval;
+the frozen bootstrap object identities and the derived dependent reference set; the raw-store and
+provenance completeness report; the response-classification totals; the drift outcome, with any
+incident record; the recovery record if either window was interrupted; every execution receipt from
+the phase; and the confirmation that network is disabled again after each window.
 
 ### 31. Completion token
 
@@ -1050,22 +1276,40 @@ candidate snapshot and to create the bounded M3.3 contract.
 ### 36. Conditions preventing progression
 
 M3.3 may not begin while any of these holds: any Gate H item is `FAIL` or `UNKNOWN`; actual requests
-diverge unexplained from planned; any prohibited route was attempted; the budget overflowed; drift is
-unresolved; any response is unclassified; any stored object lacks complete provenance; network is
-still enabled; a secret or identity leaked; the independent M3.2 review has not passed; or the M3.3
-contract does not exist.
+diverge unexplained from either window's plan; any prohibited route was attempted; either budget
+overflowed; **M3.2B ran without its own derived plan and recorded owner approval**; **the dependent
+plan was not derived from the frozen bootstrap objects**; drift is unresolved; any response is
+unclassified; any stored object lacks complete provenance; network is still enabled; a secret or
+identity leaked; the independent M3.2 review has not passed; or the M3.3 contract does not exist.
 
 ---
 
-# Phase M3.3 — Frozen real snapshot, deterministic selection, and exact real manifest construction
+# Phase M3.3 — Builder rehearsal, then frozen real snapshot and exact real manifest construction
+
+Planned in two sequential internal parts: **M3.3A** builds the candidate-snapshot builder and
+rehearses the whole execution path offline; **M3.3B** performs the real freeze and the real
+deterministic execution. **M3.3B may not begin until M3.3A passes its independent review.**
 
 ### 1. Objective
 
-Freeze the real candidate snapshot from the acquired metadata, execute the accepted deterministic
-selection over it, persist, reconstruct, and replay the result, and construct the **exact real-data
-pilot manifest** — producing the exact `root_manifest_sha256` as an **output**, never as an approval.
+Build and prove the candidate-snapshot builder and the execution path offline, then freeze the real
+candidate snapshot from the acquired metadata, execute the accepted deterministic selection over it,
+persist, reconstruct, and replay the result, and construct the **exact real-data pilot manifest** —
+producing the exact `root_manifest_sha256` as an **output**, never as an approval.
 
 ### 2. Exact scope
+
+**M3.3A — builder and execution rehearsal.** Implement the **candidate-snapshot builder** under this
+phase's bounded contract. Then run the **execution rehearsal** specified in
+[`Docs/m3/offline_rehearsal_spec.md`](../Docs/m3/offline_rehearsal_spec.md) §6 — scenarios E1–E8,
+against synthetic or real-shaped fixtures, offline — covering snapshot construction and freeze; every
+Decision 019 §9 snapshot-validation obligation; plain/dashed accession disagreement; feasible and
+fail-closed selection; reserves and dispositions; persistence and reconstruction; write-free replay;
+selection-result sealing; S6 manifest construction; file/database atomicity; identical-root replay;
+and Decision 023 **O1** behaviour. **This is where those scenarios belong** — M3.3A is the first
+phase in which the production paths they exercise exist.
+
+**M3.3B — real freeze and deterministic real execution.** Only after M3.3A passes:
 
 Disable transport. Freeze the real candidate snapshot and compute its identity. Execute the accepted
 joint entity–accession selector, reserve construction, and disposition handling — unchanged. Persist
@@ -1084,6 +1328,10 @@ second selector, no reserve substitution, no discretionary trimming, no relaxati
 output. No network. No outcome data, filing text, CompanyFacts, or Frames. **No S4 draft input.** No
 operational timestamp in any substantive identity. No approval state and no publication state written
 anywhere.
+
+**No real snapshot in M3.3A** — it uses synthetic or real-shaped fixtures only, against an isolated
+data root. **No further metadata acquisition in either part**; if the acquired set proves
+insufficient, that is a stop-and-refer condition, not a licence to reopen the network.
 
 ### 4. Controlling decisions
 
@@ -1104,12 +1352,15 @@ snapshot-freeze validation obligations**;
 
 ### 5. Required owner decisions
 
-1. **The bounded M3.3 contract**, with exact authorized paths.
-2. **A governance record for the candidate-snapshot builder** if its construction would fix any
+1. **The bounded M3.3 contract**, with exact authorized paths, covering M3.3A and M3.3B.
+2. **Authorization to proceed from M3.3A to M3.3B**, after the M3.3A independent review — separate
+   from 1, and not implied by the builder working.
+3. **A governance record for the candidate-snapshot builder** if its construction would fix any
    identity, mapping, or classification not already frozen by Decisions 013, 014, 016, or 019.
-3. **A ruling on Decision 023 O1** if the real run reaches an empty sole-carrier crosswalk family.
-4. **A ruling on any infeasibility** — if the real candidate universe cannot satisfy the frozen
-   design, M3.3 **fails closed** and reports the binding constraints; it does not relax a quota.
+4. **A ruling on Decision 023 O1** if the M3.3A rehearsal or the real M3.3B run reaches an empty
+   sole-carrier crosswalk family.
+5. **A ruling on any infeasibility** — if the real candidate universe cannot satisfy the frozen
+   design, M3.3B **fails closed** and reports the binding constraints; it does not relax a quota.
 
 The owner decision on the root is **not** taken in this phase.
 
@@ -1119,10 +1370,12 @@ The owner decision on the root is **not** taken in this phase.
   `m3.2-complete` created.
 - A bounded M3.3 contract, accepted, with exact paths and **network authorization `NONE`**.
 - **Transport disabled again**, verified before snapshot construction begins.
-- Gate H complete, every item `PASS`, owner-signed.
+- Gate H complete, every item `PASS`, owner-signed, integrating both M3.2 windows.
 - The acquired raw-object set complete, verified, and fully provenanced.
 - Catalog at migration `0013`, integrity and foreign-key checks passing.
-- Owner authorization to freeze a real candidate snapshot.
+- **M3.3B additionally requires:** the candidate-snapshot builder implemented; the M3.3A execution
+  rehearsal passed across E1–E8; the M3.3A independent review passed; and explicit owner
+  authorization to freeze a real candidate snapshot.
 
 ### 7. Exact inputs
 
@@ -1139,18 +1392,27 @@ never inferred** from Git, the environment, the interpreter, or the working tree
 
 ### 8. Exact outputs
 
-The frozen real candidate snapshot and its `snapshot_id`; the candidate-table identities; the selected
-entities; the selected accessions; roles; reserves; dispositions; the quota report; a **feasible**
-persisted S5 run; the reconstructed S5 result; the replay proof; the terminal
+**M3.3A:** the implemented candidate-snapshot builder and its tests; a passing execution rehearsal
+across E1–E8; the per-scenario recorded reason codes, persisted state, files, receipts, rollback,
+recovery, and validation; the M3.3A independent-review result.
+
+**M3.3B:** the frozen real candidate snapshot and its `snapshot_id`; the candidate-table identities;
+the selected entities; the selected accessions; roles; reserves; dispositions; the quota report; a
+**feasible** persisted S5 run; the reconstructed S5 result; the replay proof; the terminal
 `selection_result_sha256`; the exact eight S6 component digests; `root_manifest_sha256`;
 `manifest_id`; the canonical serialized manifest document under the content-derived filename; the
 verification result; the write-free replay result; the CLI output deferred from S6; the
 [`real_snapshot_evidence_packet.md`](../Docs/m3/templates/real_snapshot_evidence_packet.md); the
 limitations-register update; and one execution receipt per command.
 
+**The completed evidence packet, the manifest document, and every governed identity are private
+evidence** (§12). The public repository records only the packet's type, phase, status, SHA-256, and
+reference identifier in the evidence index — **never the root, and never a substantive row**.
+
 ### 9. Authorized future path categories
 
-- A new candidate-snapshot builder module and its tests.
+- A new candidate-snapshot builder module and its tests (**M3.3A**).
+- A new execution-rehearsal harness for E1–E8 and its fixtures (**M3.3A**).
 - A new or extended CLI subcommand delivering the deferred S6 output, with its tests.
 - Receipt emission for M3.3 commands.
 - `Docs/m3/` evidence records; `Docs/sec_data_dictionary.md` in the same pass if schema is
@@ -1195,7 +1457,9 @@ Not applicable — the phase issues no request. `planned = 0`, `maximum = 0`, `a
 Stop and report on any of:
 
 1. any network access;
-2. snapshot-freeze validation failing any Decision 019 §9 obligation;
+2. **M3.3B beginning before M3.3A has passed its independent review**;
+3. any execution-rehearsal scenario E1–E8 failing, or being unimplemented, skipped, or `xfail`ed;
+4. snapshot-freeze validation failing any Decision 019 §9 obligation;
 3. stored identity corruption detected during reconstruction;
 4. the reconstructed result disagreeing with the persisted result on any field;
 5. replay performing any write;
@@ -1279,9 +1543,13 @@ catalog integrity report, the manifest verification result, and the write-free r
 
 ### 26. Independent-review requirement
 
-**Required, and consequential.** A focused Opus Max review by a session that constructed none of the
-artifacts. Its question: *does every identity recompute from persisted rows, does replay write
-nothing, is every crosswalk item bound, and is the root an output rather than an approval?*
+**Two required reviews, both consequential, both by a session that constructed none of the artifacts.**
+
+- **After M3.3A**, before any real freeze. Its question: *does the builder satisfy every Decision 019
+  §9 obligation, and does the execution rehearsal actually exercise the production paths — not
+  stubs — across E1–E8 including O1 behaviour?*
+- **After M3.3B.** Its question: *does every identity recompute from persisted rows, does replay
+  write nothing, is every crosswalk item bound, and is the root an output rather than an approval?*
 
 ### 27. Rollback procedure
 
@@ -1311,6 +1579,10 @@ An identical re-seal is idempotent; a differing seal is refused.
 
 ### 30. Required evidence packet
 
+**Private evidence** (§12); only its type, phase, status, SHA-256, and reference identifier appear in
+the public evidence index.
+
+The M3.3A execution-rehearsal record across E1–E8, with its independent-review result; and
 [`Docs/m3/templates/real_snapshot_evidence_packet.md`](../Docs/m3/templates/real_snapshot_evidence_packet.md),
 completed: the source-observation set; provenance; snapshot identity; candidate-table identities;
 policy versions; cohort definitions; the leakage attestation; the selection result; reserves;
@@ -1325,10 +1597,11 @@ M3_3_REAL_PILOT_MANIFEST_CONSTRUCTED_READY_FOR_ROOT_APPROVAL
 
 ### 32. Implementation commit policy
 
-**One implementation commit**, by default. An intermediate checkpoint at the snapshot-freeze /
-manifest-construction boundary is allowed only if the M3.3 contract explicitly justifies it and the
-owner separately authorizes it. **No data, database, raw object, manifest artifact, or release file is
-committed.**
+**One implementation commit per part**, by default — M3.3A's builder and rehearsal harness, then
+M3.3B's execution work. The M3.3A/M3.3B boundary is an **explicitly justified** checkpoint, because
+an independent review sits between them and a review needs a committed state to review; it is still
+taken only if the owner separately authorizes it. **No data, database, raw object, manifest artifact,
+release file, or completed evidence packet is committed.**
 
 ### 33. Governance acceptance-commit policy
 
@@ -1348,34 +1621,52 @@ root-hash approval packet.
 
 ### 36. Conditions preventing progression
 
-M3.4 may not begin while any of these holds: any identity fails to recompute from persisted rows; the
-re-serialization is not byte-identical; replay performed a write; any crosswalk item is unbound; the
-run is not manifest-eligible; O1 is reached and unruled; the design is infeasible against the real
-universe; any operational value reached a governed identity; the evidence packet is incomplete; or
-the independent M3.3 review has not passed.
+M3.4 may not begin while any of these holds: the M3.3A rehearsal has not passed; the M3.3A review has
+not passed; any identity fails to recompute from persisted rows; the re-serialization is not
+byte-identical; replay performed a write; any crosswalk item is unbound; the run is not
+manifest-eligible; O1 is reached and unruled; the design is infeasible against the real universe; any
+operational value reached a governed identity; the evidence packet is incomplete; or the independent
+M3.3B review has not passed.
 
 ---
 
-# Phase M3.4 — Exact root-hash owner approval
+# Phase M3.4 — Accepted approval path and the exact root-hash decision
+
+Planned in two sequential internal parts: **M3.4A** builds and independently validates the
+approval-recording entry point against synthetic catalogs; **M3.4B** presents the exact real root and
+invokes that accepted entry point once.
+
+**M3.4 always requires a bounded contract. It is never purely documentary.**
 
 ### 1. Objective
 
 Obtain an **explicit, exact-hash-specific, owner-recorded** approval of the precise
-`root_manifest_sha256` produced by M3.3 — and record it in a way that no later session can widen,
-infer, or transfer.
+`root_manifest_sha256` produced by M3.3B — and record it through an **accepted, tested application
+entry point**, in a way that no later session can widen, infer, or transfer.
 
 ### 2. Exact scope
 
-Assemble the root-hash approval packet. Re-derive the presented root from persisted state at the
-moment of approval. Present the packet to the owner. Record the owner's explicit decision — approval
-or rejection. On approval, persist `approved_root_sha256 = root_manifest_sha256` under the accepted
-schema's equality check. Retain the evidence.
+**M3.4A — approval entry point.** Implement a **minimal approval-recording application entry point**
+under this phase's bounded contract, and validate it **independently against synthetic catalogs**: it
+must refuse a mismatched root, refuse a second differing approval, hold the six manifest identity
+fields immutable, and be incapable of writing `approved_root_sha256` unequal to
+`root_manifest_sha256`.
+
+**M3.4B — the exact-root decision.** Assemble the root-hash approval packet. Re-derive the presented
+root from persisted state **at the moment of approval**. Present the packet to the owner. Record the
+owner's explicit decision — approval or rejection. On approval, invoke the accepted entry point
+**once** to persist `approved_root_sha256 = root_manifest_sha256` under the accepted schema's
+equality check. Retain the evidence.
 
 ### 3. Explicit non-scope
 
 **No publication** — approval is not publication authority. No regeneration of the root to obtain a
 convenient value. No partial, implied, conditional, or retroactive approval. No manifest edit. No
 selection change. No new snapshot. No network. No outcome analysis.
+
+**No manual SQL against the real catalog, in any part, for any reason.** The only write path is the
+accepted entry point. **No real root is touched in M3.4A** — it runs against synthetic catalogs
+only.
 
 ### 4. Controlling decisions
 
@@ -1390,8 +1681,10 @@ proposed-only boundary S6 could not cross); migration `0009`'s
 
 ### 5. Required owner decisions
 
-1. **The bounded M3.4 contract**, if any code is needed at all to record the approval.
-2. **The approval decision itself** — the phase's entire purpose.
+1. **The bounded M3.4 contract.** Always required — M3.4 is never documentary.
+2. **Authorization to proceed from M3.4A to M3.4B**, after the entry point is independently validated
+   against synthetic catalogs.
+3. **The approval decision itself** — the phase's entire purpose.
 
 ### 6. Prerequisites
 
@@ -1401,6 +1694,8 @@ proposed-only boundary S6 could not cross); migration `0009`'s
 - The manifest in state `proposed`, verified, with every identity recomputing from persisted rows.
 - The limitations register current, with every unresolved warning listed.
 - Network verified disabled.
+- **M3.4B additionally requires:** the approval-recording entry point implemented, independently
+  validated against synthetic catalogs, and accepted.
 
 ### 7. Exact inputs
 
@@ -1412,16 +1707,23 @@ unresolved warnings; and the publication status.
 
 ### 8. Exact outputs
 
-The completed
+**M3.4A:** the implemented approval-recording entry point, its tests against synthetic catalogs, and
+its independent-validation result.
+
+**M3.4B:** the completed
 [`Docs/m3/templates/root_hash_approval_packet.md`](../Docs/m3/templates/root_hash_approval_packet.md);
-the owner's explicit recorded decision; on approval, the persisted `approved_root_sha256` equal to
-`root_manifest_sha256` and the manifest state transition the accepted lifecycle permits; the retained
-evidence; and the token.
+the owner's explicit recorded decision; on approval, the **single** governed write through the
+accepted entry point persisting `approved_root_sha256` equal to `root_manifest_sha256`, and the
+manifest state transition the accepted lifecycle permits; the retained evidence; and the token.
+
+**The approval packet is private evidence** (§12) and **contains the unpublished exact root**. Only
+its type, phase, status, SHA-256, and reference identifier are recorded publicly. **The root itself is
+never written into the repository.**
 
 ### 9. Authorized future path categories
 
-- A minimal approval-recording path, if the M3.4 contract creates one — otherwise the phase is
-  documentary and touches no code.
+- A **minimal approval-recording application entry point** and its tests (**M3.4A**). Always created;
+  the phase is never documentary.
 - `Docs/m3/` evidence records and the approval decision record under `Docs/Decisions/`.
 - `Milestones/STATUS.md` and navigation aids, under explicit instruction only.
 
@@ -1431,6 +1733,8 @@ Everything that could alter what is being approved: `release/pilot_manifest.py`;
 `sec/pilot_manifest_store.py`; every selector and store module; every migration; `cohorts.py`;
 `pilot_policy.py`; `Docs/preregistration.md`; Decisions 001–027; every completed contract; and any
 publication or release path.
+
+**Any ad-hoc SQL client, script, or console session against the real catalog is a prohibited path.**
 
 ### 11. Network permission
 
@@ -1505,13 +1809,15 @@ not the approval**; the owner's recorded decision is. The receipt records that a
 
 The root re-derives from persisted rows **at the moment of approval**, not from the packet; the
 manifest verifies; `manifest_id` recomputes; the component digests recompute; the accepted lifecycle
-accepts the transition; and the schema's equality check holds.
+accepts the transition; the schema's equality check holds; and **the write occurs through the accepted
+entry point, exactly once, with no manual SQL anywhere in the phase**.
 
 ### 24. Offline tests
 
-If a recording path is created: tests that a mismatched root is refused; that a second, different
-approval is refused; that identity fields remain immutable; and that no path can write
-`approved_root_sha256` unequal to `root_manifest_sha256`.
+**Required, against synthetic catalogs, before M3.4B:** a mismatched root is refused; a second,
+different approval is refused; an identical re-derived root is handled per §29 without producing a
+second, different approval; the six identity fields remain immutable; and **no path can write
+`approved_root_sha256` unequal to `root_manifest_sha256`**.
 
 ### 25. Full phase-end validation
 
@@ -1521,9 +1827,11 @@ packet.
 
 ### 26. Independent-review requirement
 
-**Preparation is Opus Max work** — assembling and checking the packet before it reaches the owner.
-The **approval itself is the owner's act and is not delegated, reviewed away, or performed by a
-model.** A separate independent review of the approval record occurs at M3.5.
+**Two required reviews.** The **M3.4A entry point is independently validated against synthetic
+catalogs** before it may touch a real root. **Packet preparation is Opus Max work** — assembling and
+checking the packet before it reaches the owner. The **approval itself is the owner's act and is not
+delegated, reviewed away, or performed by a model.** A separate independent review of the approval
+record occurs at M3.5.
 
 ### 27. Rollback procedure
 
@@ -1536,13 +1844,17 @@ and referred; the record of what was approved stands.
 
 An interrupted approval is resumed only after re-deriving the root and re-verifying the manifest from
 persisted state. **A partially recorded approval is not an approval.** If it cannot be determined
-whether the approval was recorded, the phase stops and the state is inspected directly.
+whether the approval was recorded, the phase stops and the state is inspected **through the accepted
+entry point's read path**, never by ad-hoc SQL.
 
 ### 29. Idempotency or replay expectations
 
 Re-running the re-derivation and verification is **write-free** and must reproduce the same
-identities. Recording the same approval twice is either idempotent under the accepted guards or
-refused; **it never produces a second, different approval.**
+identities — that is the determinism, not a coincidence. Recording the same approval twice is either
+idempotent under the accepted guards or refused; **it never produces a second, different approval.**
+
+**An identical root re-derived from unchanged governed state is the same approved value**, not a new
+one requiring re-approval.
 
 ### 30. Required evidence packet
 
@@ -1553,25 +1865,38 @@ the exact-hash-only clause, the reapproval condition, and the publication prohib
 separately authorized.
 
 **Approval semantics, stated exactly.** Approval is: **explicit**; **owner-recorded**; **exact-hash
-specific**; **non-transferable to a regenerated root**; **non-inferable from silence**;
-**non-inferable from code having run**; and **invalidated by any governed-byte or governed-row
-change**.
+specific**; **non-inferable from silence**; **non-inferable from code having run**; and **invalidated
+by any change to governed state that changes the root**.
 
-**Mismatch handling.** If the presented root does not re-derive, **stop**. Do not approve, do not
-adjust the packet to match the derived value, and do not regenerate to match the packet. Record the
-mismatch, refer it, and treat it as an M3.3 finding.
+**Deterministic re-derivation, frozen.** This replaces the v0.1 claim that any regeneration
+necessarily creates a new root, which was false and contradicted the determinism the manifest exists
+to provide:
+
+1. **Unchanged governed state plus byte-identical canonical serialization produces the same
+   `root_manifest_sha256`.**
+2. **An independently re-derived identical root remains the same approved value.** Re-deriving does
+   not invalidate the approval and requires no new packet.
+3. **A differing root, changed governed state, or a superseding manifest requires a new packet and a
+   new explicit owner decision.**
+
+The distinction is between *regenerated* and *different*. Only the latter invalidates an approval.
+
+**Mismatch handling.** If the presented root does not re-derive **to the same value**, **stop**. Do
+not approve, do not adjust the packet to match the derived value, and do not recompute in search of
+a convenient one. Record the mismatch, refer it, and treat it as an M3.3 finding.
 
 **Rejection handling.** A rejection is recorded with its reason. The manifest stays `proposed`. The
-correction is made under a new bounded authorization, and the result is a **new** exact root.
+correction is made under a new bounded authorization, and — because the correction changes governed
+state — the result is a **new, different** exact root requiring its own packet.
 
-**Regeneration handling.** Any regeneration produces a new `root_manifest_sha256`. **A prior approval
-never carries over.** The new root requires its own packet and its own explicit approval.
+**Reapproval requirements.** Reapproval is required only when the root **differs**. It requires the
+full packet again — re-derivation, re-verification, current limitations, and a fresh explicit owner
+decision naming the new exact hash.
 
-**Reapproval requirements.** Reapproval requires the full packet again — re-derivation,
-re-verification, current limitations, and a fresh explicit owner decision naming the new exact hash.
-
-**Evidence retention.** Every packet, approved or rejected, is retained permanently and is never
-edited after the decision; a correction is a new dated entry.
+**Evidence retention.** Every packet, approved or rejected, is retained permanently **in the private
+evidence root** (§12), with a separate owner-controlled backup, and is never edited after the
+decision; a correction is a new dated entry. Only its digest and non-sensitive metadata reach the
+public evidence index.
 
 **Approved-root persistence.** Inherited from the accepted schema: `approved_root_sha256` may only be
 written equal to `root_manifest_sha256` (migration `0009`'s check); the six manifest identity fields
@@ -1586,8 +1911,10 @@ M3_4_EXACT_ROOT_OWNER_APPROVED_READY_FOR_INTEGRATED_ACCEPTANCE
 
 ### 32. Implementation commit policy
 
-**At most one implementation commit**, and only if a recording path was authorized. If the phase is
-documentary, there is no implementation commit at all.
+**One implementation commit for M3.4A**, carrying the approval-recording entry point and its
+synthetic-catalog tests. **M3.4B adds no implementation commit** — it invokes the accepted entry
+point and records a decision. The phase is **never** documentary, so there is always at least the
+M3.4A commit.
 
 ### 33. Governance acceptance-commit policy
 
@@ -1624,12 +1951,16 @@ outcome-analysis authority** as five separate findings.
 
 ### 2. Exact scope
 
-Integrate and re-verify: Gate F; the M3.1A offline rehearsal; the zero-request dry runs; the request
-budget; M3.2 acquisition; Gate H; raw-store provenance; schema drift; the snapshot freeze; S5
-selection; reserves and dispositions; reconstruction; replay; selection-result sealing; the S6
-manifest; root identity; the exact owner approval; limitations; leakage; reproducibility; the operator
-workflow; execution receipts; recovery evidence; and Git and tag state. Produce the integrated
-acceptance result and, on acceptance, the Milestone 3 closeout record and checkpoint.
+Integrate and re-verify: Gate F; the M3.1A **acquisition** rehearsal; the zero-request dry runs; the
+`CURRENT_PLANNER_DISCREPANCY` resolution; **both** M3.2 windows, each against its own plan, budget,
+ceiling, and owner approval; the between-windows freeze and derivation; Gate H; raw-store provenance;
+schema drift; the M3.3A **execution** rehearsal; the snapshot freeze; S5 selection; reserves and
+dispositions; reconstruction; replay; selection-result sealing; the S6 manifest; root identity; the
+M3.4A entry point and its synthetic-catalog validation; the exact owner approval and the single
+governed write; limitations; leakage; reproducibility; the operator workflow; execution receipts; the
+**public evidence index against the private evidence root**; recovery evidence; and Git and tag
+state. Produce the integrated acceptance result and, on acceptance, the Milestone 3 closeout record
+and checkpoint.
 
 ### 3. Explicit non-scope
 
@@ -1722,7 +2053,9 @@ Stop and report on any of:
 
 1. an evidence packet missing, incomplete, or unsigned where a signature is required;
 2. an execution receipt missing for a live command;
-3. a Gate F or Gate H item not `PASS`;
+3. **a completed evidence artifact found tracked in the public repository**, or an index entry whose
+   digest does not match the private artifact it names;
+4. a Gate F or Gate H item not `PASS`;
 4. an identity that does not reproduce at review time;
 5. an approval that is not exact-hash specific;
 6. a limitation silently closed;
@@ -1755,8 +2088,11 @@ rows rather than reading them from a document, exactly as the Milestones 1–2 i
 ### 22. Execution-receipt requirements
 
 The review **consumes** receipts; it produces none of its own beyond any commands it runs. It must
-confirm: one receipt per live command; no prohibited field in any receipt; every recovery chain
-complete through its predecessor references; and **no receipt appearing in any governed identity**.
+confirm: one receipt per live command; **exactly one receipt integrity identity** (`receipt_id`), with
+no second digest; **zero actual network counts in every `rehearsal` and `dry_run` receipt**; every
+field correctly classified as required, conditionally required, or prohibited for its mode; no
+prohibited field in any receipt; every recovery chain complete through its predecessor references;
+and **no receipt appearing in any governed identity**.
 
 ### 23. Validation requirements
 
@@ -1852,16 +2188,23 @@ independent; or the owner has not accepted.
 
 Restated in one place so no phase has to re-derive it.
 
-**No integer request count may be invented.** A count is derived from accepted offline inputs and is
-reproducible, or it is written `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` and resolved by the
-zero-request planning command before network enablement.
+**No integer request count may be invented, and none is frozen in this plan.** A count is produced by
+the accepted planner from explicit inputs at the time the plan is produced, and approved by the owner
+as an exact integer **for one window**; or it is written
+`EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` and resolved by a zero-request planning run before
+that window's network enablement.
+
+**Counts are per window.** M3.2A's plan and ceiling are approved at Gate F; M3.2B's are derived from
+the frozen M3.2A objects and approved separately. **Neither approval covers the other window**, and
+**no contingency allowance exists** — the two-window split makes each count derived rather than
+estimated.
 
 **The request budget template distinguishes eight quantities, and never conflates them:**
 
 | Quantity | Meaning |
 |---|---|
-| **Planned unique logical requests** | Distinct approved retrieval identities the plan intends |
-| **Maximum physical attempts** | Including every retry, every redirect hop, and the one controlled post-cooldown request — `planned × 12` under accepted defaults |
+| **Planned unique logical requests** | Distinct approved retrieval identities that window's plan intends |
+| **Maximum physical attempts** | Including every retry, every redirect hop, and every controlled post-cooldown request. **Derived per route from the implemented response-policy state machine and independently tested against its worst reachable path** — never asserted from constants, and never assumed to be the sum of the retry, redirect, and cooldown bounds |
 | **Expected successful responses** | Logical requests expected to end in `proceed` |
 | **Expected cache hits** | Instances already satisfied in the catalog and therefore not planned |
 | **Expected not-modified responses** | Conditional re-validations expected to return `304`, producing no new raw object |
@@ -1870,7 +2213,13 @@ zero-request planning command before network enablement.
 | **Maximum elapsed acquisition window** | The limiter-imposed floor `(attempts − 1) ÷ requests_per_second`, plus the transfer component the Gate F plan states and the operator records |
 
 **Stop-before-overflow is the rule, not stop-after.** The acquisition refuses to place the attempt
-that would exceed the ceiling.
+that would exceed that window's ceiling, and **a ceiling is never increased during a running
+window**.
+
+**The `CURRENT_PLANNER_DISCREPANCY` is open** (M3.1 §15.1): the accepted planner classifies 2026 Q2
+as the provisional open quarter and excludes it, while Decision 013 §1 states that coverage extends
+through the **closed** 2026 Q2 quarter. **Gate F cannot pass while they disagree.** The bounded M3.1
+contract must diagnose it, and Decision 013 is not changed to accommodate the planner.
 
 ---
 

@@ -141,14 +141,23 @@ created at closeout, and no Milestone 3 implementation is authorized**: closure 
 precondition Decision 024 §8 imposed, and all five of that record's entry conditions still apply to
 every phase.
 
-**That master planning has run.** It is recorded in
+**That master planning has run, and has since been corrected to v0.2.** It is recorded in
 [Decision 027](../../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-(`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
+(**v0.2**, `ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
 `M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`), with the roadmap in
 [`../milestone_03_master_plan.md`](../milestone_03_master_plan.md) and the operational pack in
-[`Docs/m3/`](../../Docs/m3/operator_runbook.md) — the operator runbook, the twenty-scenario offline
-rehearsal specification, the execution-receipt specification, the limitations register, and the seven
-frozen templates.
+[`Docs/m3/`](../../Docs/m3/operator_runbook.md) — the operator runbook, the two offline rehearsal
+specifications (**A1–A12** acquisition at M3.1A, **E1–E8** execution at M3.3A), the execution-receipt
+specification, the limitations register, and the eight frozen templates.
+
+**v0.2 applied eleven bounded owner corrections after the required independent review of v0.1**, all
+recorded in Decision 027 §0. The four that bear on a future contract's shape: **M3.1 rehearses
+acquisition only** — no scenario may be placed in a phase that lacks the production path it
+exercises; **M3.2 runs in two sequential windows**, each with its own plan, budget, ceiling, and owner
+approval, with the dependent counts **derived** from the frozen first-window objects rather than
+estimated; **M3.3A** builds and rehearses the candidate-snapshot builder before **M3.3B** freezes
+anything real; and **M3.4 always requires a contract and is never documentary**, with manual SQL
+against the real catalog prohibited.
 
 **Decision 027 is a decision record, not a contract, and it appears nowhere in this index as one.**
 Like Decisions 024, 025, and 026 before it, it authorizes no implementation and **creates no
@@ -167,16 +176,22 @@ storage/migration/identity effects, test requirements, targeted and phase-end va
 proof, failure and rollback behaviour, commit and tag policy, completion report format, and the exact
 completion token.
 
-**The next authorized action is `INDEPENDENT_M3_MASTER_PLAN_REVIEW`** — read-only and focused, in a
-fresh session, by a reviewer who authored none of the planning pack (Decision 027 §23). **Only after
-that review passes** may the owner authorize a separate session to create the **bounded M3.1
-implementation contract** (Decision 027 §24) — and that contract is itself only one of Decision 024
-§8's five entry conditions, never implementation authority on its own. When a Milestone 3 phase is
-eventually authorized, it gets **its own bounded contract in this directory**, written to the
+**The next authorized action is `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`** — read-only and focused, in a
+fresh session, by a reviewer who authored neither v0.1 nor the v0.2 corrections (Decision 027 §23).
+**Only after that rereview passes** may the owner authorize a separate session to **draft** the
+bounded M3.1 implementation contract (Decision 027 §24) — and that contract is itself only one of
+Decision 024 §8's five entry conditions, never implementation authority on its own. When a Milestone 3
+phase is eventually authorized, it gets **its own bounded contract in this directory**, written to the
 required-sections shape above **and** to the master plan's §16 additions.
 
-**No Gate F has passed, no offline rehearsal has been run, no live acquisition occurred, no Gate H
-has passed, and no real snapshot, selection, manifest, or approval exists.**
+**No Gate F has passed, neither offline rehearsal has been run, no live acquisition occurred, no
+Gate H has passed, and no real snapshot, selection, manifest, or approval exists. No M3.1 contract
+has been drafted.**
+
+**One condition blocks Gate F before any contract is written.** The accepted planner classifies
+2026 Q2 as the provisional open quarter and excludes it, while Decision 013 §1 requires coverage
+through the **closed** 2026 Q2 quarter. The bounded M3.1 contract must diagnose it; **Decision 013 is
+not edited to accommodate the planner** (Decision 027 §15.1).
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

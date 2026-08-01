@@ -20,7 +20,10 @@ and identity guarantee);
 
 ## 0. Handling
 
-- **Non-secret document.** Identities, counts, states, and reason codes only.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **Non-secret content even so.** Identities, counts, states, and reason codes only.
 - **Never record** the SEC identity, any credential, any absolute personal path, or any response
   body.
 - **Nothing is deleted during recovery.** Rollback never means deleting evidence.
@@ -38,8 +41,9 @@ and identity guarantee);
 | Interrupted run identifier | `_______` |
 | Repository baseline commit | `_______` |
 | Governing contract | `_______` |
-| Approved request-plan hash | `_______` |
-| Approved hard ceiling | `____` |
+| Acquisition window | `M3.2A` / `M3.2B` / `n/a` |
+| Approved request-plan hash **for that window** | `_______` |
+| Approved hard ceiling **for that window** | `____` |
 
 ## 2. Last successful receipt
 
@@ -122,7 +126,7 @@ and identity guarantee);
 | Field | Value |
 |---|---:|
 | Physical attempts consumed before the interruption | `____` |
-| Approved hard ceiling | `____` |
+| Approved hard ceiling **for this window** | `____` |
 | **Remaining ceiling headroom** | `____` |
 | Logical requests completed | `____` |
 | Logical requests remaining in the plan | `____` |
@@ -130,7 +134,8 @@ and identity guarantee);
 | **Does the remainder fit inside the remaining headroom?** | `YES` / `NO` |
 
 **If `NO`, the resume requires a new owner-approved ceiling** and is not authorized under the old
-one.
+one. **A ceiling is never increased during a running window** — a resume that needs more headroom is
+a stop, a re-plan, and a fresh approval.
 
 ## 8. Safe-resume determination
 

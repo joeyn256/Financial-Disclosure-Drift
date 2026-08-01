@@ -25,7 +25,13 @@ lifecycle guards;
 
 ## 0. Handling
 
-- **Non-secret document.** Identities, digests, versions, counts, and evidence references.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **It contains the exact unpublished `root_manifest_sha256`.** **The root is never written into the
+  repository**, into any public decision record, or into the public evidence index — only the
+  packet's own SHA-256 and its non-sensitive reference identifier are.
+- Otherwise: identities, digests, versions, counts, and evidence references.
 - **Never record** the SEC identity, any credential, any absolute personal path, any raw response
   body, any filing text, or any outcome value.
 - **Never circulate an approved root outside this packet** before publication is separately
@@ -156,6 +162,8 @@ lifecycle guards;
 | 10.3 | Public document verification | `PASS`/`FAIL` | `_______` |
 | 10.4 | Byte-identical re-serialization | `PASS`/`FAIL` | `_______` |
 | 10.5 | Two clean rebuilds producing an identical root | `PASS`/`FAIL` | `_______` |
+| 10.6 | **M3.4A entry point implemented and independently validated against synthetic catalogs** | `PASS`/`FAIL` | `_______` |
+| 10.7 | **No manual SQL was used against the real catalog at any point** | `PASS`/`FAIL` | `_______` |
 
 ## 11. Re-derivation **at the moment of approval**
 
@@ -247,6 +255,11 @@ Complete only if §11 produced a `FAIL`.
 | If rejected, reason | `_______` |
 | Completion token recorded | `M3_4_EXACT_ROOT_OWNER_APPROVED_READY_FOR_INTEGRATED_ACCEPTANCE` / not recorded |
 
+**The write path.** On approval, the value is persisted **once**, through the **accepted
+approval-recording application entry point** built and independently validated at **M3.4A** against
+synthetic catalogs. **Manual SQL against the real catalog is prohibited**, and M3.4 is never purely
+documentary.
+
 ### Approval statement — copied verbatim when approving
 
 > I approve **exactly** the value `root_manifest_sha256 = ` `_______`, and nothing else.
@@ -256,9 +269,11 @@ Complete only if §11 produced a `FAIL`.
 > reconstruction, replay, and verification results, the re-derivation performed at this moment, the
 > limitations register, and every disclosed unresolved warning.
 >
-> **This approval applies to this exact hash only.** It does not apply to any regenerated,
-> recomputed, corrected, or superseded root. It is not inferable from silence, from a passing gate,
-> from a green suite, from a created tag, from an execution receipt, or from the code having run.
+> **This approval applies to this exact hash only.** An identical root re-derived from unchanged
+> governed state **is** this same approved value; a **different** root — corrected, superseded, or
+> produced from changed governed state — is not, and requires its own packet. This approval is not
+> inferable from silence, from a passing gate, from a green suite, from a created tag, from an
+> execution receipt, or from the code having run.
 >
 > **This approval authorizes no publication and no outcome analysis.**
 
@@ -269,7 +284,8 @@ Complete only if §11 produced a `FAIL`.
 | **Explicit** | Approval exists only as this recorded decision, signed |
 | **Owner-recorded** | Only the owner approves. No model, session, or reviewer approves on the owner's behalf |
 | **Exact-hash specific** | Approval attaches to the single byte value in §16, and to no other |
-| **Non-transferable to a regenerated root** | Any regeneration produces a new `root_manifest_sha256` and requires a new packet and a new decision. **A prior approval never carries over** |
+| **Deterministic re-derivation is not a new root** | **Unchanged governed state plus byte-identical canonical serialization produces the same `root_manifest_sha256`.** An independently re-derived identical root **remains this same approved value**, requires no new packet, and does not invalidate this approval |
+| **Non-transferable to a DIFFERENT root** | A **differing** root, **changed governed state**, or a **superseding manifest** requires a new packet and a new explicit decision. **A prior approval never carries over to a different value** |
 | **Non-inferable from silence** | Not deciding is not approving |
 | **Non-inferable from running code** | Construction, verification, replay, and a passing gate are not approval |
 | **Invalidated by any governed change** | Any change to a governed byte or a governed row after approval invalidates it for the changed artifact |
@@ -279,16 +295,22 @@ Complete only if §11 produced a `FAIL`.
 A rejection is recorded with its reason. The manifest stays `proposed`. The correction is made under
 a new bounded authorization, and the result is a **new** exact root requiring its own packet.
 
-### Regeneration handling
+### Re-derivation and regeneration handling
 
-Any regeneration produces a new root. A prior approval never carries over, and the new root requires
-its own packet and its own explicit decision.
+**Re-deriving the root from unchanged governed state must reproduce the identical value** — that is
+the determinism the manifest exists to provide, and it is asserted, not hoped for. **An identical
+re-derived root is the same approved value.** No new packet, no new decision.
+
+**A regeneration that produces a different value means governed state changed.** That new, different
+root requires its own packet and its own explicit decision; this approval never carries over to it.
+
+The distinction is between *regenerated* and *different*. Only the latter invalidates an approval.
 
 ### Reapproval requirements
 
-Reapproval requires the full packet again: re-derivation at the moment of approval, re-verification,
-a current limitations register, every unresolved warning disclosed, and a fresh explicit decision
-naming the new exact hash.
+**Reapproval is required only when the root differs.** It then requires the full packet again:
+re-derivation at the moment of approval, re-verification, a current limitations register, every
+unresolved warning disclosed, and a fresh explicit decision naming the new exact hash.
 
 ### Approved-root persistence — inherited from the accepted schema
 
@@ -302,8 +324,10 @@ naming the new exact hash.
 
 ### Evidence retention
 
-Every packet — approved or rejected — is retained permanently and is **never edited after the
-decision**. A correction is a new dated packet that names what it supersedes.
+Every packet — approved or rejected — is retained permanently **in the owner-controlled private
+evidence root**, with a **separate owner-controlled backup**, and is **never edited after the
+decision**. A correction is a new dated packet that names what it supersedes. Only its digest and
+non-sensitive metadata reach the public [evidence index](evidence_index.md).
 
 ## 18. Publication prohibition
 

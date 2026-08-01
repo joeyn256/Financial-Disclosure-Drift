@@ -29,13 +29,35 @@ unknown. It is documented so the interface is agreed before it is built.
 ## What this runbook never prints
 
 - the full `DISCLOSURE_DRIFT_SEC_USER_AGENT` value;
-- any secret, token, cookie, or authorization header;
+- any credential, token, cookie, or authorization header;
 - any absolute personal path (`/Users/<name>/…`);
 - any raw response body;
 - any governed candidate, selected, or reserve row content;
 - any unpublished root approval outside the approval packet itself.
 
 Where a path is needed, use `"$(git rev-parse --show-toplevel)"` rather than typing one.
+
+## Where evidence goes — the two layers
+
+**The repository is public. Completed evidence is not committed to it.**
+
+| Layer | What | Where |
+|---|---|---|
+| **Public** | Blank templates, planning records, the limitations register, and the **evidence index** | Tracked in the repository |
+| **Private** | Every completed packet, checklist, receipt, request budget, raw object, catalog, and unpublished governed identity | An **owner-controlled private evidence root, outside the repository** |
+
+After completing any evidence artifact, compute its digest and index it:
+
+```bash
+shasum -a 256 <private-evidence-file>
+```
+
+Record **only** that digest, the artifact type, the phase, the status, and a non-sensitive reference
+identifier in [`templates/evidence_index.md`](templates/evidence_index.md). **Never record an
+absolute private path publicly, and never paste an unpublished root anywhere.**
+
+**The private evidence root needs a separate owner-controlled backup.** It holds the only record of
+runs that cannot be re-run.
 
 ---
 
@@ -190,28 +212,28 @@ Expect:
 
 **Stop if** `network` reads `enabled` at any point before the single authorized M3.2 window.
 
-## 10. Run the complete offline rehearsal
+## 10. Run the acquisition rehearsal (A1–A12)
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.1)`**
 
 ```
-python -m disclosure_drift m3 rehearse --scenarios all --evidence-out <relative-path>
+python -m disclosure_drift m3 rehearse --scenarios A1-A12 --evidence-out <private-path>
 ```
 
 **Intended interface contract:**
 
 | Aspect | Contract |
 |---|---|
-| Purpose | Run every scenario in [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md) against scripted responses and synthetic fixtures |
+| Purpose | Run the **acquisition** scenarios A1–A12 in [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md) §5 against scripted responses and synthetic fixtures. **Not** the snapshot, selection, reserve, sealing, manifest, or root scenarios — those are E1–E8 at M3.3A, where the production paths exist |
 | Network | **None.** Opens no socket; asserts none was opened |
 | Clock | Deterministic clock inputs supplied explicitly; nothing read from the system clock into any recorded identity |
 | Arguments | `--scenarios {all,<id>[,<id>…]}`; `--evidence-out <relative-path>`; `--config <path>` |
 | Stdout | One line per scenario: `id`, name, outcome, reason code; then a summary line with counts |
 | Side effects | Writes only under an isolated synthetic data root and the named evidence path |
 | Exit codes | `0` all scenarios passed · `1` configuration error · `2` usage · `3` stage not enabled · `4` gate failure (any scenario failed) |
-| Receipt | Emits one execution receipt per invocation, `invocation_mode = "rehearsal"` |
+| Receipt | Emits one execution receipt per invocation, `invocation_mode = "rehearsal"`, with **actual network counts of `0`**; simulated totals go to the evidence report |
 
-## 11. Review the rehearsal evidence
+## 11. Review the acquisition-rehearsal evidence
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
 
@@ -221,17 +243,21 @@ python -m disclosure_drift m3 rehearse-report --evidence <relative-path>
 
 **Intended interface contract:** read-only; prints the per-scenario matrix — setup, expected reason
 code, observed reason code, persisted state, files, receipt, rollback, recovery, validation — plus the
-identity-noncontamination result. Exit `0` only when all twenty scenarios pass and the
-noncontamination proof holds.
+identity-noncontamination result and the derived per-route `A_reachable`. Exit `0` only when all
+twelve acquisition scenarios pass and the noncontamination proof holds.
 
-**Check by hand, against [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md):**
+**Check by hand, against [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md) §5:**
 
-- all twenty scenarios present, none skipped, none `xfail`ed;
-- every observed reason code equals its expected reason code;
-- every interruption scenario recovered without a duplicate substantive write;
-- the replay scenario performed **zero** writes;
-- the receipt sample carries **none** of the prohibited fields;
-- the S5 and S6 identities are identical with and without a receipt present.
+- all twelve scenarios A1–A12 present, none skipped, none `xfail`ed;
+- every observed reason code equals its expected registered code;
+- **A6** proves every registered route reachable and every denied family refused;
+- **A11** recovered every interruption without a duplicate substantive write;
+- **A12** shows the receipt sample carries **none** of the prohibited fields, and the positive control
+  proves the scan is not vacuous;
+- **A12** shows every governed value identical with receipts disabled, enabled, and varied;
+- **every rehearsal receipt reports actual network counts of `0`**;
+- **`A_reachable` is derived per route and independently tested** against the worst reachable path;
+- **no snapshot, selection, reserve, sealing, manifest, or root scenario appears here.**
 
 **Stop if** any of those fails. A rehearsal finding is a design finding, and it is cheap here and
 expensive later.
@@ -251,7 +277,7 @@ python -m disclosure_drift m3 plan-requests \
 
 | Aspect | Contract |
 |---|---|
-| Purpose | Enumerate **every** route's logical requests and emit the complete request plan and its hash |
+| Purpose | Enumerate the **M3.2A bootstrap window's** logical requests and emit that window's request plan and hash. Run a **second** time after M3.2A to derive the M3.2B plan from the frozen objects |
 | Network | **Zero requests.** Constructs no transport; resolves no host |
 | Clock | Never reads today's date; all three coverage dates and the calendar year are explicit and required together |
 | Arguments | `--coverage-start`, `--coverage-end`, `--as-of` (all three required together); `--calendar-year YEAR`; `--reconciliation-set <relative-path>` (optional, for `sec_submissions_entity`); `--plan-out <relative-path>`; `--config <path>` |
@@ -306,12 +332,15 @@ on success.
 **Transcribe the output into
 [`templates/request_budget.md`](templates/request_budget.md).** Then check by hand:
 
-- every route is listed, including the ones with zero planned requests;
+- exactly one acquisition window is named;
+- every route is listed; routes belonging to the other window read `n/a — other window`;
 - no count is blank, and no count is a guess;
-- the two deferred routes (`sec_submissions_historical`, `sec_submissions_entity`) are **resolved**
-  here, not still marked deferred;
-- the maximum physical attempts equals planned × 12 under the accepted defaults;
-- the hard ceiling equals `ceil(1.10 × maximum physical attempts)`.
+- **`A_reachable` is stated per route**, derived from the implemented state machine and
+  independently tested — **never a single asserted multiplier**;
+- the maximum physical attempts equals `Σ ( U(route) × A_reachable(route) )`;
+- the hard ceiling equals that same sum — **no contingency, no padding**;
+- for an **M3.2B** budget, the counts are **derived from the frozen M3.2A objects**, with the
+  derivation provenance recorded.
 
 ## 15. Record owner approval of the exact budget and hard ceiling
 
@@ -320,8 +349,15 @@ on success.
 Complete and sign [`templates/request_budget.md`](templates/request_budget.md) and the corresponding
 rows of [`templates/gate_f_checklist.md`](templates/gate_f_checklist.md).
 
-**The approval names two exact integers:** the total planned unique logical requests, and the hard
-request ceiling. Both are recorded verbatim.
+**The approval names two exact integers, for one window:** that window's total planned unique logical
+requests, and its hard request ceiling. Both are recorded verbatim.
+
+**Gate F approves the M3.2A window only.** The M3.2B budget does not exist yet and requires its own
+owner approval, after M3.2A's objects are frozen (step 18a).
+
+**Gate F also cannot pass while the `CURRENT_PLANNER_DISCREPANCY` is unresolved** — Decision 013 §1
+requires coverage through the **closed 2026 Q2** quarter, and the accepted planner currently
+classifies 2026 Q2 as provisional and excludes it. Diagnose it, resolve it, and record the diagnosis.
 
 **No approval by implication.** Running the planner is not approving its output; a passing gate is
 not an approval; and silence is not an approval.
@@ -375,8 +411,8 @@ First, establish Gate H **pre-run** state (milestone plan §11, Gate H):
 Then:
 
 ```
-python -m disclosure_drift m3 acquire --plan <relative-path> --live --ceiling <INT> \
-  --receipt-out <relative-path>
+python -m disclosure_drift m3 acquire --plan <path> --window M3.2A --live --ceiling <INT> \
+  --receipt-out <private-path>
 ```
 
 **Intended interface contract:**
@@ -385,7 +421,7 @@ python -m disclosure_drift m3 acquire --plan <relative-path> --live --ceiling <I
 |---|---|
 | Purpose | Execute exactly the approved plan, metadata only |
 | Network | **Live, and only here.** Requires `--live`, an enabled configuration, a valid identity, and a matching plan hash |
-| Arguments | `--plan <relative-path>`; `--live` (explicit, no default); `--ceiling <INT>` (must equal the approved ceiling); `--resume-from <receipt>` (recovery only); `--receipt-out <relative-path>` |
+| Arguments | `--plan <path>`; `--window {M3.2A,M3.2B}`; `--live` (explicit, no default); `--ceiling <INT>` (must equal **that window's** approved ceiling); `--resume-from <receipt>` (recovery only); `--receipt-out <private-path>` |
 | Stdout | Progress by route: planned, attempted, succeeded, classified, stored — then the totals |
 | Stop behaviour | **Refuses the attempt that would exceed the ceiling**; halts aggregate traffic on `403` or unqualified `429`; fails closed on blocking schema drift |
 | Side effects | Immutable raw objects; source observations; catalog rows inside their transaction; quarantine entries; one receipt |
@@ -394,6 +430,35 @@ python -m disclosure_drift m3 acquire --plan <relative-path> --live --ceiling <I
 
 **Watch the running output for:** the request count against the budget, the route list staying inside
 the allowlist, zero filing-body URLs, and the classification totals.
+
+## 18a. Between the windows — freeze, derive, and obtain the second approval
+
+**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · then **`MANUAL OWNER APPROVAL`**
+
+**M3.2A acquires only the bootstrap sources. M3.2B acquires only the dependent requests derived from
+what M3.2A actually retrieved.** Between them, in this exact order:
+
+1. **Disable transport.** Verify with step 26 before doing anything else. The derivation is an
+   offline act over frozen evidence.
+2. **Freeze and identify the bootstrap raw objects** by their content-addressed identities.
+3. **Derive** the historical-submission references **from the frozen bulk-submissions object**, and
+   the entity reconciliation set from the frozen objects.
+4. **Produce the second zero-request plan** — step 12's command, run again, over the frozen objects.
+5. **Print and inspect the second budget** — step 14, for the M3.2B window.
+6. **Obtain the owner's second exact approval** of that budget and its hard ceiling — step 15, again.
+
+```
+python -m disclosure_drift m3 derive-dependent-plan --from-window M3.2A \
+  --reconciliation-set <path> --plan-out <path>
+```
+
+**Intended interface contract:** read-only over frozen objects; **zero requests**; enumerates the
+historical-file references the frozen bulk-submissions object names and the supplied reconciliation
+set; emits the M3.2B plan and its hash. Exit `0` on success, `4` if transport is enabled or a source
+object is not frozen.
+
+**Stop if** the derived set does not match what the frozen objects name, if transport was still
+enabled, or if the owner declines the second budget. **M3.2B may not run under M3.2A's approval.**
 
 ## 19. Stop safely after any gate failure
 
@@ -475,9 +540,11 @@ python -m disclosure_drift m3 reconcile-requests --plan <relative-path> --receip
 logical requests, physical attempts, response classifications, and raw objects; flags every
 divergence. Exit `0` only when every divergence is accounted for by the plan's own rules.
 
-Transcribe the result into [`templates/gate_h_checklist.md`](templates/gate_h_checklist.md).
+Transcribe the result into [`templates/gate_h_checklist.md`](templates/gate_h_checklist.md), **per
+window** — M3.2A and M3.2B are reconciled separately and integrated there.
 
-**Stop if** actual exceeds planned anywhere the plan does not explain, or if the ceiling was reached.
+**Stop if** actual exceeds planned anywhere the plan does not explain, if either ceiling was reached,
+if a dependent request appears in M3.2A, or if a bootstrap request appears in M3.2B.
 
 ## 24. Confirm no unresolved schema drift
 
@@ -515,7 +582,8 @@ Nothing under `data/` is ever committed except `data/README.md`.
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.2)`** then **`AVAILABLE NOW`** to verify
 
-Revert the configuration change from step 16, then verify:
+Revert the configuration change from step 16, then verify. **Do this at the end of *each* window** —
+after M3.2A before the derivation step 18a, and again after M3.2B before Gate H:
 
 ```bash
 python -m disclosure_drift validate-sec-config | grep -E '^  network'
@@ -523,8 +591,8 @@ python -m disclosure_drift validate-sec-config | grep -E '^  network'
 
 Expect `network            : disabled (safe default)`.
 
-**Gate H does not pass while the network is still enabled.** Record the verification in the Gate H
-checklist.
+**Gate H does not pass while the network is still enabled**, and **the derivation in step 18a may not
+begin while it is.** Record both verifications in the Gate H checklist.
 
 ## 27. Resume after an interrupted acquisition
 
@@ -599,8 +667,14 @@ Approval happens in exactly one place:
 **None of these is an approval:** a manifest existing; verification passing; replay succeeding; a
 green suite; a created tag; an execution receipt; a passing gate; silence; or "the code ran."
 
-**Approval attaches to one exact hash.** Any regeneration produces a new root and requires a new
-packet and a new explicit decision. A prior approval never carries over.
+**Approval attaches to one exact hash.** An identical root **re-derived** from unchanged governed
+state is the **same** approved value — determinism is the point, and re-deriving invalidates nothing.
+A **different** root — corrected, superseded, or produced from changed governed state — requires a
+new packet and a new explicit decision, and a prior approval never carries over to it.
+
+**The write happens through the accepted entry point, once.** That entry point is built and
+independently validated against synthetic catalogs at M3.4A before it ever touches the real root.
+**Manual SQL against the real catalog is prohibited**, and M3.4 is never purely documentary.
 
 ## 31. Final clean-state verification
 
@@ -644,9 +718,10 @@ them.**
 
 | Planned command | Phase | Purpose |
 |---|---|---|
-| `m3 rehearse` | M3.1 | Run the offline rehearsal, all scenarios, no socket |
-| `m3 rehearse-report` | M3.1 | Render the rehearsal evidence matrix |
-| `m3 plan-requests` | M3.1 | The complete zero-request request plan and its hash |
+| `m3 rehearse` | M3.1 | Run the **acquisition** rehearsal A1–A12, no socket |
+| `m3 rehearse-report` | M3.1 | Render the acquisition-rehearsal evidence matrix |
+| `m3 plan-requests` | M3.1 | The zero-request plan for one window, and its hash |
+| `m3 derive-dependent-plan` | M3.2 | Derive the M3.2B plan from the frozen M3.2A objects; zero requests |
 | `m3 show-budget` | M3.1 | Render the eight budget quantities and the ceiling |
 | `m3 show-receipt` | M3.1 | Render a receipt, failing closed on a prohibited field |
 | `m3 acquire --show-scope` | M3.2 | Print the exact network scope; zero requests |

@@ -300,10 +300,13 @@ integrated audit's findings and the documentation corrections, read **Decision 0
 controlling. For the S6 architecture, item-46 applicability, and S6 acceptance, read **Decisions 021,
 022, and 023** respectively.
 
-## Decision 027 — ACCEPTED (Milestone 3 master plan and operational readiness)
+## Decision 027 v0.2 — ACCEPTED (Milestone 3 master plan and operational readiness)
 
-[Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md) is
-**`ACCEPTED — OWNER APPROVED 2026-07-31`** and **binding**. It **supersedes and amends nothing**:
+[Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md) is at **v0.2
+(2026-07-31)**, **`ACCEPTED — OWNER APPROVED 2026-07-31`**, and **binding**. **It has been accepted
+since v0.1; v0.2 does not change that.** v0.2 applies eleven bounded owner corrections issued after
+the required independent review of v0.1, recorded in its **§0 revision history**, and supersedes only
+the affected v0.1 operational-planning language. It **supersedes and amends nothing**:
 Decisions 001–026 all retain the authority they already hold, and **Decision 024 remains controlling
 for the M2 → M3 obligation transfer** while **Decision 026 remains controlling for the Milestones 0–2
 closeout**. It is a **planning and operational-readiness** record — **governance and documentation
@@ -312,30 +315,39 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 
 | Topic | Decision 027 section |
 |---|---|
+| **The v0.2 revision history — the eleven independent-review corrections** | **§0** |
 | Why the record exists — Milestone 3 is the first phase whose actions cannot be undone | §1 |
 | **The exact Milestones 0–2 closeout baseline** — closeout commit, tag targets, migration state | §2 |
 | **Decision 024 remains controlling** for the M2 → M3 obligation transfer | §3 |
 | **Decision 026 remains controlling** for the Milestones 0–2 closeout | §4 |
 | **The exact M3.1–M3.5 phase map**, with network permission and completion token per phase | §5 |
-| **The M3.1A / M3.1B subdivision** — no new milestone, no new phase, no tag for M3.1A | §6 |
+| **The frozen internal subdivisions** — M3.1A/B, M3.2A/B, M3.3A/B, M3.4A/B; no new milestone, no new phase, no tag for an internal part | §6 |
+| M3.1 rehearses **acquisition only**; no scenario in a phase lacking its production path | §6.1 |
+| M3.2's **two sequential acquisition windows**, the between-windows freeze and derivation, and the second owner approval | §6.2 |
+| M3.3A builder and execution rehearsal, then M3.3B real execution | §6.3 |
+| M3.4 **always contracted, never documentary**; manual SQL prohibited | §6.4 |
 | **The operator-runbook requirement** — every command labelled, none overstated | §7 |
 | **The mandatory offline rehearsal before the first SEC request** | §8 |
 | **The execution-receipt requirement for every live command** | §9 |
-| **The frozen seven-template operational set** | §10 |
+| **The frozen eight-template operational set** | §10 |
+| **The two-layer evidence model** — public index, private evidence root | §10.1 |
+| **Deterministic root re-derivation** — regeneration alone never changes the root | §10.2 |
 | **The Milestone 3 limitations register**, seeded and closing nothing | §11 |
 | **The sequential model and validation policy** — Opus Max, Sonnet High/Max, no Haiku on the critical path | §12 |
 | **Commit and tag policy** — one implementation commit per phase; frozen future tag names | §13 |
 | **The focused independent-review policy** — no repeated broad audits, no self-review | §14 |
-| **Request-volume values may not be invented** | §15 |
-| **How a deferred count is resolved** — `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | §16 |
+| **Request-volume values may not be invented, and none is frozen** | §15 |
+| **`CURRENT_PLANNER_DISCREPANCY`** — the planner and Decision 013 §1 disagree on 2026 Q2; **Gate F cannot pass while unresolved** | §15.1 |
+| **How a deferred count is resolved** — `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | §15.2 |
+| **Maximum physical attempts is derived from the implemented state machine**, not asserted | §16 |
 | **Operational receipts are outside the accepted S5 and S6 identity graphs** | §17 |
 | **Nothing operational may contaminate a governed identity** | §18 |
 | **No identity, secret, or restricted payload in a receipt** | §19 |
 | **No Milestone 3 implementation authority is granted** | §20 |
 | Formal outcome | §21 |
 | Checkpoint authorization — one commit, one push, **no tag** | §22 |
-| **The next authorized action — `INDEPENDENT_M3_MASTER_PLAN_REVIEW`** | §23 |
-| Only after that review may the bounded M3.1 contract be created | §24 |
+| **The next authorized action — `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`** | §23 |
+| Only after that rereview may the bounded M3.1 contract be drafted | §24 |
 | Negative confirmations, and what this record does not change | §§25–26 |
 
 **Where the Milestone 3 planning artifacts live.**
@@ -347,6 +359,7 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 | The offline-rehearsal specification, twenty scenarios | [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) |
 | The execution-receipt specification | [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) |
 | The Milestone 3 limitations register | [`Docs/m3/limitations_register.md`](m3/limitations_register.md) |
+| Public evidence index | [`Docs/m3/templates/evidence_index.md`](m3/templates/evidence_index.md) |
 | Request budget | [`Docs/m3/templates/request_budget.md`](m3/templates/request_budget.md) |
 | Gate F checklist | [`Docs/m3/templates/gate_f_checklist.md`](m3/templates/gate_f_checklist.md) |
 | Gate H checklist | [`Docs/m3/templates/gate_h_checklist.md`](m3/templates/gate_h_checklist.md) |
@@ -355,10 +368,15 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 | Real-snapshot evidence packet | [`Docs/m3/templates/real_snapshot_evidence_packet.md`](m3/templates/real_snapshot_evidence_packet.md) |
 | Root-hash approval packet | [`Docs/m3/templates/root_hash_approval_packet.md`](m3/templates/root_hash_approval_packet.md) |
 
-**What the planning pack does not claim.** No Gate F has passed. No offline rehearsal has been run.
-No live acquisition occurred. No Gate H has passed. No real snapshot, selection, manifest, or
-approval exists. **No Milestone 3 implementation contract exists, and implementation authorization
-is `NO` for every phase.**
+**What the planning pack does not claim.** No Gate F has passed. **Neither offline rehearsal has been
+run.** No live acquisition occurred. No Gate H has passed. No real snapshot, selection, manifest, or
+approval exists. **No Milestone 3 implementation contract exists and none has been drafted, and
+implementation authorization is `NO` for every phase.**
+
+**Two conditions are unresolved and owner-facing.** **D023-O1** is inherited and referred only if a
+real run reaches it. **M3-L12** — the planner classifies 2026 Q2 as provisional and excludes it while
+Decision 013 §1 requires coverage through the **closed** 2026 Q2 quarter — **must be ruled on before
+Gate F can pass**, and Decision 013 is not edited to accommodate the planner.
 
 ## Deviation register — where deviations are recorded
 

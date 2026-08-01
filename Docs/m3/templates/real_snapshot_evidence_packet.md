@@ -24,7 +24,11 @@ manifest identities — in a form a reviewer can check against persisted rows.
 
 ## 0. Handling
 
-- **Non-secret document.** Identities, digests, counts, versions, and classifications.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **It contains unpublished governed identities** — the snapshot ID, every component digest, the
+  root, and the manifest ID. **None of them is ever written into the repository.**
 - **Never record** the SEC identity, any credential, any absolute personal path, any raw response
   body, any filing text, or any outcome value.
 - **Relative paths only.**
@@ -35,7 +39,9 @@ manifest identities — in a form a reviewer can check against persisted rows.
 
 | Field | Value |
 |---|---|
-| Phase | M3.3 |
+| Phase | M3.3B (the real execution; M3.3A's rehearsal record is a separate artifact) |
+| M3.3A execution-rehearsal reference | `_______` |
+| M3.3A independent-review result | `_______` |
 | Owner | `_______` |
 | Date (UTC) | `_______` |
 | Operator | `_______` |
@@ -241,7 +247,11 @@ each, so a reviewer can check the assertion.
 | 12.3 | An identical re-seal is idempotent; a differing seal is refused | `PASS`/`FAIL` |
 | 12.4 | **Two clean rebuilds from the same snapshot produce identical** entity selections, accession selections, reserve ordering, quota results, and root | `PASS`/`FAIL` |
 
-**Second rebuild root:** `_______` (must equal §13's root)
+**Second rebuild root:** `_______` — **must equal §13's root exactly.**
+
+**Unchanged governed state plus byte-identical canonical serialization produces the same root.** An
+independently re-derived identical root is **not** a new root and does **not** require re-approval;
+only a **differing** root does.
 
 ## 13. Manifest identities
 

@@ -18,7 +18,10 @@ S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone
 
 ## 0. Handling
 
-- **Non-secret document.** Counts, route names, hashes, and outcomes only.
+- **The completed copy is PRIVATE evidence.** It lives in the owner-controlled private evidence root,
+  never in the repository. Only its type, phase, status, SHA-256, and reference identifier go into
+  [`evidence_index.md`](evidence_index.md).
+- **Non-secret content even so.** Counts, route names, hashes, and outcomes only.
 - **Never record** the SEC identity value, any credential, any absolute personal path, or any
   response body.
 - **Every item is `PASS`, `FAIL`, or `N/A` with a reason.** There is no `PARTIAL` and no `UNKNOWN`
@@ -55,15 +58,18 @@ S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone
 
 | # | Item | Result | Evidence |
 |---|---|---|---|
-| 3.1 | **The complete offline rehearsal passed** | `PASS`/`FAIL` | rehearsal evidence reference |
-| 3.2 | All twenty scenarios implemented and executed; none skipped or `xfail`ed | `PASS`/`FAIL` | scenario matrix |
+| 3.1 | **The complete ACQUISITION rehearsal passed** | `PASS`/`FAIL` | rehearsal evidence reference |
+| 3.2 | All twelve scenarios **A1–A12** implemented and executed; none skipped or `xfail`ed | `PASS`/`FAIL` | scenario matrix |
 | 3.3 | Every observed reason code equals its expected registered code | `PASS`/`FAIL` | matrix |
 | 3.4 | No socket was opened, asserted rather than assumed | `PASS`/`FAIL` | assertion reference |
-| 3.5 | Interruption scenarios recovered with duplicate prevention proven | `PASS`/`FAIL` | R6–R8, R10 |
-| 3.6 | Replay performed zero writes | `PASS`/`FAIL` | R18 |
-| 3.7 | **Receipt non-contamination proof holds** — every governed identity byte-identical with receipts disabled, enabled, and varied | `PASS`/`FAIL` | R20 |
-| 3.8 | Prohibited-field scan proven non-vacuous by a positive control | `PASS`/`FAIL` | R19 |
-| 3.9 | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` recorded | `PASS`/`FAIL` | reference |
+| 3.5 | Interruption scenarios recovered with duplicate prevention proven | `PASS`/`FAIL` | A11 |
+| 3.6 | Route allowlist and denylist enforced at the boundary | `PASS`/`FAIL` | A6 |
+| 3.7 | **Receipt non-contamination proof holds** — every governed value byte-identical with receipts disabled, enabled, and varied | `PASS`/`FAIL` | A12 |
+| 3.8 | Prohibited-field scan proven non-vacuous by a positive control | `PASS`/`FAIL` | A12 |
+| 3.9 | **Every rehearsal receipt reports actual network counts of `0`**, with simulated totals in the evidence report | `PASS`/`FAIL` | A1–A12 |
+| 3.10 | **`A_reachable` derived per route and independently tested** against the worst reachable path | `PASS`/`FAIL` | A2, A4, A6 |
+| 3.11 | **No snapshot, selection, reserve, sealing, manifest, or root scenario was rehearsed here** — those are M3.3A | `PASS`/`FAIL` | scenario matrix |
+| 3.12 | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` recorded | `PASS`/`FAIL` | reference |
 
 ## 4. SEC identity
 
@@ -143,14 +149,20 @@ Each family asserted refused, with a representative probe path that is rejected.
 |---|---|---|---|
 | 9.1 | Every route has a planned count with a stated basis | `PASS`/`FAIL` | budget §3 |
 | 9.2 | **No cell reads `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`** | `PASS`/`FAIL` | budget §3 |
-| 9.3 | Maximum physical attempts equals `planned × A_max` | `PASS`/`FAIL` | budget §4 |
+| 9.3 | Maximum physical attempts equals `Σ ( U(route) × A_reachable(route) )` | `PASS`/`FAIL` | budget §4 |
+| 9.3a | **`A_reachable` derived from the implemented state machine and independently tested** | `PASS`/`FAIL` | budget §4.1 |
+| 9.3b | **No contingency or padding applied** | `PASS`/`FAIL` | budget §6 |
 | 9.4 | Expected raw-object count stated | `PASS`/`FAIL` | budget §4 |
 | 9.5 | Expected request-class totals stated where derivable | `PASS`/`FAIL` | budget §4 |
 | 9.6 | Expected elapsed window stated | `PASS`/`FAIL` | budget §8 |
 | 9.7 | **Hard ceiling computed from the stated formula** | `PASS`/`FAIL` | budget §7 |
 | 9.8 | **Stop-before-overflow behaviour asserted**, not stop-after | `PASS`/`FAIL` | rehearsal R4 |
 
+**Acquisition window budgeted:** `M3.2A`
 **Planned unique logical requests:** `____`  **Hard ceiling:** `____`
+
+**This Gate F approves the M3.2A window only.** The M3.2B budget does not exist yet — it is derived
+after M3.2A freezes its bootstrap objects and is approved separately.
 
 ## 10. Policy versions in force
 
@@ -173,6 +185,22 @@ Each family asserted refused, with a representative probe path that is rejected.
 | 11.3 | No external corpus was consulted | `PASS`/`FAIL` |
 | 11.4 | No pilot membership or stratification informed anything | `PASS`/`FAIL` |
 | 11.5 | The exact read set for this phase is stated below | `PASS`/`FAIL` |
+
+## 11.1 `CURRENT_PLANNER_DISCREPANCY` — must be resolved before Gate F passes
+
+Decision 013 §1 states that coverage extends through the **closed 2026 Q2** quarter. The accepted
+planner classifies 2026 Q2 as the **provisional open quarter** and, with `include_open_quarter =
+false`, **excludes** it.
+
+| # | Item | Result | Evidence |
+|---|---|---|---|
+| 11.1a | The discrepancy was diagnosed and its cause identified | `PASS`/`FAIL` | `_______` |
+| 11.1b | **Resolved** — the planner agrees with Decision 013 §1, **or** a new owner-approved decision changed that authority | `PASS`/`FAIL` | `_______` |
+| 11.1c | **Decision 013 was not silently changed** to accommodate the planner | `PASS`/`FAIL` | `_______` |
+| 11.1d | The request plan's required-quarter set matches accepted authority | `PASS`/`FAIL` | `_______` |
+
+**Gate F cannot pass while 11.1b is `FAIL`.** A request plan that disagrees with the accepted coverage
+cutoff is not a plan a budget can be approved against.
 
 **Exact read set:** `_______`
 
@@ -199,11 +227,13 @@ Each family asserted refused, with a representative probe path that is rejected.
 ## 14. Owner sign-off
 
 > I confirm that every item above is `PASS` or a justified `N/A`, that no live SEC request has been
-> placed, and that the request budget and hard ceiling recorded in the referenced budget document are
-> approved as exact integers.
+> placed, that the `CURRENT_PLANNER_DISCREPANCY` is resolved, and that the **M3.2A** request budget
+> and hard ceiling recorded in the referenced budget document are approved as exact integers.
 >
 > **This sign-off authorizes network enablement only for the command named in the governing M3.2
-> contract, only under the approved budget and ceiling, and only for that authorized window.**
+> contract, only under the approved M3.2A budget and ceiling, and only for the M3.2A window.** It
+> does **not** authorize M3.2B, whose plan does not yet exist and whose budget requires a separate
+> owner approval after the M3.2A objects are frozen.
 
 | Field | Value |
 |---|---|

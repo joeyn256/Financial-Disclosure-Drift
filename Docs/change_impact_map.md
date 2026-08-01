@@ -401,6 +401,70 @@ exactly these files:
 completed contract are **byte-unchanged**. **Every prior delivered-path record above is preserved**
 and remains the authority on what each stage shipped and which gates each of its paths triggers.
 
+## Decision 027 — Milestone 3 master plan and operational readiness (planning only, zero impact)
+
+[Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`) records the complete Milestone 3 master plan and
+operational-readiness design. Formal outcome
+`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`.
+
+**It is planning and navigation only, and its impact set is empty.** The planning session changed
+exactly these files:
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md` | new decision record | Markdown link-check only |
+| `Milestones/milestone_03_master_plan.md` | new — the five-phase roadmap, 36 fields per phase, the request-volume policy, and the mandatory future-contract contents | Markdown link-check only |
+| `Docs/m3/operator_runbook.md` | new — the 31-step Mac operator sequence with per-command status labels | Markdown link-check; command-status label check |
+| `Docs/m3/offline_rehearsal_spec.md` | new — the twenty-scenario offline rehearsal, **specified, not implemented and not run** | Markdown link-check only |
+| `Docs/m3/execution_receipt_spec.md` | new — the versioned receipt design, **creating no code and no table** | Markdown link-check; prohibited-field scan |
+| `Docs/m3/limitations_register.md` | new — every inherited limitation plus ten new M3 entries, **closing none** | Markdown link-check only |
+| `Docs/m3/templates/request_budget.md` | new template | Markdown link-check only |
+| `Docs/m3/templates/gate_f_checklist.md` | new template | Markdown link-check only |
+| `Docs/m3/templates/gate_h_checklist.md` | new template | Markdown link-check only |
+| `Docs/m3/templates/schema_drift_incident.md` | new template | Markdown link-check only |
+| `Docs/m3/templates/interrupted_run_recovery.md` | new template | Markdown link-check only |
+| `Docs/m3/templates/real_snapshot_evidence_packet.md` | new template | Markdown link-check only |
+| `Docs/m3/templates/root_hash_approval_packet.md` | new template | Markdown link-check only |
+| `Docs/Decisions/decision_registry.md` | registry — Index row `027` (added with no preceding blank line, so rows `001`–`027` stay one continuous table) + one controlling-record row | Markdown link-check; mechanical table-structure check |
+| `Docs/decision_index.md` | topic index — the Decision 027 section and the planning-artifact locations | Markdown link-check only |
+| `Docs/architecture_map.md` | §0 Milestone 3 row and the planning-artifact layer; the closing lifecycle note | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | current-state ledger and machine-readable markers | `make context` resolves the markers |
+| `Milestones/contracts/README.md` | contract index — Decision 027 identified as a decision record, not a contract; next-action pointer | Markdown link-check only |
+| `README.md` | the live `**Status:**` block's next-phase wording | Markdown link-check only |
+
+**Zero impact, stated explicitly:**
+
+- **zero production impact** — no module under `src/` changed;
+- **zero test impact** — no file under `tests/` changed;
+- **zero migration impact** — migrations `0001`–`0013` are byte-identical, the chain is contiguous
+  with nothing beyond `0013`, and `0013`'s normative region remains 10939 bytes over 186 lines at
+  `7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595`;
+- **zero configuration impact** — `configs/`, `pyproject.toml`, `Makefile`, and `.github/` unchanged;
+- **zero CLI impact** — no subcommand added, removed, or changed. Every Milestone 3 command named in
+  the runbook is labelled `PLANNED — NOT YET IMPLEMENTED`;
+- **zero methodology impact** — no hypothesis, cohort window, maturity gate, outcome definition,
+  threshold, seed, selection rule, reserve rule, or manifest rule changed;
+- **zero identity impact** — no hash preimage, digest, `manifest_id`, run identity, canonicalization
+  rule, crosswalk row, or classification total changed. **The execution receipt the planning pack
+  designs enters no governed identity** (Decision 027 §§17–18);
+- **zero data impact** — no data read, written, acquired, or derived;
+- **zero network impact** — no network boundary moved and no SEC access occurred;
+- **zero publication impact** — no root approved and nothing published;
+- **no tag** — none created, moved, or deleted;
+- **next action `INDEPENDENT_M3_MASTER_PLAN_REVIEW`**;
+- **no Milestone 3 implementation authority** — planning a phase is not authorization to begin it,
+  all five Decision 024 §8 entry conditions still apply, implementation authorization remains `NO`,
+  and **no Milestone 3 contract exists or was created**.
+
+`Docs/preregistration.md`, `Docs/sec_data_dictionary.md`, Decisions 001–026, `CLAUDE.md`, and every
+completed contract are **byte-unchanged**. **Every prior delivered-path record above is preserved**
+and remains the authority on what each stage shipped.
+
+**When Milestone 3 implementation is eventually authorized, its impact paths get their own section
+here** — written by that phase's session, under its own contract, and never in advance.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

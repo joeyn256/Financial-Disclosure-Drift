@@ -59,10 +59,17 @@ packages and dispositions, persistence, reconstruction and replay, and pilot-man
 with terminal result identity, lifecycle enforcement, verification, and atomicity).
 
 **What is complete is a deterministic offline architecture** — through manifest construction,
-verification, and replay. **No live SEC pilot has been executed.** **Milestone 3 is the next planning
-phase**, and Milestone 3 implementation is **not authorized and not begun**. **No SEC data has been
-downloaded, no filing body is permitted at this stage, no real pilot sample exists, no manifest root
-has been approved or published, and no modeling or outcome code exists.**
+verification, and replay. **No live SEC pilot has been executed.**
+
+**Milestone 3 master planning is complete and recorded** (Decision 027, 2026-07-31): the five-phase
+roadmap in `Milestones/milestone_03_master_plan.md` and the operational-readiness pack in `Docs/m3/` —
+the Mac operator runbook, the offline-rehearsal specification, the execution-receipt specification,
+the limitations register, and seven operational templates. **That is a plan, not an authorization.**
+An independent review of the master plan is the next authorized action, and **Milestone 3
+implementation is not authorized and not begun** — no Milestone 3 contract, module, migration, or CLI
+command exists. **No SEC data has been downloaded, no filing body is permitted at this stage, no real
+pilot sample exists, no manifest root has been approved or published, and no modeling or outcome code
+exists.**
 
 ## Formal preregistered research question
 
@@ -243,7 +250,8 @@ the serial suite: at this size the worker start-up cost is not worth the added v
 ## Repository structure
 
 ```text
-Docs/                    Research record: preregistration, registers, Decisions 001-026, SEC dictionary
+Docs/                    Research record: preregistration, registers, Decisions 001-027, SEC dictionary
+Docs/m3/                 Milestone 3 operational-readiness pack: runbook, specs, templates (planning only)
 Literature/              Literature matrix, search log, bibliography, competitor audit
 Milestones/              Milestone specifications and completion records
 configs/project.yaml     Project configuration; mirrors the frozen definitions

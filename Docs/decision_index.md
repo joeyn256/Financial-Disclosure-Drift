@@ -300,6 +300,66 @@ integrated audit's findings and the documentation corrections, read **Decision 0
 controlling. For the S6 architecture, item-46 applicability, and S6 acceptance, read **Decisions 021,
 022, and 023** respectively.
 
+## Decision 027 — ACCEPTED (Milestone 3 master plan and operational readiness)
+
+[Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md) is
+**`ACCEPTED — OWNER APPROVED 2026-07-31`** and **binding**. It **supersedes and amends nothing**:
+Decisions 001–026 all retain the authority they already hold, and **Decision 024 remains controlling
+for the M2 → M3 obligation transfer** while **Decision 026 remains controlling for the Milestones 0–2
+closeout**. It is a **planning and operational-readiness** record — **governance and documentation
+only, granting no Milestone 3 implementation authority**. Formal outcome:
+**`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`**.
+
+| Topic | Decision 027 section |
+|---|---|
+| Why the record exists — Milestone 3 is the first phase whose actions cannot be undone | §1 |
+| **The exact Milestones 0–2 closeout baseline** — closeout commit, tag targets, migration state | §2 |
+| **Decision 024 remains controlling** for the M2 → M3 obligation transfer | §3 |
+| **Decision 026 remains controlling** for the Milestones 0–2 closeout | §4 |
+| **The exact M3.1–M3.5 phase map**, with network permission and completion token per phase | §5 |
+| **The M3.1A / M3.1B subdivision** — no new milestone, no new phase, no tag for M3.1A | §6 |
+| **The operator-runbook requirement** — every command labelled, none overstated | §7 |
+| **The mandatory offline rehearsal before the first SEC request** | §8 |
+| **The execution-receipt requirement for every live command** | §9 |
+| **The frozen seven-template operational set** | §10 |
+| **The Milestone 3 limitations register**, seeded and closing nothing | §11 |
+| **The sequential model and validation policy** — Opus Max, Sonnet High/Max, no Haiku on the critical path | §12 |
+| **Commit and tag policy** — one implementation commit per phase; frozen future tag names | §13 |
+| **The focused independent-review policy** — no repeated broad audits, no self-review | §14 |
+| **Request-volume values may not be invented** | §15 |
+| **How a deferred count is resolved** — `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | §16 |
+| **Operational receipts are outside the accepted S5 and S6 identity graphs** | §17 |
+| **Nothing operational may contaminate a governed identity** | §18 |
+| **No identity, secret, or restricted payload in a receipt** | §19 |
+| **No Milestone 3 implementation authority is granted** | §20 |
+| Formal outcome | §21 |
+| Checkpoint authorization — one commit, one push, **no tag** | §22 |
+| **The next authorized action — `INDEPENDENT_M3_MASTER_PLAN_REVIEW`** | §23 |
+| Only after that review may the bounded M3.1 contract be created | §24 |
+| Negative confirmations, and what this record does not change | §§25–26 |
+
+**Where the Milestone 3 planning artifacts live.**
+
+| Artifact | Path |
+|---|---|
+| The master plan — five phases, 36 fields each, plus the future-contract requirements | [`Milestones/milestone_03_master_plan.md`](../Milestones/milestone_03_master_plan.md) |
+| The Mac operator runbook | [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) |
+| The offline-rehearsal specification, twenty scenarios | [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) |
+| The execution-receipt specification | [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) |
+| The Milestone 3 limitations register | [`Docs/m3/limitations_register.md`](m3/limitations_register.md) |
+| Request budget | [`Docs/m3/templates/request_budget.md`](m3/templates/request_budget.md) |
+| Gate F checklist | [`Docs/m3/templates/gate_f_checklist.md`](m3/templates/gate_f_checklist.md) |
+| Gate H checklist | [`Docs/m3/templates/gate_h_checklist.md`](m3/templates/gate_h_checklist.md) |
+| Schema-drift incident | [`Docs/m3/templates/schema_drift_incident.md`](m3/templates/schema_drift_incident.md) |
+| Interrupted-run recovery | [`Docs/m3/templates/interrupted_run_recovery.md`](m3/templates/interrupted_run_recovery.md) |
+| Real-snapshot evidence packet | [`Docs/m3/templates/real_snapshot_evidence_packet.md`](m3/templates/real_snapshot_evidence_packet.md) |
+| Root-hash approval packet | [`Docs/m3/templates/root_hash_approval_packet.md`](m3/templates/root_hash_approval_packet.md) |
+
+**What the planning pack does not claim.** No Gate F has passed. No offline rehearsal has been run.
+No live acquisition occurred. No Gate H has passed. No real snapshot, selection, manifest, or
+approval exists. **No Milestone 3 implementation contract exists, and implementation authorization
+is `NO` for every phase.**
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

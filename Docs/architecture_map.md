@@ -23,15 +23,36 @@ invents none for a future milestone.
 | **Milestone 0** | The research and governance foundation: research question and framing, the novelty review and its prohibited-claims boundary, the approved preregistration, the frozen cohorts and outcome cutoffs, bootstrap seed `20260725`, the leakage register, the deviation register and D001, and Decisions 001–006. It owns no source module; the frozen definitions it fixed are executed by `cohorts.py` in §1 below | **Formally closed** (Decision 026 §6). Its frozen research definitions remain frozen — closure does not unfreeze one, and changing any still requires an approved decision record plus a reviewed code change (CLAUDE.md rule 3) |
 | **Milestone 1** | Foundational configuration, frozen cohort definitions, CLI and exit-code boundary, logging, packaging, and the offline safety baseline — §§1 and 9 below | **Formally closed** (Decision 026 §7). Implemented, accepted, and in production use since Milestone 1 |
 | **Milestone 2** | SEC source policy and the offline census (§2); raw-object, inventory, and catalog layers (§3); the candidate/selection/manifest schema (§4); entity selection (§5); joint accession selection (§6); reserve packages (§7); and pilot-manifest construction, terminal result identity, lifecycle enforcement, verification, and atomicity (§8) | **Formally closed** (Decision 026 §§8–10) — the deterministic **offline** SEC, storage, selection, replay, and manifest architecture through accepted Stage M2.3 S6, checkpointed at `m2.3-s6-complete`. **No live SEC pilot has been executed**: S6 creates only a `proposed` manifest, over fixtures |
-| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** live-operation readiness and Gate F; **M3.2** controlled metadata-only SEC acquisition and Gate H; **M3.3** the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **Next planning phase — governance-defined only** (Decision 024 §5.1, transferring the obligations formerly called S7–S10). **Not implemented, not planned in implementation detail, not contracted, not authorized, and not begun.** No Milestone 3 module, migration, table, CLI command, network allowlist, real snapshot, real manifest, approved root, or publication path exists |
+| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** live-operation readiness and Gate F; **M3.2** controlled metadata-only SEC acquisition and Gate H; **M3.3** the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **Planning complete, pending independent review — still governance-defined only** (Decision 024 §5.1 for the phase map; [Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md) for the master plan and operational-readiness design). **Not implemented, not contracted, not authorized, and not begun.** No Milestone 3 module, migration, table, CLI command, network allowlist, real snapshot, real manifest, approved root, or publication path exists |
 
-**Assignment to Milestone 3 is not authorization to begin it** (Decision 024 §8). Every Milestone 3
-phase additionally requires a separate accepted governance record where applicable, a bounded
+**Assignment to Milestone 3 is not authorization to begin it** (Decision 024 §8), and **planning a
+phase is not authorization to begin it either** (Decision 027 §20). Every Milestone 3 phase
+additionally requires a separate accepted governance record where applicable, a bounded
 implementation contract, explicit owner authorization, exact path authorization, and satisfaction of
 its inherited prerequisite gates. **Closeout satisfied only the precondition** that Milestone 1 and
 Milestone 2 closeout must precede any Milestone 3 implementation — **it granted no implementation
-authority**, and implementation authorization remains `NO` for every phase (Decision 026 §21). The
-next authorized action is **`MILESTONE_3_MASTER_PLANNING`**.
+authority**, and implementation authorization remains `NO` for every phase (Decision 026 §21;
+Decision 027 §20). The next authorized action is **`INDEPENDENT_M3_MASTER_PLAN_REVIEW`**.
+
+### Milestone 3 planning artifacts — documentation only, naming no runtime path
+
+Recorded at Decision 027 (`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
+`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`). **Every item below is a document.**
+None is a module, a migration, a table, a CLI command, or a runtime path, and none creates one.
+
+| Artifact | What it fixes |
+|---|---|
+| [`Milestones/milestone_03_master_plan.md`](../Milestones/milestone_03_master_plan.md) | The five phases, each with 36 specified fields; the request-volume policy; the mandatory contents of every future phase contract |
+| [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled `AVAILABLE NOW` or `PLANNED — NOT YET IMPLEMENTED` |
+| [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | The twenty-scenario offline rehearsal required before the first SEC request. **Not implemented and not run** |
+| [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The versioned receipt for every live command — permitted fields, prohibited fields, serialization, storage, retention, redaction, replay, recovery, versioning, validation. **Creates no code and no table** |
+| [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus ten new Milestone 3 entries. **Closes none** |
+| [`Docs/m3/templates/`](m3/templates/request_budget.md) | The seven frozen operational templates: request budget, Gate F, Gate H, schema-drift incident, interrupted-run recovery, real-snapshot evidence, root-hash approval |
+
+**The one rule these artifacts add to this map:** an **execution receipt** is operational evidence and
+appears in **no** governed identity. It is not part of §8's digest graph, is not a manifest input, and
+is not committed by `root_manifest_sha256` or `manifest_id`. Every identity described in §§4–8 stays
+computable from persisted substantive rows alone (Decision 027 §§17–18).
 
 **Closing a milestone does not close its accepted limitations.** Decision 020 §19.1, Decision 021
 §19, Decision 022's applicability boundary, and Decision 023 §7's **O1**–**O4** all remain active and
@@ -363,3 +384,9 @@ S4 implementation; it does not introduce any new state or transition.
   Milestones 1–2 audit and its bounded corrections and rereviews are complete, and **Milestones 0, 1,
   and 2 are now formally closed** (Decision 026, `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`).
   Closure changed no module, table, migration, or runtime path described anywhere in this map.
+  **Milestone 3 master planning is likewise complete and likewise changed nothing here**
+  ([Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md),
+  `M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`): the planning pack in §0 above is
+  documentation, it names no module, migration, table, or CLI command that does not already appear in
+  this map, and it grants no implementation authority. The next authorized action is
+  **`INDEPENDENT_M3_MASTER_PLAN_REVIEW`**.

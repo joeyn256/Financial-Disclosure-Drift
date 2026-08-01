@@ -141,11 +141,42 @@ created at closeout, and no Milestone 3 implementation is authorized**: closure 
 precondition Decision 024 §8 imposed, and all five of that record's entry conditions still apply to
 every phase.
 
-**The next authorized action is `MILESTONE_3_MASTER_PLANNING`** — planning only, in a fresh session.
-It may not implement, may not create an implementation-authorizing contract, and may not enable
-network access, acquire metadata, create a snapshot, run a pilot, construct a manifest, approve a
-root, or publish anything (Decision 026 §§19–20). When a Milestone 3 phase is eventually authorized,
-it gets **its own bounded contract in this directory**, written to the required-sections shape above.
+**That master planning has run.** It is recorded in
+[Decision 027](../../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
+`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`), with the roadmap in
+[`../milestone_03_master_plan.md`](../milestone_03_master_plan.md) and the operational pack in
+[`Docs/m3/`](../../Docs/m3/operator_runbook.md) — the operator runbook, the twenty-scenario offline
+rehearsal specification, the execution-receipt specification, the limitations register, and the seven
+frozen templates.
+
+**Decision 027 is a decision record, not a contract, and it appears nowhere in this index as one.**
+Like Decisions 024, 025, and 026 before it, it authorizes no implementation and **creates no
+contract**. **Every contract in this directory remains closed**, unchanged by planning.
+
+**The master plan is a plan, not an authorization.** It fixes, for each of M3.1–M3.5, the objective,
+scope, non-scope, controlling decisions, required owner decisions, prerequisites, inputs, outputs,
+authorized and prohibited path *categories*, network permission, permitted and prohibited SEC route
+classes, request volume and its formula, hard ceiling, stop conditions, retry and drift boundaries,
+leakage controls, provenance and receipt requirements, validation, rollback, recovery, replay
+expectations, evidence packet, completion token, commit and tag policy, next action, and the
+conditions preventing progression. **Its §16 additionally fixes the twenty mandatory contents of every
+future Milestone 3 phase contract** — exact baseline, governing decisions, exact authorized and
+prohibited paths, implementation authorization, network authorization, request ceiling, CLI interface,
+storage/migration/identity effects, test requirements, targeted and phase-end validation, nonchange
+proof, failure and rollback behaviour, commit and tag policy, completion report format, and the exact
+completion token.
+
+**The next authorized action is `INDEPENDENT_M3_MASTER_PLAN_REVIEW`** — read-only and focused, in a
+fresh session, by a reviewer who authored none of the planning pack (Decision 027 §23). **Only after
+that review passes** may the owner authorize a separate session to create the **bounded M3.1
+implementation contract** (Decision 027 §24) — and that contract is itself only one of Decision 024
+§8's five entry conditions, never implementation authority on its own. When a Milestone 3 phase is
+eventually authorized, it gets **its own bounded contract in this directory**, written to the
+required-sections shape above **and** to the master plan's §16 additions.
+
+**No Gate F has passed, no offline rehearsal has been run, no live acquisition occurred, no Gate H
+has passed, and no real snapshot, selection, manifest, or approval exists.**
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

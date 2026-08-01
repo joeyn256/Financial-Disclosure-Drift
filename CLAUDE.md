@@ -45,6 +45,17 @@ Before editing anything, read in this order:
 which module owns which stage of the data pipeline. It is not itself a required step — consult it to
 find code, never as a substitute for the decision records it links to.
 
+Two further navigation aids, consulted as needed rather than read in order:
+
+- **[`Docs/preregistration.md`](Docs/preregistration.md) §25 — Deviation register.** The canonical
+  record of every preregistration deviation, and the place a new one is recorded (rule 5 below).
+  Deviation **D001** is currently the only entry. An accepted decision may explain or approve a
+  deviation, but §25 remains the register of record unless a later accepted decision explicitly
+  replaces it.
+- **[`Docs/sec_data_dictionary.md`](Docs/sec_data_dictionary.md).** Field-level documentation of the
+  operational SQLite catalog through migration `0013`, including the M2.3 pilot layer. It describes
+  the schema; it never defines it — the migrations do.
+
 ## Authority rules
 
 - **Python policy constants control executable frozen values where a decision assigns them

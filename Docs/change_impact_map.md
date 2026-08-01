@@ -290,6 +290,36 @@ to begin it (Decision 024 §8).
 **The accepted S6 delivered-path record above is unchanged** and remains the authority on what Stage
 S6 shipped and which gates each of its ten paths triggers.
 
+## Decision 025 — integrated-audit documentation corrections (documentation only, zero impact)
+
+[Decision 025](Decisions/decision_025_integrated_audit_documentation_corrections.md)
+(`ACCEPTED — OWNER APPROVED 2026-07-31`) records the final integrated Milestones 1–2 audit result
+`REQUIRES_BOUNDED_INTEGRATED_FIXES` — **nine categories confirmed
+`INTEGRATED_ACCEPTANCE_CONFIRMED`, with no implementation, methodology, migration, hashing,
+selection, manifest, leakage, security, or test defect** — and authorizes the one bounded
+documentation correction it required. Formal outcome
+`INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED`.
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_025_integrated_audit_documentation_corrections.md` | new decision record | Markdown link-check only |
+| `Docs/sec_data_dictionary.md` | **the correction** — scope moved from migrations `0001`–`0008` to `0001`–`0013`, adding §§9–14 covering the 22 `pilot_*` tables, the `0012` and `0013` trigger inventories, the digest dependency map, and a migration coverage table | Markdown link-check; verify against `sqlite_master` on a scratch `0001`–`0013` catalog |
+| `Docs/decision_index.md` | Decision 025 section + the deviation-register pointer | Markdown link-check only |
+| `Docs/Decisions/decision_registry.md` | index row + two controlling-record rows | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | current-state ledger and machine-readable markers | `make context` resolves the markers |
+| `Milestones/contracts/README.md` | next-authorized-action pointer | Markdown link-check only |
+| `CLAUDE.md` | reading order gains pointers to `Docs/preregistration.md` §25 and the data dictionary | Markdown link-check only |
+
+**Zero impact:** no production module, test, migration, configuration, or CI file changed; no
+methodology, hash preimage, canonicalization rule, crosswalk row, or classification total changed;
+no data read, written, acquired, or published; no network boundary moved; **no implementation
+authority granted**. `Docs/preregistration.md` was **not** edited — the deviation register is
+pointed at, not altered. Decisions 021–024 and every completed contract are byte-unchanged.
+
+**When Milestone 3 introduces schema, `Docs/sec_data_dictionary.md` must be extended in the same
+pass** — that is the standing lesson this correction records.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

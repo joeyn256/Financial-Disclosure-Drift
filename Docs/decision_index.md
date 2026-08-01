@@ -225,6 +225,47 @@ Decision 021 §17 for the scope of each, and Decision 024 §5.2 for what each ca
 | S10 | **M3.4** | **Explicit** owner approval of the exact root hash; no implied approval |
 | — | **M3.5** | Integrated real-pilot acceptance and Milestone 3 closeout (**new at Decision 024**) |
 
+## Decision 025 — ACCEPTED (integrated-audit documentation corrections)
+
+[Decision 025](Decisions/decision_025_integrated_audit_documentation_corrections.md) is
+**`ACCEPTED — OWNER APPROVED 2026-07-31`**. It records the final integrated Milestones 1–2 audit
+result (`REQUIRES_BOUNDED_INTEGRATED_FIXES`), the nine categories confirmed
+`INTEGRATED_ACCEPTANCE_CONFIRMED`, the single `PROJECT_DOCUMENTATION_CLASSIFICATION:
+REQUIRES_BOUNDED_FIX`, the authorized documentation corrections, and the independence disclosure and
+its handoff. Formal outcome **`INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED`**.
+**Documentation and governance recording only — it grants no implementation authority and changes no
+schema, migration, code, test, configuration, methodology, hash, or accepted decision outcome.**
+
+| Topic | Decision 025 section |
+|---|---|
+| The audit result and why the record exists | §1 |
+| The nine confirmed classifications and the evidence reproduced independently | §2 |
+| The single bounded documentation classification | §3 |
+| **The documentation defect** — the data dictionary's declared scope versus its content | §4 |
+| **The navigation defect** — the deviation register was not clearly reachable | §5 |
+| The authorized corrections | §6 |
+| What the correction does not change | §7 |
+| **The independence disclosure** and why it is recorded rather than absorbed | §8 |
+| **The required sequence** — correction, fresh verification, closeout, then Milestone 3 planning | §9 |
+| Checkpoint authorization — one commit, one push, **no tag** | §11 |
+
+## Deviation register — where deviations are recorded
+
+**[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation
+register.** It states the fields every deviation must record and holds the register itself.
+
+- **Deviation D001** is currently the only entry: the cohort-assignment date-source rule and
+  point-in-time boundary frozen by
+  [Decision 010](Decisions/decision_010_temporal_availability_and_cohort_assignment.md), recorded as
+  prospective, outcome-blind, and made before any filing was retrieved.
+- **Accepted decision records may explain, justify, or approve a deviation**, and several do — but a
+  decision record is not itself the register.
+- **The preregistration section remains the register of record** unless a later accepted decision
+  explicitly replaces it. None does.
+
+`make cohorts` prints §25 among the governing records for the frozen cohort definitions, so the
+register is reachable from the CLI as well as from this index.
+
 ## Full chronological registry
 
 For every decision's exact status, supersession relationships, and date, use

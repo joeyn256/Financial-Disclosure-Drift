@@ -1,8 +1,24 @@
-# SEC Data Dictionary
+# SEC and Pilot Data Dictionary
 
-**Version:** 0.2 (Stage M2.2-R3)
-**Governing records:** Decisions 007–012
-**Scope:** the operational SQLite catalog and the frozen Parquet release tables
+**Version:** 0.3 (through migration `0013`, Stage M2.3-S6)
+**Status:** current for the operational SQLite catalog as of migration
+`0013_m23_manifest_lifecycle_guards.sql`.
+**Governing records:** Decisions 007–012 (sections 1–8, the SEC ingestion and census schema);
+Decisions 013, 014, 016, 017, 018, 019, 020, 021, 022, 023 (sections 9–14, the M2.3 pilot schema).
+**Scope:** the complete operational SQLite catalog created by migrations `0001`–`0013`, and the
+frozen Parquet release tables. Sections 1–8 cover the SEC ingestion and census layers
+(migrations `0001`–`0008`). **Sections 9–14 cover the M2.3 pilot layer** (migrations
+`0009`–`0013`), added at version 0.3 to close the coverage gap the final integrated Milestones 1–2
+audit recorded ([Decision 025](Decisions/decision_025_integrated_audit_documentation_corrections.md)).
+
+**Migrations are the schema ground truth; accepted decisions govern methodology and semantics.**
+This dictionary describes what the migrations create and what the accepted decisions say about it.
+It defines nothing of its own, and where it and a migration or decision disagree, the migration or
+decision controls (CLAUDE.md authority rules). Every statement in sections 9–14 was verified against
+`sqlite_master` on a scratch catalog built by the accepted `0001`–`0013` chain.
+
+**No real pilot data exists.** No production catalog, candidate-snapshot builder, or real pilot
+sample has been created; Milestone 3 has not begun and is not authorized (Decision 024).
 
 Conventions used throughout:
 
@@ -271,4 +287,228 @@ and flagged `REVIEW_ACCEPTANCE_ON_NON_OPERATING_DAY`; it never yields
 
 No column stores a SEC contact value, an API key, an absolute personal path, an outcome value, an
 operating-margin figure, an industry-adjusted quantity, a Disclosure Drift Index component, or any
-2022–2026 outcome. Milestone 2 does not construct or link outcomes.
+2022–2026 outcome. Milestone 2 does not construct or link outcomes. **This prohibition applies to
+the pilot layer in sections 9–14 without exception.**
+
+## 9. M2.3 pilot layer — overview
+
+**Migrations `0009`–`0013`, verified against `sqlite_master`.**
+
+| Migration | Tables | Triggers | Indexes | Data | What it adds |
+|---|---:|---:|---:|---:|---|
+| `0009_m23_pilot_schema` | **21** | 68 | 21 | 1 row | the pilot table family (Decision 016) |
+| `0010_m23_quota_policy_reference` | 0 | 0 | 0 | 1 row | `reference_policy_versions` row for `pilot_quota` (Decision 017) |
+| `0011_m23_joint_selector_policy_reference` | 0 | 0 | 0 | 1 row | `reference_policy_versions` row for `pilot_joint_selector` (Decision 018 §20) |
+| `0012_m23_selection_entity_reasons` | **1** | 4 | 0 | 0 | `pilot_selection_entity_reasons` + lifecycle guards (Decision 020 §8.2) |
+| `0013_m23_manifest_lifecycle_guards` | 0 | **8** | 0 | 0 | DDL-only manifest and run lifecycle guards (Decision 021 §15) |
+
+**The catalog therefore holds 22 `pilot_*` tables: the 21 migration `0009` created, plus the one
+migration `0012` added.** `0010` and `0011` are INSERT-only policy-reference rows and create no
+schema. `0013` is DDL-only and creates no table, column, or index.
+
+All 22 pilot tables are `STRICT`. Every foreign key is `ON DELETE NO ACTION`. Every `*_sha256`
+column carries `CHECK (length(x) = 64 AND x NOT GLOB '*[^0-9a-f]*')`.
+
+### 9.1 State classes
+
+| Class | Tables |
+|---|---|
+| **Candidate state** (frozen snapshot input) | `pilot_candidate_snapshots`, `pilot_candidate_entities`, `pilot_candidate_accessions`, `pilot_candidate_accession_registrants` |
+| **Source evidence** | `pilot_candidate_entity_evidence`, `pilot_candidate_accession_evidence` |
+| **Candidate reasons (audit)** | `pilot_candidate_entity_reasons`, `pilot_candidate_accession_reasons` |
+| **Lifecycle state** | `pilot_selection_runs`, `pilot_selection_run_events` |
+| **Selected state** | `pilot_selected_entities`, `pilot_selected_accessions` |
+| **Quota state** | `pilot_quota_results`, `pilot_quota_result_members`, `pilot_selected_entity_quota_contributions`, `pilot_selected_accession_quota_contributions` |
+| **Reserve state** | `pilot_reserves`, `pilot_reserve_accessions`, `pilot_reserve_quota_contributions`, `pilot_selection_entity_reasons` |
+| **Manifest state** | `pilot_manifest_versions` |
+| **Operational-only** | `pilot_projection_recovery_events` (no writer; Decision 021 §16) |
+
+### 9.2 Stage boundaries
+
+- **S4** writes an **entity-only draft** into `pilot_selection_runs` + `pilot_selected_entities`,
+  and its `run_state` is deliberately never advanced past `running`. That draft is
+  **non-publishable and is never a manifest input** (Decision 018 §§6, 27; Decision 020 §11).
+- **S5** creates a **distinct, content-derived** joint run that reaches `feasible` and writes the
+  selected, quota, contribution, member, reserve, and disposition families inside one `running`
+  window, in one transaction.
+- **S6** seals `pilot_selection_runs.selection_result_sha256` in its own prior transaction, then
+  writes exactly one `proposed` `pilot_manifest_versions` row together with its serialized
+  canonical document, in one transaction.
+
+**Writers, exhaustively.** `sec/entity_selection_store.py` (S4), `sec/accession_selection_store.py`
+(S5, including reserves and dispositions), `sec/pilot_manifest_store.py` (S6 seal and manifest).
+No other module writes a `pilot_*` table, and no module writes
+`pilot_projection_recovery_events`.
+
+## 10. Candidate layer (migration `0009`)
+
+**No module writes any `pilot_candidate_*` table.** This is schema ahead of its writer: the
+candidate-snapshot builder is Milestone 3 phase M3.3 and does not exist. S4, S5, and S6 read these
+tables; accepted tests populate them from fixtures.
+
+| Table | PK | Key uniqueness / FKs | Material CHECKs | Role |
+|---|---|---|---|---|
+| `pilot_candidate_snapshots` | `snapshot_id` (64-hex, content-derived) | FK `census_run_id` → `ops_ingestion_jobs`; FK `invalidated_reason_code` → `reference_reason_codes` | `snapshot_state IN ('building','frozen','invalidated')`; `include_open_quarter = 0`; each declared `*_sha256` 64-hex-or-NULL; state-conditional presence of counts and digests | Frozen snapshot header. Its 22 declared fields are the entire `candidate_tables_sha256` preimage (Decision 021 §8.2) |
+| `pilot_candidate_entities` | (`snapshot_id`, `cik_numeric`) | FK → `pilot_candidate_snapshots`; idx on tie-break and on (`size_stratum`,`industry_family`,`history_class`) | `candidate_category IN ('operating','control','ineligible')`; control ⇔ `control_kind`; `primary_universe_eligible` requires operating + provisional evidence; paired `(value IS NULL) = (resolution_sha256 IS NULL)` for size/industry/history | Candidate entity state. Feeds `entity_content_sha256` → `selection_input_sha256` |
+| `pilot_candidate_accessions` | (`snapshot_id`, `accession_plain`) | UNIQUE (`snapshot_id`,`accession_number_dashed`); FK → snapshot, `reference_form_types` | `filing_date_precedence IS NULL OR = 2`; cohort/xbrl/amendment evidence-level enums; `is_amendment = 1` ⇔ linkage state present; four `*_eligible` flags | Candidate accession state. **`accession_plain` is the database and FK identity; `accession_number_dashed` is the canonical form for hashing and presentation** (Decision 018 §5) |
+| `pilot_candidate_accession_registrants` | (`snapshot_id`,`accession_plain`,`registrant_cik_numeric`) | **UNIQUE `uq_pilot_candidate_accession_single_anchor` (`snapshot_id`,`accession_plain`)** — one anchor per accession | `role IN ('anchor','associated','submitter_only')`; `(role='anchor') = (is_anchor=1)` | Multi-registrant relationships |
+| `pilot_candidate_entity_evidence` | `evidence_id` | FK → `pilot_candidate_entities`; idx on (`snapshot_id`,`cik_numeric`,`classification_dimension`) | `classification_dimension IN ('size','industry','history','primary_universe','identity')`; `evidence_role IN ('winning','competing','supporting')`; `precedence >= 1` | Source evidence (Decision 014; Decision 019 conversions) |
+| `pilot_candidate_accession_evidence` | `evidence_id` | FK → `pilot_candidate_accessions` | as above, over the accession dimensions | Source evidence |
+| `pilot_candidate_entity_reasons` | (`snapshot_id`,`cik_numeric`,`reason_scope`,`reason_code`) | FK `reason_code` → `reference_reason_codes` | `reason_scope IN ('eligibility','size','industry','history','primary_universe','identity')` | Candidate audit trail; §10 crosswalk items 44 and 76 |
+| `pilot_candidate_accession_reasons` | (`snapshot_id`,`accession_plain`,`reason_scope`,`reason_code`) | FK `reason_code` → `reference_reason_codes` | `reason_scope IN ('eligibility','cohort','xbrl','amendment','multi_registrant','identity')` | Candidate audit trail |
+
+**Digest contribution.** The candidate layer contributes to `candidate_tables_sha256` through the
+snapshot's **declared** component digests, which Decision 021 §8.2 binds as the accepted
+representation rather than recomputing. Candidate row content is independently bound through
+`selection_input_sha256`, which S5 derives from the frozen rows and S6 re-derives at
+reconstruction — so the content is proven, not trusted (Decision 021 §19.2).
+
+## 11. Selection layer (migration `0009`)
+
+| Table | PK | Key uniqueness / FKs | Material CHECKs | Lifecycle / role |
+|---|---|---|---|---|
+| `pilot_selection_runs` | `selection_run_id` (64-hex, content-derived) | UNIQUE (`selection_run_id`,`snapshot_id`); FK → `pilot_candidate_snapshots` | `run_state` enum; `feasible` requires both counts non-NULL; `node_limit_exhausted = 0 OR run_state='infeasible_or_unproven'`; `selection_result_sha256` 64-hex-or-NULL | **18 columns.** Lifecycle `planned → running → {feasible, infeasible, infeasible_or_unproven}`. `selection_result_sha256` is **append-once** and, from migration `0013`, so is the run's identity (§13.2) |
+| `pilot_selection_run_events` | `event_id` | UNIQUE (`selection_run_id`,`attempt_number`); FK → run, `reference_reason_codes` | `from_state`/`to_state` enums; `attempt_number >= 1` | Transition audit. **Excluded from every digest** (Decision 021 §6.3) |
+| `pilot_selected_entities` | (`selection_run_id`,`snapshot_id`,`cik_numeric`) | UNIQUE (`selection_run_id`,`snapshot_id`,`selected_order`); FK → run, candidate entities | `entity_role IN ('operating','control')`; `selected_order >= 1`; `entity_hash_sha256` 64-hex | **Selected state.** Its frozen eleven-column tuple is the whole `selected_entities_sha256` preimage (Decision 021 §7.1) |
+| `pilot_selected_accessions` | (`selection_run_id`,`snapshot_id`,`accession_plain`) | UNIQUE (`selection_run_id`,`snapshot_id`,`selected_order`); FK → run, selected entities, candidate accessions | `accession_role IN ('base','stress','support','control')` — **mutually exclusive**; `selected_order >= 1` | **Selected state.** Frozen seven-column tuple = `selected_accessions_sha256` (Decision 021 §7.2) |
+| `pilot_quota_results` | `quota_result_id` | UNIQUE (`selection_run_id`,`snapshot_id`,`quota_dimension`,`quota_key`); UNIQUE (`quota_result_id`,`selection_run_id`,`snapshot_id`) | `comparison_operator IN ('exact','at_least','at_most')`; operator-consistent pass conditions; **`quota_result='pass'` requires `evidence_state='provisional'`** | **Quota state.** Fourteen columns feed `quota_report_sha256`; a four-column subset feeds `quota_definitions_sha256` (Decision 021 §§7.3, 8.3) |
+| `pilot_quota_result_members` | (`quota_result_id`,`member_order`) | FK → quota results, selected entities, selected accessions | `member_kind IN ('entity','accession')` with `(kind='entity') = (cik_numeric IS NOT NULL)` and the accession mirror | Quota membership provenance → `quota_report_sha256` |
+| `pilot_selected_entity_quota_contributions` | (`selection_run_id`,`snapshot_id`,`cik_numeric`,`quota_dimension`,`quota_key`) | FK → selected entities | — | Contribution arithmetic → `quota_report_sha256`. **Load-bearing for the reserve trigger** (Decision 020 §6) |
+| `pilot_selected_accession_quota_contributions` | (`selection_run_id`,`snapshot_id`,`accession_plain`,`quota_dimension`,`quota_key`) | FK → selected accessions | — | Contribution provenance → `quota_report_sha256` |
+
+**Reconstruction and replay.** `reconstruct_persisted_joint_selection` re-derives the run from the
+frozen snapshot under its own recorded seed, policy versions, and node limit, and compares every
+`JointSelectionRunIdentity` field. Same-ID replay reads, reconstructs, compares, and returns; it
+never overwrites, and a stored-content mismatch is a `GateFailureError`.
+
+## 12. Reserve layer (migrations `0009` and `0012`)
+
+| Table | Migration | PK | Key uniqueness / FKs | Material CHECKs | Role |
+|---|---|---|---|---|---|
+| `pilot_reserves` | `0009` | `reserve_package_id` (64-hex, content-derived) | **UNIQUE (`selection_run_id`,`snapshot_id`,`target_cik_numeric`,`reserve_rank`)** — one package per target per rank; FK → run, selected entities, candidate entities | **`replaces_signature_sha256 = reserve_signature_sha256`** (exact-equality rule); `target_cik_numeric <> replacement_cik_numeric`; `reserve_rank >= 1`; `evidence_floor` enum | Reserve packages. Twelve-column tuple → `reserves_sha256` (Decision 021 §7.4). A reserve is **constructed, never applied** (Decision 013 §6) |
+| `pilot_reserve_accessions` | `0009` | (`reserve_package_id`,`accession_plain`) | UNIQUE (`reserve_package_id`,`accession_order`); FK → reserves, candidate accessions | `accession_role` enum; `accession_order >= 1` | Reserve bundle → `reserves_sha256` |
+| `pilot_reserve_quota_contributions` | `0009` | (`reserve_package_id`,`quota_dimension`,`quota_key`) | FK → reserves | — | Reserve contribution set → `reserves_sha256` |
+| `pilot_selection_entity_reasons` | **`0012`** | (`selection_run_id`,`snapshot_id`,`cik_numeric`,`reason_scope`) | FK → selected entities, `reference_reason_codes` | **`reason_scope IN ('reserve')`**; reserve scope admits only `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` | Durable **no-compatible-reserve disposition** → `reserves_sha256` |
+
+**Migration `0012` triggers — four, all on the reserve-disposition path (Decision 020 §8.2):**
+
+| Trigger | Target | Event | Protected invariant |
+|---|---|---|---|
+| `pilot_selection_entity_reasons_insert_guard` | `pilot_selection_entity_reasons` | `BEFORE INSERT` | a disposition may be written only inside the run's `running` window |
+| `pilot_selection_entity_reasons_update_guard` | `pilot_selection_entity_reasons` | `BEFORE UPDATE` | `selection_run_id`, `snapshot_id`, and `cik_numeric` immutable; checks **both** the OLD and the NEW associated run |
+| `pilot_selection_entity_reasons_delete_guard` | `pilot_selection_entity_reasons` | `BEFORE DELETE` | dispositions are not deleted outside the `running` window |
+| `pilot_selection_run_feasible_requires_reserve_disposition` | `pilot_selection_runs` | `BEFORE UPDATE` (`running → feasible`) | **total, mutually exclusive** reserve coverage for every selected target before the run may reach `feasible` |
+
+**Coverage rule (Decision 020 §7.1, Decision 022).** Every selected target carries **exactly one**
+of: one rank-1 package, or one `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` disposition. Never both, never
+neither. **A run with zero packages and complete dispositions is lawful and manifest-eligible**;
+Decision 022 rules that crosswalk item 46's reserve rank is applicable **once per persisted
+package** and is **structurally not applicable** for a target covered by a disposition. **No
+synthetic package, `reserve_rank = 0`, `null`, `"N/A"`, or invented rank is ever created or
+serialized.**
+
+## 13. Manifest layer (migrations `0009` and `0013`)
+
+### 13.1 `pilot_manifest_versions`
+
+**24 columns.** PK `manifest_id` (64-hex, content-derived from root/ordinal/supersedes,
+Decision 021 §9.1). Three uniqueness routes, all load-bearing for the replacement guard:
+
+| Route | Index | Definition |
+|---|---|---|
+| 1 | `sqlite_autoindex_…_1` | `manifest_id` `TEXT PRIMARY KEY` |
+| 2 | `sqlite_autoindex_…_2` | UNIQUE (`selection_run_id`, `snapshot_id`, `ordinal_version`) |
+| 3 | `uq_pilot_manifest_single_active_approval` | partial UNIQUE (`selection_run_id`, `snapshot_id`) `WHERE manifest_state = 'owner_approved'` |
+
+FKs → `pilot_selection_runs` (`selection_run_id`, `snapshot_id`) and self (`supersedes_manifest_id`).
+Material CHECKs: all nine digest columns 64-hex; `manifest_state IN ('proposed','owner_approved',
+'rejected','superseded')`; **`approved_root_sha256 = root_manifest_sha256`** whenever state is
+`owner_approved` or `superseded`; `relative_manifest_path` non-empty and relative;
+`supersedes_manifest_id <> manifest_id`; state-conditional timestamp presence.
+
+**Field classification — the distinction that matters:**
+
+| Kind | Fields | Rule |
+|---|---|---|
+| **Immutable governed identity** | `manifest_id`, `manifest_schema_version`, `selection_run_id`, `snapshot_id`, `ordinal_version`, `supersedes_manifest_id` | Fixed at `INSERT`, never updated (Decision 021 §9.2), enforced by trigger 4 |
+| **Substantive identity** | the eight component digests + `root_manifest_sha256` | Immutable via migration `0009`'s hashes guard; each re-derives from persisted rows |
+| **Mutable operational** | `manifest_state`, `approval_reference`, `approved_root_sha256`, `relative_manifest_path`, `detail` | Move under `0009`'s transition guard; correctable without touching identity |
+| **Operational envelope** | `generated_at_utc`, `approved_at_utc`, `rejected_at_utc`, `superseded_at_utc` | Excluded from every digest **and from the document's substantive body** (Decision 021 §13.4) |
+
+**S6 writes only `manifest_state = 'proposed'`**, always with `supersedes_manifest_id = NULL`, and
+never populates an approval field. Approval is Milestone 3 phase M3.4.
+
+### 13.2 Migration `0013` trigger inventory (Decision 021 §15.1)
+
+**Five target `pilot_selection_runs`; three target `pilot_manifest_versions`** — verified against
+`sqlite_master`. All eight abort with `RAISE(ABORT)`; none depends on a pragma.
+
+| # | Trigger | Target | Event | Protected invariant | Identical restatement | §21 |
+|---|---|---|---|---|---|---|
+| 1 | `pilot_selection_run_insert_unsealed_guard` | runs | `BEFORE INSERT` | every run is inserted **unsealed** | n/a — refuses any pre-sealed INSERT | §15.1 b1 |
+| 2 | `pilot_selection_run_result_hash_guard` | runs | `BEFORE UPDATE OF selection_result_sha256` | seal only on a run `feasible` **before and after**; a sealed digest may neither change nor clear | **permitted** — identical reseal is idempotent | §15.1 b2 |
+| 3 | `pilot_manifest_versions_insert_guard` | manifests | `BEFORE INSERT` | requires an existing **`feasible`, sealed** run whose snapshot matches | n/a | §15.1 b3 |
+| 4 | `pilot_manifest_versions_identity_guard` | manifests | `BEFORE UPDATE OF` the six identity columns | all six immutable; OLD **and** NEW run must be feasible and sealed | **permitted** — identical six-field restatement is a no-op | §15.1 b4 |
+| 5 | `pilot_manifest_versions_replacement_guard` | manifests | `BEFORE INSERT` | closes **all three** uniqueness routes against `INSERT OR REPLACE` / `OR IGNORE` / duplicate | n/a | §15.1 b5 |
+| 6 | `pilot_selection_run_replacement_guard` | runs | `BEFORE INSERT` | an existing run is never replaced or re-inserted | n/a | §15.1 b6 |
+| 7 | `pilot_selection_run_delete_guard` | runs | `BEFORE DELETE` | **unconditional** — runs are undeletable in every state | n/a | §15.1 b7 |
+| 8 | `pilot_selection_run_identity_guard` | runs | `BEFORE UPDATE OF selection_run_id, snapshot_id, selection_input_sha256` | the three persisted identity fields are immutable | **permitted** — identical three-field restatement is a no-op | §15.1 b8 |
+
+`selection_input_schema_version` is **not** a column on `pilot_selection_runs`; it is immutable by
+absence and enters the preimages as the accepted code constant
+`ACCESSION_SELECTION_INPUT_SCHEMA_VERSION` (Decision 021 §3.6).
+
+**Normative region:** 10939 bytes over 186 lines, SHA-256
+`7f473802db7471f31106c5b19bc33376424594db88ae6d50f0a4dbf827f0d595`, byte-identical to Decision 021
+§15.1 with all eight per-block digests reproducing.
+
+**The §15.5 guarantee.** Together these make `selection_result_sha256` **append-once and
+recomputable from its persisted preimage** across every direct SQLite write path.
+
+### 13.3 Digest dependency map (Decision 021 §§6–10)
+
+```
+census_source_observations ──▶ source_observation_set_sha256 ─┐
+pilot_candidate_snapshots  ──▶ candidate_tables_sha256        ─┤
+pilot_quota_results (4 cols)──▶ quota_definitions_sha256      ─┼──▶ root_manifest_sha256 ──▶ manifest_id
+reference_policy_versions + ──▶ selector_policy_sha256        ─┤              ▲
+  6 explicit arguments                                         │              │
+pilot_selected_entities ───▶ selected_entities_sha256 ──┐      │              │
+pilot_selected_accessions ─▶ selected_accessions_sha256 ─┼──▶ selection_result_sha256 ─┘
+pilot_quota_* ─────────────▶ quota_report_sha256 ───────┤   (the four also feed the root
+pilot_reserve* + dispositions ▶ reserves_sha256 ────────┘    directly — a diamond, not a cycle)
+```
+
+The graph is **acyclic**: no digest is an input to itself, `manifest_id` is derived from the root and
+never the reverse, and `pilot_manifest_versions` is never hashed into any digest.
+
+### 13.4 Serialized document and verification
+
+S6 writes the canonical JSON under `DataTree.releases / "pilot"` as
+`pilot_manifest_<root_manifest_sha256>.json` — UTF-8, LF, sorted keys, relative paths only, and
+byte-identical on re-serialization. **The row and the file commit together or not at all**; an
+injected fault leaves no new row and no new file. `verify_pilot_manifest` re-derives every digest,
+the root, `manifest_id`, and the document from persisted rows and fails closed on any difference.
+**Idempotent replay reads, reconstructs, compares, and returns without writing.**
+
+## 14. Migration-to-dictionary coverage
+
+| Migration | Layer | Dictionary sections |
+|---|---|---|
+| `0001_initial` | core catalog, reference tables | 2, 3, 5, 7 |
+| `0002_source_observations` | source observations | 4, 6A |
+| `0003_census_catalog` | census, operating calendar | 6A, 7.1 |
+| `0004_m22_r1_safety` | safety and rate state | 5, 6A |
+| `0005_r2_structural_evidence` | structural observations | 6A |
+| `0006_r2_resolution_and_reconciliation` | accession resolution | 1 (Decision 012) |
+| `0007_r2_index_retrieval` | index retrieval | 1, 6A |
+| `0008_r3_durability_and_lineage` | durability, lineage | 6B |
+| `0009_m23_pilot_schema` | **21 pilot tables** | **9, 10, 11, 12, 13** |
+| `0010_m23_quota_policy_reference` | quota policy row | **9** |
+| `0011_m23_joint_selector_policy_reference` | joint selector policy row | **9** |
+| `0012_m23_selection_entity_reasons` | **1 pilot table + 4 triggers** | **9, 12** |
+| `0013_m23_manifest_lifecycle_guards` | **8 triggers** | **9, 13.2** |
+
+**Coverage is complete for `0001`–`0013`.** Milestone 3 (phases M3.1–M3.5) has not begun and is not
+authorized; when it introduces schema, this dictionary must be extended in the same pass
+(Decision 024 §8).

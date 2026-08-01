@@ -101,10 +101,21 @@ bounded implementation contract in this directory, a separate accepted governanc
 applicable, explicit owner authorization, exact path authorization, and satisfaction of its inherited
 prerequisite gates — and none may begin before Milestone 1 and Milestone 2 closeout is complete.
 
-**The next authorized action is the final independent integrated Milestones 1 and 2 audit**
-(`FINAL_INDEPENDENT_INTEGRATED_MILESTONES_1_AND_2_AUDIT`), which is read-only, records no closeout,
-and authorizes no implementation. Formal Milestone 1 and Milestone 2 closeout follows only if that
-audit passes, in its own governance-only session, and **Milestone 2 is not closed until then**.
+**That audit has run.** It returned `REQUIRES_BOUNDED_INTEGRATED_FIXES`, confirming
+`INTEGRATED_ACCEPTANCE_CONFIRMED` in nine categories with **no implementation, methodology,
+migration, hashing, selection, manifest, leakage, security, or test defect**, and raising one bounded
+documentation finding. That correction is complete and recorded in
+[Decision 025](../../Docs/Decisions/decision_025_integrated_audit_documentation_corrections.md)
+(`INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED`), which is a decision record, **not a
+contract**, and grants no implementation authority.
+
+**The next authorized action is
+`FRESH_INDEPENDENT_INTEGRATED_CORRECTION_AND_GOVERNANCE_VERIFICATION`** — a fresh independent
+session, which must have authored none of Decisions 023, 024, or 025 nor the documentation
+corrections. It is read-only, records no closeout, and authorizes no implementation. Formal
+Milestone 1 and Milestone 2 closeout follows only if that verification passes, in its own
+governance-only session which controls the closeout tags, and **Milestones 1 and 2 are not closed
+until then**.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

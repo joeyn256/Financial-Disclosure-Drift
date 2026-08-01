@@ -628,7 +628,23 @@ class SecClient:
 
             if action.kind == "cooldown":
                 if cooldowns >= 1:
-                    return self._terminal("failed", state, response, action)
+                    # A second cooldown ends the retrieval. A block page or a 403
+                    # already carries SEC_BLOCK_PAGE, but an unqualified 429 cooldown
+                    # carries no reason code, so returning the action unchanged would
+                    # produce a terminal failure with no registered reason. The two
+                    # adjacent terminal branches apply the same fallback, for the same
+                    # purpose: no consumer may read this failure as an empty dataset.
+                    state.actions.append("second_cooldown_terminal")
+                    halted = ResponseAction(
+                        kind="fail",
+                        reason=(
+                            f"{action.reason}; aggregate traffic had already halted once, "
+                            "so the retrieval is terminal"
+                        ),
+                        reason_code=action.reason_code or "SEC_RETRIES_EXHAUSTED",
+                        halts_aggregate_traffic=action.halts_aggregate_traffic,
+                    )
+                    return self._terminal("failed", state, response, halted)
                 cooldowns += 1
                 delay = max(action.delay_seconds, self._policy.cooldown_seconds)
                 self._logger.warning(

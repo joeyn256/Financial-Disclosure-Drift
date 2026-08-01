@@ -190,10 +190,27 @@ _FORBIDDEN_S5_4_CODES: tuple[str, ...] = (
     "REVIEW_PILOT_RESERVE_SUBSTITUTION",
 )
 
+#: The two codes Decision 028 section 6 authorizes for Milestone 3.1, with no alias.
+_M3_1_CODES: dict[str, dict[str, Any]] = {
+    "SEC_REQUEST_CEILING_EXHAUSTED": {
+        "category": "integrity",
+        "blocks_release": True,
+        "requires_manual_review": False,
+        "decision_reference": "Docs/Decisions/decision_028_m3_1_readiness_corrections.md",
+    },
+    "SEC_ACQUISITION_INTERRUPTED": {
+        "category": "integrity",
+        "blocks_release": True,
+        "requires_manual_review": False,
+        "decision_reference": "Docs/Decisions/decision_028_m3_1_readiness_corrections.md",
+    },
+}
+
 _PRE_S3_1_CODE_COUNT = 87
 _S3_1_TOTAL_COUNT = 103
 _S5_2_TOTAL_COUNT = 108
-_TOTAL_COUNT = 109
+_S5_4_TOTAL_COUNT = 109
+_TOTAL_COUNT = 111
 
 # Computed once, offline, from the accepted S3.0 governance baseline (the 87 reason codes that
 # existed before the M2.3 S3.1 addition): sort the pre-S3.1 codes by their ``code`` string, render
@@ -205,7 +222,7 @@ _PRE_S3_1_FINGERPRINT_SHA256 = "65c94cf2e10eb5854b2c00034c13f4f9de746bef39673ec4
 
 
 def _pre_s3_1_codes() -> dict[str, Any]:
-    added = set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES)
+    added = set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES) | set(_M3_1_CODES)
     return {code: entry for code, entry in REASON_CODES.items() if code not in added}
 
 
@@ -227,29 +244,44 @@ def _fingerprint(codes: dict[str, Any]) -> str:
 
 def test_exactly_sixteen_s3_1_five_s5_2_and_one_s5_4_code_were_added() -> None:
     added = set(REASON_CODES) - set(_pre_s3_1_codes())
-    assert added == set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES)
+    assert added == set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES) | set(_M3_1_CODES)
     assert len(_NEW_CODES) == 16
     assert len(_S5_2_CODES) == 5
     assert len(_S5_4_CODES) == 1
+    assert len(_M3_1_CODES) == 2
     assert not set(_NEW_CODES) & set(_S5_2_CODES)
     assert not (set(_NEW_CODES) | set(_S5_2_CODES)) & set(_S5_4_CODES)
+    assert not (set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES)) & set(_M3_1_CODES)
 
 
-def test_registry_count_is_exactly_one_hundred_nine() -> None:
+def test_registry_count_is_exactly_one_hundred_eleven() -> None:
     assert len(REASON_CODES) == _TOTAL_COUNT
     assert _S3_1_TOTAL_COUNT + len(_S5_2_CODES) == _S5_2_TOTAL_COUNT
-    assert _S5_2_TOTAL_COUNT + len(_S5_4_CODES) == _TOTAL_COUNT
+    assert _S5_2_TOTAL_COUNT + len(_S5_4_CODES) == _S5_4_TOTAL_COUNT
+    assert _S5_4_TOTAL_COUNT + len(_M3_1_CODES) == _TOTAL_COUNT
 
 
 def test_no_reason_code_beyond_the_five_approved_s5_2_additions_exists() -> None:
     """Decision 018 section 21 approves exactly five; the contract authorizes no other."""
-    beyond_s3_1 = set(REASON_CODES) - set(_pre_s3_1_codes()) - set(_NEW_CODES) - set(_S5_4_CODES)
+    beyond_s3_1 = (
+        set(REASON_CODES)
+        - set(_pre_s3_1_codes())
+        - set(_NEW_CODES)
+        - set(_S5_4_CODES)
+        - set(_M3_1_CODES)
+    )
     assert beyond_s3_1 == set(_S5_2_CODES)
 
 
 def test_no_reason_code_beyond_the_single_approved_s5_4_addition_exists() -> None:
     """Decision 020 section 13 approves exactly one; the contract authorizes no other."""
-    beyond_s5_2 = set(REASON_CODES) - set(_pre_s3_1_codes()) - set(_NEW_CODES) - set(_S5_2_CODES)
+    beyond_s5_2 = (
+        set(REASON_CODES)
+        - set(_pre_s3_1_codes())
+        - set(_NEW_CODES)
+        - set(_S5_2_CODES)
+        - set(_M3_1_CODES)
+    )
     assert beyond_s5_2 == set(_S5_4_CODES)
 
 
@@ -369,3 +401,63 @@ def test_new_decision_reference_paths_exist_in_the_repository() -> None:
     assert len(set(new_decision_constants)) == 7
     for relative_path in new_decision_constants:
         assert (_REPO_ROOT / relative_path).is_file(), relative_path
+
+
+# --------------------------------------------------------------------------- #
+# Milestone 3.1 additions (Decision 028 section 6)
+# --------------------------------------------------------------------------- #
+def test_no_reason_code_beyond_the_two_approved_m3_1_additions_exists() -> None:
+    """Decision 028 section 6 authorizes exactly two; the contract authorizes no other."""
+    beyond_s5_4 = (
+        set(REASON_CODES)
+        - set(_pre_s3_1_codes())
+        - set(_NEW_CODES)
+        - set(_S5_2_CODES)
+        - set(_S5_4_CODES)
+    )
+    assert beyond_s5_4 == set(_M3_1_CODES)
+
+
+def test_m3_1_codes_carry_the_approved_metadata() -> None:
+    for code, expected in _M3_1_CODES.items():
+        entry = REASON_CODES[code]
+        assert entry.category == expected["category"]
+        assert entry.blocks_release == expected["blocks_release"]
+        assert entry.requires_manual_review == expected["requires_manual_review"]
+        assert entry.decision_reference == expected["decision_reference"]
+        assert (_REPO_ROOT / str(expected["decision_reference"])).is_file()
+        assert entry.description.endswith(".")
+
+
+def test_both_m3_1_codes_block_release_without_manual_review() -> None:
+    blocking = reasons.release_blocking_codes()
+    integrity = reasons.codes_for_category("integrity")
+    for code in _M3_1_CODES:
+        assert code in blocking
+        assert code in integrity
+
+
+def test_the_ceiling_code_is_distinct_from_retries_exhausted() -> None:
+    """Decision 028 section 6: a consumed window ceiling is not an exhausted retry budget."""
+    ceiling = REASON_CODES["SEC_REQUEST_CEILING_EXHAUSTED"]
+    retries = REASON_CODES["SEC_RETRIES_EXHAUSTED"]
+    assert ceiling.code != retries.code
+    assert ceiling.description != retries.description
+    assert "ceiling" in ceiling.description.lower()
+    assert "SEC_RETRIES_EXHAUSTED" in ceiling.description
+
+
+def test_the_interruption_code_is_distinct_from_partial_download() -> None:
+    """Decision 028 section 6: an interruption is not an actual partial transfer."""
+    interrupted = REASON_CODES["SEC_ACQUISITION_INTERRUPTED"]
+    partial = REASON_CODES["RAW_PARTIAL_DOWNLOAD"]
+    assert interrupted.code != partial.code
+    assert interrupted.description != partial.description
+    assert "RAW_PARTIAL_DOWNLOAD" in interrupted.description
+
+
+def test_neither_m3_1_code_has_an_alias() -> None:
+    """Decision 028 section 6 forbids an alias for either code."""
+    for code in _M3_1_CODES:
+        matches = [c for c in REASON_CODES if c != code and code in c]
+        assert matches == [], f"{code} has alias-like siblings: {matches}"

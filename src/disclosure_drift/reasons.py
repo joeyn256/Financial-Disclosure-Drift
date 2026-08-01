@@ -86,6 +86,7 @@ _D015: Final = "Docs/Decisions/decision_015_pilot_use_prohibition.md"
 _D016: Final = "Docs/Decisions/decision_016_m23_schema_and_artifact_architecture.md"
 _D018: Final = "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"
 _D020: Final = "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
+_D028: Final = "Docs/Decisions/decision_028_m3_1_readiness_corrections.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -753,6 +754,25 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "terminal and is never reported as an empty or successful result.",
         blocks_release=True,
         decision_reference=_D009,
+    ),
+    _code(
+        "SEC_REQUEST_CEILING_EXHAUSTED",
+        "integrity",
+        "Planned work remains, but the next physical attempt would exceed the exact "
+        "owner-approved ceiling. Distinct from SEC_RETRIES_EXHAUSTED, which means a "
+        "single logical retrieval exhausted response-policy retries rather than that "
+        "the window-wide physical-attempt ceiling was consumed.",
+        blocks_release=True,
+        decision_reference=_D028,
+    ),
+    _code(
+        "SEC_ACQUISITION_INTERRUPTED",
+        "integrity",
+        "Acquisition was interrupted and no narrower registered reason applies. "
+        "Distinct from RAW_PARTIAL_DOWNLOAD, which is specific to an actual partial "
+        "transfer.",
+        blocks_release=True,
+        decision_reference=_D028,
     ),
     _code(
         "SEC_RESPONSE_EMPTY",

@@ -1001,3 +1001,46 @@ def test_exhausted_transport_failures_carry_a_registered_terminal_reason(
     assert REASON_CODES[result.reason_code].blocks_release
     assert result.attempts == len(transport.requests)
     assert result.attempts > 1
+
+
+def test_a_second_unqualified_429_cooldown_carries_a_registered_terminal_reason() -> None:
+    """Decision 028 section 5 A4: a terminal second cooldown must name a registered code.
+
+    An unqualified ``429`` cooldown action carries no ``reason_code`` -- unlike a block
+    page or a ``403``, which both carry ``SEC_BLOCK_PAGE``. The second-cooldown branch
+    ends the retrieval by returning that action directly, so without a fallback it
+    produces a terminal failure with no registered reason, which a consumer cannot
+    distinguish from a source that legitimately returned nothing. The two adjacent
+    terminal branches already apply ``or SEC_RETRIES_EXHAUSTED``; this one must too.
+    """
+    client, transport, _ = build(
+        [
+            response(429, body=b"", content_type=None),
+            response(429, body=b"", content_type=None),
+        ],
+        policy=RetrievalPolicy(cooldown_seconds=600.0),
+    )
+
+    result = client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert result.outcome == "failed"
+    assert result.reason_code is not None, "a terminal failure must name a reason"
+    assert result.reason_code in REASON_CODES
+    assert REASON_CODES[result.reason_code].blocks_release
+    assert len(transport.requests) == 2
+
+
+def test_a_second_block_page_cooldown_keeps_its_own_specific_reason() -> None:
+    """The fallback must not overwrite a more specific code that is already present."""
+    client, _, _ = build(
+        [
+            response(body=BLOCK_PAGE, content_type="text/html"),
+            response(body=BLOCK_PAGE, content_type="text/html"),
+        ],
+        policy=RetrievalPolicy(cooldown_seconds=600.0),
+    )
+
+    result = client.fetch("sec_sic_code_list", purpose="official SIC reference load")
+
+    assert result.outcome == "failed"
+    assert result.reason_code == "SEC_BLOCK_PAGE"

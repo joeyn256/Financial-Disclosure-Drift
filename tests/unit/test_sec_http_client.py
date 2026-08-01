@@ -19,6 +19,10 @@ from disclosure_drift.sec.http_client import (
     SecClient,
 )
 from disclosure_drift.sec.rate_limit import AggregateRateLimiter
+from disclosure_drift.sec.request_ceiling import (
+    PhysicalAttemptCeiling,
+    RequestCeilingExhaustedError,
+)
 from disclosure_drift.sec.source_registry import SOURCES
 from disclosure_drift.sec.transport import (
     MAX_IN_MEMORY_BYTES,
@@ -111,6 +115,7 @@ def build(
     *,
     rate: float = 4.0,
     policy: RetrievalPolicy | None = None,
+    ceiling: PhysicalAttemptCeiling | None = None,
 ) -> tuple[SecClient, FakeTransport, FakeClock]:
     clock = FakeClock()
     transport = FakeTransport(responses)
@@ -121,6 +126,7 @@ def build(
         limiter,
         policy or RetrievalPolicy(),
         sleeper=clock.sleep,
+        ceiling=ceiling,
     )
     return client, transport, clock
 
@@ -1044,3 +1050,108 @@ def test_a_second_block_page_cooldown_keeps_its_own_specific_reason() -> None:
 
     assert result.outcome == "failed"
     assert result.reason_code == "SEC_BLOCK_PAGE"
+
+
+# --------------------------------------------------------------------------- #
+# Cumulative physical-attempt ceiling (Decision 028 section 7)
+# --------------------------------------------------------------------------- #
+def test_without_a_ceiling_gate_accepted_m2_behaviour_is_unchanged() -> None:
+    """An accepted M2 caller performs no M3 live window and supplies no gate."""
+    client, transport, _ = build([response()])
+    result = client.fetch(TICKERS, purpose="census alias evidence")
+    assert result.outcome == "retrieved"
+    assert len(transport.requests) == 1
+    assert "request_ceiling_checked" not in result.actions
+
+
+def test_a_ceiling_gate_permits_attempts_up_to_the_ceiling() -> None:
+    gate = PhysicalAttemptCeiling(1)
+    client, transport, _ = build([response()], ceiling=gate)
+
+    result = client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert result.outcome == "retrieved"
+    assert "request_ceiling_checked" in result.actions
+    assert gate.consumed == 1
+    assert len(transport.requests) == 1
+
+
+def test_an_exhausted_ceiling_refuses_before_transport_is_called() -> None:
+    """The refusal precedes the transport, so attempt C+1 is never placed."""
+    gate = PhysicalAttemptCeiling(0)
+    client, transport, _ = build([response()], ceiling=gate)
+
+    with pytest.raises(RequestCeilingExhaustedError) as excinfo:
+        client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert excinfo.value.reason_code == "SEC_REQUEST_CEILING_EXHAUSTED"
+    assert excinfo.value.reason_code in REASON_CODES
+    assert transport.requests == [], "no request may be placed once the ceiling is consumed"
+    assert gate.consumed == 0
+
+
+def test_a_refused_attempt_consumes_no_rate_limit_slot() -> None:
+    """The gate precedes the limiter, so a refused attempt costs no aggregate slot."""
+    gate = PhysicalAttemptCeiling(0)
+    client, _, clock = build([response()], ceiling=gate)
+
+    with pytest.raises(RequestCeilingExhaustedError):
+        client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert clock.sleeps == []
+
+
+def test_retries_consume_ceiling_headroom_because_they_are_physical_attempts() -> None:
+    """Decision 028: retries and redirect hops are physical attempts, not free."""
+    gate = PhysicalAttemptCeiling(3)
+    client, transport, _ = build(
+        [
+            response(503, body=b"", content_type=None),
+            response(503, body=b"", content_type=None),
+            response(),
+        ],
+        ceiling=gate,
+    )
+
+    result = client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert result.outcome == "retrieved"
+    assert len(transport.requests) == 3
+    assert gate.consumed == 3
+    assert gate.is_exhausted
+
+
+def test_a_ceiling_reached_mid_retrieval_refuses_the_next_attempt() -> None:
+    """A run may exhaust its window ceiling part-way through a retrieval's retries."""
+    gate = PhysicalAttemptCeiling(2)
+    client, transport, _ = build(
+        [
+            response(503, body=b"", content_type=None),
+            response(503, body=b"", content_type=None),
+            response(),
+        ],
+        ceiling=gate,
+    )
+
+    with pytest.raises(RequestCeilingExhaustedError):
+        client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert len(transport.requests) == 2, "the third scripted response is never requested"
+    assert gate.consumed == 2
+    assert gate.consumed <= gate.approved_ceiling
+
+
+def test_one_shared_gate_accumulates_across_separate_fetches() -> None:
+    """The ceiling is window-wide, not per-retrieval."""
+    gate = PhysicalAttemptCeiling(2)
+    client, transport, _ = build([response(), response(), response()], ceiling=gate)
+
+    assert client.fetch(TICKERS, purpose="census alias evidence").outcome == "retrieved"
+    assert client.fetch(TICKERS, purpose="census alias evidence").outcome == "retrieved"
+    assert gate.consumed == 2
+
+    with pytest.raises(RequestCeilingExhaustedError):
+        client.fetch(TICKERS, purpose="census alias evidence")
+
+    assert len(transport.requests) == 2
+    assert gate.consumed == 2

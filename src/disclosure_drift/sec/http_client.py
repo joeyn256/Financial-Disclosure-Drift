@@ -37,6 +37,7 @@ from disclosure_drift.logging_config import get_logger
 from disclosure_drift.sec.calendar_evidence import require_evidence
 from disclosure_drift.sec.identifiers import IdentifierError, normalize_cik
 from disclosure_drift.sec.rate_limit import AggregateRateLimiter
+from disclosure_drift.sec.request_ceiling import PhysicalAttemptCeiling
 from disclosure_drift.sec.response_policy import (
     ExpectedPayload,
     ResponseAction,
@@ -254,6 +255,7 @@ class SecClient:
         policy: RetrievalPolicy | None = None,
         *,
         sleeper: Callable[[float], None] | None = None,
+        ceiling: PhysicalAttemptCeiling | None = None,
     ) -> None:
         if not user_agent.strip():
             message = (
@@ -268,6 +270,11 @@ class SecClient:
         self._sleeper = sleeper or _time.sleep
         self._logger = get_logger(_LOGGER_NAME)
         self._request_count = 0
+        # Optional by construction, and deliberately so: an accepted Milestone 2 caller
+        # performs no M3 live window and keeps its behaviour unchanged without a gate.
+        # Every future M3 live acquisition supplies one shared gate explicitly; no M3
+        # command may default or infer an approved ceiling (Decision 028 §7).
+        self._ceiling = ceiling
 
     @property
     def request_count(self) -> int:
@@ -473,6 +480,15 @@ class SecClient:
                     ),
                     exc,
                 )
+            if self._ceiling is not None:
+                # Before every physical attempt (Decision 028 §7). The refusal precedes
+                # the limiter and the transport, so attempt C+1 is never placed, the
+                # counter remains C, and no rate-limit slot is consumed by an attempt
+                # that will not happen. The refusal is raised rather than returned: it
+                # names a registered release-blocking reason and must not be mistaken
+                # for an ordinary retrieval failure or an empty result.
+                state.actions.append("request_ceiling_checked")
+                self._ceiling.before_attempt()
             self._limiter.acquire()
             self._request_count += 1
             state.http_attempts += 1

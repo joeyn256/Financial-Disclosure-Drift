@@ -9,7 +9,9 @@ place.
 boundary it was given — routes, budget, ceiling, response policy, provenance, drift, and secrecy —
 and that nothing beyond acquisition has happened yet.
 **Phase:** M3.2
-**Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md);
+**Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md),
+as narrowly corrected by proposed
+[Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md) §§7, 9–10;
 [Decision 024](../../Decisions/decision_024_m2_m3_boundary_governance.md) §5.2 (the S8 row);
 [Decision 009](../../Decisions/decision_009_raw_data_governance.md);
 [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone_2_3_pilot_selection_plan.md)
@@ -97,11 +99,12 @@ and that nothing beyond acquisition has happened yet.
 | # | Item | Result |
 |---|---|---|
 | 3.1 | Every divergence is explained by a plan rule (retry, redirect, cooldown, cache hit, not-modified) | `PASS`/`FAIL` |
-| 3.2 | **Actual physical attempts strictly below each window's approved ceiling** | `PASS`/`FAIL` |
-| 3.3 | **No unexplained request was placed** in either window | `PASS`/`FAIL` |
-| 3.4 | Each window consumed its own approved plan hash | `PASS`/`FAIL` |
-| 3.5 | **No dependent request in M3.2A, and no bootstrap request in M3.2B** | `PASS`/`FAIL` |
-| 3.6 | **No M3.2B request was issued under the M3.2A approval** | `PASS`/`FAIL` |
+| 3.2 | **Actual physical attempts less than or equal to each window's approved ceiling** | `PASS`/`FAIL` |
+| 3.3 | Each window completed its whole approved plan; equality with unfinished work is a ceiling stop and fails Gate H | `PASS`/`FAIL` |
+| 3.4 | **No unexplained request was placed** in either window | `PASS`/`FAIL` |
+| 3.5 | Each window consumed its own approved plan hash | `PASS`/`FAIL` |
+| 3.6 | **No dependent request in M3.2A, and no bootstrap request in M3.2B** | `PASS`/`FAIL` |
+| 3.7 | **No M3.2B request was issued under the M3.2A approval** | `PASS`/`FAIL` |
 
 ## 4. Route compliance
 
@@ -149,7 +152,7 @@ and that nothing beyond acquisition has happened yet.
 
 | Field | Value |
 |---|---:|
-| Expected raw objects (from the budget) | `____` |
+| Maximum new raw objects (from the budget) | `____` |
 | Actual new raw objects | `____` |
 | Duplicate bodies reconciled | `____` |
 | Not-modified responses | `____` |
@@ -203,9 +206,9 @@ and that nothing beyond acquisition has happened yet.
 
 | # | Item | Result |
 |---|---|---|
-| 9.1 | **No budget overflow** — the ceiling was never reached | `PASS`/`FAIL` |
+| 9.1 | **No budget overflow** — actual attempts are `<=` the approved ceiling | `PASS`/`FAIL` |
 | 9.2 | The ceiling was **not raised** at any point during the run | `PASS`/`FAIL` |
-| 9.3 | If the run stopped at the ceiling, it stopped **before** the exceeding attempt | `PASS`/`N/A` |
+| 9.3 | If a run reached the ceiling, it either completed exactly there or stopped with `SEC_REQUEST_CEILING_EXHAUSTED` before `C+1` | `PASS`/`N/A` |
 | 9.4 | A resumed run carried its consumed count forward against the same ceiling | `PASS`/`N/A` |
 
 ## 10. Schema drift
@@ -240,7 +243,7 @@ and that nothing beyond acquisition has happened yet.
 | # | Item | Result |
 |---|---|---|
 | 12.1 | **One receipt per live command**, none missing | `PASS`/`FAIL` |
-| 12.2 | Every receipt validates against the receipt schema | `PASS`/`FAIL` |
+| 12.2 | Every receipt validates against `m3-execution-receipt/2.0` | `PASS`/`FAIL` |
 | 12.3 | Actual counts in the receipts reconcile with §3 | `PASS`/`FAIL` |
 | 12.4 | Any recovery chain resolves completely to its first attempt | `PASS`/`N/A` |
 | 12.5 | **No receipt appears in any governed identity** | `PASS`/`FAIL` |

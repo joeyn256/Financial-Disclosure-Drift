@@ -373,10 +373,40 @@ run.** No live acquisition occurred. No Gate H has passed. No real snapshot, sel
 approval exists. **No Milestone 3 implementation contract exists and none has been drafted, and
 implementation authorization is `NO` for every phase.**
 
-**Two conditions are unresolved and owner-facing.** **D023-O1** is inherited and referred only if a
-real run reaches it. **M3-L12** — the planner classifies 2026 Q2 as provisional and excludes it while
-Decision 013 §1 requires coverage through the **closed** 2026 Q2 quarter — **must be ruled on before
-Gate F can pass**, and Decision 013 is not edited to accommodate the planner.
+**D023-O1 remains the sole unresolved owner-ruling condition** and is referred only if a real run
+reaches it. Proposed Decision 028 records the owner rulings for **M3-L11** and **M3-L12**, preserving
+Decision 013 and requiring the planner-v2 and private-evidence protections. Those entries remain
+active until implementation, tests, independent acceptance, and checkpoint; Gate F cannot pass
+while M3-L12 remains active.
+
+## Decision 028 — PROPOSED (Milestone 3.1 readiness corrections and owner rulings)
+
+[Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md) is **`PROPOSED — PENDING
+INDEPENDENT REREVIEW AND OWNER ACCEPTANCE`**. It records the bounded correction required after the
+independent Decision 027 v0.2 rereview returned `NEEDS_CORRECTION`. It is not binding yet and grants
+no implementation, contract, network, data, approval, publication, commit, push, or tag authority.
+
+| Topic | Decision 028 section |
+|---|---|
+| Why the correction record is required and the verified `c91af08` baseline | §§1–2 |
+| Decision 013 and Decision 024 remain unchanged and controlling | §3 |
+| **M3-L12 is an inherited implementation defect; exact-quarter-end total order and `quarterly-index-instances/2.0`** | §4 |
+| **The corrected A1–A12 matrix** | §5 |
+| New future reason codes `SEC_REQUEST_CEILING_EXHAUSTED` and `SEC_ACQUISITION_INTERRUPTED` | §6 |
+| **Ceiling equality:** `actual <= ceiling`, with completeness separately required | §7 |
+| M3.1 read-only recovery inspection; M3.2 repair and resume | §8 |
+| **Execution receipt `m3-execution-receipt/2.0` before the first receipt exists** | §9 |
+| Correct request-budget arithmetic and rate-limiter spacing floor | §10 |
+| Three-layer M3-L11 protection | §11 |
+| Future implementation boundary and required independent rereview | §§12–13 |
+| Acceptance/checkpoint sequence and next action | §§14–15 |
+| Negative confirmations | §16 |
+
+Decision 028 narrowly supersedes affected Decision 027 operational language **only if accepted**.
+It does not amend Decision 013 or Decision 024, reopen Milestone 2, rewrite any historical v1 hash,
+or create an M3.1 contract. The next action is
+`INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`; only a `PASS` permits owner
+acceptance and later, separate M3.1 contract drafting.
 
 ## Deviation register — where deviations are recorded
 

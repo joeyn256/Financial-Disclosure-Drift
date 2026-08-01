@@ -8,8 +8,9 @@ place.
 that it has not placed one yet.
 **Phase:** M3.1B
 **Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§§6, 8, 15–16; [Decision 024](../../Decisions/decision_024_m2_m3_boundary_governance.md) §5.2 (the
-S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone_2_3_pilot_selection_plan.md)
+§§6, 8, 15–16; proposed [Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md)
+§§4, 7, 9–11 (controlling once accepted); [Decision 024](../../Decisions/decision_024_m2_m3_boundary_governance.md)
+§5.2 (the S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone_2_3_pilot_selection_plan.md)
 §11 Gate F; [`milestone_03_master_plan.md`](../../../Milestones/milestone_03_master_plan.md) phase M3.1.
 **Completion token:** on a full pass,
 `M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION`.
@@ -53,6 +54,8 @@ S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone
 | 2.4 | Full suite green at the phase-entry baseline | `PASS`/`FAIL` | suite counts |
 | 2.5 | Bounded M3.1 contract exists, accepted, with exact paths | `PASS`/`FAIL` | contract path |
 | 2.6 | Explicit owner authorization to begin M3.1 recorded | `PASS`/`FAIL` | reference |
+| 2.7 | Decision 028 is accepted and its corrected master-plan rereview passed | `PASS`/`FAIL` | decision and rereview references |
+| 2.8 | M3-L11 repository, hygiene, and resolved-path protections are implemented and validated | `PASS`/`FAIL` | committed validation reference |
 
 ## 3. Offline rehearsal (M3.1A)
 
@@ -62,7 +65,7 @@ S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone
 | 3.2 | All twelve scenarios **A1–A12** implemented and executed; none skipped or `xfail`ed | `PASS`/`FAIL` | scenario matrix |
 | 3.3 | Every observed reason code equals its expected registered code | `PASS`/`FAIL` | matrix |
 | 3.4 | No socket was opened, asserted rather than assumed | `PASS`/`FAIL` | assertion reference |
-| 3.5 | Interruption scenarios recovered with duplicate prevention proven | `PASS`/`FAIL` | A11 |
+| 3.5 | A11 read-only inspection performed no write; deterministic repair was rehearsed separately and duplicate prevention proven | `PASS`/`FAIL` | A11 |
 | 3.6 | Route allowlist and denylist enforced at the boundary | `PASS`/`FAIL` | A6 |
 | 3.7 | **Receipt non-contamination proof holds** — every governed value byte-identical with receipts disabled, enabled, and varied | `PASS`/`FAIL` | A12 |
 | 3.8 | Prohibited-field scan proven non-vacuous by a positive control | `PASS`/`FAIL` | A12 |
@@ -152,11 +155,12 @@ Each family asserted refused, with a representative probe path that is rejected.
 | 9.3 | Maximum physical attempts equals `Σ ( U(route) × A_reachable(route) )` | `PASS`/`FAIL` | budget §4 |
 | 9.3a | **`A_reachable` derived from the implemented state machine and independently tested** | `PASS`/`FAIL` | budget §4.1 |
 | 9.3b | **No contingency or padding applied** | `PASS`/`FAIL` | budget §6 |
-| 9.4 | Expected raw-object count stated | `PASS`/`FAIL` | budget §4 |
+| 9.4 | Maximum new raw objects equals planned unique logical requests; cache hits were not subtracted twice | `PASS`/`FAIL` | budget §4 |
 | 9.5 | Expected request-class totals stated where derivable | `PASS`/`FAIL` | budget §4 |
-| 9.6 | Expected elapsed window stated | `PASS`/`FAIL` | budget §8 |
+| 9.6 | Rate-limiter spacing floor and unbounded elapsed-time factors are stated without claiming a maximum elapsed window | `PASS`/`FAIL` | budget §8 |
 | 9.7 | **Hard ceiling computed from the stated formula** | `PASS`/`FAIL` | budget §7 |
 | 9.8 | **Stop-before-overflow behaviour asserted**, not stop-after | `PASS`/`FAIL` | rehearsal A5 |
+| 9.9 | **Ceiling equality is correct:** a complete run at `C` succeeds; unfinished work at `C` stops and refuses `C+1` | `PASS`/`FAIL` | rehearsal A5; Decision 028 §7 |
 
 **Acquisition window budgeted:** `M3.2A`
 **Planned unique logical requests:** `____`  **Hard ceiling:** `____`
@@ -169,6 +173,9 @@ after M3.2A freezes its bootstrap objects and is approved separately.
 | Version | Value |
 |---|---|
 | Source registry | `_______` |
+| Index-plan policy | `quarterly-index-instances/2.0` |
+| Request-plan schema | `_______` |
+| Execution-receipt schema | `m3-execution-receipt/2.0` |
 | Quota policy | `_______` |
 | Joint selector policy | `_______` |
 | Replacement signature policy | `_______` |
@@ -188,21 +195,25 @@ after M3.2A freezes its bootstrap objects and is approved separately.
 
 **Exact read set:** `_______`
 
-## 12. `CURRENT_PLANNER_DISCREPANCY` — must be resolved before Gate F passes
+## 12. M3-L12 planner-v2 correction — must be implemented before Gate F passes
 
 Decision 013 §1 states that coverage extends through the **closed 2026 Q2** quarter. The accepted
-planner classifies 2026 Q2 as the **provisional open quarter** and, with `include_open_quarter =
-false`, **excludes** it.
+Decision 028 ruling preserves that authority and classifies the current planner behaviour as an
+inherited implementation defect. Gate F requires the corrected total order and a v2 policy; it does
+not permit Decision 013 to be changed to accommodate the planner.
 
 | # | Item | Result | Evidence |
 |---|---|---|---|
-| 12.1 | The discrepancy was diagnosed and its cause identified | `PASS`/`FAIL` | `_______` |
-| 12.2 | **Resolved** — the planner agrees with Decision 013 §1, **or** a new owner-approved decision changed that authority | `PASS`/`FAIL` | `_______` |
-| 12.3 | **Decision 013 was not silently changed** to accommodate the planner | `PASS`/`FAIL` | `_______` |
-| 12.4 | The request plan's required-quarter set matches accepted authority | `PASS`/`FAIL` | `_______` |
+| 12.1 | Decision 028 is accepted and records the owner ruling | `PASS`/`FAIL` | accepted decision |
+| 12.2 | Planner total order is `start > as_of` → unplanned; else `end <= as_of` → closed; else open | `PASS`/`FAIL` | implementation and boundary tests |
+| 12.3 | Exact quarter end has no provisional quarter and 2026 Q2 is required at `2026-06-30` | `PASS`/`FAIL` | exact-boundary tests |
+| 12.4 | Executable policy is exactly `quarterly-index-instances/2.0`; a mismatching caller version is refused | `PASS`/`FAIL` | policy-version tests |
+| 12.5 | Historical v1 records and hashes were not rewritten; no migration was introduced | `PASS`/`FAIL` | diff and migration check |
+| 12.6 | **Decision 013 remained byte-for-byte unchanged** | `PASS`/`FAIL` | baseline comparison |
+| 12.7 | The request plan's required-quarter set matches accepted authority | `PASS`/`FAIL` | request-plan output |
 
-**Gate F cannot pass while 12.2 is `FAIL`.** A request plan that disagrees with the accepted coverage
-cutoff is not a plan a budget can be approved against.
+**Gate F cannot pass while any row in this section is `FAIL`.** A request plan that disagrees with
+the accepted coverage cutoff is not a plan a budget can be approved against.
 
 ## 13. Operator readiness acknowledgement
 
@@ -227,8 +238,9 @@ cutoff is not a plan a budget can be approved against.
 ## 15. Owner sign-off
 
 > I confirm that every item above is `PASS` or a justified `N/A`, that no live SEC request has been
-> placed, that the `CURRENT_PLANNER_DISCREPANCY` is resolved, and that the **M3.2A** request budget
-> and hard ceiling recorded in the referenced budget document are approved as exact integers.
+> placed, that the Decision 028 planner-v2 correction is implemented and validated, and that the
+> **M3.2A** request budget and hard ceiling recorded in the referenced budget document are approved
+> as exact integers.
 >
 > **This sign-off authorizes network enablement only for the command named in the governing M3.2
 > contract, only under the approved M3.2A budget and ceiling, and only for the M3.2A window.** It

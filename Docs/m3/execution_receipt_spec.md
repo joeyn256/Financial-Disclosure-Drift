@@ -3,8 +3,9 @@
 **Status:** specification only. **No runtime code and no database table is created by this document.**
 **Applies to:** every Milestone 3 command that runs against real inputs, and every live command
 without exception.
-**Controlling record:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§§9, 17, 18, 19.
+**Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
+§§9, 17, 18, 19, as narrowly corrected by proposed
+[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§9–10.
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 
 ---
@@ -99,6 +100,8 @@ nearly every field as optional and then validated several as mandatory, which is
 | Field | Type | Class | Meaning |
 |---|---|---|---|
 | `source_registry_version` | string | **`C:`** `dry_run`, `live` | `M22_SOURCE_REGISTRY_VERSION` in force |
+| `index_plan_policy_version` | string | **`C:`** `dry_run`, `live` | `INDEX_PLAN_POLICY_VERSION` in force; M3.1 implementation must use `quarterly-index-instances/2.0` |
+| `request_plan_schema_version` | string | **`C:`** `dry_run`, `live` | The schema version of the exact request-plan document consumed |
 | `quota_policy_version` | string | **`C:`** `offline_execution` | `PILOT_QUOTA_POLICY_VERSION` in force |
 | `joint_selector_policy_version` | string | **`C:`** `offline_execution` | `PILOT_JOINT_SELECTOR_POLICY_VERSION` in force |
 | `replacement_signature_policy_version` | string | **`C:`** `offline_execution` | `PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION` in force |
@@ -123,12 +126,12 @@ already excludes `generated_at` from the manifest content hash.
 
 | Field | Type | Class | Meaning |
 |---|---|---|---|
-| `acquisition_window` | string | **`C:`** `live` | `M3.2A` or `M3.2B`. **Each window has its own plan, budget, and ceiling** |
+| `acquisition_window` | string | **`C:`** `dry_run`, `live` | `M3.2A` or `M3.2B`. **Each window has its own plan, budget, and ceiling** |
 | `request_plan_id` | string | **`C:`** `dry_run`, `live` | That window's plan identity |
 | `request_plan_sha256` | string | **`C:`** `dry_run`, `live` | The plan hash the run consumed |
-| `approved_request_ceiling` | integer | **`C:`** `dry_run`, `live` | The owner-approved hard ceiling for **that window** |
-| `planned_logical_request_count` | integer | **`C:`** `dry_run`, `live` | From that window's approved plan |
-| `maximum_physical_attempt_count` | integer | **`C:`** `dry_run`, `live` | From that window's approved plan, **derived per route from the implemented state machine** — never from an asserted constant |
+| `approved_request_ceiling` | integer | **`C:`** `live` | The owner-approved hard ceiling for **that window**. Omitted from Gate F dry runs, which precede approval |
+| `planned_logical_request_count` | integer | **`C:`** `dry_run`, `live` | From that window's deterministic request plan. A dry-run plan is not yet owner-approved |
+| `maximum_physical_attempt_count` | integer | **`C:`** `dry_run`, `live` | From that window's deterministic request plan, **derived per route from the implemented state machine** — never from an asserted constant. A dry-run value is not yet owner-approved |
 | `planned_per_route` | object | **`C:`** `dry_run`, `live` | `source_id` to planned unique logical requests |
 
 ### 4.5 Actual execution accounting
@@ -149,6 +152,7 @@ already excludes `generated_at` from the manifest content hash.
 | `quarantined_object_count` | integer | **`C:`** `live` | Objects quarantined and preserved |
 | `redirect_hop_count` | integer | **`C:`** `live` | Validated hops followed by the policy layer |
 | `cooldown_count` | integer | **`C:`** `live` | Aggregate traffic halts |
+| `remaining_planned_logical_request_count` | integer | **`C:`** `live` when `completion_status = "stopped_at_ceiling"` | Planned logical requests left unattempted when the next physical attempt was refused |
 
 ### 4.5.1 Simulated activity is not actual activity
 
@@ -163,14 +167,16 @@ v0.1's rehearsal scenarios described receipts whose actual-network fields carrie
 contradicting v0.1's own zero-request rule. **A receipt that reports a non-zero actual network count
 in a non-`live` mode is a fail-closed validation error** (§14), not a reporting convention.
 
-### 4.6 Gate and drift outcomes
+### 4.6 Drift outcomes
 
 | Field | Type | Class | Meaning |
 |---|---|---|---|
 | `schema_drift_outcome` | string | **`C:`** `live`, `rehearsal` | One of `none`, `unknown_fields_retained`, `blocked` |
 | `schema_drift_event_count` | integer | **`C:`** `live`, `rehearsal` | Total drift events, blocking and non-blocking |
-| `gate_f_outcome` | string | **`C:`** `dry_run` | `pass`, `fail`, or `not_applicable` |
-| `gate_h_outcome` | string | **`C:`** `live` | `pass`, `fail`, or `not_applicable` |
+
+**Gate F and Gate H outcomes are not receipt fields.** Each gate concludes only after the command's
+receipt is immutable, so its outcome belongs in the corresponding checklist. A receipt records what
+the command did; it does not retroactively claim that a later governance gate passed.
 
 ### 4.7 Resulting governed identities, recorded as references
 
@@ -322,22 +328,22 @@ does **not** make them part of any governed preimage.
 2. The version this document defines is:
 
    ```
-   m3-execution-receipt/1.0
+   m3-execution-receipt/2.0
    ```
 
 3. **Adding a conditionally-required field is a minor version increment.** Removing a field,
    renaming one, changing a type, changing a field's meaning, or **changing a field's
    classification** is a **major** increment.
-4. **A new major version requires a new accepted decision record.** The field set is frozen by
-   Decision 027 §10; it is not extended by an implementation session.
+4. **A new major version requires a new accepted decision record.** The v2 field set is governed by
+   Decision 028 §9; it is not extended by an implementation session.
 5. **Old receipts are never rewritten to a new schema.** A reader dispatches on the version it finds.
-6. Receipt-schema evolution is a recorded limitation
-   ([`limitations_register.md`](limitations_register.md), **M3-L09**), because a version change
-   during Milestone 3 would make receipts from different phases non-comparable.
-7. **This document is at `m3-execution-receipt/1.0`.** The v0.2 corrections — removing
-   `receipt_content_sha256`, classifying every field by invocation mode, and forcing zero actual
-   network counts outside `live` — were made **before any receipt was ever produced**, so no receipt
-   exists at an earlier shape and no migration is required.
+6. Receipt-schema evolution remains a recorded limitation
+   ([`limitations_register.md`](limitations_register.md), **M3-L09**). Once the first v2 receipt
+   exists, later incompatible changes would make phases non-comparable and require an explicit
+   versioned reader policy.
+7. **This document is at `m3-execution-receipt/2.0`.** The v1 design was corrected before any
+   receipt was ever produced. No v1 artifact exists, so no migration, rewrite, or compatibility
+   shim is required.
 
 ## 13. The single receipt integrity identity
 
@@ -376,14 +382,14 @@ Every receipt is validated at construction and again at inspection:
 |---|---|
 | **Class conformance** | **Every `R` field present; every `C` field present in its named modes and absent outside them; every `P` field absent in its named modes.** This is the §4 table, enforced exactly |
 | **No placeholder** | An inapplicable field is **omitted**, never `null`, an empty string, `0`, or `"N/A"` |
-| **Enumerations valid** | `phase`, `invocation_mode`, `completion_status`, `schema_drift_outcome`, `gate_*_outcome`, `interruption_state` each within their fixed value sets |
+| **Enumerations valid** | `phase`, `invocation_mode`, `completion_status`, `schema_drift_outcome`, and `interruption_state` each within their fixed value sets |
 | **Reason code registered** | Any `reason_code` must exist in `src/disclosure_drift/reasons.py` |
 | **Prohibited-field scan** | Every §5 class scanned for, over the serialized bytes, failing closed |
-| **Accounting consistency** | `actual_physical_attempt_count >= actual_logical_request_count`; `actual_physical_attempt_count <= approved_request_ceiling` for that window; per-route totals summing to the reported totals |
+| **Accounting consistency** | `actual_physical_attempt_count >= actual_logical_request_count`; in `live`, `actual_physical_attempt_count <= approved_request_ceiling`; per-route totals sum to the reported totals; in `live`, `stopped_at_ceiling` carries a positive `remaining_planned_logical_request_count` |
 | **Classification completeness** | Every response accounted for in exactly one classification bucket; no residual |
 | **Zero-network modes** | **`rehearsal`, `dry_run`, `offline_execution`, and `approval` receipts must report `actual_logical_request_count = 0` and `actual_physical_attempt_count = 0`.** A non-zero value is a fail-closed error, not a reporting convention (§4.5.1) |
 | **Simulated totals separated** | A `rehearsal` receipt carries `rehearsal_evidence_reference` and **no** simulated traffic or object-accounting total in any actual-network or `C: live` field; those values exist only in the rehearsal evidence report |
-| **Window scoping** | A `live` receipt names its `acquisition_window`, and its ceiling and plan hash are that window's |
+| **Window scoping** | A `dry_run` or `live` receipt names its `acquisition_window`; a `live` receipt's ceiling and both modes' plan identities belong to that window |
 | **Recovery chain** | `recovery_predecessor_receipt_id`, where present, resolves to a readable receipt |
 | **Canonical form** | Re-serializing the parsed receipt reproduces the file byte-for-byte |
 | **Single integrity identity** | `receipt_id` recomputes over its excluding preimage, and **no second receipt-integrity field exists** |

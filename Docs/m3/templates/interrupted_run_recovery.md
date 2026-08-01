@@ -8,7 +8,9 @@ place.
 what did not, and whether resuming is provably safe — and to prove that resuming will not duplicate a
 substantive write.
 **Phase:** M3.2 primarily; M3.3 for an interrupted selection or manifest construction.
-**Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md);
+**Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md),
+as narrowly corrected by proposed
+[Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md) §§7–8;
 [Decision 009](../../Decisions/decision_009_raw_data_governance.md);
 [Decision 021](../../Decisions/decision_021_m23_s6_manifest_construction.md) §15.5 (the append-once
 and identity guarantee);
@@ -28,6 +30,8 @@ and identity guarantee);
   body.
 - **Nothing is deleted during recovery.** Rollback never means deleting evidence.
 - **`UNDETERMINED` is a stop condition, not a judgement call.**
+- **Inspection is read-only.** `m3 recovery-state` reports state and never adopts, quarantines,
+  rebuilds, reconciles, resumes, or calls `observation_catalog.reconcile()`.
 
 ## 1. Identification
 
@@ -133,9 +137,9 @@ and identity guarantee);
 | Maximum physical attempts the remainder could consume | `____` |
 | **Does the remainder fit inside the remaining headroom?** | `YES` / `NO` |
 
-**If `NO`, the resume requires a new owner-approved ceiling** and is not authorized under the old
-one. **A ceiling is never increased during a running window** — a resume that needs more headroom is
-a stop, a re-plan, and a fresh approval.
+**If `NO`, resume is not authorized under the old plan.** A ceiling is never increased during a
+running window. Stop, close the interrupted attempt, produce a new zero-request plan, and obtain a
+fresh exact owner approval before any later command.
 
 ## 8. Safe-resume determination
 
@@ -159,8 +163,8 @@ a stop, a re-plan, and a fresh approval.
 | Basis | `_______` |
 
 - **`SAFE`** — every condition `MET`. Resume is authorized under §10.
-- **`UNSAFE`** — a condition is `NOT MET` and the cause is known. Correct it, then re-run this
-  checklist.
+- **`UNSAFE`** — a condition is `NOT MET` and the cause is known. A separately authorized M3.2
+  repair may correct it; then re-run the read-only inspection. Inspection itself never repairs.
 - **`UNDETERMINED`** — it cannot be established whether a write committed. **Stop. Do not resume.
   Refer for an owner ruling.**
 
@@ -188,7 +192,7 @@ Complete **before** resuming. A resume without this proof is not authorized.
 | Resume command | `_______` |
 | **Predecessor receipt ID passed to the resume** | `_______` |
 | Consumed count carried forward | `____` |
-| Ceiling in force for the resume | `____` (must equal the original unless re-approved) |
+| Ceiling in force for the resume | `____` (must equal the original; otherwise cite the new plan and approval as a new attempt) |
 | Plan hash in force | `_______` |
 
 ## 11. Resumed receipt
@@ -202,7 +206,7 @@ Complete **before** resuming. A resume without this proof is not authorized.
 | `actual_logical_request_count` | `____` |
 | `actual_physical_attempt_count` | `____` |
 | Cumulative physical attempts across the chain | `____` |
-| **Cumulative attempts below the approved ceiling?** | `YES` / `NO` |
+| **Cumulative attempts less than or equal to the approved ceiling?** | `YES` / `NO` |
 
 ## 12. Final reconciliation
 

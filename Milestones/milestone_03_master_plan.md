@@ -1,11 +1,12 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
-**Status:** `PLANNING_COMPLETE_PENDING_INDEPENDENT_REREVIEW`
+**Status:** `BOUNDED_DECISION_028_CORRECTION_PENDING_INDEPENDENT_REREVIEW`
 **Implementation authorization:** `NO` — for every phase, without exception
-**Controlling record:** [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
+**Controlling records:** [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 (`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
-`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`)
-**Next authorized action:** `INDEPENDENT_M3_MASTER_PLAN_REREVIEW`
+`M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`), as narrowly corrected by proposed
+[Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md).
+**Next authorized action:** `INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`
 
 **This document is a governance roadmap, not an authorization.** It plans five phases. It starts
 none of them. No Milestone 3 contract exists, no Milestone 3 implementation exists, no SEC network
@@ -55,7 +56,7 @@ Milestone 3 inherits every applicable accepted control from Milestones 0, 1, and
 - **Accepted S6** — every manifest identity and preimage, the lifecycle and its eight
   migration-`0013` guards, verification, and file/database atomicity.
 - **The decision record** — Decisions 013, 015, 016, 017, 018, 019, 020, 021, 022, 023, 024, 025,
-  026, and 027.
+  026, and 027, plus Decision 028 once independently reviewed and owner-accepted.
 - **All accepted limitations** — carried in
   [`Docs/m3/limitations_register.md`](../Docs/m3/limitations_register.md) and never closed by a
   phase passing.
@@ -87,11 +88,11 @@ Terms are defined once here and used with exactly these meanings throughout.
 | **Physical attempt** | One HTTP request actually placed on the wire. A redirect hop, a retry, and the single controlled post-cooldown request are each separate physical attempts. |
 | **Request plan** | The complete, ordered, deterministic set of logical requests a command intends to issue, derived from explicit inputs and never from the clock. |
 | **Request-plan hash** | The SHA-256 over the canonical serialization of the request plan. Two dry runs with identical inputs must produce identical plan hashes. |
-| **Request budget** | The owner-approved statement of planned logical requests, maximum physical attempts, expected raw objects, and the expected elapsed window, per route and in total. |
-| **Hard request ceiling** | An owner-approved integer above which no further physical attempt may be placed. Reaching it stops the phase; it is never raised mid-run. |
+| **Request budget** | The owner-approved statement of planned logical requests, maximum physical attempts, maximum new raw objects, expected response classes, and the rate-limiter spacing floor, per route and in total. |
+| **Hard request ceiling** | An owner-approved integer above which no physical attempt may be placed. A complete run may finish exactly at it; equality with work remaining yields `stopped_at_ceiling`. It is never raised during a running window. |
 | **Governed identity** | Any of: candidate identity, `selection_run_id`, `selection_input_sha256`, `selection_result_sha256`, the eight S6 component digests, `root_manifest_sha256`, `manifest_id`. |
 | **Operational state** | Timestamps, counts, durations, paths, receipt identifiers, machine and operator identity, and log locations. Operational state never enters a governed identity. |
-| **Execution receipt** | One machine-readable, non-secret record of one live command's operational facts, specified by [`Docs/m3/execution_receipt_spec.md`](../Docs/m3/execution_receipt_spec.md). |
+| **Execution receipt** | One machine-readable, non-secret record of one governed M3 command's operational facts, specified by [`Docs/m3/execution_receipt_spec.md`](../Docs/m3/execution_receipt_spec.md). |
 | **Governed non-success response** | A non-2xx response the accepted response policy classifies (`retry`, `retry_after`, `cooldown`, `fail`, `quarantine`) rather than one that is silently absorbed. There is no unclassified response. |
 | **Fail closed** | Stop, preserve evidence, record a registered reason code, and report. Never relax a threshold, drop a failing row, substitute a default, or work around the gate. |
 | **Exact root** | The specific byte value of `root_manifest_sha256` presented for approval. Approval attaches to that value alone. |
@@ -363,11 +364,11 @@ phase that lacks the production path it exercises** (Decision 027 §6.1).
 
 **M3.1B.** Verify the `[sec]` extra is installed; validate the SEC identity locally without printing
 it; confirm network is disabled by default; define and assert the exact route allowlist and denylist;
-implement the zero-request request-plan command; **diagnose the `CURRENT_PLANNER_DISCREPANCY`**
-(§15.1) and either reconcile the planner with accepted authority or stop and refer it; produce a
+implement the zero-request request-plan command; implement the Decision 028 planner-v2 correction
+that resolves the `CURRENT_PLANNER_DISCREPANCY` (§15.1), with Decision 013 unchanged; produce a
 deterministic request plan for the **M3.2A window** and its plan hash; run the dry run twice and
 compare plan hashes; construct the proposed request budget and the hard ceiling from the **derived**
-maximum-attempt bound (§16); record policy versions and the expected raw-object count; obtain
+maximum-attempt bound (§16); record policy versions and the maximum-new-raw-object bound; obtain
 operator acknowledgement; obtain **owner approval of the exact M3.2A budget and ceiling**; produce
 the Gate F evidence packet.
 
@@ -398,6 +399,7 @@ window's plan does not exist until M3.2A freezes its objects.
 [Decision 024](../Docs/Decisions/decision_024_m2_m3_boundary_governance.md) §§5.1, 5.2 (the S7 row),
 6, 8; [Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md) §§19–21;
 [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md);
+[Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md), once accepted;
 [Decision 021](../Docs/Decisions/decision_021_m23_s6_manifest_construction.md) §17 (the S7 scope
 definition Decision 024 renamed); [Decision 007](../Docs/Decisions/decision_007_sec_universe.md)
 (approved sources); [Decision 009](../Docs/Decisions/decision_009_raw_data_governance.md) (raw-data
@@ -408,17 +410,19 @@ Gate F, §12 (rate limiting, retry, quarantine, rollback, audit).
 ### 5. Required owner decisions
 
 1. **The bounded M3.1 contract**, with its exact authorized paths.
-2. **Acceptance of the acquisition-rehearsal scenario matrix** (A1–A12) as the required coverage set.
-3. **A ruling on the `CURRENT_PLANNER_DISCREPANCY`** (§15.1) — either the planner is corrected to
-   agree with Decision 013 §1, or a new owner-approved decision changes that authority. **Gate F
-   cannot pass while they disagree.**
+2. **Acceptance of Decision 028's corrected acquisition-rehearsal scenario matrix** (A1–A12) as the
+   required coverage set.
+3. **Acceptance of Decision 028's M3-L12 ruling** — correct the planner to agree with Decision 013
+   §1 under policy `quarterly-index-instances/2.0`; do not change Decision 013. Gate F cannot pass
+   until that implementation and its tests are accepted.
 4. **Approval of the exact M3.2A request budget and the exact hard request ceiling** — a Gate F exit
    condition, and the single most consequential decision in the phase.
 5. **Authorization to proceed to M3.2A** — separate from 4, and not implied by it.
 
 ### 6. Prerequisites
 
-- Decision 027 accepted at v0.2; `INDEPENDENT_M3_MASTER_PLAN_REREVIEW` passed.
+- Decision 027 accepted at v0.2; Decision 028 accepted; the corrected
+  `INDEPENDENT_M3_MASTER_PLAN_REREVIEW` passed.
 - A bounded M3.1 contract exists, accepted, with exact paths.
 - Explicit owner authorization to begin M3.1.
 - Live baseline re-verified with `make context`: branch `main`, `HEAD == origin/main`, clean tree,
@@ -445,6 +449,8 @@ Gate F, §12 (rate limiting, retry, quarantine, rollback, audit).
   `PILOT_JOINT_SELECTOR_POLICY_VERSION`, `PILOT_REPLACEMENT_SIGNATURE_POLICY_VERSION`,
   `PILOT_MANIFEST_HASH_POLICY_VERSION`, `ACCESSION_SELECTION_INPUT_SCHEMA_VERSION`, and the parser
   versions.
+- `INDEX_PLAN_POLICY_VERSION = "quarterly-index-instances/2.0"` and the request-plan schema version
+  named by the M3.1 contract.
 - Synthetic fixtures and scripted responses for M3.1A. **No live data, and no real SEC response.**
 
 ### 8. Exact outputs
@@ -456,9 +462,9 @@ physical-attempt bound** (§16); the rehearsal evidence record; the token
 `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED`.
 
 **M3.1B.** A deterministic **M3.2A** request plan; its request-plan hash; two dry-run outputs with
-identical plan hashes; a recorded diagnosis of the `CURRENT_PLANNER_DISCREPANCY`; the completed
+identical plan hashes; proof that the M3-L12 planner correction agrees with Decision 013 §1; the completed
 [`Docs/m3/templates/request_budget.md`](../Docs/m3/templates/request_budget.md) for the M3.2A window;
-the owner-approved hard ceiling; the recorded policy versions; the expected raw-object count; the
+the owner-approved hard ceiling; the recorded policy versions; the maximum-new-raw-object bound; the
 expected request-class totals where derivable; the completed
 [`Docs/m3/templates/gate_f_checklist.md`](../Docs/m3/templates/gate_f_checklist.md); one execution
 receipt per dry run; the token `M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION`.
@@ -474,6 +480,16 @@ Stated as **categories**; a contract names exact paths.
 - A new zero-request request-planning module and its tests, plus the CLI wiring for a dry-run-only
   subcommand.
 - A new execution-receipt construction and serialization module and its tests.
+- Bounded corrections to the inherited quarterly planner, terminal second-cooldown fallback, and
+  central reason-code registry, with their nearest unit tests, exactly as Decision 028 authorizes.
+- A bounded cumulative physical-attempt ceiling gate on the acquisition/retrieval surface, taking an
+  explicit ceiling argument and refusing the attempt that would exceed it, with its unit tests. This
+  is the production path scenario A5 exercises and the seam the rehearsal's ceiling substitution
+  uses; without it A5 could only be satisfied by test-only behaviour, which §2.9 of the rehearsal
+  spec forbids.
+- The read-only recovery-state inspection surface and proof that it cannot invoke a writer.
+- The M3-L11 root-level ignore entry, explicit hygiene refusal, evidence-root boundary validation,
+  and adversarial path/symlink tests.
 - Bounded edits to existing test modules that the new modules force.
 - `Docs/m3/` evidence records for this phase.
 - `Milestones/STATUS.md` and the navigation aids, under explicit instruction only.
@@ -483,10 +499,10 @@ Stated as **categories**; a contract names exact paths.
 - Every accepted S4, S5, and S6 production module.
 - Every migration, existing or new, unless a separately accepted decision authorizes one and the
   contract names it.
-- `cohorts.py`, `pilot_policy.py`, `reasons.py`, `release/hashing.py`, `release/manifest.py`,
+- `cohorts.py`, `pilot_policy.py`, `release/hashing.py`, `release/manifest.py`,
   `release/pilot_manifest.py`, `sec/pilot_manifest_store.py`, `paths.py`.
 - `configs/`, `pyproject.toml`, `.github/`.
-- `Docs/preregistration.md`, `Docs/sec_data_dictionary.md`, Decisions 001–027, every completed
+- `Docs/preregistration.md`, `Docs/sec_data_dictionary.md`, Decisions 001–028, every completed
   contract.
 - Any code path that opens a socket during M3.1A.
 
@@ -563,11 +579,11 @@ A_reachable(route)
     It is never asserted from constants, and never assumed to be the sum of the retry,
     redirect, and cooldown bounds. See §16.
 
-max_raw_objects(window)
+max_new_raw_objects(window)
   = planned_unique_logical_requests(window)
-    − expected_not_modified − expected_cache_hits − expected_duplicate_bodies
 
-elapsed_floor_seconds = (total_physical_attempts − 1) ÷ requests_per_second
+rate_limiter_spacing_floor_seconds
+  = max(0, max_physical_attempts(window) − 1) ÷ requests_per_second
 ```
 
 The **M3.2B dependent window** has its own plan, derived after M3.2A freezes its objects:
@@ -597,13 +613,13 @@ the response-policy state machine from which `A_reachable` is derived.
 |---|---|
 | **Deduplication** | Two retrievals collapse to one logical request only when `request_identity(source_id, normalized_url, parameters)` is identical. Nothing else deduplicates. |
 | **Cache hit** | An instance already satisfied in the catalog is **not** planned and consumes no logical request. The dry run reports it as `already satisfied (reused)`. |
-| **Conditional request** | A conditional re-validation is one logical request and at least one physical attempt. A `304 Not Modified` closes it, produces **no** new raw object, and creates no new observation. |
+| **Conditional request** | A conditional re-validation is one logical request and at least one physical attempt. A `304 Not Modified` closes it, produces **no** new raw object, and records an immutable `reused_snapshot` observation with `SOURCE_SNAPSHOT_REUSED`. |
 | **Retry** | A retry consumes **no** additional logical request and **one** additional physical attempt. Bounded by the accepted retry budget. |
 | **Redirect** | Each validated hop is **one** additional physical attempt against the **same** logical request. Bounded by the accepted redirect depth; a loop or an over-depth chain fails closed. |
 | **Cooldown** | A `403`, or a `429` without a usable `Retry-After`, halts **aggregate** traffic and permits exactly **one** controlled further request; a second cooldown is terminal. |
 | **Already-present raw object** | A byte-identical body reconciles to the existing content-addressed object and creates **no** second object. A differing body at the same identity is a **new observation**, never an overwrite. |
 
-### 15.1 `CURRENT_PLANNER_DISCREPANCY` — unresolved, and blocking Gate F
+### 15.1 `CURRENT_PLANNER_DISCREPANCY` — owner ruling recorded; implementation still blocks Gate F
 
 **The accepted planner and accepted authority currently disagree about the 2026 Q2 quarter.**
 
@@ -619,12 +635,16 @@ ending its required set at 2026 QTR1.
 2026 Q2 satisfies both conditions at once: it **ends on** the as-of date and it **contains** the
 as-of date. The planner resolves that tie one way; Decision 013 §1 states the other.
 
-**This plan does not resolve it, and Decision 013 is unchanged and controlling.**
+Proposed Decision 028 classifies this as an inherited implementation defect and records the
+controlling total order: a quarter beginning after `as_of_date` is unplanned; otherwise a quarter
+ending on or before `as_of_date` is required and closed; otherwise it is provisional and open. The
+corrected implementation uses `quarterly-index-instances/2.0`, refuses a caller-supplied mismatching
+version, and leaves historical v1 hashes untouched. **Decision 013 remains unchanged and
+controlling.**
 
-**The bounded M3.1 contract must diagnose this discrepancy.** Until the planner's behaviour agrees
-with accepted authority, or a new owner-approved decision changes that authority, **Gate F cannot
-pass** — a request plan that disagrees with the accepted coverage cutoff is not a plan a budget can
-be approved against.
+Until Decision 028 is accepted and the bounded M3.1 implementation and tests make the planner agree
+with that authority, **Gate F cannot pass** — a request plan that disagrees with the accepted
+coverage cutoff is not a plan a budget can be approved against.
 
 **How the M3.2B counts get resolved.** The zero-request planning command
 (**`PLANNED — NOT YET IMPLEMENTED`**, interface in the operator runbook) is run a **second** time
@@ -662,10 +682,12 @@ window's count is derived rather than padded.
 6. **refuse the request that would exceed the approved ceiling** — stop before, never after;
 7. **never increase a ceiling during a running window.**
 
-**The ceiling is a hard stop, not a target.** It is approved by the owner as an exact integer per
+**The ceiling is a hard bound, not a target.** It is approved by the owner as an exact integer per
 window before that window's network enablement, is recorded in that window's request budget and in
-the Gate F record, and is **never raised mid-window**. Raising it requires stopping, re-planning, and
-a new owner approval.
+the Gate F record, and is **never raised mid-window**. A complete run may finish exactly at the
+ceiling. Equality with work remaining yields `stopped_at_ceiling`, records
+`SEC_REQUEST_CEILING_EXHAUSTED`, and refuses attempt `C+1`. More headroom requires stopping,
+re-planning, and a new owner approval.
 
 ### 17. Stop conditions
 
@@ -682,8 +704,8 @@ Stop and report — do not work around — on any of:
 8. any evidence that receipt content reached a governed identity;
 9. `A_reachable` being underivable, or the derived bound disagreeing with the independently tested
     worst reachable path;
-10. **the `CURRENT_PLANNER_DISCREPANCY` (§15.1) remaining unresolved** — Gate F cannot pass while the
-    planner and Decision 013 §1 disagree about 2026 Q2;
+10. **the Decision 028 planner-v2 correction not being implemented and accepted** — Gate F cannot
+    pass while the planner and Decision 013 §1 disagree about 2026 Q2;
 11. the live baseline disagreeing with the contract's stated baseline;
 12. a full SEC identity or an absolute personal path appearing in any output, log, or artifact;
 13. the owner declining to approve the exact M3.2A budget or ceiling;
@@ -698,7 +720,10 @@ against *scripted* responses only: the full matrix of `proceed`, `retry`, `retry
 post-cooldown request, retry exhaustion at `max_transient_retries`, and the invariant that **a
 failure never becomes a valid empty result**.
 
-**M3.1 changes no response-policy constant, no classification, and no reason code.**
+**M3.1 changes no response-policy constant and no response classification.** Under Decision 028 it
+adds the two registered terminal codes `SEC_REQUEST_CEILING_EXHAUSTED` and
+`SEC_ACQUISITION_INTERRUPTED`, and makes the narrow terminal fallback that assigns
+`SEC_RETRIES_EXHAUSTED` to a second unqualified `429`. No other reason-code meaning changes.
 
 ### 19. Schema-drift boundary
 
@@ -736,8 +761,10 @@ proves the lineage path rather than bypassing it.
 demonstrate the receipt's redaction rules and its non-contamination of S5 and S6 identities.
 
 **M3.1B** produces one receipt per dry run, with `invocation_mode = "dry_run"`,
-`actual_logical_request_count = 0`, `actual_physical_attempt_count = 0`, the request-plan identity,
-the planned counts, the proposed ceiling, and `gate_f_outcome` once Gate F concludes.
+`actual_logical_request_count = 0`, `actual_physical_attempt_count = 0`, the acquisition-window and
+request-plan identities, the planner and request-plan schema versions, and the planned counts.
+Because the two dry runs precede approval, they omit `approved_request_ceiling`. Gate F's later
+outcome belongs only in its checklist.
 
 Both must satisfy every prohibition in
 [`Docs/m3/execution_receipt_spec.md`](../Docs/m3/execution_receipt_spec.md) §5.
@@ -750,7 +777,7 @@ Both must satisfy every prohibition in
   `xfail`ed.
 - **The independently tested worst reachable path per route**, producing `A_reachable` and agreeing
   with the derived bound.
-- A recorded diagnosis of the `CURRENT_PLANNER_DISCREPANCY`.
+- Boundary tests proving the Decision 028 quarter total order and policy-version refusal.
 - An assertion that no socket is opened during the rehearsal.
 - An assertion that the receipt schema contains **no** prohibited field.
 - An assertion that the S5 and S6 identity functions produce identical values with and without a
@@ -815,7 +842,7 @@ identifier are recorded publicly, in
 - The acquisition-rehearsal evidence record: per-scenario outcomes for A1–A12, their reason-code
   results, the derived and tested `A_reachable` per route, the non-contamination proof, and the
   receipt sample set with prohibited fields shown absent.
-- The recorded `CURRENT_PLANNER_DISCREPANCY` diagnosis.
+- The M3-L12 implementation and boundary-test evidence.
 - The two dry-run outputs and their identical plan hashes.
 - One execution receipt per rehearsal command and per dry run.
 
@@ -852,7 +879,7 @@ M3.2 contract.
 ### 36. Conditions preventing progression
 
 M3.2A may not begin while **any** of these holds: the acquisition rehearsal has not passed; the two
-dry runs disagree; **the `CURRENT_PLANNER_DISCREPANCY` is unresolved**; `A_reachable` is underived or
+dry runs disagree; **the Decision 028 planner-v2 correction is unaccepted or unimplemented**; `A_reachable` is underived or
 untested; the M3.2A request budget is unapproved; the hard ceiling is unapproved; the allowlist or
 denylist is unasserted; the SEC identity is unvalidated or has been printed; network is enabled
 outside an authorized window; the independent M3.1 review has not passed; the M3.2 contract does not
@@ -951,8 +978,8 @@ Gate H, 12, 13.
   `m3.1-complete` created.
 - A bounded M3.2 contract, accepted, with explicit network authorization and exact paths.
 - The Gate F checklist complete, every item `PASS`, owner-signed.
-- **The `CURRENT_PLANNER_DISCREPANCY` resolved** — the planner agrees with Decision 013 §1, or a new
-  owner-approved decision has changed that authority.
+- **The Decision 028 planner-v2 correction accepted and implemented** — the planner agrees with
+  Decision 013 §1 and records policy `quarterly-index-instances/2.0`.
 - The **M3.2A** request budget and hard ceiling approved as exact integers.
 - Gate H **pre-run** state established, before **each** window: an isolated M3.2 data root; a
   consistent SQLite backup of any accepted prior state; recorded available storage; confirmed
@@ -1012,7 +1039,7 @@ type, phase, status, SHA-256, and reference identifier in the evidence index.
 Every accepted S4, S5, and S6 module; every existing migration; `cohorts.py`; `pilot_policy.py`;
 `release/pilot_manifest.py`; `sec/pilot_manifest_store.py`; `configs/` beyond the explicitly
 authorized network-enable change the contract names; `.github/`; `Docs/preregistration.md`;
-Decisions 001–027; every completed contract; and any code path that would retrieve a prohibited
+Decisions 001–028; every completed contract; and any code path that would retrieve a prohibited
 route.
 
 ### 11. Network permission
@@ -1080,9 +1107,10 @@ the phase has two windows.
 ### 16. Hard request ceiling
 
 **One exact owner-approved integer per window**, in force for that window only. **The acquisition
-refuses the attempt that would exceed it** — it stops before, never after. Reaching a ceiling is a
-stop condition and a Gate H failure; it is **never raised mid-window**, and a re-plan requires a new
-owner approval.
+refuses the attempt that would exceed it** — it stops before, never after. A complete run ending
+exactly at the ceiling succeeds; equality with planned work remaining is `stopped_at_ceiling` and a
+Gate H failure. The ceiling is **never raised mid-window**, and a re-plan requires a new owner
+approval.
 
 **M3.2A's ceiling does not bind or budget M3.2B, and M3.2B's does not extend M3.2A.** Consumed counts
 are tracked per window and reconciled together at Gate H.
@@ -1091,7 +1119,7 @@ are tracked per window and reconciled together at Gate H.
 
 Stop and report on any of:
 
-1. reaching that window's hard request ceiling;
+1. reaching that window's hard request ceiling **with planned work remaining**;
 2. any request to a prohibited host, method, or route, attempted or constructed — including a
    dependent request issued in M3.2A, or a bootstrap request issued in M3.2B;
 3. any response the accepted policy cannot classify;
@@ -1732,7 +1760,7 @@ never written into the repository.**
 
 Everything that could alter what is being approved: `release/pilot_manifest.py`;
 `sec/pilot_manifest_store.py`; every selector and store module; every migration; `cohorts.py`;
-`pilot_policy.py`; `Docs/preregistration.md`; Decisions 001–027; every completed contract; and any
+`pilot_policy.py`; `Docs/preregistration.md`; Decisions 001–028; every completed contract; and any
 publication or release path.
 
 **Any ad-hoc SQL client, script, or console session against the real catalog is a prohibited path.**
@@ -1955,7 +1983,7 @@ outcome-analysis authority** as five separate findings.
 ### 2. Exact scope
 
 Integrate and re-verify: Gate F; the M3.1A **acquisition** rehearsal; the zero-request dry runs; the
-`CURRENT_PLANNER_DISCREPANCY` resolution; **both** M3.2 windows, each against its own plan, budget,
+Decision 028's M3-L12 ruling and its accepted planner-v2 implementation; **both** M3.2 windows, each against its own plan, budget,
 ceiling, and owner approval; the between-windows freeze and derivation; Gate H; raw-store provenance;
 schema drift; the M3.3A **execution** rehearsal; the snapshot freeze; S5 selection; reserves and
 dispositions; reconstruction; replay; selection-result sealing; the S6 manifest; root identity; the
@@ -2209,20 +2237,21 @@ estimated.
 | **Planned unique logical requests** | Distinct approved retrieval identities that window's plan intends |
 | **Maximum physical attempts** | Including every retry, every redirect hop, and every controlled post-cooldown request. **Derived per route from the implemented response-policy state machine and independently tested against its worst reachable path** — never asserted from constants, and never assumed to be the sum of the retry, redirect, and cooldown bounds |
 | **Expected successful responses** | Logical requests expected to end in `proceed` |
-| **Expected cache hits** | Instances already satisfied in the catalog and therefore not planned |
+| **Expected cache hits** | Instances already satisfied in the catalog and therefore excluded before the logical-request plan is formed; reported for reconciliation and never subtracted again |
 | **Expected not-modified responses** | Conditional re-validations expected to return `304`, producing no new raw object |
 | **Expected governed non-success responses** | Responses expected to classify as `retry`, `retry_after`, `cooldown`, `fail`, or `quarantine` — never "errors we will look at" |
-| **Maximum raw objects** | Planned logical requests minus not-modified, cache hits, and duplicate bodies |
-| **Maximum elapsed acquisition window** | The limiter-imposed floor `(attempts − 1) ÷ requests_per_second`, plus the transfer component the Gate F plan states and the operator records |
+| **Maximum new raw objects** | Equal to planned unique logical requests. A `304`, duplicate body, terminal failure, or quarantine may lower the actual count, but none is assumed in the maximum |
+| **Rate-limiter spacing floor** | `max(0, maximum physical attempts − 1) ÷ requests_per_second`. A minimum spacing floor, not a maximum or prediction; transfers, timeouts, `Retry-After`, and cooldowns may lengthen the run |
 
 **Stop-before-overflow is the rule, not stop-after.** The acquisition refuses to place the attempt
 that would exceed that window's ceiling, and **a ceiling is never increased during a running
-window**.
+window**. A complete run may finish exactly at the ceiling; equality with work remaining is a
+governed ceiling stop and Gate H failure.
 
-**The `CURRENT_PLANNER_DISCREPANCY` is open** (M3.1 §15.1): the accepted planner classifies 2026 Q2
-as the provisional open quarter and excludes it, while Decision 013 §1 states that coverage extends
-through the **closed** 2026 Q2 quarter. **Gate F cannot pass while they disagree.** The bounded M3.1
-contract must diagnose it, and Decision 013 is not changed to accommodate the planner.
+**The M3-L12 owner ruling is recorded in proposed Decision 028** (M3.1 §15.1): exact-quarter-end
+classification is an inherited planner defect; Decision 013 stays unchanged; corrected behaviour is
+`quarterly-index-instances/2.0`. **Gate F cannot pass until that decision is accepted and the
+contracted correction and tests are accepted.**
 
 ---
 

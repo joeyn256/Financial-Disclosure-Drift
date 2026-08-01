@@ -4,8 +4,10 @@
 **Phases:** **M3.1A** — acquisition rehearsal, scenarios **A1–A12**. **M3.3A** — execution rehearsal,
 scenarios **E1–E8**.
 **Network permission:** `NONE` for both — no socket is opened.
-**Controlling record:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§§6.1, 6.3, 8. **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
+**Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
+§§6.1, 6.3, 8, as narrowly corrected by proposed
+[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§5–8.
+**Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 **Completion tokens (future):** `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` (A1–A12); the E1–E8 result
 is recorded inside M3.3A and gates M3.3B.
 
@@ -50,8 +52,9 @@ the production path it exercises.** Hence two rehearsals:
    Simulated request, response, and object-accounting totals belong to the rehearsal evidence
    report, never to receipt fields classified for `live` mode
    ([`execution_receipt_spec.md`](execution_receipt_spec.md) §§4.5, 14).
-9. **No accepted module is modified** to make a scenario pass. A rehearsal exercises the accepted
-   code; it does not adapt it.
+9. **No uncontracted module is modified** to make a scenario pass. The future M3.1 contract may make
+   only the bounded Decision 028 corrections it names; the rehearsal must exercise the resulting
+   production path rather than substituting test-only behaviour.
 10. **All rehearsal evidence is private evidence.** Completed records live in the owner-controlled
     private evidence root; only type, phase, status, SHA-256, and a reference identifier reach the
     public [`evidence_index.md`](templates/evidence_index.md).
@@ -67,7 +70,8 @@ disposition fixtures are constructed in the shape the accepted loaders expect, w
 for every field the accepted identity functions consume. **No fixture is derived from a real filing,
 a real registrant, or any real SEC payload.**
 
-**Injection points** — five, all at boundaries the accepted architecture already exposes:
+**Injection points** — six, all at boundaries the accepted architecture already exposes, or that the
+bounded M3.1 corrections introduce as explicit arguments:
 
 | Injection | Where |
 |---|---|
@@ -76,6 +80,7 @@ a real registrant, or any real SEC payload.**
 | Interruption | A named abort point, raised between two identified statements |
 | Filesystem fault | A write that raises after `n` bytes, or a file removed between write and verification |
 | Payload mutation | A field added, removed, nulled, or retyped in a scripted body, to produce drift |
+| Ceiling substitution | The explicit cumulative physical-attempt ceiling argument the acquisition driver takes, per Decision 028 §7 |
 
 **No injection modifies production code.** Each is a test-time substitution at an existing seam.
 
@@ -123,13 +128,13 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Setup** | Full synthetic plan across every bootstrap route; every scripted response `200` with a well-formed body of that route's expected content kind; empty data root; empty catalog at migration `0013` |
 | **Expected command** | `m3 plan-requests`, then `m3 rehearse --scenarios A1` |
 | **Expected response** | Every logical request classified `proceed`; physical attempts equal logical requests |
-| **Expected reason code** | none terminal; `SOURCE_CONTENT_UPDATED` per newly stored object |
+| **Expected reason code** | none. First storage is `stored_new`; `SOURCE_CONTENT_UPDATED` applies only to a later changed living source |
 | **Expected persisted state** | One source-observation row per logical request, each with its validated single-hop chain; parsed source records with parser version and complete `parser_state`; no quarantine row |
 | **Expected files** | One content-addressed raw object per logical request, each with its `.lineage.json` sibling; **zero** `.part` files |
 | **Expected receipt** | `completion_status = "complete"`; **`actual_logical_request_count = 0` and `actual_physical_attempt_count = 0`** (rehearsal mode); simulated totals recorded in the rehearsal evidence report; `schema_drift_outcome = "none"` |
 | **Expected rollback** | none |
 | **Expected recovery** | none |
-| **Expected validation** | Simulated planned equals simulated actual per route; every object verifies against its `content_sha256`; every observation has complete provenance; the plan hash is unchanged from the dry run; **the request order is identical across two runs** |
+| **Expected validation** | Simulated planned equals simulated actual per route; every object verifies against its `content_sha256`; every observation has complete provenance; the plan hash is unchanged from the dry run; **the request order is identical across two runs**. The announcement route lawfully contributes zero requests when its evidence manifest is empty |
 
 ---
 
@@ -174,7 +179,7 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Setup** | Three variants: (a) `429` **without** `Retry-After`; (b) `403`; (c) `200` whose body carries a block-page signature. Each followed by a second cooldown-triggering response |
 | **Expected command** | `m3 rehearse --scenarios A4` |
 | **Expected response** | Each first occurrence → `cooldown`, aggregate traffic **halted**, exactly **one** controlled further request permitted. Each second occurrence → **terminal** |
-| **Expected reason code** | `SEC_BLOCK_PAGE` for (b) and (c); `SEC_RETRIES_EXHAUSTED` where the terminal branch supplies no more specific code |
+| **Expected reason code** | `SEC_RETRIES_EXHAUSTED` for a second unqualified `429`; `SEC_BLOCK_PAGE` for a second `403` or block-page response |
 | **Expected persisted state** | The attempt and its classification recorded; **no** partial or empty observation promoted to usable; the retrieval marked failed on the second cooldown |
 | **Expected files** | No raw object for a non-`proceed` outcome; nothing empty stored |
 | **Expected receipt** | Rehearsal-mode network counts `0`; `completion_status = "failed"`; `reason_code` set; the cooldown count recorded in the evidence report |
@@ -191,13 +196,13 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Setup** | A plan whose derived maximum physical attempts exceed a deliberately low injected hard ceiling; every response `200` |
 | **Expected command** | `m3 rehearse --scenarios A5` |
 | **Expected response** | The run **refuses to place the attempt that would exceed the ceiling** and stops |
-| **Expected reason code** | A registered code naming budget exhaustion. **If the registry contains none, stop and report** — the rehearsal does not invent one, and the gap is referred for a decision before M3.2 |
+| **Expected reason code** | `SEC_REQUEST_CEILING_EXHAUSTED` |
 | **Expected persisted state** | Every object retrieved before the stop is committed and provenanced; the run marked failed with the remaining plan recorded unattempted |
 | **Expected files** | Raw objects for the completed retrievals only; no partial file |
-| **Expected receipt** | `completion_status = "stopped_at_ceiling"`; simulated attempts **strictly less than** the ceiling; remaining planned count recorded |
+| **Expected receipt** | `completion_status = "stopped_at_ceiling"`; simulated attempts equal the injected ceiling `C`; `C+1` was not placed; the remaining planned count is recorded in rehearsal evidence. Actual network counts remain `0` in the rehearsal receipt |
 | **Expected rollback** | Stop-and-preserve, never delete |
-| **Expected recovery** | Resume permitted **only** after a new owner-approved ceiling; the consumed count carries forward |
-| **Expected validation** | **Stop-before-overflow, never stop-after.** The run never raises its own ceiling. **A ceiling is never increased mid-window** |
+| **Expected recovery** | A real resume would carry consumed attempts forward. If the proven remainder does not fit the original headroom, stop for re-planning and a new exact owner approval; never enlarge the active window silently |
+| **Expected validation** | **Stop-before-overflow, never stop-after.** Exactly `C` attempts are allowed; `C+1` is refused and the counter remains `C`. A separate variant that completes exactly at `C` succeeds |
 
 ---
 
@@ -207,14 +212,14 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 |---|---|
 | **Setup** | A scripted plan and scripted redirect chains that attempt, per denied family: `/Archives/edgar/data/…`; an `-index.htm` path; `.txt`, `.htm`, `.xml`, `.xsd` suffixes; a CompanyFacts path; a Frames path; a non-SEC host; a scheme downgrade; a user-info authority; an unexpected port; a fragment; a relative `..` segment; a redirect leaving the source's URL family; a redirect loop; and an over-depth chain |
 | **Expected command** | `m3 rehearse --scenarios A6` |
-| **Expected response** | **Every** attempt refused at the boundary, before any request is constructed |
+| **Expected response** | Invalid initial routes are refused before transport. A redirect violation occurs only after the preceding scripted response; its proposed next hop is refused before being followed and before any write |
 | **Expected reason code** | `SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY` for boundary violations; `SEC_REDIRECT_DEPTH_EXCEEDED` for loops and over-depth chains |
-| **Expected persisted state** | No observation, no parsed record, and no catalog row for any refused route |
+| **Expected persisted state** | No observation, parsed record, or catalog row for an invalid initial route. A redirect refusal records only the already-observed attempt evidence required by policy and promotes no payload to a usable observation |
 | **Expected files** | No raw object and no `.part` file for any refused route |
 | **Expected receipt** | `completion_status = "failed"` on the refusal variants; the refusal reason recorded |
-| **Expected rollback** | Nothing to roll back — refusal precedes any write |
+| **Expected rollback** | Initial-route refusal has nothing to roll back. Redirect refusal preserves the preceding attempt evidence and performs no substantive write for the refused hop |
 | **Expected recovery** | none |
-| **Expected validation** | Every one of the nine registered families is asserted **reachable** at its exact path or pattern; every denied family is asserted **refused** by at least one representative probe; **only `GET` and only `www.sec.gov` / `data.sec.gov` are permitted**; **the redirect hop count observed here contributes to the derived `A_reachable`** |
+| **Expected validation** | Every one of the nine registered families is asserted **reachable** at its exact path or pattern; a manifest-resolved announcement source with an empty accepted manifest is lawful and yields zero instances; every denied family is asserted **refused** by at least one representative probe; **only `GET` and only `www.sec.gov` / `data.sec.gov` are permitted**; **the redirect hop count observed here contributes to the derived `A_reachable`** |
 
 ---
 
@@ -243,29 +248,29 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Expected command** | `m3 rehearse --scenarios A8` |
 | **Expected response** | Processing **stops** and evidence is preserved on all four blocking variants |
 | **Expected reason code** | `SEC_SCHEMA_REQUIRED_FIELD_MISSING`; `PARSER_STRUCTURE_NULL`; `PARSER_STRUCTURE_WRONG_TYPE`; `PARSER_STRUCTURE_MALFORMED`. The reference variant records `PARSER_HISTORICAL_REFERENCE_MALFORMED` where malformed, or a recorded drift event where merely new |
-| **Expected persisted state** | **No** parsed record admitted from the drifted payload; the raw object preserved; the drift event recorded as **blocking** |
+| **Expected persisted state** | The source observation and raw object are preserved. Parser failure, structural failure, quarantine, and drift evidence are committed atomically; **no invalid/defaulted/coerced normalized row** is admitted. Valid siblings may remain recorded, but the parser run is failed/incomplete |
 | **Expected files** | The raw object is retained in every variant — evidence is never deleted |
 | **Expected receipt** | `schema_drift_outcome = "blocked"`; `completion_status = "failed"` |
-| **Expected rollback** | The uncommitted transaction rolls back; the object is preserved |
+| **Expected rollback** | Policy-failure evidence is retained. Rollback occurs only if the evidence transaction itself faults; that fault may not promote any invalid normalized row |
 | **Expected recovery** | Requires a [`schema_drift_incident.md`](templates/schema_drift_incident.md) record and an **owner ruling**; no resume until ruled |
 | **Expected validation** | **No default supplied, no type coerced, no row dropped.** A new historical-file reference is a recorded drift event and **does not silently expand the plan** — it is inside the approved budget or it stops the run |
 
 ---
 
-### A9 — Byte-identical duplicate reconciliation
+### A9 — Byte-identical duplicate and valid-304 reconciliation
 
 | Field | Specification |
 |---|---|
-| **Setup** | The same logical request returning a **byte-identical** body twice, across two runs against the same data root |
+| **Setup** | Two variants across two runs against the same data root: **(a)** the same logical request returns a byte-identical `200`; **(b)** a conditional request receives a valid `304` and reuses the preserved snapshot |
 | **Expected command** | `m3 rehearse --scenarios A9` |
-| **Expected response** | Both classify `proceed` |
-| **Expected reason code** | `SOURCE_CONTENT_UNCHANGED` and `SOURCE_SNAPSHOT_REUSED` |
-| **Expected persisted state** | **One** object, a reuse recorded, **no** second object and **no** second observation row claiming new content |
+| **Expected response** | **(a)** both responses classify `proceed`; **(b)** the second response classifies `not_modified` and reuses the preserved object |
+| **Expected reason code** | **(a)** second observation `SOURCE_CONTENT_UNCHANGED`; **(b)** second observation `SOURCE_SNAPSHOT_REUSED` |
+| **Expected persisted state** | **One** object and **two immutable observations** in each variant. The second is `unchanged_content` for (a) and `reused_snapshot` for (b); neither claims new content |
 | **Expected files** | Exactly one raw object and one lineage sibling |
 | **Expected receipt** | `invocation_mode = "rehearsal"`; actual network counts `0`; the `C: live` fields `duplicate_object_count` and `raw_object_count` are **absent**. The simulated duplicate/new-object accounting is recorded in the rehearsal evidence report |
 | **Expected rollback** | none |
 | **Expected recovery** | none |
-| **Expected validation** | Content-addressing collapses identical bodies by identity, not by filename or timestamp |
+| **Expected validation** | Content-addressing collapses identical bodies by identity, not filename or timestamp; a lawful `304` never suppresses its immutable reuse observation |
 
 ---
 
@@ -273,10 +278,10 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 
 | Field | Specification |
 |---|---|
-| **Setup** | The same logical request returning a **different** body on the second retrieval, in three variants: a `living` source, a **closed-quarter** `dated_snapshot`, and an `immutable` identity |
+| **Setup** | The same logical request returning a **different** body on the second retrieval, in four variants: a `living` source, a **closed-quarter** `dated_snapshot`, an `immutable` identity, and an officially explained dated correction |
 | **Expected command** | `m3 rehearse --scenarios A10` |
 | **Expected response** | `proceed`, with the change recorded rather than absorbed |
-| **Expected reason code** | `REMOTE_CONTENT_CHANGED` for the `living` source; `SOURCE_DATED_ARTIFACT_CHANGED` for the closed-quarter snapshot; `SOURCE_IMMUTABLE_IDENTITY_MUTATED` for the immutable identity. `SOURCE_CORRECTION_EXPLAINED` only where an official explanation is supplied |
+| **Expected reason code** | `SOURCE_CONTENT_UPDATED` for the living source; `SOURCE_DATED_ARTIFACT_CHANGED` for the closed-quarter snapshot; `SOURCE_IMMUTABLE_IDENTITY_MUTATED` for the immutable identity; `SOURCE_CONTENT_UPDATED` plus `SOURCE_CORRECTION_EXPLAINED` for an official explained correction. `REMOTE_CONTENT_CHANGED` may exist only as lower-layer observation evidence, not the final SnapshotStore verdict |
 | **Expected persisted state** | A **new observation**, with the earlier observation retained and the supersession lineage recorded and non-cyclic |
 | **Expected files** | **Two** raw objects — **the first is never overwritten** |
 | **Expected receipt** | `invocation_mode = "rehearsal"`; actual network counts `0`; the `C: live` field `raw_object_count` is **absent**. The simulated new-object accounting and changed-body observation are recorded in the rehearsal evidence report |
@@ -292,14 +297,14 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 |---|---|
 | **Setup** | Four injected abort points, exercised in sequence and then recovered from: **(a)** before any byte reaches the raw store; **(b)** after the object is promoted and fsynced but **before** the catalog transaction commits; **(c)** immediately **after** the catalog commit; **(d)** a restart-and-resume pass over all three |
 | **Expected command** | `m3 recovery-state`, then `m3 rehearse --scenarios A11` resuming from the predecessor receipt |
-| **Expected response** | Each abort terminates the retrieval as interrupted; recovery reports `SAFE`; the resumed run completes the remaining plan |
-| **Expected reason code** | `RAW_PARTIAL_DOWNLOAD` where a stream was in flight; `SOURCE_SNAPSHOT_REUSE_UNRECONCILED` where a later pass finds an object without its row; `AUDIT_PROJECTION_INCOMPLETE` where a projection rebuild was required |
+| **Expected response** | Each abort terminates the retrieval as interrupted. Read-only inspection reports `UNSAFE` while deterministic repair is required; the isolated rehearsal applies that repair, a second inspection reports `SAFE`, and the resumed synthetic run completes the remainder |
+| **Expected reason code** | `SEC_ACQUISITION_INTERRUPTED` where no narrower code applies; `RAW_PARTIAL_DOWNLOAD` only where a stream was actually partial; `RAW_FILE_CHECKSUM_MISMATCH` for an unproven orphan quarantined rather than adopted; `AUDIT_PROJECTION_INCOMPLETE` where a projection rebuild is required |
 | **Expected persisted state** | **(a)** catalog byte-identical to the pre-retrieval state, no observation row. **(b)** **no** committed row — the transaction rolled back. **(c)** the committed row present and complete. **(d)** exactly the state one uninterrupted run would have produced — no more rows and no fewer |
-| **Expected files** | **(a)** no object, no `.part`. **(b)** the object **exists** as an **orphan**, with its lineage sibling — recovery **adopts** it if it verifies against `content_sha256` and its lineage intent, otherwise **quarantines** it. **It is never deleted.** **(c)** object and lineage present, matching the row. **(d)** zero `.part` files; every orphan adopted or quarantined |
-| **Expected receipt** | `completion_status = "interrupted"` with `interruption_state` set to `before_raw_store_write`, `after_raw_store_write_before_catalog_commit`, and `after_catalog_commit` respectively; the resumed receipt names its `recovery_predecessor_receipt_id` and carries the consumed count forward |
+| **Expected files** | **(a)** no object, no `.part`. **(b)** the object **exists** as an **orphan**, with its lineage sibling — repair records `RecoveryEvent(action_taken="adopted_verified")` if it verifies against `content_sha256` and lineage intent, otherwise quarantines it with `RAW_FILE_CHECKSUM_MISMATCH`. **It is never deleted.** **(c)** object and lineage present, matching the row. **(d)** zero `.part` files; every orphan adopted or quarantined |
+| **Expected receipt** | `completion_status = "interrupted"` with `interruption_state` set to `before_raw_store_write`, `after_raw_store_write_before_catalog_commit`, and `after_catalog_commit` respectively; the resumed rehearsal receipt names its `recovery_predecessor_receipt_id`, reports actual network counts `0`, and omits the live-only `consumed_request_count_carried_forward`; the simulated consumed count is carried forward and proved in the rehearsal evidence report |
 | **Expected rollback** | The uncommitted transaction rolls back in every variant; **no file is deleted in any variant** |
-| **Expected recovery** | Safe-resume `SAFE` in all four; the committed retrieval in (c) is **not** re-attempted; the projection is rebuilt from the authoritative SQLite catalog |
-| **Expected validation** | **This is the scenario the acquisition rehearsal exists for.** Variant (b) must produce exactly one orphan, exactly one adoption or quarantine, and **no** duplicate object and **no** duplicate row after recovery. **Duplicate-prevention proof:** the resumed run issues **zero** requests for an already-committed retrieval, and the final state equals the uninterrupted-run state exactly |
+| **Expected recovery** | The `m3 recovery-state` inspector is provably read-only and never invokes `observation_catalog.reconcile()` or an equivalent writer. M3.1 rehearses repair only in its isolated synthetic harness; M3.2 owns real repair application and resume. The committed retrieval in (c) is **not** re-attempted |
+| **Expected validation** | **This is the scenario the acquisition rehearsal exists for.** Variant (b) produces exactly one orphan, exactly one adoption or quarantine, and **no** duplicate object or row after repair. Inspection alone changes no byte. **Duplicate-prevention proof:** the resumed run issues **zero** requests for an already-committed retrieval, and the final state equals the uninterrupted-run state exactly |
 
 ---
 
@@ -329,7 +334,8 @@ The M3.1A rehearsal passes when **all** hold:
    specified fields;
 3. every observed reason code equals its expected code and is a **registered** code;
 4. no socket was opened, asserted rather than assumed;
-5. no accepted module was modified to make a scenario pass;
+5. no uncontracted module, and no accepted S4, S5, or S6 module, was modified to make a scenario
+   pass;
 6. **every rehearsal receipt reports actual network counts of `0`**, with simulated totals in the
    evidence report;
 7. every receipt passes the prohibited-field scan, and the positive control proves the scan is not

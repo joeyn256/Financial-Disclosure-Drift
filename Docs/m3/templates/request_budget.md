@@ -5,16 +5,18 @@ Copy it, fill every field, and retain the completed copy as evidence. Do not edi
 place.
 
 **Purpose:** to state, route by route, exactly how many requests **one acquisition window** intends
-to place, how many it could physically place in the worst case, what it will store, how long it will
-take, and the exact integer above which it must stop — and to carry the owner's explicit approval of
-those numbers.
+to place, how many it could physically place in the worst case, the maximum it could newly store,
+the rate-limiter spacing floor and elapsed-time factors, and the exact integer above which it must
+stop — and to carry the owner's explicit approval of those numbers.
 
 **One budget per window.** The **M3.2A** budget is constructed at M3.1B and approved at Gate F. The
 **M3.2B** budget is derived **after** M3.2A freezes its bootstrap objects, and is approved separately.
 **Neither approval covers the other window.**
 **Phase:** M3.1B → M3.2A · then between the windows → M3.2B
 **Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§§15–16; [Decision 013](../../Decisions/decision_013_pilot_selection_mechanics.md) §1;
+§§15–16, as narrowly corrected by proposed
+[Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md) §§7, 10;
+[Decision 013](../../Decisions/decision_013_pilot_selection_mechanics.md) §1;
 [Decision 007](../../Decisions/decision_007_sec_universe.md);
 [`milestone_03_master_plan.md`](../../../Milestones/milestone_03_master_plan.md) §15.
 **Completion token contribution:** a signed budget is a Gate F exit condition for
@@ -67,13 +69,15 @@ those numbers.
 | `max_transient_retries` | `_______` |
 | `MAX_REDIRECT_DEPTH` | `_______` |
 | Source registry version | `_______` |
+| Index-plan policy version | `_______` (M3.1 implementation: `quarterly-index-instances/2.0`) |
+| Request-plan schema version | `_______` |
 | Already-satisfied instances in the catalog (cache hits) | `_______` |
 
 ## 3. Route-by-route planned count
 
 One row per registered route. **Every route appears, including routes planning zero.**
 
-| `source_id` | Host | Planned unique logical requests | Max physical attempts | Expected raw objects | Basis |
+| `source_id` | Host | Planned unique logical requests | Max physical attempts | Max new raw objects | Basis |
 |---|---|---:|---:|---:|---|
 | `sec_bulk_submissions` | `www.sec.gov` | `____` | `____` | `____` | `_______` |
 | `sec_company_tickers_exchange` | `www.sec.gov` | `____` | `____` | `____` | `_______` |
@@ -110,11 +114,11 @@ the frozen M3.2A objects — never by estimating it.
 | Planned unique logical requests | `____` | `Σ U(route)` from §3 |
 | Maximum physical attempts | `____` | `Σ ( U(route) × A_reachable(route) )` from §4.1 — **never a single asserted multiplier** |
 | Expected successful responses | `____` | logical requests expected to classify `proceed` |
-| Expected cache hits | `____` | instances already satisfied and therefore **not** planned |
+| Expected cache hits | `____` | instances already satisfied and therefore excluded before planning; **reported, not subtracted again** |
 | Expected not-modified responses | `____` | conditional re-validations expected to return `304` |
 | Expected governed non-success responses | `____` | expected `retry` + `retry_after` + `cooldown` + `fail` + `quarantine` |
-| Maximum raw objects | `____` | planned − not-modified − cache hits − duplicate bodies |
-| Maximum elapsed acquisition window | `____` | limiter floor `(attempts − 1) ÷ requests_per_second`, plus the stated transfer component |
+| Maximum new raw objects | `____` | equals planned unique logical requests; `304`, duplicates, terminal failures, and quarantine can lower actual, but are not assumed in the maximum |
+| Rate-limiter spacing floor | `____` | `max(0, maximum physical attempts − 1) ÷ requests_per_second`; a minimum floor, not a maximum or prediction |
 
 ### 4.1 `A_reachable` per route — derived, not asserted
 
@@ -170,18 +174,24 @@ HARD_REQUEST_CEILING(window) = Σ_over_routes_in_window ( U(route) × A_reachabl
 | Computed ceiling for **this window** | `____` |
 | **Approved ceiling (exact integer)** | `____` |
 | Ceiling behaviour | The run **refuses the attempt that would exceed** this value — it stops before, never after |
+| Equality behaviour | A complete run may finish exactly at the ceiling; equality with work remaining yields `stopped_at_ceiling`, refuses `C+1`, and records `SEC_REQUEST_CEILING_EXHAUSTED` |
 | May the ceiling be raised mid-window? | **No.** Raising it requires stopping, re-planning, and a new owner approval |
 | Does this ceiling bind the other window? | **No.** Each window carries its own |
 
-## 8. Expected elapsed acquisition window
+## 8. Rate-limiter spacing floor and elapsed-time factors
+
+**This section does not claim a maximum duration.** Transfers, timeouts, `Retry-After`, and cooldowns
+can lengthen the run beyond the limiter-imposed spacing floor.
 
 | Field | Value |
 |---|---|
 | Limiter-imposed floor (seconds) | `____` |
-| Stated transfer component (seconds) | `____` |
+| Expected transfer component (seconds) | `____` |
 | Basis for the transfer component | `_______` |
-| Total expected window | `____` |
-| Window on one cooldown | `____` (add the cooldown duration) |
+| Expected timeout contribution (seconds) | `____` |
+| Expected `Retry-After` contribution (seconds) | `____` |
+| Expected cooldown contribution (seconds) | `____` |
+| Operational elapsed estimate (not a bound) | `____` |
 
 ## 9. Pass/fail
 
@@ -193,6 +203,8 @@ HARD_REQUEST_CEILING(window) = Σ_over_routes_in_window ( U(route) × A_reachabl
 | No count is a guess; each has a stated basis | `PASS` / `FAIL` | `_______` |
 | **`A_reachable` derived per route and independently tested** | `PASS` / `FAIL` | `_______` |
 | Max physical attempts equals `Σ ( U(route) × A_reachable(route) )` | `PASS` / `FAIL` | `_______` |
+| Maximum new raw objects equals planned unique logical requests | `PASS` / `FAIL` | `_______` |
+| Cache hits were excluded before planning and not subtracted again | `PASS` / `FAIL` | `_______` |
 | **No contingency or padding applied** | `PASS` / `FAIL` | `_______` |
 | Two dry runs produced identical plan hashes | `PASS` / `FAIL` | `_______` |
 | For M3.2B: counts derived from the frozen M3.2A objects | `PASS` / `FAIL` / `N/A` | `_______` |

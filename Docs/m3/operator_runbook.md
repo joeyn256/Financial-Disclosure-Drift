@@ -1,8 +1,10 @@
 # Milestone 3 — Mac Operator Runbook
 
 **Status:** documentation only. **No step here is authorized to run against the SEC network.**
-**Controlling record:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§7. **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
+**Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
+§7, as narrowly corrected by proposed
+[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md).
+**Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 
 This runbook is written for the project owner operating on macOS. It is sequential: work down it, and
 stop at the first step that fails. It is **documentation, not authorization** — following it does not
@@ -58,6 +60,18 @@ absolute private path publicly, and never paste an unpublished root anywhere.**
 
 **The private evidence root needs a separate owner-controlled backup.** It holds the only record of
 runs that cannot be re-run.
+
+**`PLANNED — NOT YET IMPLEMENTED (M3.1, Decision 028 §11)`**
+
+Every M3 evidence-output command *will* resolve its evidence root before writing and refuse a root
+equal to, inside, or containing the checkout, so that symlinks cannot bypass the check. The
+repository-root `.m3-private-evidence/` path *will* be matched by a reserved `.gitignore` rule
+`/.m3-private-evidence` and explicitly rejected by repository hygiene; it is never a lawful
+operational evidence root.
+
+None of these three protections exists yet: the `.gitignore` rule, the repository-hygiene refusal,
+and the resolved-path CLI check are all future M3.1 contract requirements, and no M3 evidence-output
+command exists. See limitations register **M3-L11**.
 
 ---
 
@@ -251,7 +265,9 @@ twelve acquisition scenarios pass and the noncontamination proof holds.
 - all twelve scenarios A1–A12 present, none skipped, none `xfail`ed;
 - every observed reason code equals its expected registered code;
 - **A6** proves every registered route reachable and every denied family refused;
-- **A11** recovered every interruption without a duplicate substantive write;
+- **A11** proves `m3 recovery-state` is read-only, reports `UNSAFE` before required repair and
+  `SAFE` only after the isolated rehearsal applies deterministic repair, and resumes without a
+  duplicate substantive write;
 - **A12** shows the receipt sample carries **none** of the prohibited fields, and the positive control
   proves the scan is not vacuous;
 - **A12** shows every governed value identical with receipts disabled, enabled, and varied;
@@ -281,10 +297,10 @@ python -m disclosure_drift m3 plan-requests \
 | Network | **Zero requests.** Constructs no transport; resolves no host |
 | Clock | Never reads today's date; all three coverage dates and the calendar year are explicit and required together |
 | Arguments | `--coverage-start`, `--coverage-end`, `--as-of` (all three required together); `--calendar-year YEAR`; `--reconciliation-set <relative-path>` (optional, for `sec_submissions_entity`); `--plan-out <relative-path>`; `--config <path>` |
-| Stdout | The per-route table — `source_id`, planned unique logical requests, maximum physical attempts, expected raw objects — then the totals and the **request-plan hash** |
+| Stdout | The per-route table — `source_id`, planned unique logical requests, maximum physical attempts, maximum new raw objects — then the totals and the **request-plan hash** |
 | Side effects | Writes only the named plan file. Touches no catalog |
 | Exit codes | `0` plan produced · `1` configuration error · `2` usage · `3` stage not enabled · `4` gate failure |
-| Receipt | Emits one execution receipt, `invocation_mode = "dry_run"`, with zero actual request counts |
+| Receipt | Emits one `m3-execution-receipt/2.0` receipt, `invocation_mode = "dry_run"`, with zero actual request counts, the acquisition window and plan/version fields, and **no** approved ceiling or later gate outcome |
 
 **`AVAILABLE NOW` today, and covering a strict subset:**
 
@@ -326,7 +342,7 @@ python -m disclosure_drift m3 show-budget --plan <relative-path>
 **Intended interface contract:** read-only; renders the eight budget quantities per route and in
 total — planned unique logical requests, maximum physical attempts, expected successful responses,
 expected cache hits, expected not-modified responses, expected governed non-success responses,
-maximum raw objects, maximum elapsed acquisition window — plus the computed hard ceiling. Exit `0`
+maximum new raw objects, and the rate-limiter spacing floor — plus the computed hard ceiling. Exit `0`
 on success.
 
 **Transcribe the output into
@@ -338,6 +354,9 @@ on success.
 - **`A_reachable` is stated per route**, derived from the implemented state machine and
   independently tested — **never a single asserted multiplier**;
 - the maximum physical attempts equals `Σ ( U(route) × A_reachable(route) )`;
+- maximum new raw objects equals planned unique logical requests; cache hits were excluded before
+  planning and are not subtracted again;
+- the elapsed quantity is labelled a rate-limiter spacing floor, not a maximum or prediction;
 - the hard ceiling equals that same sum — **no contingency, no padding**;
 - for an **M3.2B** budget, the counts are **derived from the frozen M3.2A objects**, with the
   derivation provenance recorded.
@@ -355,9 +374,9 @@ requests, and its hard request ceiling. Both are recorded verbatim.
 **Gate F approves the M3.2A window only.** The M3.2B budget does not exist yet and requires its own
 owner approval, after M3.2A's objects are frozen (step 18a).
 
-**Gate F also cannot pass while the `CURRENT_PLANNER_DISCREPANCY` is unresolved** — Decision 013 §1
-requires coverage through the **closed 2026 Q2** quarter, and the accepted planner currently
-classifies 2026 Q2 as provisional and excludes it. Diagnose it, resolve it, and record the diagnosis.
+**Gate F cannot pass until Decision 028's planner-v2 correction is accepted, implemented, and
+tested** — Decision 013 §1 requires coverage through the **closed 2026 Q2** quarter. The corrected
+planner must classify it closed under `quarterly-index-instances/2.0`; Decision 013 is unchanged.
 
 **No approval by implication.** Running the planner is not approving its output; a passing gate is
 not an approval; and silence is not an approval.
@@ -543,8 +562,10 @@ divergence. Exit `0` only when every divergence is accounted for by the plan's o
 Transcribe the result into [`templates/gate_h_checklist.md`](templates/gate_h_checklist.md), **per
 window** — M3.2A and M3.2B are reconciled separately and integrated there.
 
-**Stop if** actual exceeds planned anywhere the plan does not explain, if either ceiling was reached,
-if a dependent request appears in M3.2A, or if a bootstrap request appears in M3.2B.
+**Stop if** actual exceeds planned anywhere the plan does not explain, if actual physical attempts
+exceed a ceiling, if a run reaches equality with planned work unfinished, if a dependent request
+appears in M3.2A, or if a bootstrap request appears in M3.2B. A complete run may lawfully finish
+exactly at its ceiling.
 
 ## 24. Confirm no unresolved schema drift
 
@@ -596,7 +617,7 @@ begin while it is.** Record both verifications in the Gate H checklist.
 
 ## 27. Resume after an interrupted acquisition
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **`RECOVERY`**
+**`PLANNED — NOT YET IMPLEMENTED (M3.1 read-only inspector; M3.2 repair/resume)`** · **`RECOVERY`**
 
 Work through [`templates/interrupted_run_recovery.md`](templates/interrupted_run_recovery.md) **before**
 resuming anything:
@@ -607,7 +628,11 @@ python -m disclosure_drift m3 recovery-state --run <run-id>
 
 **Intended interface contract:** read-only; reports the last successful receipt, the interruption
 point, database state, raw-store state, partial-file state, the consumed request count, and a
-**safe-resume determination** of `SAFE`, `UNSAFE`, or `UNDETERMINED`. Exit `0` only for `SAFE`.
+**safe-resume determination** of `SAFE`, `UNSAFE`, or `UNDETERMINED`. It never adopts, quarantines,
+rebuilds, reconciles, resumes, or calls `observation_catalog.reconcile()`. Exit `0` only for `SAFE`.
+
+On `UNSAFE`, stop. A separately authorized M3.2 repair command may apply the deterministic action;
+then run `recovery-state` again and require `SAFE`. Inspection itself never repairs.
 
 Resume only on `SAFE`:
 
@@ -728,7 +753,8 @@ them.**
 | `m3 acquire --live` | M3.2 | Execute the approved plan, metadata only |
 | `m3 reconcile-requests` | M3.2 | Planned versus actual, per route and total |
 | `m3 show-drift` | M3.2 | Every drift event, blocking ones separated |
-| `m3 recovery-state` | M3.2 | Interruption state and the safe-resume determination |
+| `m3 recovery-state` | M3.1 (used by M3.2) | Read-only interruption state and safe-resume determination; never repairs |
+| `m3 recover` | M3.2 | Apply a separately authorized deterministic repair before a fresh read-only inspection |
 
 **Exit codes for every planned command follow the accepted convention:** `0` success, `1`
 configuration error, `2` usage, `3` stage not enabled, `4` gate failure.

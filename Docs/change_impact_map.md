@@ -528,6 +528,55 @@ faithful to the accepted planner but **not** to Decision 013 §1, and `A_max` wa
 three guards rather than derived from and tested against the implemented state machine. **Neither
 class of value may be reintroduced without deriving it and testing it.**
 
+## Proposed Decision 028 — M3.1 readiness corrections (planning only, zero runtime impact)
+
+[Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md) is
+`PROPOSED — PENDING INDEPENDENT REREVIEW AND OWNER ACCEPTANCE`. It responds to the independent
+Decision 027 v0.2 rereview outcome `NEEDS_CORRECTION`. It records owner rulings and corrects the
+planning package only; it is not yet binding and authorizes no implementation, network access,
+contract, commit, push, or tag.
+
+The proposed correction package changes exactly these documentation paths:
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_028_m3_1_readiness_corrections.md` | new proposed decision record | Markdown link-check; fresh independent rereview |
+| `Docs/Decisions/decision_registry.md` | proposed Decision 028 registry and topic rows | Markdown link-check; mechanical table-structure check |
+| `Docs/decision_index.md` | proposed Decision 028 topic index | Markdown link-check only |
+| `Docs/architecture_map.md` | Milestone 3 state, receipt-v2, M3-L11, and M3-L12 navigation | Markdown link-check only |
+| `Docs/change_impact_map.md` | this exact-path and zero-impact record | Markdown link-check only |
+| `Docs/m3/execution_receipt_spec.md` | pre-first-receipt v2 field timing and validation | Markdown link-check; prohibited-field scan |
+| `Docs/m3/limitations_register.md` | M3-L09 v2; M3-L11 and M3-L12 owner rulings recorded, both still active | Markdown link-check only |
+| `Docs/m3/offline_rehearsal_spec.md` | corrected A1–A12 expectations | Markdown link-check; scenario-matrix check |
+| `Docs/m3/operator_runbook.md` | planner-v2, evidence-root, receipt-v2, budget, ceiling, and recovery wording | Markdown link-check; command-status label check |
+| `Docs/m3/templates/gate_f_checklist.md` | planner-v2, receipt-v2, budget, ceiling, and M3-L11 entry gates | Markdown link-check only |
+| `Docs/m3/templates/gate_h_checklist.md` | ceiling equality plus complete-plan requirement | Markdown link-check only |
+| `Docs/m3/templates/interrupted_run_recovery.md` | read-only inspection, separate repair, and cumulative-ceiling rules | Markdown link-check only |
+| `Docs/m3/templates/request_budget.md` | no double-subtracted cache hits; maximum objects; spacing floor | Markdown link-check only |
+| `Milestones/STATUS.md` | live proposed-correction and rereview state | `make context` marker check |
+| `Milestones/contracts/README.md` | Decision 028 is not a contract; corrected contract-drafting gate | Markdown link-check only |
+| `Milestones/milestone_03_master_plan.md` | corrected M3.1 scope, formulas, receipt v2, scenarios, and progression gates | five-phases × 36-fields check; Markdown link-check |
+| `README.md` | live Milestone 3 status | Markdown link-check only |
+
+Zero impact is explicit:
+
+- no production module, test, migration, configuration, CI workflow, or `.gitignore` byte changes;
+- Decision 013 and Decision 024 remain byte-unchanged and controlling;
+- no historical v1 plan or hash is rewritten and no receipt migration exists because no receipt has
+  yet been produced;
+- no hypothesis, cohort window, cutoff, seed, selection rule, reserve rule, hash preimage,
+  canonicalization rule, accepted S5/S6 identity, or publication boundary changes;
+- no data is read, written, acquired, or derived; no transport is constructed and no SEC request is
+  placed;
+- no M3.1 contract is drafted, no Milestone 3 implementation is authorized, and no Gate F or Gate H
+  passes; and
+- no commit, push, or tag occurs unless the rereview passes and a later acceptance/checkpoint step
+  separately authorizes it.
+
+The next action is `INDEPENDENT_M3_MASTER_PLAN_REREVIEW_OF_DECISION_028_PACKAGE`. Only
+`INDEPENDENT_M3_MASTER_PLAN_REREVIEW: PASS` permits owner acceptance of Decision 028 and the later,
+separate authorization to draft the bounded M3.1 contract.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

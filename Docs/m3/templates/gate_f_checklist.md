@@ -55,7 +55,6 @@ that it has not placed one yet.
 | 2.5 | Bounded M3.1 contract exists, accepted, with exact paths | `PASS`/`FAIL` | contract path |
 | 2.6 | Explicit owner authorization to begin M3.1 recorded | `PASS`/`FAIL` | reference |
 | 2.7 | Decision 028 is accepted and its corrected master-plan rereview passed | `PASS`/`FAIL` | decision and rereview references |
-| 2.8 | M3-L11 repository, hygiene, and resolved-path protections are implemented and validated | `PASS`/`FAIL` | committed validation reference |
 
 ## 3. Offline rehearsal (M3.1A)
 
@@ -72,7 +71,8 @@ that it has not placed one yet.
 | 3.9 | **Every rehearsal receipt reports actual network counts of `0`**, with simulated totals in the evidence report | `PASS`/`FAIL` | A1–A12 |
 | 3.10 | **`A_reachable` derived per route and independently tested** against the worst reachable path | `PASS`/`FAIL` | A2, A4, A6 |
 | 3.11 | **No snapshot, selection, reserve, sealing, manifest, or root scenario was rehearsed here** — those are M3.3A | `PASS`/`FAIL` | scenario matrix |
-| 3.12 | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` recorded | `PASS`/`FAIL` | reference |
+| 3.12 | **M3-L11 repository, hygiene, and resolved-path protections implemented and validated** — an M3.1 deliverable, not a phase-entry prerequisite | `PASS`/`FAIL` | committed validation reference |
+| 3.13 | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` recorded | `PASS`/`FAIL` | reference |
 
 ## 4. SEC identity
 

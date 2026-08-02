@@ -337,7 +337,7 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 | **Commit and tag policy** — one implementation commit per phase; frozen future tag names | §13 |
 | **The focused independent-review policy** — no repeated broad audits, no self-review | §14 |
 | **Request-volume values may not be invented, and none is frozen** | §15 |
-| **M3-L12 planner-v2 correction** — owner ruling recorded by Decision 028; implementation and acceptance still block Gate F | §15.1 |
+| **M3-L12 planner-v2 correction** (`CURRENT_PLANNER_DISCREPANCY`) — owner ruling recorded by Decision 028 §4; implementation and acceptance still block Gate F | §15.1 |
 | **How a deferred count is resolved** — `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | §15.2 |
 | **Maximum physical attempts is derived from the implemented state machine**, not asserted | §16 |
 | **Operational receipts are outside the accepted S5 and S6 identity graphs** | §17 |

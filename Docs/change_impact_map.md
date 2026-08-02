@@ -257,7 +257,7 @@ real-data manifest instance, **any CLI surface**, and any projection-recovery wr
 **Milestone 3 phases M3.1–M3.4** and later operational work — the stages Decision 021 §§16 and 17
 called S7–S10, renamed without substantive change by Decision 024 §5.1. `release/hashing.py`,
 `release/manifest.py`, `paths.py`, `pilot_policy.py`, `reasons.py`, `cli.py`, and every accepted
-S4/S5 module are **reused or regressed, never edited**.
+S4/S5 module are **reused or regressed, never edited under Milestone 2**.
 
 ## Decision 024 — the Milestone 2 / Milestone 3 boundary (governance only, zero impact)
 

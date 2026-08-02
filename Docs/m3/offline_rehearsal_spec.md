@@ -45,7 +45,8 @@ the production path it exercises.** Hence two rehearsals:
 6. **Every scenario is implemented and runs.** None may be skipped, `xfail`ed, or conditionally
    disabled. An unimplemented scenario is a phase failure.
 7. **Reason codes come from the registered registry.** A scenario needing a code the registry does
-   not contain is a stop-and-report condition, not licence to add one.
+   not contain — and which the future M3.1 contract has not already registered under Decision 028
+   §6 — is a stop-and-report condition, not licence to add one.
 8. **Receipts are produced for every rehearsal command.** Acquisition scenarios A1–A12 use
    `invocation_mode = "rehearsal"`; execution scenarios E1–E8 use
    `invocation_mode = "offline_execution"`. In both modes the **actual network counts are `0`**.
@@ -82,7 +83,8 @@ bounded M3.1 corrections introduce as explicit arguments:
 | Payload mutation | A field added, removed, nulled, or retyped in a scripted body, to produce drift |
 | Ceiling substitution | The explicit cumulative physical-attempt ceiling argument the acquisition driver takes, per Decision 028 §7 |
 
-**No injection modifies production code.** Each is a test-time substitution at an existing seam.
+**No injection modifies production code.** Each is a test-time substitution at a seam that exists
+when the rehearsal runs.
 
 ---
 
@@ -193,16 +195,16 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 
 | Field | Specification |
 |---|---|
-| **Setup** | A plan whose derived maximum physical attempts exceed a deliberately low injected hard ceiling; every response `200` |
+| **Setup** | Two variants. **(a) Overflow:** a plan whose derived maximum physical attempts exceed a deliberately low injected hard ceiling. **(b) Exactly at `C`:** a plan whose attempts total exactly the injected ceiling. Every response `200` in both |
 | **Expected command** | `m3 rehearse --scenarios A5` |
 | **Expected response** | The run **refuses to place the attempt that would exceed the ceiling** and stops |
 | **Expected reason code** | `SEC_REQUEST_CEILING_EXHAUSTED` |
-| **Expected persisted state** | Every object retrieved before the stop is committed and provenanced; the run marked failed with the remaining plan recorded unattempted |
+| **Expected persisted state** | Every object retrieved before the stop is committed and provenanced; the run marked `stopped_at_ceiling` — a status distinct from `failed` — with the remaining plan recorded unattempted |
 | **Expected files** | Raw objects for the completed retrievals only; no partial file |
-| **Expected receipt** | `completion_status = "stopped_at_ceiling"`; simulated attempts equal the injected ceiling `C`; `C+1` was not placed; the remaining planned count is recorded in rehearsal evidence. Actual network counts remain `0` in the rehearsal receipt |
+| **Expected receipt** | `completion_status = "stopped_at_ceiling"`. Actual network counts remain `0` in the rehearsal receipt |
 | **Expected rollback** | Stop-and-preserve, never delete |
 | **Expected recovery** | A real resume would carry consumed attempts forward. If the proven remainder does not fit the original headroom, stop for re-planning and a new exact owner approval; never enlarge the active window silently |
-| **Expected validation** | **Stop-before-overflow, never stop-after.** Exactly `C` attempts are allowed; `C+1` is refused and the counter remains `C`. A separate variant that completes exactly at `C` succeeds |
+| **Expected validation** | **Stop-before-overflow, never stop-after.** Exactly `C` attempts are allowed; `C+1` is refused and the counter remains `C`. Variant (b), completing exactly at `C`, succeeds. The simulated attempt total equalling `C`, the fact that `C+1` was not placed, and the remaining planned count are recorded in the **rehearsal evidence report**, never in a receipt's `live`-classified fields |
 
 ---
 

@@ -1454,7 +1454,7 @@ reference identifier in the evidence index — **never the root, and never a sub
 `sec/accession_selection_store.py`, `sec/reserve_selector.py`, `sec/entity_selector.py`,
 `sec/entity_selection_store.py` — **reused, never edited**; `cohorts.py`; `pilot_policy.py`;
 `reasons.py`; `release/hashing.py`; migrations `0001`–`0013`; `Docs/preregistration.md`; Decisions
-001–027; every completed contract; and any transport, HTTP, or socket path.
+001–028; every completed contract; and any transport, HTTP, or socket path.
 
 ### 11. Network permission
 

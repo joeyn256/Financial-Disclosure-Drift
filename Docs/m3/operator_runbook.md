@@ -19,7 +19,8 @@ Every command in this runbook carries exactly one label.
 | Label | Meaning |
 |---|---|
 | **`AVAILABLE NOW`** | Implemented and accepted today. Safe to run as written. |
-| **`PLANNED — NOT YET IMPLEMENTED (M3.1)`** | Does not exist. Its interface contract is stated so a bounded M3.1 contract implements this interface rather than inventing one. |
+| **`IMPLEMENTED (M3.1)`** | Exists and runs. Implemented by the bounded Milestone 3.1 contract against the interface stated here. |
+| **`IMPLEMENTED (M3.1)`** | Does not exist. Its interface contract is stated so a bounded M3.1 contract implements this interface rather than inventing one. |
 | **`PLANNED — NOT YET IMPLEMENTED (M3.2)`** | Does not exist. Same rule, for M3.2. |
 | **`MANUAL OWNER APPROVAL`** | Not a command. A decision the owner records in a template under [`templates/`](templates/request_budget.md). |
 | **`VERIFICATION`** | A read-only check whose output is compared against an expectation. |
@@ -61,7 +62,7 @@ absolute private path publicly, and never paste an unpublished root anywhere.**
 **The private evidence root needs a separate owner-controlled backup.** It holds the only record of
 runs that cannot be re-run.
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1, Decision 028 §11)`**
+**`IMPLEMENTED (M3.1, Decision 028 §11)`**
 
 Every M3 evidence-output command *will* resolve its evidence root before writing and refuse a root
 equal to, inside, or containing the checkout, so that symlinks cannot bypass the check. The
@@ -228,7 +229,7 @@ Expect:
 
 ## 10. Run the acquisition rehearsal (A1–A12)
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1)`**
+**`IMPLEMENTED (M3.1)`**
 
 ```
 python -m disclosure_drift m3 rehearse --scenarios all \
@@ -251,7 +252,7 @@ python -m disclosure_drift m3 rehearse --scenarios all \
 
 ## 11. Review the acquisition-rehearsal evidence
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
+**`IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
 
 ```
 python -m disclosure_drift m3 rehearse-report \
@@ -283,7 +284,7 @@ expensive later.
 
 ## 12. Perform Gate F's zero-request dry run
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1)`**
+**`IMPLEMENTED (M3.1)`**
 
 ```
 python -m disclosure_drift m3 plan-requests \
@@ -321,7 +322,7 @@ evidence.
 
 ## 13. Repeat the dry run and compare plan hashes
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
+**`IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
 
 Run step 12 twice, into two different plan files, then compare:
 
@@ -337,7 +338,7 @@ means a plan input is being read from the environment or the clock rather than s
 
 ## 14. Print and inspect the request budget
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1)`**
+**`IMPLEMENTED (M3.1)`**
 
 ```
 python -m disclosure_drift m3 show-budget \
@@ -540,7 +541,7 @@ supersession record; the payload is a raw response body and is never quoted into
 
 ## 22. Locate execution receipts
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
+**`IMPLEMENTED (M3.1)`** · **`VERIFICATION`**
 
 Receipts are written to the path given by `--receipt-out`, under the receipt storage policy in
 [`execution_receipt_spec.md`](execution_receipt_spec.md) §7.
@@ -622,7 +623,7 @@ begin while it is.** Record both verifications in the Gate H checklist.
 
 ## 27. Resume after an interrupted acquisition
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.1 read-only inspector; M3.2 repair/resume)`** · **`RECOVERY`**
+**`IMPLEMENTED (M3.1 read-only inspector)`** · **`PLANNED — NOT YET IMPLEMENTED (M3.2 repair/resume)`** · **`RECOVERY`**
 
 Work through [`templates/interrupted_run_recovery.md`](templates/interrupted_run_recovery.md) **before**
 resuming anything:
@@ -746,27 +747,27 @@ deleted; every gate green.
 | `python -m disclosure_drift sec --help` | The Milestone 2 SEC command group |
 | `python -m disclosure_drift sec census --dry-run …` | The M2.2 census plan; **zero requests**; prints a census plan hash |
 
-## Appendix B — commands planned but not implemented
+## Appendix B — the Milestone 3 command surface
 
-**Every command in this table is `PLANNED — NOT YET IMPLEMENTED`. None of these exists. Do not type
-them.**
+**The six Milestone 3.1 commands exist and run.** Every command marked M3.2 is
+`PLANNED — NOT YET IMPLEMENTED`; none of those exists, and typing one does nothing.
 
-| Planned command | Phase | Purpose |
-|---|---|---|
-| `m3 rehearse` | M3.1 | Run the **acquisition** rehearsal A1–A12, no socket |
-| `m3 rehearse-report` | M3.1 | Render the acquisition-rehearsal evidence matrix |
-| `m3 plan-requests` | M3.1 | The zero-request plan for one window, and its hash |
-| `m3 derive-dependent-plan` | M3.2 | Derive the M3.2B plan from the frozen M3.2A objects; zero requests |
-| `m3 show-budget` | M3.1 | Render the eight budget quantities and the ceiling |
-| `m3 show-receipt` | M3.1 | Render a receipt, failing closed on a prohibited field |
-| `m3 acquire --show-scope` | M3.2 | Print the exact network scope; zero requests |
-| `m3 acquire --live` | M3.2 | Execute the approved plan, metadata only |
-| `m3 reconcile-requests` | M3.2 | Planned versus actual, per route and total |
-| `m3 show-drift` | M3.2 | Every drift event, blocking ones separated |
-| `m3 recovery-state` | M3.1 (used by M3.2) | Read-only interruption state and safe-resume determination; never repairs |
-| `m3 recover` | M3.2 | Apply a separately authorized deterministic repair before a fresh read-only inspection |
+| Command | Phase | Status | Purpose |
+|---|---|---|---|
+| `m3 rehearse` | M3.1 | **implemented** | Run the **acquisition** rehearsal A1–A12, no socket |
+| `m3 rehearse-report` | M3.1 | **implemented** | Render the acquisition-rehearsal evidence matrix |
+| `m3 plan-requests` | M3.1 | **implemented** | The zero-request plan for one window, and its hash |
+| `m3 derive-dependent-plan` | M3.2 | planned | Derive the M3.2B plan from the frozen M3.2A objects; zero requests |
+| `m3 show-budget` | M3.1 | **implemented** | Render the derived budget quantities and the ceiling |
+| `m3 show-receipt` | M3.1 | **implemented** | Render a receipt, failing closed on a prohibited field |
+| `m3 acquire --show-scope` | M3.2 | planned | Print the exact network scope; zero requests |
+| `m3 acquire --live` | M3.2 | planned | Execute the approved plan, metadata only |
+| `m3 reconcile-requests` | M3.2 | planned | Planned versus actual, per route and total |
+| `m3 show-drift` | M3.2 | planned | Every drift event, blocking ones separated |
+| `m3 recovery-state` | M3.1 (used by M3.2) | **implemented** | Read-only interruption state and safe-resume determination; never repairs |
+| `m3 recover` | M3.2 | planned | Apply a separately authorized deterministic repair before a fresh read-only inspection |
 
-**Exit codes for every planned command follow the accepted convention:** `0` success, `1`
+**Exit codes for every command above follow the accepted convention:** `0` success, `1`
 configuration error, `2` usage, `3` stage not enabled, `4` gate failure.
 
 ## Appendix C — the stop rule

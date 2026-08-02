@@ -74,15 +74,39 @@ def _rehearse(repo_root: Path, evidence_root: Path) -> subprocess.CompletedProce
     )
 
 
+def _write_manifest(evidence_root: Path, approved: int = 0) -> None:
+    """An operator-named calendar-evidence manifest with `approved` approved entries."""
+    entries = [
+        {"evidence_id": f"e{index}", "review_status": "approved"} for index in range(approved)
+    ]
+    entries.append({"evidence_id": "draft", "review_status": "draft"})
+    path = evidence_root / "manifest.json"
+    path.write_text(
+        json.dumps({"manifest_version": "edgar-calendar-evidence/1.0", "entries": entries}),
+        encoding="utf-8",
+    )
+
+
 def _plan(
-    repo_root: Path, evidence_root: Path, out: str = "plans/m3-2a.json"
+    repo_root: Path,
+    evidence_root: Path,
+    out: str = "plans/m3-2a.json",
+    *,
+    approved_entries: int = 0,
 ) -> subprocess.CompletedProcess[str]:
+    _write_manifest(evidence_root, approved_entries)
     return _run(
         [
             "m3",
             "plan-requests",
             "--evidence-root",
             str(evidence_root),
+            "--calendar-evidence-manifest",
+            "manifest.json",
+            "--catalog",
+            "catalog/catalog.db",
+            "--data-root",
+            str(evidence_root / "data"),
             "--coverage-start",
             "2024-01-01",
             "--coverage-end",
@@ -405,7 +429,7 @@ def test_show_budget_renders_the_plan_and_approves_nothing(
 
     assert result.returncode == EXIT_OK
     normalized = " ".join(result.stdout.split())
-    assert "hard_request_ceiling" in normalized
+    assert "hard request ceiling (derived)" in normalized
     assert "not approved by this command" in normalized
 
 
@@ -434,6 +458,113 @@ def test_an_artifact_path_escaping_the_evidence_root_is_refused(
 
 
 # --------------------------------------------------------------------------- #
+# The plan reads its explicit inputs rather than hardwiring them
+# --------------------------------------------------------------------------- #
+def test_the_manifest_entry_count_drives_the_announcement_route(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The operator-named manifest sets U(sec_edgar_calendar_announcement), not a constant."""
+    _plan(repo_root, evidence_root, out="plans/two.json", approved_entries=2)
+    document = json.loads((evidence_root / "plans" / "two.json").read_text(encoding="utf-8"))
+
+    route = next(
+        item
+        for item in document["routes"]
+        if item["source_id"] == "sec_edgar_calendar_announcement"
+    )
+    assert route["planned_unique_logical_requests"] == 2
+
+
+def test_an_empty_manifest_lawfully_plans_zero_announcements(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _plan(repo_root, evidence_root, out="plans/zero.json", approved_entries=0)
+    document = json.loads((evidence_root / "plans" / "zero.json").read_text(encoding="utf-8"))
+
+    route = next(
+        item
+        for item in document["routes"]
+        if item["source_id"] == "sec_edgar_calendar_announcement"
+    )
+    assert route["planned_unique_logical_requests"] == 0
+
+
+def test_only_approved_manifest_entries_are_counted(repo_root: Path, evidence_root: Path) -> None:
+    """Every manifest written here carries one draft entry, which must never be planned."""
+    _plan(repo_root, evidence_root, out="plans/three.json", approved_entries=3)
+    document = json.loads((evidence_root / "plans" / "three.json").read_text(encoding="utf-8"))
+
+    route = next(
+        item
+        for item in document["routes"]
+        if item["source_id"] == "sec_edgar_calendar_announcement"
+    )
+    assert route["planned_unique_logical_requests"] == 3
+
+
+def test_plan_requests_requires_its_explicit_inputs(repo_root: Path, evidence_root: Path) -> None:
+    """§9 names --calendar-evidence-manifest and --catalog; neither may be inferred."""
+    result = _run(
+        [
+            "m3",
+            "plan-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--coverage-start",
+            "2024-01-01",
+            "--coverage-end",
+            "2024-06-30",
+            "--as-of",
+            "2024-06-30",
+            "--calendar-year",
+            "2024",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_USAGE
+    assert "--calendar-evidence-manifest" in result.stderr or "--catalog" in result.stderr
+
+
+def test_show_budget_renders_all_eight_governed_quantities(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _plan(repo_root, evidence_root)
+
+    result = _run(
+        ["m3", "show-budget", "--evidence-root", str(evidence_root), "--plan", "plans/m3-2a.json"],
+        repo_root,
+    )
+
+    normalized = " ".join(result.stdout.split())
+    for quantity in (
+        "planned unique logical requests",
+        "maximum physical attempts",
+        "expected successful responses",
+        "expected cache hits",
+        "expected not-modified responses",
+        "expected governed non-success responses",
+        "maximum new raw objects",
+        "rate-limiter spacing floor",
+    ):
+        assert quantity in normalized
+
+
+def test_an_underivable_expectation_is_marked_unresolved_not_zero(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A zero would read as an approved expectation of no successful responses."""
+    _plan(repo_root, evidence_root)
+
+    result = _run(
+        ["m3", "show-budget", "--evidence-root", str(evidence_root), "--plan", "plans/m3-2a.json"],
+        repo_root,
+    )
+
+    assert "EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
 # show-receipt
 # --------------------------------------------------------------------------- #
 def test_show_receipt_exits_four_on_a_defective_receipt(
@@ -456,6 +587,45 @@ def test_show_receipt_exits_four_on_a_defective_receipt(
     )
 
     assert result.returncode == EXIT_GATE_FAILURE
+
+
+def test_show_receipt_refuses_a_receipt_whose_predecessor_is_missing(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Receipt spec §11.4: a broken recovery chain is a stop condition."""
+    import hashlib
+
+    _rehearse(repo_root, evidence_root)
+    original = json.loads(
+        (evidence_root / "receipts" / "rehearse.json").read_text(encoding="utf-8")
+    )
+    original["recovery_predecessor_receipt_id"] = "c" * 64
+    preimage = {key: value for key, value in original.items() if key != "receipt_id"}
+    rendered = (
+        json.dumps(preimage, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    )
+    original["receipt_id"] = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    broken = evidence_root / "receipts" / "broken.json"
+    broken.write_text(
+        json.dumps(original, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run(
+        [
+            "m3",
+            "show-receipt",
+            "--evidence-root",
+            str(evidence_root),
+            "--receipt",
+            "receipts/broken.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "recovery_predecessor_receipt_id" in result.stderr
+    assert str(evidence_root) not in result.stderr
 
 
 def test_show_receipt_exits_four_on_a_missing_receipt(repo_root: Path, evidence_root: Path) -> None:

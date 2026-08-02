@@ -47,7 +47,6 @@ from disclosure_drift.m3.request_plan import (
 )
 from disclosure_drift.paths import PathPolicyError
 from disclosure_drift.reasons import REASON_CODES, release_blocking_codes
-from disclosure_drift.sec.calendar_evidence import approved_entries
 from disclosure_drift.sec.index_plan import (
     INDEX_PLAN_POLICY_VERSION,
     CoverageWindow,
@@ -261,6 +260,33 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         required=True,
         metavar="YEAR",
         help="Year the annual EDGAR calendar instance must cover. Never inferred.",
+    )
+    plan_requests.add_argument(
+        "--calendar-evidence-manifest",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help=(
+            "The approved calendar-evidence manifest, relative to --evidence-root. Its entry "
+            "count sets U(sec_edgar_calendar_announcement); an empty manifest lawfully plans zero."
+        ),
+    )
+    plan_requests.add_argument(
+        "--catalog",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help=(
+            "The operational catalog, read only, to exclude already-satisfied index instances "
+            "before planning. Relative to --data-root."
+        ),
+    )
+    plan_requests.add_argument(
+        "--data-root",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="The data root the catalog lives under.",
     )
     plan_requests.add_argument(
         "--include-open-quarter",
@@ -1157,6 +1183,10 @@ def _m3_plan_requests_command(
     evidence_root: Path,
 ) -> int:
     """Derive the M3.2A request plan. Constructs no transport and makes zero requests."""
+    entry_count = _calendar_manifest_entry_count(evidence_root, args.calendar_evidence_manifest)
+    data_root = Path(args.data_root).expanduser()
+    satisfied = _already_satisfied_index_keys(data_root / args.catalog)
+
     started = _utc_now()
     plan = build_m3_2a_request_plan(
         coverage_start=args.coverage_start,
@@ -1164,8 +1194,8 @@ def _m3_plan_requests_command(
         as_of_date=args.as_of,
         include_open_quarter=bool(args.include_open_quarter),
         calendar_year=int(args.calendar_year),
-        calendar_evidence_entry_count=len(approved_entries()),
-        already_satisfied_index_keys=frozenset(),
+        calendar_evidence_entry_count=entry_count,
+        already_satisfied_index_keys=satisfied,
         requests_per_second=float(config.sec.requests_per_second),
     )
 
@@ -1247,16 +1277,17 @@ def _m3_show_budget_command(
                 f"{entry.get('a_reachable')!s:>8} "
                 f"{entry.get('maximum_physical_attempts')!s:>13}"
             )
-    if isinstance(totals, dict):
-        for label in (
-            "planned_unique_logical_requests",
-            "maximum_physical_attempts",
-            "maximum_new_raw_objects",
-            "hard_request_ceiling",
-            "rate_limiter_spacing_floor_seconds",
-        ):
-            print(f"  {label:<38}: {totals.get(label)}")
-    print("  approval status                       : not approved by this command")
+
+    # All eight governed quantities from `request_budget.md` §4, in that order. Three are
+    # expectations the plan does not derive; they are shown as unresolved rather than omitted or
+    # invented, because a blank in the budget blocks approval and a guess would corrupt it.
+    quantities = _eight_budget_quantities(totals if isinstance(totals, dict) else {}, document)
+    for label, value in quantities:
+        print(f"  {label:<38}: {value}")
+    print(
+        f"  {'hard request ceiling (derived)':<38}: {_budget_value(totals, 'hard_request_ceiling')}"
+    )
+    print(f"  {'approval status':<38}: not approved by this command")
     logger.info("m3 show-budget: rendered a stored plan")
     return EXIT_OK
 
@@ -1267,10 +1298,11 @@ def _m3_show_receipt_command(
     logger: Logger,
     evidence_root: Path,
 ) -> int:
-    """Validate and display a receipt. Exits 4 on any defect."""
+    """Validate and display a receipt, including its recovery chain. Exits 4 on any defect."""
     path = _m3_artifact_path(evidence_root, args.receipt)
     try:
         document = inspect_receipt(path)
+        chain = _resolve_receipt_chain(path, document)
     except ReceiptValidationError as exc:
         print(f"receipt rejected: {exc}", file=sys.stderr)
         logger.error("m3 show-receipt: the receipt failed validation")
@@ -1281,7 +1313,8 @@ def _m3_show_receipt_command(
         if isinstance(value, (dict, list)):
             continue
         print(f"  {field_name:<42}: {value}")
-    print("  validation                                : passed")
+    print(f"  {'recovery_chain_length':<42}: {len(chain)}")
+    print(f"  {'validation':<42}: passed")
     logger.info("m3 show-receipt: the receipt validated")
     return EXIT_OK
 
@@ -1340,6 +1373,134 @@ def _m3_recovery_state_command(
         return EXIT_GATE_FAILURE
     logger.info("m3 recovery-state: SAFE")
     return EXIT_OK
+
+
+def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple[str, ...]:
+    """Resolve `recovery_predecessor_receipt_id` back to the first attempt.
+
+    Receipt spec §14 requires a present predecessor to resolve to a readable receipt, and §11.4
+    makes a broken chain a stop condition. Validating the head alone would let a receipt naming a
+    predecessor that was never written pass as intact, which is precisely the case the chain exists
+    to detect.
+    """
+    receipts_dir = head_path.parent
+    chain: list[str] = [str(head["receipt_id"])]
+    visited = {str(head["receipt_id"])}
+    document: Mapping[str, object] = head
+
+    while True:
+        predecessor = document.get("recovery_predecessor_receipt_id")
+        if predecessor is None:
+            return tuple(chain)
+        identifier = str(predecessor)
+        if identifier in visited:
+            message = (
+                f"the recovery chain loops back to {identifier[:12]}… and never reaches a first "
+                f"attempt"
+            )
+            raise ReceiptValidationError(message)
+        candidate = receipts_dir / f"receipt-{identifier}.json"
+        try:
+            document = inspect_receipt(candidate)
+        except OSError as exc:
+            # An OSError carries the absolute filename it failed on, which may never be printed.
+            message = (
+                f"recovery_predecessor_receipt_id {identifier[:12]}… does not resolve to a "
+                f"readable receipt ({type(exc).__name__})"
+            )
+            raise ReceiptValidationError(message) from exc
+        except ReceiptValidationError as exc:
+            message = (
+                f"recovery_predecessor_receipt_id {identifier[:12]}… resolves to a receipt that "
+                f"fails validation: {exc}"
+            )
+            raise ReceiptValidationError(message) from exc
+        visited.add(identifier)
+        chain.append(identifier)
+
+
+def _budget_value(totals: object, key: str) -> object:
+    """One total from a stored plan, or a marker when the plan does not carry it."""
+    if isinstance(totals, Mapping):
+        return totals.get(key, "MISSING")
+    return "MISSING"
+
+
+#: The three budget quantities that are operator expectations rather than derived counts. The
+#: zero-request planner cannot know how many responses will classify `proceed`, so it must not
+#: assert one; `request_budget.md` §4 has the operator supply them before approval.
+_UNRESOLVED = "EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN"
+
+
+def _eight_budget_quantities(
+    totals: Mapping[str, object],
+    document: Mapping[str, object],
+) -> tuple[tuple[str, object], ...]:
+    """The eight governed budget quantities, in `request_budget.md` §4 order.
+
+    Every one is shown. Three are expectations the deterministic planner does not derive, and they
+    render as unresolved rather than as `0`: a zero would read as an approved expectation of no
+    successful responses, which is a different and false claim.
+    """
+    return (
+        (
+            "planned unique logical requests",
+            totals.get("planned_unique_logical_requests", "MISSING"),
+        ),
+        ("maximum physical attempts", totals.get("maximum_physical_attempts", "MISSING")),
+        ("expected successful responses", _UNRESOLVED),
+        ("expected cache hits", document.get("expected_cache_hits", "MISSING")),
+        ("expected not-modified responses", _UNRESOLVED),
+        ("expected governed non-success responses", _UNRESOLVED),
+        ("maximum new raw objects", totals.get("maximum_new_raw_objects", "MISSING")),
+        (
+            "rate-limiter spacing floor (seconds)",
+            totals.get("rate_limiter_spacing_floor_seconds", "MISSING"),
+        ),
+    )
+
+
+def _calendar_manifest_entry_count(evidence_root: Path, relative: Path) -> int:
+    """Count approved entries in the operator-named calendar-evidence manifest.
+
+    The manifest is named explicitly rather than read from the in-repository constant, so the count
+    reflects the evidence the operator actually approved for this window.
+    """
+    document = _read_json_artifact(evidence_root, relative)
+    entries = document.get("entries")
+    if not isinstance(entries, list):
+        message = (
+            f"calendar-evidence manifest {relative} carries no 'entries' list; an empty manifest "
+            f"is written as an empty list, never omitted"
+        )
+        raise GateFailureError(message)
+    approved = [
+        entry
+        for entry in entries
+        if isinstance(entry, Mapping) and entry.get("review_status") == "approved"
+    ]
+    return len(approved)
+
+
+def _already_satisfied_index_keys(catalog_path: Path) -> frozenset[str]:
+    """Index instances already satisfied in the catalog, read without a writer lease.
+
+    These are excluded before the plan is formed and reported as cache hits; Decision 028 §10 is
+    explicit that they are never subtracted a second time. A catalog that does not exist yet
+    satisfies nothing, which is the ordinary state before the first acquisition.
+    """
+    if not catalog_path.is_file():
+        return frozenset()
+    try:
+        with read_only_connection(catalog_path) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT instance_key FROM census_index_instances "
+                "WHERE retrieved = 1 AND parse_usable = 1"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        message = f"the catalog could not be read to exclude already-satisfied instances: {exc}"
+        raise GateFailureError(message) from exc
+    return frozenset(str(row[0]) for row in rows)
 
 
 def _m3_artifact_path(evidence_root: Path, relative: Path) -> Path:

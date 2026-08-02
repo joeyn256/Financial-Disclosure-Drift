@@ -404,8 +404,22 @@ for what it governs and grants no implementation, network, data, approval, or pu
 
 Decision 028 narrowly supersedes the affected Decision 027 operational language. It does not amend
 Decision 013 or Decision 024, reopen Milestone 2, rewrite any historical v1 hash, or grant
-implementation authority. Its rereview passed and it is accepted. The separate M3.1 contract now
-exists as a draft; the next action is `INDEPENDENT_M3_1_CONTRACT_REVIEW`.
+implementation authority. Its rereview passed and it is accepted. The separate M3.1 contract is now
+**accepted** with `IMPLEMENTATION_AUTHORIZATION: YES`, and `INDEPENDENT_M3_1_CONTRACT_REVIEW` is
+discharged.
+
+[Decision 029](Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md) —
+`ACCEPTED — OWNER APPROVED 2026-08-02` — is the bounded M3.1 remediation record. It narrowly
+supersedes **exactly two** Decision 028 clauses: §5's A6 language, to permit a rehearsal-only
+manifest-resolution fixture that grants no retrieval authority; and §6's word "exactly" with §12's
+closed-delta wording, to register one code, `OFFLINE_REHEARSAL_SCENARIO_MISMATCH` (category
+`integrity`, `blocks_release=true`, `requires_manual_review=false`). It rules that **a zero
+`U(route)` never waives the independent `A_reachable` witness**, requires **one realizable full-path
+witness per route** in place of three separately measured terms, requires the M3.1A token to gate on
+all four of `passed`, `complete`, `a_reachable_agrees`, and `a_reachable_fully_tested`, and records
+that **no durable §17 review artifact exists and none covers the current tree**. It changes no
+receipt schema field or digest preimage, creates no migration, and grants no network authority. The
+next action is the Decision 029 §11 remediation, then the **first durable §17 review**.
 
 ## Deviation register — where deviations are recorded
 

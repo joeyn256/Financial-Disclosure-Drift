@@ -9,7 +9,11 @@ that it has not placed one yet.
 **Phase:** M3.1B
 **Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 §§6, 8, 15–16; proposed [Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md)
-§§4, 7, 9–11 (controlling once accepted); [Decision 024](../../Decisions/decision_024_m2_m3_boundary_governance.md)
+§§4, 7, 9–11 (accepted 2026-08-01, and controlling except for the two clauses Decision 029 narrowly
+supersedes); [Decision 029](../../Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
+§§4–8 (**controlling** for the per-route `A_reachable` witness, the rule that a zero `U(route)` never
+waives it, the one new reason code, the four-predicate M3.1A token gate, and the per-route ceiling
+formula); [Decision 024](../../Decisions/decision_024_m2_m3_boundary_governance.md)
 §5.2 (the S7 row); [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone_2_3_pilot_selection_plan.md)
 §11 Gate F; [`milestone_03_master_plan.md`](../../../Milestones/milestone_03_master_plan.md) phase M3.1.
 **Completion token:** on a full pass,
@@ -69,7 +73,10 @@ that it has not placed one yet.
 | 3.7 | **Receipt non-contamination proof holds** — every governed value byte-identical with receipts disabled, enabled, and varied | `PASS`/`FAIL` | A12 |
 | 3.8 | Prohibited-field scan proven non-vacuous by a positive control | `PASS`/`FAIL` | A12 |
 | 3.9 | **Every rehearsal receipt reports actual network counts of `0`**, with simulated totals in the evidence report | `PASS`/`FAIL` | A1–A12 |
-| 3.10 | **`A_reachable` derived per route and independently tested** against the worst reachable path | `PASS`/`FAIL` | A2, A4, A6 |
+| 3.10 | **`A_reachable` derived per route and independently tested** against the worst reachable path, by **one realizable full-path witness per route** — **including every route planning zero requests**; a zero `U(route)` never waives this item | `PASS`/`FAIL` | rehearsal §6.9 witness table |
+| 3.10a | `a_reachable_fully_tested = true` and `unmeasured_routes = {}` | `PASS`/`FAIL` | rehearsal report |
+| 3.10b | Tested route key set **exactly equals** the authoritative derived key set — no omission, no extra | `PASS`/`FAIL` | rehearsal report |
+| 3.10c | The four exact singleton routes **actively received and rejected** a redirect response, so their zero hop count is proved rather than assumed | `PASS`/`FAIL` | rehearsal report |
 | 3.11 | **No snapshot, selection, reserve, sealing, manifest, or root scenario was rehearsed here** — those are M3.3A | `PASS`/`FAIL` | scenario matrix |
 | 3.12 | **M3-L11 repository, hygiene, and resolved-path protections implemented and validated** — an M3.1 deliverable, not a phase-entry prerequisite | `PASS`/`FAIL` | committed validation reference |
 | 3.13 | `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` recorded | `PASS`/`FAIL` | reference |
@@ -78,7 +85,7 @@ that it has not placed one yet.
 
 | # | Item | Result | Evidence |
 |---|---|---|---|
-| 4.1 | The `[sec]` extra is installed | `PASS`/`FAIL` | version string only |
+| 4.1 | The `[sec]` extra is installed — cite the installed `httpx` version **and** a passing, **non-skipped** `tests/unit/test_httpx_transport.py`. A skipped transport test is `FAIL`, not `N/A` | `PASS`/`FAIL` | version string only |
 | 4.2 | **SEC identity validates at the boundary** | `PASS`/`FAIL` | `SEC contact identity: valid; value not displayed` |
 | 4.3 | **The identity value was never printed, echoed, pasted, or written anywhere** | `PASS`/`FAIL` | operator attestation |
 | 4.4 | No identity appears in any log, artifact, receipt, or this document | `PASS`/`FAIL` | scan result |
@@ -152,8 +159,8 @@ Each family asserted refused, with a representative probe path that is rejected.
 |---|---|---|---|
 | 9.1 | Every route has a planned count with a stated basis | `PASS`/`FAIL` | budget §3 |
 | 9.2 | **No cell reads `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`** | `PASS`/`FAIL` | budget §3 |
-| 9.3 | Maximum physical attempts equals `Σ ( U(route) × A_reachable(route) )` | `PASS`/`FAIL` | budget §4 |
-| 9.3a | **`A_reachable` derived from the implemented state machine and independently tested** | `PASS`/`FAIL` | budget §4.1 |
+| 9.3 | Maximum physical attempts equals `Σ ( U(route) × A_reachable(route) )`, summed **per route** with **no single asserted multiplier**, and with the full-index term counted **after** catalog-satisfied exclusion | `PASS`/`FAIL` | budget §4 |
+| 9.3a | **`A_reachable` derived from the implemented state machine and independently tested**, for **every** route the plan enumerates — **including routes whose `U` is `0`**. Item 9.3's arithmetic does not discharge this item | `PASS`/`FAIL` | budget §4.1 |
 | 9.3b | **No contingency or padding applied** | `PASS`/`FAIL` | budget §6 |
 | 9.4 | Maximum new raw objects equals planned unique logical requests; cache hits were not subtracted twice | `PASS`/`FAIL` | budget §4 |
 | 9.5 | Expected request-class totals stated where derivable | `PASS`/`FAIL` | budget §4 |

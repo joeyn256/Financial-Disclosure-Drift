@@ -6,7 +6,12 @@ scenarios **E1–E8**.
 **Network permission:** `NONE` for both — no socket is opened.
 **Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 §§6.1, 6.3, 8, as narrowly corrected by proposed
-[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§5–8.
+[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§5–8, as narrowly
+superseded in two clauses by
+[Decision 029](../Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md), which
+is controlling for the manifest-resolution injection (§3), the one new reason code (§2 constraint 7),
+and the per-route `A_reachable` witness (§6.9). **A1–A12 remain exactly twelve scenarios with
+unchanged identities; no A13 is introduced.**
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 **Completion tokens (future):** `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` (A1–A12); the E1–E8 result
 is recorded inside M3.3A and gates M3.3B.
@@ -46,7 +51,12 @@ the production path it exercises.** Hence two rehearsals:
    disabled. An unimplemented scenario is a phase failure.
 7. **Reason codes come from the registered registry.** A scenario needing a code the registry does
    not contain — and which the future M3.1 contract has not already registered under Decision 028
-   §6 — is a stop-and-report condition, not licence to add one.
+   §6, or Decision 029 §5 — is a stop-and-report condition, not licence to add one.
+   [Decision 029](../Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md) §5
+   registers exactly one further code, `OFFLINE_REHEARSAL_SCENARIO_MISMATCH` (category `integrity`,
+   `blocks_release=true`, `requires_manual_review=false`), recorded when a scenario does not reach
+   the state this specification names. `SEC_ACQUISITION_INTERRUPTED` remains reserved for genuine
+   acquisition interruption and may never stand in for a defective witness.
 8. **Receipts are produced for every rehearsal command.** Acquisition scenarios A1–A12 use
    `invocation_mode = "rehearsal"`; execution scenarios E1–E8 use
    `invocation_mode = "offline_execution"`. In both modes the **actual network counts are `0`**.
@@ -82,9 +92,28 @@ bounded M3.1 corrections introduce as explicit arguments:
 | Filesystem fault | A write that raises after `n` bytes, or a file removed between write and verification |
 | Payload mutation | A field added, removed, nulled, or retyped in a scripted body, to produce drift |
 | Ceiling substitution | The explicit cumulative physical-attempt ceiling argument the acquisition driver takes, per Decision 028 §7 |
+| Manifest resolution (rehearsal only) | A context-managed substitution of the binding `SecClient._resolve_url` consults for a manifest-resolved route — that is, of `disclosure_drift.sec.http_client.require_evidence` — authorized narrowly by Decision 029 §4 |
 
 **No injection modifies production code.** Each is a test-time substitution at a seam that exists
 when the rehearsal runs.
+
+**The manifest-resolution injection is narrowly bounded** (Decision 029 §4). It exists so
+`sec_edgar_calendar_announcement` — whose URL comes only from a reviewed manifest, and whose
+source-controlled manifest is provably empty — can be driven through the **real** `SecClient.fetch()`
+policy loop and yield an independently tested `A_reachable`. It must:
+
+- exist only inside the offline rehearsal context, never in a production code path;
+- resolve exactly one fixed synthetic evidence identifier to exactly one fixed approved-host URL of
+  the route's registered family;
+- never enter or mutate `CALENDAR_EVIDENCE_MANIFEST`;
+- never read, write, or require the operator's private calendar-evidence manifest;
+- never assert a real date, announcement, or provenance fact outside the fixture;
+- never be serialized into a report, receipt, plan, catalog, snapshot, or raw object;
+- restore the production resolver on normal **and** exceptional exit; and
+- open no socket, and grant no live and no arbitrary-URL retrieval authority.
+
+It is implemented as a scoped substitution, **never** by adding a resolver parameter, URL override,
+or arbitrary-URL API to the production `SecClient`.
 
 ---
 
@@ -153,7 +182,7 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Expected receipt** | Rehearsal-mode network counts `0`; the simulated logical/physical split and the two `retry` classifications recorded in the evidence report |
 | **Expected rollback** | none |
 | **Expected recovery** | none |
-| **Expected validation** | A retry consumes **no** additional logical request and **exactly one** additional physical attempt; backoff is exponential from the accepted base and never exceeds the accepted ceiling; **the observed worst-case attempt count for this route contributes to the derived `A_reachable`** |
+| **Expected validation** | A retry consumes **no** additional logical request and **exactly one** additional physical attempt; backoff is exponential from the accepted base and never exceeds the accepted ceiling. This scenario no longer supplies a term of `A_reachable`: that bound is established by the single full-path witness of §6.9, not by adding separately measured retry, cooldown, and redirect terms |
 
 ---
 
@@ -221,7 +250,7 @@ validation. "No rollback" means none is expected, and an observed rollback is a 
 | **Expected receipt** | `completion_status = "failed"` on the refusal variants; the refusal reason recorded |
 | **Expected rollback** | Initial-route refusal has nothing to roll back. Redirect refusal preserves the preceding attempt evidence and performs no substantive write for the refused hop |
 | **Expected recovery** | none |
-| **Expected validation** | Every one of the nine registered families is asserted **reachable** at its exact path or pattern; a manifest-resolved announcement source with an empty accepted manifest is lawful and yields zero instances; every denied family is asserted **refused** by at least one representative probe; **only `GET` and only `www.sec.gov` / `data.sec.gov` are permitted**; **the redirect hop count observed here contributes to the derived `A_reachable`** |
+| **Expected validation** | Every one of the nine registered families is asserted **reachable** at its exact path or pattern; a manifest-resolved announcement source with an empty accepted manifest is lawful and yields zero instances, **but still requires the §6.9 witness — a zero `U(route)` never waives it**; every denied family is asserted **refused** by at least one representative probe; **only `GET` and only `www.sec.gov` / `data.sec.gov` are permitted**. This scenario no longer supplies a redirect term of `A_reachable`: that bound is established by the single full-path witness of §6.9 |
 
 ---
 
@@ -343,9 +372,41 @@ The M3.1A rehearsal passes when **all** hold:
 7. every receipt passes the prohibited-field scan, and the positive control proves the scan is not
    vacuous;
 8. **A12's non-contamination proof holds exactly**;
-9. **`A_reachable` is derived per route from the observed worst reachable path** across A2, A4, and
-   A6, and is independently tested;
+9. **`A_reachable` is independently tested per route by one realizable full-path witness** — see
+   §6.9 — with `unmeasured_routes` empty and the tested key set exactly equal to the authoritative
+   derived key set;
 10. re-running the whole rehearsal from the same fixtures reproduces the same results.
+
+### 6.9 The per-route `A_reachable` witness
+
+Superseding the earlier description, which credited A2, A4, and A6 with separately measured retry,
+cooldown, and redirect terms and **added** them. That arithmetic proved each term separately
+reachable and never proved the composite path realizable, so it was not a witness. Decision 029 §7
+replaces it with **one black-box `SecClient.fetch()` execution per route**, whose observed transport
+attempt count *is* the tested bound.
+
+| Routes | Scripted path | Attempts |
+|---|---|---|
+| The four exact singleton routes, and `sec_edgar_calendar_announcement` | `503 × 4` → unqualified `429` → **active** same-path/only-path redirect refusal | **6**, with zero accepted redirect hops |
+| `sec_edgar_filing_calendar` | `503 × 4` → `429` → one accepted in-family redirect → terminal response | **7** |
+| `sec_full_index_company` | `503 × 4` → `429` → five accepted unique in-family redirects → terminal response | **11** |
+
+Three rules make the witness non-vacuous:
+
+1. **The four singleton routes must actively receive and reject a redirect response.** Reporting zero
+   hops without exercising the resolver is a failure, because it proves only that the measurement
+   never asked.
+2. **Removing or bypassing any segment of the combined path must make the witness fail.** A witness
+   that still passes with a segment deleted is measuring something else.
+3. **A zero `U(route)` never waives the witness.** The obligation holds whether the approved operator
+   calendar-evidence manifest is empty (`U = 0`, the route contributing zero to the ceiling) or
+   non-empty (`U = m > 0`). Gate F §9.3's arithmetic and Gate F §3.10's evidence obligation are
+   separate requirements; satisfying the first does not discharge the second. A **missing** operator
+   manifest is a third case: `U` is then undefined, planning is refused outright, and the witness is
+   still required.
+
+A witness that does not reach the state named above records `completion_status = "failed"` with
+`reason_code = "OFFLINE_REHEARSAL_SCENARIO_MISMATCH"`.
 
 Then, and only then:
 

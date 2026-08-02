@@ -32,7 +32,10 @@ implementation contract, explicit owner authorization, exact path authorization,
 its inherited prerequisite gates. **Closeout satisfied only the precondition** that Milestone 1 and
 Milestone 2 closeout must precede any Milestone 3 implementation — **it granted no implementation
 authority**, and implementation authorization remains `NO` for every phase (Decision 026 §21;
-Decision 027 §20). The next authorized action is **`INDEPENDENT_M3_1_CONTRACT_REVIEW`**.
+Decision 027 §20). `INDEPENDENT_M3_1_CONTRACT_REVIEW` is discharged: `Milestones/contracts/m3_1.md`
+is accepted with `IMPLEMENTATION_AUTHORIZATION: YES`, and the M3.1 implementation exists in the tree
+without being accepted. The next authorized action is the **Decision 029 §11 remediation**, then the
+**first durable §17 review** by a non-author session.
 
 ### Milestone 3 planning artifacts — documentation only, naming no runtime path
 
@@ -408,5 +411,8 @@ S4 implementation; it does not introduce any new state or transition.
   documentation, it names no module, migration, table, or CLI command that does not already appear in
   this map, and it grants no implementation authority. **v0.2 applied eleven bounded corrections after
   the required independent review of v0.1** and likewise changed no module, table, migration, or
-  runtime path. Decision 028 is accepted after independent PASS; the M3.1 contract is drafted for
-  **`INDEPENDENT_M3_1_CONTRACT_REVIEW`**.
+  runtime path. Decision 028 is accepted after independent PASS, and **Decision 029 is accepted**
+  (2026-08-02) as the bounded M3.1 remediation record — it likewise creates no module, table,
+  migration, or runtime path, and grants no network authority. The M3.1 contract is accepted with
+  `IMPLEMENTATION_AUTHORIZATION: YES`; the next action is the **Decision 029 §11 remediation**, then
+  the **first durable §17 review**.

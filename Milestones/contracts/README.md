@@ -183,26 +183,35 @@ storage/migration/identity effects, test requirements, targeted and phase-end va
 proof, failure and rollback behaviour, commit and tag policy, completion report format, and the exact
 completion token.
 
-**The next authorized action is the independent review and owner acceptance of the new bounded
-[`m3_1.md`](m3_1.md) contract.** The contract is currently
-`DRAFT_PENDING_INDEPENDENT_REVIEW` with `IMPLEMENTATION_AUTHORIZATION: NO`. It is only one of
-Decision 024 §8's five entry conditions and never grants implementation authority on its own. Every
-Milestone 3 phase gets its own contract in this directory, written to the required-sections shape
-above and to the master plan's §16 additions.
+**The independent review and owner acceptance of [`m3_1.md`](m3_1.md) is discharged.** The contract
+is `ACCEPTED_READY_FOR_IMPLEMENTATION` with `IMPLEMENTATION_AUTHORIZATION: YES`. **The next
+authorized action is the [Decision 029](../../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
+§11 remediation, then the first durable §17 review by a non-author session.** A contract is only one
+of Decision 024 §8's five entry conditions and never grants implementation authority on its own.
+Every Milestone 3 phase gets its own contract in this directory, written to the required-sections
+shape above and to the master plan's §16 additions.
 
-**No Gate F has passed, neither offline rehearsal has been run, no live acquisition occurred, no
-Gate H has passed, and no real snapshot, selection, manifest, or approval exists. The M3.1 contract
-exists only as an unaccepted draft and authorizes no implementation.**
+**No Gate F has passed, neither offline rehearsal has been run to a passing token, no live
+acquisition occurred, no Gate H has passed, and no real snapshot, selection, manifest, or approval
+exists. The M3.1 implementation exists in the tree and is NOT accepted: Decision 029 remediation is
+outstanding, no durable §17 review artifact exists and none covers the current tree, the M3.2A budget
+and ceiling are unapproved, and neither completion token has been emitted.**
 
 **Two active corrections block Gate F.** M3-L12 is an inherited exact-quarter-end planner defect:
 the future contract must implement `quarterly-index-instances/2.0` while leaving Decision 013
 byte-unchanged. M3-L11 requires the reserved-path ignore, hygiene refusal, and resolved-path CLI
 protections. Their owner rulings are recorded by accepted Decision 028, but neither closes until
-implementation, tests, independent acceptance, and a committed checkpoint exist.
+implementation, tests, independent acceptance, and a committed checkpoint exist. **A third correction
+now joins them:** accepted [Decision 029](../../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
+requires an independently tested per-route `A_reachable` witness for **every** route — including one
+planning zero requests — plus the single reason code `OFFLINE_REHEARSAL_SCENARIO_MISMATCH` and the
+four-predicate M3.1A token gate.
 
 - [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F.
-  **Draft pending independent review.** `STATUS: DRAFT_PENDING_INDEPENDENT_REVIEW`,
-  `IMPLEMENTATION_AUTHORIZATION: NO`; no network access and no implementation are authorized.
+  **Accepted; implementation exists and is not accepted.** `STATUS: ACCEPTED_READY_FOR_IMPLEMENTATION`,
+  `IMPLEMENTATION_AUTHORIZATION: YES`, `NETWORK_AUTHORIZATION_M3_1A: NONE`,
+  `NETWORK_AUTHORIZATION_M3_1B: ZERO LIVE REQUESTS`. Active blocker: the **Decision 029** remediation
+  and the **first durable §17 review**. No network access is authorized.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

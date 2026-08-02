@@ -336,11 +336,36 @@ With §13 passed, the sequence is:
 M3_1_READINESS_CORRECTIONS_ACCEPTED
 ```
 
-The next authorized action is:
+The next authorized action **as this record stood on 2026-08-01** was:
 
 ```text
 INDEPENDENT_M3_1_CONTRACT_REVIEW
 ```
+
+That action is **discharged and historical**. `Milestones/contracts/m3_1.md` exists and is
+`ACCEPTED_READY_FOR_IMPLEMENTATION`. For the current next authorized action, see
+[Decision 029](decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md) §12.
+
+## 15.1 Supersession note (append-only, added 2026-08-02)
+
+[Decision 029](decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md) —
+`ACCEPTED — OWNER APPROVED 2026-08-02` — **narrowly supersedes exactly two clauses of this record**,
+and nothing else:
+
+1. **§5's A6 scenario language**, solely to permit an in-memory, rehearsal-only manifest-resolution
+   fixture for `sec_edgar_calendar_announcement` inside the offline rehearsal context. The fixture
+   grants no retrieval authority, never enters `CALENDAR_EVIDENCE_MANIFEST`, never reads or writes
+   the operator manifest, and never persists into any artifact. See Decision 029 §4.
+2. **§6's word "exactly"**, together with **§12's closed-delta wording**, solely to admit one
+   additional reason code: `OFFLINE_REHEARSAL_SCENARIO_MISMATCH`, category `integrity`,
+   `blocks_release=true`, `requires_manual_review=false`. The delta is otherwise closed and no second
+   code is authorized. Receipt schema `m3-execution-receipt/2.0` is unchanged in every field, type,
+   status value, canonicalization rule, and digest preimage. See Decision 029 §5.
+
+Every other clause of this record — including the M3-L12 classification, the planner version, the
+corrected A1–A12 definitions and pass criteria, ceiling equality, the recovery-ownership split, the
+receipt v2 correction, the request-budget arithmetic, and the three-layer M3-L11 protection —
+remains unchanged and controlling. This note adds text only; nothing above it is edited.
 
 ## 16. Negative confirmations
 

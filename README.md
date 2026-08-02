@@ -65,10 +65,13 @@ verification, and replay. **No live SEC pilot has been executed.**
 correction package is proposed**: the five-phase roadmap in `Milestones/milestone_03_master_plan.md`
 and the `Docs/m3/` operational-readiness pack now incorporate the proposed planner-v2, corrected
 A1–A12, receipt-v2, budget, ceiling, recovery, and private-evidence protections. **That remains a
-plan, not an authorization.** A fresh independent Opus rereview of Decision 028 is the next action;
-only a pass permits owner acceptance and later M3.1 contract drafting. **Milestone 3 implementation
-is not authorized and not begun** — no Milestone 3 contract, module, migration, or CLI command
-exists. **No SEC data has been downloaded, no filing body is permitted at this stage, no real
+plan, not an authorization.** That rereview passed, Decision 028 was accepted, and the bounded
+`Milestones/contracts/m3_1.md` contract is now accepted with `IMPLEMENTATION_AUTHORIZATION: YES`.
+**M3.1 implementation exists in the tree and is NOT accepted** — accepted
+[Decision 029](Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
+remediation is outstanding, no durable §17 review artifact exists and none covers the current tree,
+Gate F has not been reached, and neither M3.1 completion token has been emitted. **M3.2 onward is not
+authorized and not begun.** **No SEC data has been downloaded, no filing body is permitted at this stage, no real
 pilot sample exists, no manifest root has been approved or published, and no modeling or outcome code
 exists.**
 

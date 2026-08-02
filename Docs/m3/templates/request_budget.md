@@ -14,8 +14,12 @@ stop — and to carry the owner's explicit approval of those numbers.
 **Neither approval covers the other window.**
 **Phase:** M3.1B → M3.2A · then between the windows → M3.2B
 **Controlling records:** [Decision 027](../../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
-§§15–16, as narrowly corrected by proposed
-[Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md) §§7, 10;
+§§15–16, as narrowly corrected by
+[Decision 028](../../Decisions/decision_028_m3_1_readiness_corrections.md) §§7, 10
+(**accepted — owner approved 2026-08-01**), and further by
+[Decision 029](../../Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md) §§7–8
+(**accepted — owner approved 2026-08-02**), which is controlling for the per-route `A_reachable`
+witness and for the corrected full-index count;
 [Decision 013](../../Decisions/decision_013_pilot_selection_mechanics.md) §1;
 [Decision 007](../../Decisions/decision_007_sec_universe.md);
 [`milestone_03_master_plan.md`](../../../Milestones/milestone_03_master_plan.md) §15.
@@ -93,6 +97,17 @@ One row per registered route. **Every route appears, including routes planning z
 **Rows belonging to the other window read `n/a — other window`, not `0`.** M3.2A budgets the seven
 bootstrap routes; M3.2B budgets `sec_submissions_historical` and `sec_submissions_entity` only.
 
+**A route planning zero still gets a filled row, not an omitted one, and still needs its
+independently tested `A_reachable` in §4.1** (Decision 029 §4.1). An explicitly empty approved
+operator calendar-evidence manifest lawfully yields
+`U(sec_edgar_calendar_announcement) = 0`; a **missing or unconfirmed** manifest leaves `U` undefined,
+which is not zero and blocks approval.
+
+**The `sec_full_index_company` count is the count after catalog-satisfied exclusion**
+(Decision 029 §8): `q = |required_index_keys − already_satisfied_index_keys|`, **not** the bare
+`|required_closed_quarters(coverage, as_of, include_open_quarter)|`. Record both, and record which
+one the plan used.
+
 **Any cell still reading `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` blocks approval.** For
 M3.2A the zero-request dry run resolves it. For M3.2B it is resolved by **deriving** the count from
 the frozen M3.2A objects — never by estimating it.
@@ -127,9 +142,15 @@ implemented response-policy state machine and independently tested against its w
 It is **never** assumed to be the sum of the retry, redirect, and cooldown bounds — those mechanisms
 interact inside one loop, and the composition is a property of the code, not of arithmetic.
 
-| `source_id` | `A_reachable` | Derived from | Worst-path test reference |
-|---|---:|---|---|
-| `_______` | `____` | `_______` | `_______` |
+The tested value is the transport attempt count observed from **one realizable full-path witness per
+route** — a single `SecClient.fetch()` execution driven to its worst reachable path (Decision 029 §7,
+`offline_rehearsal_spec.md` §6.9). Three separately measured terms added together are **not** a
+witness. **Every route enumerated in §3 gets a row here, including routes planning zero**; a zero
+`U(route)` never waives the witness.
+
+| `source_id` | `A_reachable` | Derived from | Full-path witness reference | Zero-redirect actively proved |
+|---|---:|---|---|---|
+| `_______` | `____` | `_______` | `_______` | `YES` / `NO` / `n/a — route accepts hops` |
 
 | Field | Value |
 |---|---|
@@ -201,7 +222,7 @@ can lengthen the run beyond the limiter-imposed spacing floor.
 | Every route listed; other-window rows marked `n/a — other window` | `PASS` / `FAIL` | `_______` |
 | No cell reads `EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` | `PASS` / `FAIL` | `_______` |
 | No count is a guess; each has a stated basis | `PASS` / `FAIL` | `_______` |
-| **`A_reachable` derived per route and independently tested** | `PASS` / `FAIL` | `_______` |
+| **`A_reachable` derived per route and independently tested**, for **every** route in §3 including any planning zero | `PASS` / `FAIL` | `_______` |
 | Max physical attempts equals `Σ ( U(route) × A_reachable(route) )` | `PASS` / `FAIL` | `_______` |
 | Maximum new raw objects equals planned unique logical requests | `PASS` / `FAIL` | `_______` |
 | Cache hits were excluded before planning and not subtracted again | `PASS` / `FAIL` | `_______` |

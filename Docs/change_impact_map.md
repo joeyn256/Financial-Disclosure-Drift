@@ -576,8 +576,11 @@ Zero impact is explicit:
 - no commit, push, or tag occurs unless the rereview passes and a later acceptance/checkpoint step
   separately authorizes it.
 
-The next action is `INDEPENDENT_M3_1_CONTRACT_REVIEW`. Only a fresh PASS and owner acceptance of the
-contract permit the later, separate exact-path M3.1 implementation authorization.
+`INDEPENDENT_M3_1_CONTRACT_REVIEW` is discharged — the contract is accepted with
+`IMPLEMENTATION_AUTHORIZATION: YES`, and the M3.1 implementation exists in the tree without being
+accepted. The next action is the **Decision 029 §11 remediation**, then the **first durable §17
+review** by a session that wrote none of the M3.1 work. No durable review artifact exists today and
+none covers the current tree; a fix commit never converts a prior `FAIL` into a `PASS`.
 
 ## Notes on reading this table
 

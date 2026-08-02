@@ -567,17 +567,25 @@ U(sec_company_tickers)           = 1
 U(sec_sic_code_list)             = 1
 U(sec_edgar_filing_calendar)     = 1                       # one instance per explicit --calendar-year
 U(sec_edgar_calendar_announcement)
-                                 = |CALENDAR_EVIDENCE_MANIFEST|
-U(sec_full_index_company)        = |required_closed_quarters(coverage, as_of, include_open_quarter)|
+                                 = |approved entries in the explicitly named operator
+                                    calendar-evidence manifest|          # 0 is lawful; see below
+U(sec_full_index_company)        = |required_index_keys − already_satisfied_index_keys|
+                                   # i.e. AFTER catalog-satisfied exclusion, per §4 of the M3.1
+                                   # contract and the cache-hit rule below. The bare
+                                   # |required_closed_quarters(coverage, as_of, include_open_quarter)|
+                                   # is the pre-exclusion set and is NOT the planned count.
 
 max_physical_attempts(window)
   = Σ_over_routes_in_window  U(route) × A_reachable(route)
 
 A_reachable(route)
   = the maximum reachable physical attempts for that route, DERIVED from the implemented
-    response-policy state machine and INDEPENDENTLY TESTED against its worst reachable path.
-    It is never asserted from constants, and never assumed to be the sum of the retry,
-    redirect, and cooldown bounds. See §16.
+    response-policy state machine and INDEPENDENTLY TESTED against its worst reachable path
+    by ONE realizable full-path witness — a single SecClient.fetch() execution whose observed
+    transport attempt count IS the tested bound. It is never asserted from constants, and it
+    is never the SUM of separately measured retry, redirect, and cooldown terms: that sum
+    proves each term separately reachable and never proves the composite path realizable.
+    See §16 and offline_rehearsal_spec.md §6.9.
 
 max_new_raw_objects(window)
   = planned_unique_logical_requests(window)
@@ -676,7 +684,11 @@ window's count is derived rather than padded.
    simply additive;
 2. **count every redirect hop, every retry, and every controlled post-cooldown request** as a
    physical attempt;
-3. **test the worst reachable path independently**, rather than deriving the bound only by reading;
+3. **test the worst reachable path independently**, rather than deriving the bound only by reading,
+   using **one realizable full-path witness per route** (Decision 029 §7) rather than a sum of
+   separately measured terms — and **a zero `U(route)` never waives that witness**: Gate F §9.3's
+   arithmetic and Gate F §3.10's evidence obligation are separate requirements, so a route planning
+   zero requests still needs an independently tested bound;
 4. **produce an exact per-window integer**;
 5. **obtain explicit owner approval** of that integer;
 6. **refuse the request that would exceed the approved ceiling** — stop before, never after;
@@ -703,7 +715,9 @@ Stop and report — do not work around — on any of:
 7. a receipt containing a prohibited field;
 8. any evidence that receipt content reached a governed identity;
 9. `A_reachable` being underivable, or the derived bound disagreeing with the independently tested
-    worst reachable path;
+    worst reachable path — **including** a non-empty `unmeasured_routes`, a false
+    `a_reachable_fully_tested`, or a tested key set that is not exactly equal to the authoritative
+    derived key set. A route excluded from the agreement predicate is an untested bound, not a pass;
 10. **the Decision 028 planner-v2 correction not being implemented and accepted** — Gate F cannot
     pass while the planner and Decision 013 §1 disagree about 2026 Q2;
 11. the live baseline disagreeing with the contract's stated baseline;
@@ -723,7 +737,21 @@ failure never becomes a valid empty result**.
 **M3.1 changes no response-policy constant and no response classification.** Under Decision 028 it
 adds the two registered terminal codes `SEC_REQUEST_CEILING_EXHAUSTED` and
 `SEC_ACQUISITION_INTERRUPTED`, and makes the narrow terminal fallback that assigns
-`SEC_RETRIES_EXHAUSTED` to a second unqualified `429`. No other reason-code meaning changes.
+`SEC_RETRIES_EXHAUSTED` to a second unqualified `429`. Under
+[Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
+§5 it adds exactly one further code, `OFFLINE_REHEARSAL_SCENARIO_MISMATCH` (category `integrity`,
+`blocks_release=true`, `requires_manual_review=false`), for a rehearsal scenario that does not reach
+the state its specification names. **`SEC_ACQUISITION_INTERRUPTED` is preserved for genuine
+acquisition interruption only** and may never stand in for a defective witness. No other reason-code
+meaning changes, and the receipt schema is unchanged in every field, type, status value,
+canonicalization rule, and digest preimage.
+
+**M3.1A exit requirements, stated exactly** (Decision 029 §§6–7). The phase token requires all four
+of `passed`, `complete`, `a_reachable_agrees`, and **`a_reachable_fully_tested`**; `unmeasured_routes`
+must be **empty**; and the tested route key set must be **exactly equal** to the authoritative derived
+key set. `m3 rehearse-report` recomputes these rather than trusting a stored report, and a
+subset-matching bounds comparison is not agreement. A diagnostic subset run may complete as a command
+but never emits the token.
 
 ### 19. Schema-drift boundary
 
@@ -807,6 +835,17 @@ none of the M3.1 work. Its question: *does the rehearsal actually cover the work
 genuinely zero-request, and is the approved budget derived rather than asserted?* It is not a
 re-audit of Milestones 0–2.
 
+**The review must produce a durable artifact** (Decision 029 §13). No §17/§26 review artifact exists
+in tracked history, refs, reflogs, or unreachable objects; commit prose describing prior rounds is
+not a review record, and a fix commit never converts a prior `FAIL` into a `PASS`. The required
+artifact is written at the frozen implementation SHA to
+`Docs/m3/reviews/m3_1_section_17_review_<FULL_REVIEWED_SHA>.md` and carries the reviewer session and
+model identifier with a non-authorship attestation, the UTC review date, the exact reviewed commit
+and tree SHA, the live remote SHA and clean-status evidence, the reviewed diff boundaries, every
+validation command and its result, a finding table with dispositions, the §26 answer, the exact
+verdict `M3_1_SECTION_17_REVIEW: PASS` or `M3_1_SECTION_17_REVIEW: FAIL`, and a reviewer signature.
+**A FAIL artifact is retained and blocks the tokens; it is never rewritten into a PASS.**
+
 ### 27. Rollback procedure
 
 No data is acquired, so rollback is code-level only: discard the working tree to the phase-entry
@@ -879,11 +918,14 @@ M3.2 contract.
 ### 36. Conditions preventing progression
 
 M3.2A may not begin while **any** of these holds: the acquisition rehearsal has not passed; the two
-dry runs disagree; **the Decision 028 planner-v2 correction is unaccepted or unimplemented**; `A_reachable` is underived or
-untested; the M3.2A request budget is unapproved; the hard ceiling is unapproved; the allowlist or
+dry runs disagree; **the Decision 028 planner-v2 correction is unaccepted or unimplemented**;
+**the Decision 029 remediation is unimplemented**; `A_reachable` is underived or
+untested **for any route, including a route planning zero requests**; `unmeasured_routes` is
+non-empty; the M3.2A request budget is unapproved; the hard ceiling is unapproved; the allowlist or
 denylist is unasserted; the SEC identity is unvalidated or has been printed; network is enabled
-outside an authorized window; the independent M3.1 review has not passed; the M3.2 contract does not
-exist; or any Gate F checklist item is `FAIL` or `UNKNOWN`.
+outside an authorized window; the independent M3.1 review has not passed **or has produced no
+durable artifact**; the M3.2 contract does not exist; or any Gate F checklist item is `FAIL` or
+`UNKNOWN`.
 
 ---
 

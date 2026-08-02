@@ -1,11 +1,20 @@
 # Milestone 3 — Execution-Receipt Specification
 
 **Status:** specification only. **No runtime code and no database table is created by this document.**
+A runtime implementation of this specification now exists under the M3.1 contract; this document
+remains the specification and creates nothing.
 **Applies to:** every Milestone 3 command that runs against real inputs, and every live command
 without exception.
 **Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 §§9, 17, 18, 19, as narrowly corrected by accepted
-[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§9–10.
+[Decision 028](../Decisions/decision_028_m3_1_readiness_corrections.md) §§9–10, and by accepted
+[Decision 029](../Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md) §5,
+which registers **one additional permitted `reason_code` value**,
+`OFFLINE_REHEARSAL_SCENARIO_MISMATCH`.
+**Schema unchanged.** Decision 029 registers a reason-code *value*, not a schema element. Receipt
+schema `m3-execution-receipt/2.0`, the field set, every field type, the `completion_status`
+vocabulary, the canonicalization rule, and the `receipt_id` digest preimage are **unchanged**, and
+**no migration is created or authorized**.
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 
 ---

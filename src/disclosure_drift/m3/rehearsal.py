@@ -40,7 +40,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from disclosure_drift.errors import DisclosureDriftError, RawObjectIntegrityError
 from disclosure_drift.m3.receipt import (
@@ -56,6 +56,8 @@ from disclosure_drift.m3.recovery import read_only_catalog
 from disclosure_drift.m3.request_plan import M3_2A_BOOTSTRAP_ROUTES, derive_a_reachable
 from disclosure_drift.paths import DataTree
 from disclosure_drift.reasons import REASON_CODES
+from disclosure_drift.sec import http_client as _sec_http_client
+from disclosure_drift.sec.calendar_evidence import CalendarEvidenceEntry
 from disclosure_drift.sec.http_client import (
     ProhibitedRetrievalError,
     RetrievalPolicy,
@@ -139,6 +141,11 @@ _BLOCK_PAGE: Final = (
 #: have to know the URL the policy layer will construct.
 _ECHO_REQUEST_URL: Final = "__rehearsal_request_url__"
 
+#: The HTTP status band a served response must fall in, alongside a `Location` header, before the
+#: witness may record that a redirect was genuinely offered to the policy layer.
+_REDIRECT_STATUS_FLOOR: Final = 300
+_REDIRECT_STATUS_CEILING: Final = 400
+
 
 class RehearsalError(DisclosureDriftError):
     """Raised when the rehearsal harness itself is misconfigured.
@@ -162,6 +169,10 @@ class _ScriptedTransport:
     def __init__(self, responses: Sequence[TransportResponse]) -> None:
         self._responses = list(responses)
         self.requests: list[SecRequest] = []
+        #: Every response actually delivered to the client, after sentinel resolution. A witness
+        #: that must prove a redirect was *offered* reads this rather than counting attempts:
+        #: what was scripted and what was served can differ, and only what was served is evidence.
+        self.served: list[TransportResponse] = []
         self.closed = False
 
     def send(self, request: SecRequest) -> TransportResponse:
@@ -173,8 +184,18 @@ class _ScriptedTransport:
             )
             raise RehearsalError(message)
         response = self._responses.pop(0)
+        # A scripted `Location` may need to name the URL the client just asked for — the
+        # same-path redirect a pinned route must refuse. The scenario cannot know that URL
+        # in advance for a manifest-resolved route, so the sentinel is resolved here.
+        if response.header("location") == _ECHO_REQUEST_URL:
+            headers = {
+                key: (request.url if value == _ECHO_REQUEST_URL else value)
+                for key, value in response.headers.items()
+            }
+            response = replace(response, headers=headers)
         if response.final_url == _ECHO_REQUEST_URL:
-            return replace(response, final_url=request.url)
+            response = replace(response, final_url=request.url)
+        self.served.append(response)
         return response
 
     def close(self) -> None:
@@ -1985,113 +2006,240 @@ _REDIRECT_CANDIDATES: Final[Mapping[str, tuple[str, ...]]] = {
 }
 
 
-def _measure_redirect_hops(source_id: str) -> int:
-    """Count how many hops the *resolver* actually accepts for a route.
+#: The synthetic evidence identity the rehearsal-only manifest-resolution fixture answers to, and
+#: the single approved-host URL it resolves to. Decision 029 §4 authorizes exactly this: an
+#: in-memory substitution that lets the manifest-resolved announcement route be driven through the
+#: **real** `SecClient.fetch()` policy loop. It never enters `CALENDAR_EVIDENCE_MANIFEST`, never
+#: reads or writes the operator's private manifest, asserts no real date, and is never serialized.
+#: The name of the module-level binding `SecClient._resolve_url` consults for a manifest-resolved
+#: route. Named rather than written literally so the substitution below is a rebinding of one known
+#: attribute, and so the production module keeps its export surface unchanged.
+_RESOLVER_BINDING: Final = "require_evidence"
 
-    This drives `sec.urls.resolve_redirect` — the code that really decides — rather than reasoning
-    about the URL-family table as the derivation does. That difference is the whole point: two
-    independent mechanisms must agree, so measuring by re-reading the same table would prove
-    nothing.
+_REHEARSAL_ANNOUNCEMENT_EVIDENCE_ID: Final = "rehearsal-synthetic-announcement"
+_REHEARSAL_ANNOUNCEMENT_URL: Final = (
+    "https://www.sec.gov/newsroom/rehearsal-synthetic-calendar-announcement"
+)
+
+#: The fixture entry itself. `review_status` is deliberately `pending_review` and
+#: `source_observation_id` is absent, so `is_approved` is **False**: nothing here could be mistaken
+#: for a reviewed determination if it ever escaped, and it asserts no date at all.
+_REHEARSAL_ANNOUNCEMENT_ENTRY: Final = CalendarEvidenceEntry(
+    evidence_id=_REHEARSAL_ANNOUNCEMENT_EVIDENCE_ID,
+    url=_REHEARSAL_ANNOUNCEMENT_URL,
+    evidence_type="date_specific_announcement",
+    asserted_status="non_operating",
+    affected_dates=(),
+    title="synthetic rehearsal fixture; asserts no real date",
+    parser_version="rehearsal-fixture/1.0",
+    review_status="pending_review",
+)
+
+
+@contextmanager
+def _rehearsal_manifest_resolution() -> Iterator[None]:
+    """Resolve one synthetic evidence id for the duration of the announcement witness.
+
+    Decision 029 §4, narrowly superseding Decision 028 §5 A6. `SecClient._resolve_url` obtains a
+    manifest-resolved URL only through `sec.http_client.require_evidence`, and the source-controlled
+    manifest is empty by design (Decision 011 §8), so without this seam the announcement route can
+    place no attempt and its `A_reachable` is never independently tested — which Gate F §3.10 and
+    master plan §16 forbid, **whether or not the route plans any request**.
+
+    It is a substitution at the module binding, not a production parameter: no resolver argument and
+    no arbitrary-URL API is added to `SecClient`, so no caller gains the ability to retrieve a URL
+    it chose. The production binding is restored in `finally`, so an exception inside the witness
+    cannot leave the seam open.
+    """
+    original = cast(
+        "Callable[[str], CalendarEvidenceEntry]",
+        getattr(_sec_http_client, _RESOLVER_BINDING),
+    )
+
+    def _resolve(evidence_id: str) -> CalendarEvidenceEntry:
+        if evidence_id != _REHEARSAL_ANNOUNCEMENT_EVIDENCE_ID:
+            # Anything else still goes to the real resolver, which refuses it against the empty
+            # manifest. The fixture answers for exactly one identity and widens nothing.
+            return original(evidence_id)
+        return _REHEARSAL_ANNOUNCEMENT_ENTRY
+
+    setattr(_sec_http_client, _RESOLVER_BINDING, _resolve)
+    try:
+        yield
+    finally:
+        setattr(_sec_http_client, _RESOLVER_BINDING, original)
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteWitness:
+    """What one full-path witness observed for one route."""
+
+    attempts: int
+    accepted_hops: int
+    redirect_offered: bool
+    detail: str
+    defect: str | None = None
+
+
+def _hop_targets(source_id: str, start: str) -> tuple[str, ...]:
+    """In-family URLs the witness offers as redirect targets, in order.
+
+    Every candidate is a real URL of the route's registered family. The resolver — not this
+    function — decides which are lawful, which is what keeps the witness independent of the
+    derivation it is meant to confirm.
+    """
+    normalized_start = normalize_url(start)
+    candidates = tuple(
+        candidate
+        for candidate in _REDIRECT_CANDIDATES.get(source_id, ())
+        if normalize_url(candidate) != normalized_start
+    )
+    return candidates[:MAX_REDIRECT_DEPTH]
+
+
+def _witness_responses(hop_targets: Sequence[str], source_id: str) -> list[TransportResponse]:
+    """The one scripted worst path: retries, then a cooldown, then the redirect frontier.
+
+    Four retryable responses exhaust the retry budget's continues, the fifth response is an
+    unqualified `429` that spends the single cooldown continue, and every response after it is a
+    redirect. A route that accepts hops walks them and then terminates; a route whose path is pinned
+    is offered a redirect back to the URL it just requested and must refuse it — which is what makes
+    "zero hops" an observation rather than an omission.
+    """
+    responses: list[TransportResponse] = [_scripted(503) for _ in range(MAX_TRANSIENT_RETRIES - 1)]
+    responses.append(_scripted(429))
+    if not hop_targets:
+        responses.append(_scripted(302, headers={"Location": _ECHO_REQUEST_URL}))
+        return responses
+    responses.extend(_scripted(302, headers={"Location": target}) for target in hop_targets)
+    responses.append(_scripted_for(source_id))
+    return responses
+
+
+def _measure_full_path(source_id: str) -> _RouteWitness:
+    """Drive one route to its worst reachable path with a single `SecClient.fetch()`.
+
+    This is the independent confirmation master plan §16 requires, in the form Decision 029 §7
+    fixes. The observed transport attempt count **is** the tested bound. It deliberately replaces
+    the earlier arithmetic — retry attempts, cooldown continues, and redirect hops measured
+    separately and added — because that sum proved each term separately reachable and never proved
+    the composite path realizable. Nothing is copied from `m3.request_plan`, so agreement between
+    the derivation and this witness is evidence rather than a tautology.
     """
     spec = SOURCES[source_id]
-    candidates = _REDIRECT_CANDIDATES.get(source_id, ())
-    start = candidates[0] if candidates else _first_url(source_id)
-    if start is None:
-        return 0
-
-    seen: list[str] = [normalize_url(start)]
-    current = start
-    hops = 0
-    for candidate in candidates[1:] or ():
-        try:
-            resolved = resolve_redirect(
-                candidate, current, spec, seen=tuple(seen), identity_url=start
-            )
-        except RedirectBoundaryError:
-            break
-        hops += 1
-        seen.append(normalize_url(resolved))
-        current = resolved
-        if hops >= MAX_REDIRECT_DEPTH:
-            break
-    return hops
-
-
-def _first_url(source_id: str) -> str | None:
-    """A lawful starting URL for a route, or ``None`` when only a manifest can supply one."""
-    spec = SOURCES[source_id]
+    parameters = _parameters_for(source_id)
+    evidence_id = _REHEARSAL_ANNOUNCEMENT_EVIDENCE_ID if spec.manifest_resolved else None
     if spec.manifest_resolved:
-        return None
-    try:
-        return spec.url(**dict(_parameters_for(source_id) or {}))
-    except (KeyError, DisclosureDriftError):  # pragma: no cover - registry defect
-        return None
+        start = _REHEARSAL_ANNOUNCEMENT_URL
+    else:
+        try:
+            start = spec.url(**dict(parameters or {}))
+        except (KeyError, DisclosureDriftError) as exc:  # pragma: no cover - registry defect
+            return _RouteWitness(
+                attempts=0,
+                accepted_hops=0,
+                redirect_offered=False,
+                detail=f"no lawful starting URL could be constructed: {exc}",
+                defect="the route has no constructible starting URL, so no worst path was driven",
+            )
 
-
-def _measure_retry_attempts(source_id: str) -> int:
-    """Count the attempts the real loop makes when every response is retryable."""
-    client, transport, _ = _client([_scripted(503) for _ in range(MAX_TRANSIENT_RETRIES + 2)])
+    targets = _hop_targets(source_id, start)
+    client, transport, _ = _client(_witness_responses(targets, source_id))
     try:
-        client.fetch(
+        result = client.fetch(
             source_id,
-            purpose="rehearsal worst-path measurement",
-            parameters=_parameters_for(source_id),
+            purpose="rehearsal worst reachable path witness",
+            parameters=parameters,
+            evidence_id=evidence_id,
         )
-    except DisclosureDriftError:  # pragma: no cover - a refused route places no attempt
-        return len(transport.requests)
-    return len(transport.requests)
-
-
-def _measure_cooldown_continues(source_id: str) -> int:
-    """Count the extra attempts one cooldown actually buys, by executing the loop."""
-    client, transport, _ = _client([_scripted(429), _scripted(429), _scripted(429)])
-    try:
-        client.fetch(
-            source_id,
-            purpose="rehearsal worst-path measurement",
-            parameters=_parameters_for(source_id),
+    except DisclosureDriftError as exc:
+        return _RouteWitness(
+            attempts=len(transport.requests),
+            accepted_hops=0,
+            redirect_offered=False,
+            detail=f"the witness was refused before it completed: {exc}",
+            defect="the worst path could not be driven to a terminal state",
         )
-    except DisclosureDriftError:  # pragma: no cover - a refused route places no attempt
-        return 0
-    return max(0, len(transport.requests) - 1)
+
+    attempts = len(transport.requests)
+    accepted_hops = len(result.redirect_hops)
+    # An *observation*, never an inference from the attempt count: a script whose sixth response
+    # were a terminal success would spend exactly the same six attempts and prove nothing about
+    # the redirect frontier. What counts is that the transport actually served a redirect the
+    # policy layer then had to decide about — so the served responses are inspected, and for a
+    # path-pinned route the resolver's own `redirect_refused` action must appear in the result.
+    offered = tuple(
+        response
+        for response in transport.served
+        if _REDIRECT_STATUS_FLOOR <= response.status < _REDIRECT_STATUS_CEILING
+        and response.header("location")
+    )
+    redirect_offered = bool(offered)
+    defect: str | None = None
+    if not redirect_offered:
+        defect = (
+            "the witness terminated before a redirect was offered, so the route's redirect "
+            "reachability was assumed rather than observed"
+        )
+    elif not targets and "redirect_refused" not in result.actions:
+        defect = (
+            "a path-pinned route was offered a redirect the policy layer never recorded refusing; "
+            "zero accepted hops without an observed refusal is an omission, not an observation"
+        )
+    elif not targets and accepted_hops:
+        defect = (
+            f"a path-pinned route accepted {accepted_hops} redirect hop(s); the resolver must "
+            f"refuse every hop for this route"
+        )
+    elif targets and accepted_hops != len(targets):
+        defect = (
+            f"the route accepted {accepted_hops} of {len(targets)} offered in-family hop(s); the "
+            f"witness did not reach the redirect frontier the family admits"
+        )
+    elif attempts != result.attempts:
+        defect = (
+            f"the client reported {result.attempts} attempt(s) while the transport saw {attempts}; "
+            f"the observed counts must agree"
+        )
+
+    detail = (
+        f"one logical request drove {attempts} physical attempt(s): "
+        f"{MAX_TRANSIENT_RETRIES - 1} retryable, one unqualified 429 cooldown continue, "
+        f"{len(offered)} redirect(s) served and observed, "
+        f"{accepted_hops} accepted redirect hop(s) of {len(targets)} offered, "
+        f"ending {result.outcome!r}"
+    )
+    return _RouteWitness(
+        attempts=attempts,
+        accepted_hops=accepted_hops,
+        redirect_offered=redirect_offered,
+        detail=detail,
+        defect=defect,
+    )
 
 
 def _tested_a_reachable() -> tuple[dict[str, int], dict[str, str]]:
-    """Drive the real machinery to each route's worst reachable path.
+    """Witness every registered route's worst reachable path, once each.
 
-    This is the independent confirmation master plan §16 requires. Every term is *measured by
-    execution*: the retry attempts by running the loop until it goes terminal, the cooldown continue
-    by running the cooldown path, and the redirect hops by driving the real resolver with in-family
-    candidates. Nothing is copied from `m3.request_plan`, so agreement between the two is evidence
-    rather than a tautology — and §17 stop condition 9 fires on disagreement.
-
-    A manifest-resolved route is measured the same way for retries and cooldown; its hop count is
-    zero because the resolver pins its path, which the measurement confirms by finding no lawful
-    in-family candidate to move to.
+    Every route in the registry gets a witness, including a route that plans zero requests:
+    Decision 029 §4.1 rules that **a zero `U(route)` never waives the independent `A_reachable`
+    witness**, because Gate F §9.3's arithmetic and Gate F §3.10's evidence obligation are separate
+    requirements. A route whose witness is structurally defective is recorded in the unmeasured map
+    rather than credited with a number, which withholds `a_reachable_fully_tested` and so withholds
+    the M3.1A token.
     """
     tested: dict[str, int] = {}
     unmeasured: dict[str, str] = {}
     for source_id in sorted(SOURCES):
-        retries = _measure_retry_attempts(source_id)
-        if retries == 0:
-            # The route placed no attempt at all, so there is no worst path to measure. The only
-            # route that can reach this today is the manifest-resolved announcement source with an
-            # empty accepted manifest -- which the spec states is lawful and yields zero instances.
-            # It is recorded as unmeasured rather than assumed equal to its derivation: copying the
-            # derived value would make the confirmation circular, and calling it a mismatch would
-            # be a false stop for a route that plans no request and so contributes nothing to any
-            # ceiling.
-            unmeasured[source_id] = (
-                "no lawful URL exists to exercise this route without a manifest entry, so no "
-                "attempt could be placed and its A_reachable is NOT independently tested. When "
-                "the approved calendar-evidence manifest is non-empty this route DOES contribute "
-                "to the window ceiling, so Gate F must not treat this as inert: master plan §16 "
-                "requires an independently tested bound for every route the ceiling counts"
-            )
+        if SOURCES[source_id].manifest_resolved:
+            with _rehearsal_manifest_resolution():
+                witness = _measure_full_path(source_id)
+        else:
+            witness = _measure_full_path(source_id)
+        if witness.defect is not None:
+            unmeasured[source_id] = f"{witness.defect}; observed: {witness.detail}"
             continue
-        cooldown = _measure_cooldown_continues(source_id)
-        hops = _measure_redirect_hops(source_id)
-        tested[source_id] = retries + cooldown + hops
+        tested[source_id] = witness.attempts
     return tested, unmeasured
 
 

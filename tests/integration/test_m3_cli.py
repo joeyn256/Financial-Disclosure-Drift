@@ -739,6 +739,7 @@ def _rehearse_in_process(
     evidence_root: Path,
     *,
     tested: dict[str, int],
+    unmeasured: dict[str, str] | None = None,
 ) -> int:
     """Run `m3 rehearse` in-process over a report whose tested bounds are supplied.
 
@@ -754,7 +755,7 @@ def _rehearse_in_process(
         outcomes=real.outcomes,
         derived_a_reachable=real.derived_a_reachable,
         tested_a_reachable=tested,
-        unmeasured_routes={},
+        unmeasured_routes=unmeasured or {},
     )
     monkeypatch.setattr(cli, "run_rehearsal", lambda _requested, **_kwargs: substituted)
     return cli.main(
@@ -811,6 +812,298 @@ def test_an_agreeing_a_reachable_bound_still_passes(
     assert code == EXIT_OK
     captured = capsys.readouterr()
     assert "A_reachable agrees : yes" in " ".join(captured.out.split())
+
+
+# --------------------------------------------------------------------------- #
+# Decision 029 §6: the token needs four conjuncts, not three
+# --------------------------------------------------------------------------- #
+def _agreeing_bounds() -> dict[str, int]:
+    from disclosure_drift.m3.request_plan import derive_a_reachable
+    from disclosure_drift.sec.source_registry import SOURCES
+
+    return {source_id: derive_a_reachable(spec) for source_id, spec in sorted(SOURCES.items())}
+
+
+def test_an_omitted_tested_route_is_a_gate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The exact hole Decision 029 §6 closes.
+
+    `a_reachable_agrees` quantifies over the *tested* keys, so a report that measures one route and
+    omits the other eight satisfies it vacuously. Before the correction that record emitted the
+    phase token; the ceiling it would have backed rests on eight untested bounds.
+    """
+    bounds = _agreeing_bounds()
+    one_route = {"sec_company_tickers": bounds["sec_company_tickers"]}
+
+    code = _rehearse_in_process(monkeypatch, evidence_root, tested=one_route)
+
+    assert code == EXIT_GATE_FAILURE
+    captured = capsys.readouterr()
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in captured.out
+    assert "absent from the tested set" in captured.err
+
+
+def test_a_forged_fully_tested_flag_beside_an_unmeasured_route_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`a_reachable_fully_tested` is derived from `unmeasured_routes`, so it cannot be forged here.
+
+    The route is both counted as tested and listed as unmeasured — a self-contradictory record. The
+    gate must refuse it rather than believe the more convenient half.
+    """
+    bounds = _agreeing_bounds()
+
+    code = _rehearse_in_process(
+        monkeypatch,
+        evidence_root,
+        tested=bounds,
+        unmeasured={"sec_edgar_calendar_announcement": "no witness was driven"},
+    )
+
+    assert code == EXIT_GATE_FAILURE
+    captured = capsys.readouterr()
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in captured.out
+    assert "no full-path witness" in captured.err
+
+
+def test_an_evidence_gap_records_the_decision_029_reason_not_an_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+) -> None:
+    """Decision 029 §5: a defective witness is an evidence-integrity failure, never an interruption.
+
+    A rehearsal places no request, so it can interrupt no acquisition. Recording
+    `SEC_ACQUISITION_INTERRUPTED` here would misreport a broken witness as a network event and
+    corrupt the one code Decision 028 §6 reserves for a real interruption.
+    """
+    bounds = _agreeing_bounds()
+
+    code = _rehearse_in_process(
+        monkeypatch,
+        evidence_root,
+        tested=bounds,
+        unmeasured={"sec_edgar_calendar_announcement": "no witness was driven"},
+    )
+    assert code == EXIT_GATE_FAILURE
+
+    receipt = json.loads((evidence_root / "receipts" / "bounds.json").read_text())
+    assert receipt["completion_status"] == "failed"
+    assert receipt["reason_code"] == "OFFLINE_REHEARSAL_SCENARIO_MISMATCH"
+    assert receipt["reason_code"] != "SEC_ACQUISITION_INTERRUPTED"
+    # The schema is untouched: Decision 029 registers a permitted value, not a schema element.
+    assert receipt["receipt_schema_version"] == "m3-execution-receipt/2.0"
+    assert receipt["actual_logical_request_count"] == 0
+    assert receipt["actual_physical_attempt_count"] == 0
+
+
+def test_a_stored_report_with_an_omitted_route_fails_inspection(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """`m3 rehearse-report` recomputes rather than trusts (Decision 029 §6).
+
+    The stored booleans all claim success; the record's own numbers do not support them.
+    """
+    first = _rehearse(repo_root, evidence_root)
+    assert first.returncode == EXIT_OK
+
+    stored = evidence_root / "reports" / "a1-a12.json"
+    document = json.loads(stored.read_text())
+    keep = sorted(document["tested_a_reachable"])[0]
+    document["tested_a_reachable"] = {keep: document["tested_a_reachable"][keep]}
+    forged = evidence_root / "reports" / "forged.json"
+    forged.write_text(json.dumps(document))
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/forged.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in result.stdout
+
+
+def test_a_stored_report_omitting_a_route_from_both_mappings_fails_inspection(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A record does not get to define its own route set (Decision 029 §6).
+
+    Deleting a route from the tested mapping alone is the easy forgery. The hard one deletes it
+    from *both* mappings: the two stored mappings then agree with each other perfectly, every
+    stored boolean is true, and `unmeasured_routes` is empty. Only recomputing the authoritative
+    nine-route derivation from the source registry refuses it.
+    """
+    first = _rehearse(repo_root, evidence_root)
+    assert first.returncode == EXIT_OK
+
+    stored = evidence_root / "reports" / "a1-a12.json"
+    document = json.loads(stored.read_text())
+    keep = sorted(document["derived_a_reachable"])[0]
+    document["derived_a_reachable"] = {keep: document["derived_a_reachable"][keep]}
+    document["tested_a_reachable"] = {keep: document["tested_a_reachable"][keep]}
+    document["unmeasured_routes"] = {}
+    document["a_reachable_agrees"] = True
+    document["a_reachable_fully_tested"] = True
+    forged = evidence_root / "reports" / "forged_both.json"
+    forged.write_text(json.dumps(document))
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/forged_both.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in result.stdout
+
+
+def test_a_stored_report_with_equal_but_wrong_bounds_fails_inspection(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Agreement with itself is not agreement with the derivation (Decision 029 §6).
+
+    Every route is present in both mappings and every pair matches, so a stored-versus-stored
+    comparison sees a flawless record. The values are simply not the ones the response-policy loop
+    derives — which is exactly the claim the M3.1A token is read as making.
+    """
+    first = _rehearse(repo_root, evidence_root)
+    assert first.returncode == EXIT_OK
+
+    stored = evidence_root / "reports" / "a1-a12.json"
+    document = json.loads(stored.read_text())
+    wrong = dict.fromkeys(document["derived_a_reachable"], 6)
+    assert wrong != document["derived_a_reachable"], "the 7/11 routes make this a real forgery"
+    document["derived_a_reachable"] = dict(wrong)
+    document["tested_a_reachable"] = dict(wrong)
+    document["unmeasured_routes"] = {}
+    document["a_reachable_agrees"] = True
+    document["a_reachable_fully_tested"] = True
+    forged = evidence_root / "reports" / "forged_equal_but_wrong.json"
+    forged.write_text(json.dumps(document))
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/forged_equal_but_wrong.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in result.stdout
+
+
+def test_a_stored_report_with_a_forged_fully_tested_flag_fails_inspection(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A non-empty `unmeasured_routes` refutes the flag beside it, whatever the flag says."""
+    first = _rehearse(repo_root, evidence_root)
+    assert first.returncode == EXIT_OK
+
+    stored = evidence_root / "reports" / "a1-a12.json"
+    document = json.loads(stored.read_text())
+    document["a_reachable_fully_tested"] = True
+    document["unmeasured_routes"] = {"sec_edgar_calendar_announcement": "not witnessed"}
+    forged = evidence_root / "reports" / "forged_flag.json"
+    forged.write_text(json.dumps(document))
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/forged_flag.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
+def test_an_unmodified_stored_report_still_inspects_clean(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The inverse control: the stricter inspection must not refuse a genuine record."""
+    first = _rehearse(repo_root, evidence_root)
+    assert first.returncode == EXIT_OK
+
+    stored = evidence_root / "reports" / "a1-a12.json"
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            f"reports/{stored.name}",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK
+    assert "A_reachable fully tested : yes" in " ".join(result.stdout.split())
+
+
+def test_the_operator_manifest_branch_does_not_change_the_witness_requirement(
+    repo_root: Path, evidence_root: Path, tmp_path: Path
+) -> None:
+    """Decision 029 §4.1: the witness survives unchanged in both manifest branches.
+
+    An empty approved manifest makes `U(sec_edgar_calendar_announcement)` zero and a non-empty one
+    makes it positive, so the route's *ceiling contribution* differs — but Gate F §3.10's evidence
+    obligation does not, and the rehearsal never reads the operator manifest at all.
+    """
+    # A separate root per branch: the manifest is a write-once artifact, so one root cannot hold
+    # both an empty and a populated version of it.
+    populated_root = tmp_path / "populated-evidence"
+    populated_root.mkdir()
+
+    empty = _plan(repo_root, evidence_root, "plans/branch.json", approved_entries=0)
+    populated = _plan(repo_root, populated_root, "plans/branch.json", approved_entries=2)
+    assert empty.returncode == EXIT_OK
+    assert populated.returncode == EXIT_OK
+
+    def _announcement_count(root: Path) -> int:
+        document = json.loads((root / "plans" / "branch.json").read_text())
+        route = next(
+            row
+            for row in document["routes"]
+            if row["source_id"] == "sec_edgar_calendar_announcement"
+        )
+        return int(route["planned_unique_logical_requests"])
+
+    assert _announcement_count(evidence_root) == 0
+    assert _announcement_count(populated_root) == 2
+
+    rehearsed = _rehearse(repo_root, evidence_root)
+    assert rehearsed.returncode == EXIT_OK
+    report = json.loads((evidence_root / "reports" / "a1-a12.json").read_text())
+    assert report["unmeasured_routes"] == {}
+    assert report["a_reachable_fully_tested"] is True
+    assert report["tested_a_reachable"]["sec_edgar_calendar_announcement"] == 6
 
 
 # --------------------------------------------------------------------------- #

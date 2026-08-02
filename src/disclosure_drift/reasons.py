@@ -87,6 +87,7 @@ _D016: Final = "Docs/Decisions/decision_016_m23_schema_and_artifact_architecture
 _D018: Final = "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"
 _D020: Final = "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
 _D028: Final = "Docs/Decisions/decision_028_m3_1_readiness_corrections.md"
+_D029: Final = "Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -773,6 +774,19 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "transfer.",
         blocks_release=True,
         decision_reference=_D028,
+    ),
+    _code(
+        "OFFLINE_REHEARSAL_SCENARIO_MISMATCH",
+        "integrity",
+        "An offline rehearsal scenario did not reach the state its specification names — a "
+        "scripted path ending in the wrong terminal condition, a worst-path witness whose "
+        "observed attempt count disagrees with the state machine, or a report whose tested "
+        "route key set omits a derived route. It is an integrity failure of the evidence, "
+        "not of acquisition: SEC_ACQUISITION_INTERRUPTED stays reserved for a genuine "
+        "acquisition interruption and never stands in for a defective witness. Decision 029 "
+        "rules requires_manual_review false; blocks_release is what stops a release here.",
+        blocks_release=True,
+        decision_reference=_D029,
     ),
     _code(
         "SEC_RESPONSE_EMPTY",

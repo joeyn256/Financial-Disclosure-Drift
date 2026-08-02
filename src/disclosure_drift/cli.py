@@ -39,11 +39,12 @@ from disclosure_drift.m3.receipt import (
     write_receipt,
 )
 from disclosure_drift.m3.recovery import inspect_recovery_state
-from disclosure_drift.m3.rehearsal import SCENARIO_IDS, run_rehearsal
+from disclosure_drift.m3.rehearsal import SCENARIO_IDS, RehearsalReport, run_rehearsal
 from disclosure_drift.m3.request_plan import (
     REQUEST_PLAN_SCHEMA_VERSION,
     build_m3_2a_request_plan,
     canonical_plan_bytes,
+    derive_a_reachable,
     request_plan_from_document,
 )
 from disclosure_drift.paths import PathPolicyError
@@ -53,7 +54,7 @@ from disclosure_drift.sec.index_plan import (
     CoverageWindow,
     plan_index_instances,
 )
-from disclosure_drift.sec.source_registry import M22_SOURCE_REGISTRY_VERSION
+from disclosure_drift.sec.source_registry import M22_SOURCE_REGISTRY_VERSION, SOURCES
 from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
 
 __all__ = ["build_parser", "main", "run"]
@@ -724,8 +725,6 @@ def _census_dry_run(
             boundary. It is used as given: this helper never rebuilds it from argparse
             values and never substitutes today's date.
     """
-    from disclosure_drift.sec.source_registry import SOURCES  # noqa: PLC0415
-
     tree = config.data_tree()
     print("SEC metadata census dry run valid.")
     print("  requests made          : 0")
@@ -1102,6 +1101,7 @@ def _m3_rehearse_command(
         ("all twelve run", "yes" if report.complete else "no"),
         ("every scenario passed", "yes" if report.passed else "no"),
         ("A_reachable agrees", "yes" if report.a_reachable_agrees else "no"),
+        ("A_reachable fully tested", "yes" if report.a_reachable_fully_tested else "no"),
         ("routes measured", str(len(report.tested_a_reachable))),
         ("routes unmeasurable", str(len(report.unmeasured_routes))),
         ("simulated logical requests", str(report.simulated_logical_requests)),
@@ -1137,9 +1137,14 @@ def _m3_rehearse_command(
         actual_physical_attempt_count=0,
         schema_drift_outcome="none",
         schema_drift_event_count=0,
-        completion_status="complete" if report.passed else "failed",
-        reason_code=None if report.passed else "SEC_ACQUISITION_INTERRUPTED",
-        reason_detail=None if report.passed else "a rehearsal scenario did not pass.",
+        # Decision 029 §5: a rehearsal that does not reach the state the specification names is an
+        # integrity failure of the *evidence*, so it carries its own code.
+        # `SEC_ACQUISITION_INTERRUPTED` stays reserved for a genuine acquisition interruption and
+        # never stands in for a defective witness — a rehearsal interrupts no acquisition, because
+        # it places no request.
+        completion_status="complete" if _rehearsal_sound(report) else "failed",
+        reason_code=(None if _rehearsal_sound(report) else "OFFLINE_REHEARSAL_SCENARIO_MISMATCH"),
+        reason_detail=(None if _rehearsal_sound(report) else _rehearsal_receipt_detail(report)),
         rehearsal_evidence_reference=report.evidence_reference,
     )
     written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
@@ -1149,25 +1154,16 @@ def _m3_rehearse_command(
     if not report.passed:
         logger.error("m3 rehearse: a scenario failed; the phase does not pass")
         return EXIT_GATE_FAILURE
-    # Master plan §17 stop condition 9: a disagreement between the derived and the independently
-    # measured `A_reachable` is a phase stop, not a printed footnote. Printing it while emitting
-    # the token would let a run whose worst-path bound is unproven claim M3.1A passed.
-    if not report.a_reachable_agrees:
-        disagreements = sorted(
-            source_id
-            for source_id, tested in report.tested_a_reachable.items()
-            if report.derived_a_reachable[source_id] != tested
-        )
-        logger.error(
-            "m3 rehearse: the derived and independently tested A_reachable bounds disagree for %s",
-            ", ".join(disagreements),
-        )
-        print(
-            "  A_reachable disagreement    : "
-            + ", ".join(disagreements)
-            + " (derived and independently tested bounds must agree)",
-            file=sys.stderr,
-        )
+    # Master plan §17 stop condition 9 and Decision 029 §6: the token requires four conjuncts, and
+    # two of them are about `A_reachable`. `a_reachable_agrees` quantifies only over the routes that
+    # *were* measured, so a route excluded into `unmeasured_routes` would be silently skipped rather
+    # than failing the gate — which is exactly how an unproven worst-path bound could claim M3.1A
+    # passed. `a_reachable_fully_tested` closes that, and the key-set equality below closes the case
+    # where a report is measured but omits a derived route.
+    if not _rehearsal_sound(report):
+        detail = _rehearsal_mismatch_detail(report)
+        logger.error("m3 rehearse: %s", detail)
+        print(f"  A_reachable evidence gap    : {detail}", file=sys.stderr)
         return EXIT_GATE_FAILURE
     if not report.complete:
         logger.warning("m3 rehearse: a subset ran, so no completion token is emitted")
@@ -1212,7 +1208,15 @@ def _m3_rehearse_report_command(
     recorded_ids = [str(entry.get("scenario_id")) for entry in recorded]
     complete = sorted(recorded_ids) == sorted(SCENARIO_IDS)
     passed = bool(recorded) and all(bool(entry.get("passed")) for entry in recorded)
-    agrees = bool(document.get("a_reachable_agrees")) and _bounds_agree(document)
+    # Recomputed, never trusted (Decision 029 §6): the stored booleans are claims about the record,
+    # and `_bounds_agree` re-derives the authoritative key set, exact key equality, the emptiness of
+    # `unmeasured_routes`, and numeric agreement from the record's own numbers. A forged
+    # `a_reachable_fully_tested: true` beside a non-empty `unmeasured_routes` fails here.
+    agrees = (
+        bool(document.get("a_reachable_agrees"))
+        and bool(document.get("a_reachable_fully_tested"))
+        and _bounds_agree(document)
+    )
 
     claimed_complete = bool(document.get("complete"))
     claimed_passed = bool(document.get("passed"))
@@ -1257,11 +1261,18 @@ def _m3_rehearse_report_command(
         ("every scenario passed", "yes" if passed else "no"),
         ("identity non-contamination", non_contamination),
         ("A_reachable agrees", "yes" if agrees else "no"),
+        (
+            "A_reachable fully tested",
+            "yes" if _bounds_agree(document) else "no",
+        ),
     ):
         print(f"  {label:<28}: {value}")
 
     if not (complete and passed and agrees):
-        logger.error("m3 rehearse-report: the record is not a complete passing A1-A12 record")
+        logger.error(
+            "m3 rehearse-report: the record is not a complete passing A1-A12 record with an "
+            "independently tested A_reachable for every derived route"
+        )
         return EXIT_GATE_FAILURE
     logger.info("m3 rehearse-report: complete passing record")
     return EXIT_OK
@@ -1516,18 +1527,104 @@ def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple
         chain.append(identifier)
 
 
-def _bounds_agree(document: Mapping[str, object]) -> bool:
-    """Recompute derived-versus-tested agreement from the recorded bounds.
+def _rehearsal_sound(report: RehearsalReport) -> bool:
+    """Whether the rehearsal's `A_reachable` evidence is complete as well as consistent.
 
-    The report carries an `a_reachable_agrees` boolean, but a gate that reads only that boolean
-    would accept a record whose own numbers disagree. Master plan §17 item 9 makes a disagreement a
-    stop condition, so the numbers are compared here as well.
+    Decision 029 §6. Three separate things can be wrong, and only the first was ever checked:
+    a measured bound can disagree with its derivation; a route can be excluded from measurement
+    altogether; and a measured set can silently omit a route the derivation counts. A gate reading
+    only `a_reachable_agrees` passes the last two, because that property quantifies over the tested
+    keys rather than the derived ones.
     """
+    return (
+        report.passed
+        and report.a_reachable_agrees
+        and report.a_reachable_fully_tested
+        and set(report.tested_a_reachable) == set(report.derived_a_reachable)
+    )
+
+
+def _rehearsal_mismatch_detail(report: RehearsalReport) -> str:
+    """Say exactly which routes are missing, unmeasured, or disagreeing."""
+    problems: list[str] = []
+    if not report.passed:
+        failed = sorted(outcome.scenario_id for outcome in report.outcomes if not outcome.passed)
+        problems.append(f"scenario(s) failed: {', '.join(failed)}")
+    disagreements = sorted(
+        source_id
+        for source_id, tested in report.tested_a_reachable.items()
+        if report.derived_a_reachable.get(source_id) != tested
+    )
+    if disagreements:
+        problems.append(
+            "derived and independently tested A_reachable disagree for " + ", ".join(disagreements)
+        )
+    if report.unmeasured_routes:
+        problems.append("no full-path witness for " + ", ".join(sorted(report.unmeasured_routes)))
+    missing = sorted(set(report.derived_a_reachable) - set(report.tested_a_reachable))
+    if missing:
+        problems.append("derived route(s) absent from the tested set: " + ", ".join(missing))
+    extra = sorted(set(report.tested_a_reachable) - set(report.derived_a_reachable))
+    if extra:
+        problems.append("tested route(s) absent from the derived set: " + ", ".join(extra))
+    if not problems:  # pragma: no cover - only reached when the report is sound
+        return "no defect recorded"
+    return "; ".join(problems)
+
+
+def _rehearsal_receipt_detail(report: RehearsalReport) -> str:
+    """The same finding, compressed to the one short single-line sentence §4.8 permits.
+
+    The stderr diagnostic names every affected route so an operator can act on it; a receipt field
+    is bounded at 200 characters, so it counts rather than enumerates. The evidence report the
+    receipt references carries the full picture, which is where a reader is sent for it.
+    """
+    failed = sum(1 for outcome in report.outcomes if not outcome.passed)
+    disagreeing = sum(
+        1
+        for source_id, tested in report.tested_a_reachable.items()
+        if report.derived_a_reachable.get(source_id) != tested
+    )
+    unwitnessed = len(report.unmeasured_routes)
+    missing = len(set(report.derived_a_reachable) - set(report.tested_a_reachable))
+    return (
+        f"the rehearsal did not reach its specified state: {failed} failing scenario(s), "
+        f"{disagreeing} disagreeing bound(s), {unwitnessed} unwitnessed route(s), "
+        f"{missing} untested derived route(s)."
+    )
+
+
+def _bounds_agree(document: Mapping[str, object]) -> bool:
+    """Recompute the authoritative derived bounds and check the stored record against them.
+
+    The report carries `a_reachable_agrees` and `a_reachable_fully_tested` booleans, but a gate that
+    reads either would accept a record whose own numbers contradict it. Master plan §17 item 9 and
+    Decision 029 §6 make all three of disagreement, an unmeasured route, and an omitted route stop
+    conditions.
+
+    **A record does not get to define its own route set.** Comparing the two stored mappings to each
+    other is not enough: a document naming one route in both mappings, with equal values and an
+    empty `unmeasured_routes`, satisfies every stored-versus-stored comparison while withholding
+    eight routes. So the derivation is recomputed here from the source registry — the same
+    :func:`derive_a_reachable` over the same `SOURCES` the rehearsal itself derives from — and the
+    record must reproduce it exactly, key for key and value for value, before its tested mapping is
+    consulted at all. Equal-but-wrong bounds fail against the recomputation even though they agree
+    with each other.
+    """
+    authoritative = {source_id: derive_a_reachable(spec) for source_id, spec in SOURCES.items()}
     derived = document.get("derived_a_reachable")
     tested = document.get("tested_a_reachable")
+    unmeasured = document.get("unmeasured_routes", {})
     if not isinstance(derived, Mapping) or not isinstance(tested, Mapping):
         return False
-    return all(derived.get(source_id) == bound for source_id, bound in tested.items())
+    if not isinstance(unmeasured, Mapping) or unmeasured:
+        return False
+    if set(derived) != set(authoritative) or set(tested) != set(authoritative):
+        return False
+    return all(
+        derived.get(source_id) == bound and tested.get(source_id) == bound
+        for source_id, bound in authoritative.items()
+    )
 
 
 def _budget_value(totals: object, key: str) -> object:

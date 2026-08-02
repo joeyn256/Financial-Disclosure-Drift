@@ -20,7 +20,7 @@ Every command in this runbook carries exactly one label.
 |---|---|
 | **`AVAILABLE NOW`** | Implemented and accepted today. Safe to run as written. |
 | **`IMPLEMENTED (M3.1)`** | Exists and runs. Implemented by the bounded Milestone 3.1 contract against the interface stated here. |
-| **`IMPLEMENTED (M3.1)`** | Does not exist. Its interface contract is stated so a bounded M3.1 contract implements this interface rather than inventing one. |
+| **`PLANNED — NOT YET IMPLEMENTED (M3.1)`** | Does not exist. Its interface contract is stated so a bounded M3.1 contract implements this interface rather than inventing one. |
 | **`PLANNED — NOT YET IMPLEMENTED (M3.2)`** | Does not exist. Same rule, for M3.2. |
 | **`MANUAL OWNER APPROVAL`** | Not a command. A decision the owner records in a template under [`templates/`](templates/request_budget.md). |
 | **`VERIFICATION`** | A read-only check whose output is compared against an expectation. |

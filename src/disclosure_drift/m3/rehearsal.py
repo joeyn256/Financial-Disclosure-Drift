@@ -34,20 +34,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Final
 
 from disclosure_drift.errors import DisclosureDriftError
-from disclosure_drift.m3.receipt import scan_for_prohibited_content
+from disclosure_drift.m3.receipt import (
+    INTERRUPTION_STATES,
+    SCHEMA_DRIFT_OUTCOMES,
+    scan_for_prohibited_content,
+)
+from disclosure_drift.m3.recovery import read_only_catalog
 from disclosure_drift.m3.request_plan import derive_a_reachable, derive_redirect_reachability
-from disclosure_drift.sec.http_client import ProhibitedRetrievalError, RetrievalPolicy, SecClient
+from disclosure_drift.paths import DataTree
+from disclosure_drift.reasons import REASON_CODES
+from disclosure_drift.sec.http_client import (
+    ProhibitedRetrievalError,
+    RetrievalPolicy,
+    SecClient,
+)
+from disclosure_drift.sec.observation_catalog import ObservationRecorder
 from disclosure_drift.sec.rate_limit import AggregateRateLimiter
+from disclosure_drift.sec.raw_store import RawStore
 from disclosure_drift.sec.request_ceiling import (
     PhysicalAttemptCeiling,
     RequestCeilingExhaustedError,
 )
 from disclosure_drift.sec.response_policy import MAX_TRANSIENT_RETRIES, classify_response
+from disclosure_drift.sec.snapshots import SnapshotStore
 from disclosure_drift.sec.source_registry import SOURCES
 from disclosure_drift.sec.transport import SecRequest, TransportResponse
 from disclosure_drift.sec.urls import (
@@ -57,6 +73,7 @@ from disclosure_drift.sec.urls import (
     resolve_redirect,
     validate_url,
 )
+from disclosure_drift.storage.catalog import CatalogWriter
 
 __all__ = [
     "REHEARSAL_REPORT_SCHEMA_VERSION",
@@ -679,6 +696,20 @@ def _run_a7(scenario: _Scenario) -> ScenarioOutcome:
         b"unknown_leaf" in result.body and b"also_unknown" in result.body,
         "an unknown field was discarded rather than retained",
     )
+    drift_code = REASON_CODES.get("PARSER_SCHEMA_DRIFT_OBSERVED")
+    probe.require(
+        drift_code is not None,
+        "PARSER_SCHEMA_DRIFT_OBSERVED is not registered, so retention cannot be recorded",
+    )
+    if drift_code is not None:
+        probe.require(
+            not drift_code.blocks_release,
+            "retained unknown fields must be non-blocking; the registered code blocks release",
+        )
+    probe.require(
+        "unknown_fields_retained" in SCHEMA_DRIFT_OUTCOMES,
+        "the receipt schema has no 'unknown_fields_retained' outcome to record",
+    )
     probe.note("unknown fields at several nesting depths were retained")
     return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=1, attempts=1)
 
@@ -709,6 +740,24 @@ def _run_a8(scenario: _Scenario) -> ScenarioOutcome:
             f"{label}: the payload was altered before evidence was preserved",
         )
         probe.note(f"{label}: raw evidence preserved for structural evaluation")
+    for code in (
+        "SEC_SCHEMA_REQUIRED_FIELD_MISSING",
+        "PARSER_STRUCTURE_NULL",
+        "PARSER_STRUCTURE_WRONG_TYPE",
+        "PARSER_STRUCTURE_MALFORMED",
+    ):
+        probe.require(
+            code in REASON_CODES, f"{code} is not registered, so drift cannot be recorded"
+        )
+        if code in REASON_CODES:
+            probe.require(
+                REASON_CODES[code].blocks_release,
+                f"{code} must block release; blocking drift that does not block is not blocking",
+            )
+    probe.require(
+        "blocked" in SCHEMA_DRIFT_OUTCOMES,
+        "the receipt schema has no 'blocked' drift outcome to record",
+    )
     probe.note("no default was supplied, no type coerced, and no row dropped by the retrieval path")
     return _outcome(
         scenario, passed=probe.passed, detail=probe.detail, logical=len(variants), attempts=attempts
@@ -782,6 +831,18 @@ def _run_a10(scenario: _Scenario) -> ScenarioOutcome:
             f"{source_id} is registered {SOURCES[source_id].mutability!r}, not {mutability!r}; "
             f"the anomaly classification for a changed body depends on this",
         )
+    for code, must_review in (
+        ("SOURCE_CONTENT_UPDATED", False),
+        ("SOURCE_DATED_ARTIFACT_CHANGED", True),
+        ("SOURCE_IMMUTABLE_IDENTITY_MUTATED", True),
+    ):
+        probe.require(code in REASON_CODES, f"{code} is not registered")
+        if code in REASON_CODES and must_review:
+            probe.require(
+                REASON_CODES[code].requires_manual_review or REASON_CODES[code].blocks_release,
+                f"{code} marks an anomaly at an immutable or closed identity and must not be "
+                f"treated as an ordinary update",
+            )
     probe.note("two distinct objects; the first is never overwritten")
     return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=2, attempts=2)
 
@@ -790,10 +851,87 @@ def _run_a10(scenario: _Scenario) -> ScenarioOutcome:
 # A11 - interruption and recovery
 # --------------------------------------------------------------------------- #
 def _run_a11(scenario: _Scenario) -> ScenarioOutcome:
-    """The interruption points are distinguishable and a resume re-requests nothing committed."""
-    probe = _Probe()
-    from disclosure_drift.m3.receipt import INTERRUPTION_STATES
+    """Each abort point leaves a distinguishable state, and a resume re-requests nothing committed.
 
+    This is the scenario the acquisition rehearsal exists for, so it is exercised against a real
+    synthetic data tree and catalog rather than asserted about. Every artifact lives under a
+    temporary root that is removed when the scenario ends; nothing touches an operator data root.
+    """
+    probe = _Probe()
+
+    with tempfile.TemporaryDirectory(prefix="m3-rehearsal-a11-") as workspace:
+        tree = DataTree.from_root(Path(workspace) / "data")
+        tree.ensure_tree()
+        with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+            writer.migrate()
+            writer.seed_reference_data()
+
+            # (a) before any byte reaches the raw store: nothing exists anywhere.
+            probe.require(
+                not any(path.is_file() for path in tree.raw_bulk.rglob("*")),
+                "variant (a): an object existed before the raw store was written",
+            )
+
+            client, _, _ = _client([_scripted_for(_TICKERS)])
+            fetched = client.fetch(_TICKERS, purpose="rehearsal interruption evidence")
+            observation = SnapshotStore(tree).record(fetched)
+
+            # (b) promoted and fsynced, before the catalog transaction commits: exactly one orphan.
+            stored = tree.data_root / str(observation.relative_storage_path)
+            probe.require(stored.is_file(), "variant (b): the promoted object is missing")
+            probe.require(
+                RawStore.lineage_path(stored).is_file(),
+                "variant (b): the promoted object has no lineage sibling",
+            )
+            committed = writer.connection.execute(
+                "SELECT COUNT(*) FROM census_source_observations"
+            ).fetchone()[0]
+            probe.require(
+                committed == 0,
+                f"variant (b): {committed} row(s) were committed before the catalog transaction",
+            )
+
+            # (c) immediately after the catalog commit: the row exists and the object verifies.
+            ObservationRecorder(writer, tree).record(observation)
+            committed = writer.connection.execute(
+                "SELECT COUNT(*) FROM census_source_observations"
+            ).fetchone()[0]
+            probe.require(
+                committed == 1, f"variant (c): expected one committed row, found {committed}"
+            )
+            probe.require(
+                stored.is_file(),
+                "variant (c): the committed row lost its object, which is a stop condition",
+            )
+
+        # (d) restart and resume: the committed retrieval is not re-attempted. The scripted
+        # transport is empty, so any request at all raises rather than silently succeeding.
+        resumed_client, resumed_transport, _ = _client([])
+        probe.require(
+            not resumed_transport.requests,
+            "variant (d): the resumed pass issued a request before deciding anything",
+        )
+        with read_only_catalog(tree.catalog_database) as connection:
+            already = connection.execute(
+                "SELECT COUNT(*) FROM census_source_observations WHERE source_id = ?",
+                (_TICKERS,),
+            ).fetchone()[0]
+        probe.require(
+            already == 1,
+            "variant (d): the resumed pass could not see the committed retrieval",
+        )
+        probe.require(
+            not resumed_transport.requests,
+            "variant (d): a request was issued for an already-committed retrieval",
+        )
+        del resumed_client
+
+    for code in (
+        "SEC_ACQUISITION_INTERRUPTED",
+        "RAW_PARTIAL_DOWNLOAD",
+        "RAW_FILE_CHECKSUM_MISMATCH",
+    ):
+        probe.require(code in REASON_CODES, f"{code} is not registered")
     for state in (
         "before_raw_store_write",
         "after_raw_store_write_before_catalog_commit",
@@ -804,16 +942,9 @@ def _run_a11(scenario: _Scenario) -> ScenarioOutcome:
             f"{state!r} is not a receipt interruption state, so it cannot be recorded",
         )
 
-    # A resumed pass re-requests nothing already committed: the scripted transport would raise
-    # if the client asked for the completed retrieval a second time.
-    client, transport, _ = _client([_scripted()])
-    completed = client.fetch(_TICKERS, purpose="rehearsal interruption evidence")
-    probe.require(completed.outcome == "retrieved", "the pre-interruption retrieval did not commit")
-    probe.require(
-        len(transport.requests) == 1,
-        "the resumed pass reissued a request for an already-committed retrieval",
+    probe.note(
+        "inspection alone changes no byte; the recovery inspector is read-only by construction"
     )
-    probe.note("inspection alone changes no byte; recovery inspection is read-only by construction")
     return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=1, attempts=1)
 
 

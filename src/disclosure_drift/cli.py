@@ -1162,12 +1162,45 @@ def _m3_rehearse_report_command(
     complete = bool(document.get("complete"))
     passed = bool(document.get("passed"))
     agrees = bool(document.get("a_reachable_agrees"))
+
+    # §9 requires the non-contamination result and the derived/tested route bounds, not just the
+    # matrix: those two are what Gate F items 3.7 and 3.10 are read from.
+    scenarios = document.get("scenarios", [])
+    a12 = next(
+        (
+            entry
+            for entry in (scenarios if isinstance(scenarios, list) else [])
+            if isinstance(entry, dict) and entry.get("scenario_id") == "A12"
+        ),
+        None,
+    )
+    non_contamination = (
+        "not recorded" if a12 is None else ("passed" if a12.get("passed") else "FAILED")
+    )
+
+    derived = document.get("derived_a_reachable", {})
+    tested = document.get("tested_a_reachable", {})
+    unmeasured = document.get("unmeasured_routes", {})
+    if isinstance(derived, dict) and isinstance(tested, dict):
+        print("\n  route bounds (derived vs independently tested)")
+        for source_id in sorted(derived):
+            measured = tested.get(source_id, "not measured")
+            agreement = "agrees" if tested.get(source_id) == derived[source_id] else "-"
+            print(
+                f"    {source_id:<34} derived {derived[source_id]!s:>3}  "
+                f"tested {measured!s:>12}  {agreement}"
+            )
+    if isinstance(unmeasured, dict):
+        for source_id, reason in sorted(unmeasured.items()):
+            print(f"    unmeasurable: {source_id} ({reason})")
+
     for label, value in (
         ("all twelve recorded", "yes" if complete else "no"),
         ("every scenario passed", "yes" if passed else "no"),
+        ("identity non-contamination", non_contamination),
         ("A_reachable agrees", "yes" if agrees else "no"),
     ):
-        print(f"  {label:<24}: {value}")
+        print(f"  {label:<28}: {value}")
 
     if not (complete and passed and agrees):
         logger.error("m3 rehearse-report: the record is not a complete passing A1-A12 record")

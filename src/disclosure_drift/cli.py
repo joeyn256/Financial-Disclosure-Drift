@@ -39,7 +39,7 @@ from disclosure_drift.m3.receipt import (
     write_receipt,
 )
 from disclosure_drift.m3.recovery import inspect_recovery_state
-from disclosure_drift.m3.rehearsal import run_rehearsal
+from disclosure_drift.m3.rehearsal import SCENARIO_IDS, run_rehearsal
 from disclosure_drift.m3.request_plan import (
     REQUEST_PLAN_SCHEMA_VERSION,
     build_m3_2a_request_plan,
@@ -216,7 +216,7 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     rehearse.add_argument(
         "--evidence-out",
         type=Path,
-        default=None,
+        required=True,
         metavar="RELATIVE_PATH",
         help="Where to write the rehearsal evidence report, relative to --evidence-root.",
     )
@@ -278,15 +278,8 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         metavar="RELATIVE_PATH",
         help=(
             "The operational catalog, read only, to exclude already-satisfied index instances "
-            "before planning. Relative to --data-root."
+            "before planning. Relative to --evidence-root, like every other artifact argument."
         ),
-    )
-    plan_requests.add_argument(
-        "--data-root",
-        type=Path,
-        required=True,
-        metavar="PATH",
-        help="The data root the catalog lives under.",
     )
     plan_requests.add_argument(
         "--include-open-quarter",
@@ -358,8 +351,8 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         "--data-root",
         type=Path,
         required=True,
-        metavar="PATH",
-        help="The data root whose raw store is inspected.",
+        metavar="RELATIVE_PATH",
+        help="The data root whose raw store is inspected, relative to --evidence-root.",
     )
 
 
@@ -1098,11 +1091,10 @@ def _m3_rehearse_command(
     for source_id, reason in sorted(report.unmeasured_routes.items()):
         print(f"  unmeasurable route          : {source_id} ({reason})")
 
-    if args.evidence_out is not None:
-        destination = _m3_artifact_path(evidence_root, args.evidence_out)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(report.canonical_bytes())
-        print(f"  evidence written            : {args.evidence_out}")
+    evidence_written = _m3_artifact_path(evidence_root, args.evidence_out)
+    evidence_written.parent.mkdir(parents=True, exist_ok=True)
+    evidence_written.write_bytes(report.canonical_bytes())
+    print(f"  evidence written            : {args.evidence_out}")
 
     receipt = ExecutionReceipt(
         command_name="m3 rehearse",
@@ -1137,9 +1129,15 @@ def _m3_rehearse_command(
         return EXIT_OK
     # The token is emitted only after the receipt exists on disk: the phase claims a rehearsal
     # passed, and a passing rehearsal that produced no evidence is an incomplete command.
-    if not written.is_file():  # pragma: no cover - the write above raises on failure
-        message = "the rehearsal receipt was not written; the phase produces no completion token"
-        raise GateFailureError(message)
+    # The token is emitted only when BOTH artifacts exist. The receipt's
+    # `rehearsal_evidence_reference` names the report, and the simulated totals live only there, so
+    # a token backed by a receipt pointing at a missing report claims evidence that does not exist.
+    for label, artifact in (("receipt", written), ("evidence report", evidence_written)):
+        if not artifact.is_file():  # pragma: no cover - the writes above raise on failure
+            message = (
+                f"the rehearsal {label} was not written; the phase produces no completion token"
+            )
+            raise GateFailureError(message)
     print(f"\n{M3_1A_COMPLETION_TOKEN}")
     logger.info("m3 rehearse: all twelve scenarios passed")
     return EXIT_OK
@@ -1159,13 +1157,28 @@ def _m3_rehearse_report_command(
             status = "PASS" if entry.get("passed") else "FAIL"
             print(f"  {str(entry.get('scenario_id')):<4} {status}  {entry.get('title')}")
 
-    complete = bool(document.get("complete"))
-    passed = bool(document.get("passed"))
-    agrees = bool(document.get("a_reachable_agrees"))
+    # Derived from the scenario list, never from the stored booleans: a report claiming
+    # `passed: true` while listing a failed scenario must not exit 0.
+    recorded = [
+        entry
+        for entry in (scenarios if isinstance(scenarios, list) else [])
+        if isinstance(entry, dict)
+    ]
+    recorded_ids = [str(entry.get("scenario_id")) for entry in recorded]
+    complete = sorted(recorded_ids) == sorted(SCENARIO_IDS)
+    passed = bool(recorded) and all(bool(entry.get("passed")) for entry in recorded)
+    agrees = bool(document.get("a_reachable_agrees")) and _bounds_agree(document)
+
+    claimed_complete = bool(document.get("complete"))
+    claimed_passed = bool(document.get("passed"))
+    if (claimed_complete, claimed_passed) != (complete, passed):
+        print(
+            "  record inconsistent: its summary disagrees with its own scenario list",
+            file=sys.stderr,
+        )
 
     # §9 requires the non-contamination result and the derived/tested route bounds, not just the
     # matrix: those two are what Gate F items 3.7 and 3.10 are read from.
-    scenarios = document.get("scenarios", [])
     a12 = next(
         (
             entry
@@ -1217,8 +1230,9 @@ def _m3_plan_requests_command(
 ) -> int:
     """Derive the M3.2A request plan. Constructs no transport and makes zero requests."""
     entry_count = _calendar_manifest_entry_count(evidence_root, args.calendar_evidence_manifest)
-    data_root = Path(args.data_root).expanduser()
-    satisfied = _already_satisfied_index_keys(data_root / args.catalog)
+    # §9: every artifact argument is a path below the resolved evidence root, so the catalog is
+    # located there too rather than at an arbitrary absolute location outside the boundary.
+    satisfied = _already_satisfied_index_keys(_m3_artifact_path(evidence_root, args.catalog))
 
     started = _utc_now()
     plan = build_m3_2a_request_plan(
@@ -1376,7 +1390,7 @@ def _m3_recovery_state_command(
         requests_per_second=float(inputs["requests_per_second"]),
     )
 
-    data_root = Path(args.data_root).expanduser()
+    data_root = _m3_artifact_path(evidence_root, args.data_root)
     state = inspect_recovery_state(
         plan=plan,
         receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
@@ -1450,6 +1464,20 @@ def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple
             raise ReceiptValidationError(message) from exc
         visited.add(identifier)
         chain.append(identifier)
+
+
+def _bounds_agree(document: Mapping[str, object]) -> bool:
+    """Recompute derived-versus-tested agreement from the recorded bounds.
+
+    The report carries an `a_reachable_agrees` boolean, but a gate that reads only that boolean
+    would accept a record whose own numbers disagree. Master plan §17 item 9 makes a disagreement a
+    stop condition, so the numbers are compared here as well.
+    """
+    derived = document.get("derived_a_reachable")
+    tested = document.get("tested_a_reachable")
+    if not isinstance(derived, Mapping) or not isinstance(tested, Mapping):
+        return False
+    return all(derived.get(source_id) == bound for source_id, bound in tested.items())
 
 
 def _budget_value(totals: object, key: str) -> object:
@@ -1560,8 +1588,14 @@ def _read_json_artifact(evidence_root: Path, relative: Path) -> dict[str, object
     path = _m3_artifact_path(evidence_root, relative)
     try:
         document = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        message = f"artifact {path.name!r} is not readable UTF-8 JSON: {exc}"
+    except OSError as exc:
+        # `str(OSError)` embeds the absolute filename. Master plan §17 stop condition 12 and
+        # contract §9 both forbid printing one, and this helper feeds four commands' error paths,
+        # so the class of leak is closed here rather than at each call site.
+        message = f"artifact {Path(relative).name!r} could not be read ({type(exc).__name__})"
+        raise GateFailureError(message) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        message = f"artifact {Path(relative).name!r} is not readable UTF-8 JSON: {exc}"
         raise GateFailureError(message) from exc
     if not isinstance(document, dict):
         message = f"artifact {path.name!r} is not a JSON object"

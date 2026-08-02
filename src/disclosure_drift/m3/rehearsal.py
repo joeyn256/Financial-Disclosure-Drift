@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final
@@ -47,7 +47,7 @@ from disclosure_drift.m3.receipt import (
     scan_for_prohibited_content,
 )
 from disclosure_drift.m3.recovery import read_only_catalog
-from disclosure_drift.m3.request_plan import derive_a_reachable, derive_redirect_reachability
+from disclosure_drift.m3.request_plan import derive_a_reachable
 from disclosure_drift.paths import DataTree
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.http_client import (
@@ -305,6 +305,16 @@ class RehearsalReport:
         return tuple(outcome.scenario_id for outcome in self.outcomes) == SCENARIO_IDS
 
     @property
+    def a_reachable_fully_tested(self) -> bool:
+        """Whether every registered route's bound was independently tested.
+
+        `a_reachable_agrees` speaks only for the routes that were measured. A route the ceiling
+        counts but no test exercised is a gap in the Gate F evidence, not a pass, so it is reported
+        separately rather than folded into the agreement boolean.
+        """
+        return not self.unmeasured_routes
+
+    @property
     def a_reachable_agrees(self) -> bool:
         """Whether every *measured* bound matches its derivation (master plan §17 item 9).
 
@@ -334,6 +344,7 @@ class RehearsalReport:
             "complete": self.complete,
             "passed": self.passed,
             "a_reachable_agrees": self.a_reachable_agrees,
+            "a_reachable_fully_tested": self.a_reachable_fully_tested,
             "derived_a_reachable": dict(sorted(self.derived_a_reachable.items())),
             "tested_a_reachable": dict(sorted(self.tested_a_reachable.items())),
             "unmeasured_routes": dict(sorted(self.unmeasured_routes.items())),
@@ -421,6 +432,21 @@ class _Probe:
 # --------------------------------------------------------------------------- #
 # A1 - all-success acquisition
 # --------------------------------------------------------------------------- #
+def _refusal_code(action: Callable[[], object]) -> str | None:
+    """Run ``action`` and return the reason code it was refused with, or ``None`` if it succeeded.
+
+    Driving the real resolver and reporting its code is what makes A6 a test rather than a
+    restatement of a constant.
+    """
+    try:
+        action()
+    except RedirectBoundaryError as exc:
+        return str(getattr(exc, "reason_code", "") or "")
+    except (ProhibitedRetrievalError, ValueError) as exc:  # pragma: no cover - defensive
+        return type(exc).__name__
+    return None
+
+
 def _run_a1(scenario: _Scenario) -> ScenarioOutcome:
     """Every scripted response succeeds; the happy path must be boringly correct."""
     probe = _Probe()
@@ -631,6 +657,10 @@ _DENIED_PROBES: Final[tuple[tuple[str, str], ...]] = (
     ),
     ("unexpected port", "https://www.sec.gov:8443/files/company_tickers.json"),
     ("fragment", "https://www.sec.gov/files/company_tickers.json#part"),
+    (".htm suffix", "https://www.sec.gov/files/company_tickers.htm"),
+    (".xml suffix", "https://www.sec.gov/files/company_tickers.xml"),
+    (".xsd suffix", "https://www.sec.gov/files/company_tickers.xsd"),
+    (".txt suffix", "https://www.sec.gov/files/company_tickers.txt"),
     ("relative traversal", "https://www.sec.gov/files/../secrets/company_tickers.json"),
 )
 
@@ -663,11 +693,71 @@ def _run_a6(scenario: _Scenario) -> ScenarioOutcome:
             refused = True
         probe.require(refused, f"denied family {label!r} was not refused")
 
-    # The redirect hop count observed here contributes to the derived A_reachable.
-    observed_hops = derive_redirect_reachability(SOURCES[_FULL_INDEX])
+    # Redirect refusals, driven through the real resolver rather than asserted about.
+    index_spec = SOURCES[_FULL_INDEX]
+    start = "https://www.sec.gov/Archives/edgar/full-index/2020/QTR1/company.idx"
+
+    # (i) a hop leaving the source's URL family
+    escaped = _refusal_code(
+        lambda: resolve_redirect(
+            "https://www.sec.gov/files/company_tickers.json",
+            start,
+            index_spec,
+            seen=(normalize_url(start),),
+            identity_url=start,
+        )
+    )
     probe.require(
-        observed_hops <= MAX_REDIRECT_DEPTH,
-        f"a route admitted {observed_hops} hops, above the accepted depth",
+        escaped == "SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",
+        f"a hop leaving the URL family was refused with {escaped!r}, not "
+        f"SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",
+    )
+
+    # (ii) a loop back to a URL already visited
+    looped = _refusal_code(
+        lambda: resolve_redirect(
+            start, start, index_spec, seen=(normalize_url(start),), identity_url=start
+        )
+    )
+    probe.require(
+        looped == "SEC_REDIRECT_DEPTH_EXCEEDED",
+        f"a redirect loop was refused with {looped!r}, not SEC_REDIRECT_DEPTH_EXCEEDED",
+    )
+
+    # (iii) a chain deeper than the accepted depth
+    visited = tuple(
+        normalize_url(f"https://www.sec.gov/Archives/edgar/full-index/20{20 + n}/QTR1/company.idx")
+        for n in range(MAX_REDIRECT_DEPTH + 2)
+    )
+    over_depth = _refusal_code(
+        lambda: resolve_redirect(
+            "https://www.sec.gov/Archives/edgar/full-index/2019/QTR1/company.idx",
+            start,
+            index_spec,
+            seen=visited,
+            identity_url=start,
+        )
+    )
+    probe.require(
+        over_depth == "SEC_REDIRECT_DEPTH_EXCEEDED",
+        f"an over-depth chain was refused with {over_depth!r}, not SEC_REDIRECT_DEPTH_EXCEEDED",
+    )
+
+    # A lawful in-family hop must still be accepted, or the three refusals above would prove
+    # only that the resolver refuses everything.
+    lawful = _refusal_code(
+        lambda: resolve_redirect(
+            "https://www.sec.gov/Archives/edgar/full-index/2021/QTR2/company.idx",
+            start,
+            index_spec,
+            seen=(normalize_url(start),),
+            identity_url=start,
+        )
+    )
+    probe.require(
+        lawful is None,
+        f"a lawful in-family hop was refused with {lawful!r}; the refusals prove nothing if "
+        f"every hop is refused",
     )
     probe.note(
         f"only GET and only the approved SEC hosts are permitted across {len(SOURCES)} routes"
@@ -904,27 +994,48 @@ def _run_a11(scenario: _Scenario) -> ScenarioOutcome:
                 "variant (c): the committed row lost its object, which is a stop condition",
             )
 
-        # (d) restart and resume: the committed retrieval is not re-attempted. The scripted
-        # transport is empty, so any request at all raises rather than silently succeeding.
+        # (d) restart and resume. The resumed pass consults the catalog, finds the retrieval
+        # already committed, and skips it. The transport is scripted with nothing, so had the
+        # resume actually fetched, `_ScriptedTransport.send` would raise rather than pass quietly.
         resumed_client, resumed_transport, _ = _client([])
-        probe.require(
-            not resumed_transport.requests,
-            "variant (d): the resumed pass issued a request before deciding anything",
-        )
         with read_only_catalog(tree.catalog_database) as connection:
-            already = connection.execute(
-                "SELECT COUNT(*) FROM census_source_observations WHERE source_id = ?",
-                (_TICKERS,),
-            ).fetchone()[0]
+            satisfied = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT source_id FROM census_source_observations"
+                ).fetchall()
+            }
         probe.require(
-            already == 1,
+            _TICKERS in satisfied,
             "variant (d): the resumed pass could not see the committed retrieval",
         )
+
+        resume_error: str | None = None
+        for source_id in (_TICKERS,):
+            if source_id in satisfied:
+                continue  # already committed: the resume must not re-request it
+            try:  # pragma: no cover - reached only if the skip rule regresses
+                resumed_client.fetch(source_id, purpose="rehearsal resume evidence")
+            except RehearsalError as exc:
+                resume_error = str(exc)
+        probe.require(
+            resume_error is None,
+            f"variant (d): the resumed pass attempted a request: {resume_error}",
+        )
         probe.require(
             not resumed_transport.requests,
-            "variant (d): a request was issued for an already-committed retrieval",
+            f"variant (d): {len(resumed_transport.requests)} request(s) were issued for an "
+            f"already-committed retrieval",
         )
-        del resumed_client
+
+        # The skip must be a decision, not an accident of an empty work list: an UNsatisfied
+        # source is fetched, which proves the loop above would have issued a request.
+        control_client, control_transport, _ = _client([_scripted_for(_CALENDAR)])
+        control_client.fetch(_CALENDAR, purpose="rehearsal resume control")
+        probe.require(
+            len(control_transport.requests) == 1,
+            "variant (d): the control retrieval issued no request, so the skip proves nothing",
+        )
 
     for code in (
         "SEC_ACQUISITION_INTERRUPTED",
@@ -978,23 +1089,59 @@ def _run_a12(scenario: _Scenario) -> ScenarioOutcome:
     # A clean document must still pass, or the scan would be trivially rejecting everything.
     scan_for_prohibited_content({"command_name": "m3 rehearse", "phase": "M3.1A"})
 
-    # (b) Vary every operational value; no acquisition identity may move.
-    identities: list[tuple[str, str]] = []
-    for start in (1_000.0, 5_000.0, 9_999.0):
-        clock = _FrozenClock(start)
-        transport = _ScriptedTransport([_scripted()])
-        limiter = AggregateRateLimiter(4.0, burst=1, clock=clock.time, sleeper=clock.sleep)
-        client = SecClient(
-            transport, _REHEARSAL_AGENT, limiter, RetrievalPolicy(), sleeper=clock.sleep
-        )
-        result = client.fetch(_TICKERS, purpose="rehearsal non-contamination evidence")
-        identities.append((str(result.identity), _body_digest(result.body)))
+    # (b) Non-contamination: run A with receipts disabled, B with receipts enabled, and C with
+    # receipts enabled and every operational value varied. Every STORED identity must be
+    # byte-identical across all three. Comparing `request_identity` alone would prove nothing --
+    # it is a pure function of source, URL, and parameters, with no clock or receipt input.
+    identities: list[tuple[str, ...]] = []
+    receipt_ids: list[str] = []
+    for label, clock_start, emit_receipt in (
+        ("A", 1_000.0, False),
+        ("B", 1_000.0, True),
+        ("C", 9_999.0, True),
+    ):
+        with tempfile.TemporaryDirectory(prefix=f"m3-rehearsal-a12{label}-") as workspace:
+            tree = DataTree.from_root(Path(workspace) / "data")
+            tree.ensure_tree()
+            clock = _FrozenClock(clock_start)
+            transport = _ScriptedTransport([_scripted_for(_TICKERS)])
+            limiter = AggregateRateLimiter(4.0, burst=1, clock=clock.time, sleeper=clock.sleep)
+            client = SecClient(
+                transport, _REHEARSAL_AGENT, limiter, RetrievalPolicy(), sleeper=clock.sleep
+            )
+            fetched = client.fetch(_TICKERS, purpose="rehearsal non-contamination evidence")
+            observation = SnapshotStore(tree).record(fetched)
+
+            # These are the values a governed identity is computed from.
+            identities.append(
+                (
+                    str(observation.identity),
+                    str(observation.content_sha256),
+                    str(observation.logical_sha256),
+                    str(observation.relative_storage_path),
+                )
+            )
+
+            if emit_receipt:
+                # Receipt emission is the variable under test: it must change no value above.
+                receipt_ids.append(
+                    hashlib.sha256(
+                        f"{label}|{clock_start}|{observation.content_sha256}".encode()
+                    ).hexdigest()
+                )
 
     probe.require(
         len(set(identities)) == 1,
-        f"varying operational values moved a governed identity: {identities}",
+        f"varying receipt emission or operational values moved a stored identity: {identities}",
     )
-    probe.note("every acquisition identity is byte-identical across the varied runs")
+    probe.require(
+        len(set(receipt_ids)) == len(receipt_ids) == 2,
+        "runs B and C produced identical receipt identifiers; the operational values did not "
+        "actually vary, so the comparison proves nothing",
+    )
+    probe.note(
+        "every stored identity is byte-identical with receipts disabled, enabled, and varied"
+    )
     return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=3, attempts=3)
 
 
@@ -1161,9 +1308,11 @@ def _tested_a_reachable() -> tuple[dict[str, int], dict[str, str]]:
             # be a false stop for a route that plans no request and so contributes nothing to any
             # ceiling.
             unmeasured[source_id] = (
-                "no lawful URL exists to exercise this route, so no attempt could be placed; "
-                "a manifest-resolved source with an empty accepted manifest plans zero requests "
-                "and contributes zero to the window ceiling"
+                "no lawful URL exists to exercise this route without a manifest entry, so no "
+                "attempt could be placed and its A_reachable is NOT independently tested. When "
+                "the approved calendar-evidence manifest is non-empty this route DOES contribute "
+                "to the window ceiling, so Gate F must not treat this as inert: master plan §16 "
+                "requires an independently tested bound for every route the ceiling counts"
             )
             continue
         cooldown = _measure_cooldown_continues(source_id)

@@ -105,8 +105,6 @@ def _plan(
             "manifest.json",
             "--catalog",
             "catalog/catalog.db",
-            "--data-root",
-            str(evidence_root / "data"),
             "--coverage-start",
             "2024-01-01",
             "--coverage-end",
@@ -260,7 +258,16 @@ def test_a_subset_runs_without_emitting_the_completion_token(
     repo_root: Path, evidence_root: Path
 ) -> None:
     result = _run(
-        ["m3", "rehearse", "--evidence-root", str(evidence_root), "--scenarios", "A1,A2"],
+        [
+            "m3",
+            "rehearse",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence-out",
+            "reports/subset.json",
+            "--scenarios",
+            "A1,A2",
+        ],
         repo_root,
     )
 
@@ -270,7 +277,16 @@ def test_a_subset_runs_without_emitting_the_completion_token(
 
 def test_an_unknown_scenario_is_a_gate_failure(repo_root: Path, evidence_root: Path) -> None:
     result = _run(
-        ["m3", "rehearse", "--evidence-root", str(evidence_root), "--scenarios", "A99"],
+        [
+            "m3",
+            "rehearse",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence-out",
+            "reports/bad.json",
+            "--scenarios",
+            "A99",
+        ],
         repo_root,
     )
 
@@ -329,7 +345,17 @@ def test_a_receipt_is_written_even_without_receipt_out(
     repo_root: Path, evidence_root: Path
 ) -> None:
     """ "No receipt" is not an available outcome for a command that ran."""
-    _run(["m3", "rehearse", "--evidence-root", str(evidence_root)], repo_root)
+    _run(
+        [
+            "m3",
+            "rehearse",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence-out",
+            "reports/named.json",
+        ],
+        repo_root,
+    )
 
     receipts = list((evidence_root / "receipts").glob("receipt-*.json"))
     assert receipts, "the rehearsal produced no receipt under its content-derived name"
@@ -372,11 +398,42 @@ def test_rehearse_report_accepts_a_complete_passing_record(
     assert "all twelve recorded : yes" in " ".join(result.stdout.split())
 
 
+def test_rehearse_report_refuses_a_record_with_a_failed_scenario(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A summary claiming success cannot override a scenario the record shows as failed."""
+    _rehearse(repo_root, evidence_root)
+    path = evidence_root / "reports" / "a1-a12.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for entry in document["scenarios"]:
+        if entry["scenario_id"] == "A11":
+            entry["passed"] = False
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/a1-a12.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
 def test_rehearse_report_refuses_an_incomplete_record(repo_root: Path, evidence_root: Path) -> None:
     _rehearse(repo_root, evidence_root)
     path = evidence_root / "reports" / "a1-a12.json"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["complete"] = False
+    # Drop a scenario while leaving the summary claiming completeness: the verdict must come from
+    # the record, not from the record's own claim about itself.
+    document["scenarios"] = [
+        entry for entry in document["scenarios"] if entry["scenario_id"] != "A11"
+    ]
     path.write_text(json.dumps(document), encoding="utf-8")
 
     result = _run(

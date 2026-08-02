@@ -632,7 +632,7 @@ resuming anything:
 python -m disclosure_drift m3 recovery-state \
   --evidence-root <absolute-external-path> \
   --plan <relative-path> --receipt-chain-head <relative-path> \
-  --catalog <relative-path> --data-root <relative-path>
+  --catalog <relative-path> --data-root <relative-path-below-evidence-root>
 ```
 
 **Intended interface contract:** read-only over the explicit plan, receipt-chain head, catalog, and

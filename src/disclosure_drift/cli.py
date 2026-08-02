@@ -44,6 +44,7 @@ from disclosure_drift.m3.request_plan import (
     REQUEST_PLAN_SCHEMA_VERSION,
     build_m3_2a_request_plan,
     canonical_plan_bytes,
+    request_plan_from_document,
 )
 from disclosure_drift.paths import PathPolicyError
 from disclosure_drift.reasons import REASON_CODES, release_blocking_codes
@@ -280,11 +281,6 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
             "The operational catalog, read only, to exclude already-satisfied index instances "
             "before planning. Relative to --evidence-root, like every other artifact argument."
         ),
-    )
-    plan_requests.add_argument(
-        "--include-open-quarter",
-        action="store_true",
-        help="Also plan the provisional open quarter containing the as-of date.",
     )
     plan_requests.add_argument(
         "--plan-out",
@@ -966,6 +962,35 @@ def _rfc3339(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _write_m3_artifact_once(
+    payload: bytes,
+    *,
+    evidence_root: Path,
+    relative: Path,
+    description: str,
+) -> Path:
+    """Write one evidence artifact below the root, never overwriting a different one.
+
+    Contract §11 states that re-running never overwrites an existing artifact, and §15 keeps
+    retained rehearsal evidence from being silently rewritten. Rewriting *byte-identical* content
+    is a collision by identity rather than an edit, so an idempotent replay from the same explicit
+    inputs still succeeds; anything else is refused, because a correction is a new artifact.
+
+    Only the operator-supplied relative name appears in the refusal — the resolved absolute path
+    is never rendered (§9).
+    """
+    destination = _m3_artifact_path(evidence_root, relative)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and destination.read_bytes() != payload:
+        message = (
+            f"a different {description} already exists at {relative}; re-running never overwrites "
+            f"an existing artifact, and a correction is a new artifact, never an edit"
+        )
+        raise GateFailureError(message)
+    destination.write_bytes(payload)
+    return destination
+
+
 def _write_m3_receipt(
     receipt: ExecutionReceipt,
     *,
@@ -982,17 +1007,12 @@ def _write_m3_receipt(
         return write_receipt(
             receipt, evidence_root=evidence_root, repository_root=_repository_root()
         )
-    destination = _m3_artifact_path(evidence_root, relative)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = receipt.canonical_bytes()
-    if destination.exists() and destination.read_bytes() != payload:
-        message = (
-            f"a different receipt already exists at {relative}; a receipt is immutable and a "
-            f"correction is a new receipt, never an edit"
-        )
-        raise GateFailureError(message)
-    destination.write_bytes(payload)
-    return destination
+    return _write_m3_artifact_once(
+        receipt.canonical_bytes(),
+        evidence_root=evidence_root,
+        relative=relative,
+        description="receipt",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1065,7 +1085,9 @@ def _m3_rehearse_command(
         else [item.strip() for item in args.scenarios.split(",") if item.strip()]
     )
     started = _utc_now()
-    report = run_rehearsal(requested)
+    # §11 places the synthetic data tree and synthetic catalog below the external evidence root,
+    # alongside the evidence and the receipt. The root is already resolved and validated here.
+    report = run_rehearsal(requested, workspace_root=evidence_root)
     completed = _utc_now()
 
     for outcome in report.outcomes:
@@ -1091,9 +1113,12 @@ def _m3_rehearse_command(
     for source_id, reason in sorted(report.unmeasured_routes.items()):
         print(f"  unmeasurable route          : {source_id} ({reason})")
 
-    evidence_written = _m3_artifact_path(evidence_root, args.evidence_out)
-    evidence_written.parent.mkdir(parents=True, exist_ok=True)
-    evidence_written.write_bytes(report.canonical_bytes())
+    evidence_written = _write_m3_artifact_once(
+        report.canonical_bytes(),
+        evidence_root=evidence_root,
+        relative=args.evidence_out,
+        description="rehearsal evidence report",
+    )
     print(f"  evidence written            : {args.evidence_out}")
 
     receipt = ExecutionReceipt(
@@ -1123,6 +1148,26 @@ def _m3_rehearse_command(
 
     if not report.passed:
         logger.error("m3 rehearse: a scenario failed; the phase does not pass")
+        return EXIT_GATE_FAILURE
+    # Master plan §17 stop condition 9: a disagreement between the derived and the independently
+    # measured `A_reachable` is a phase stop, not a printed footnote. Printing it while emitting
+    # the token would let a run whose worst-path bound is unproven claim M3.1A passed.
+    if not report.a_reachable_agrees:
+        disagreements = sorted(
+            source_id
+            for source_id, tested in report.tested_a_reachable.items()
+            if report.derived_a_reachable[source_id] != tested
+        )
+        logger.error(
+            "m3 rehearse: the derived and independently tested A_reachable bounds disagree for %s",
+            ", ".join(disagreements),
+        )
+        print(
+            "  A_reachable disagreement    : "
+            + ", ".join(disagreements)
+            + " (derived and independently tested bounds must agree)",
+            file=sys.stderr,
+        )
         return EXIT_GATE_FAILURE
     if not report.complete:
         logger.warning("m3 rehearse: a subset ran, so no completion token is emitted")
@@ -1239,7 +1284,11 @@ def _m3_plan_requests_command(
         coverage_start=args.coverage_start,
         coverage_end=args.coverage_end,
         as_of_date=args.as_of,
-        include_open_quarter=bool(args.include_open_quarter),
+        # Contract §9 lists the exact argument set for this command and it contains no
+        # open-quarter switch. The provisional open quarter changes the planned quarter set and
+        # therefore the budget integers the owner signs, so it is fixed closed here rather than
+        # left switchable: Decision 013 §1 plans closed quarters only.
+        include_open_quarter=False,
         calendar_year=int(args.calendar_year),
         calendar_evidence_entry_count=entry_count,
         already_satisfied_index_keys=satisfied,
@@ -1264,9 +1313,12 @@ def _m3_plan_requests_command(
         print(f"  {label:<34}: {value}")
 
     if args.plan_out is not None:
-        destination = _m3_artifact_path(evidence_root, args.plan_out)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(canonical_plan_bytes(plan))
+        _write_m3_artifact_once(
+            canonical_plan_bytes(plan),
+            evidence_root=evidence_root,
+            relative=args.plan_out,
+            description="request plan",
+        )
         print(f"  {'plan written':<34}: {args.plan_out}")
 
     completed = _utc_now()
@@ -1373,28 +1425,26 @@ def _m3_recovery_state_command(
     evidence_root: Path,
 ) -> int:
     """Report the safe-resume determination. Read-only; never repairs. Exit 0 only for SAFE."""
-    plan_document = _read_json_artifact(evidence_root, args.plan)
-    inputs = plan_document.get("inputs", {})
-    if not isinstance(inputs, dict):  # pragma: no cover - a malformed plan fails earlier
-        message = "the stored plan carries no inputs section"
-        raise GateFailureError(message)
-
-    plan = build_m3_2a_request_plan(
-        coverage_start=date.fromisoformat(str(inputs["coverage_start"])),
-        coverage_end=date.fromisoformat(str(inputs["coverage_end"])),
-        as_of_date=date.fromisoformat(str(inputs["as_of_date"])),
-        include_open_quarter=bool(inputs["include_open_quarter"]),
-        calendar_year=int(inputs["calendar_year"]),
-        calendar_evidence_entry_count=int(inputs["calendar_evidence_entry_count"]),
-        already_satisfied_index_keys=frozenset(),
-        requests_per_second=float(inputs["requests_per_second"]),
-    )
+    # The stored plan document is the authority on the plan, not a set of inputs to replan from.
+    # Rebuilding from its `inputs` section cannot restore the already-satisfied instances that were
+    # excluded before the plan was formed — that set is not an input the schema carries — so a
+    # rebuild plans every cache hit again, derives a larger ceiling, and hashes differently.
+    # Condition 8.10 would then read NOT MET for the very plan being executed, and 8.8 would measure
+    # headroom against a ceiling nobody approved: a gate refusing the lawful case. Reading the
+    # document instead keeps the governed hash and the signed ceiling exactly as written.
+    plan = request_plan_from_document(_read_artifact_bytes(evidence_root, args.plan))
 
     data_root = _m3_artifact_path(evidence_root, args.data_root)
+    # §9 makes every artifact argument a relative path contained by the resolved evidence root.
+    # `--catalog` is named relative to `--data-root`, so the two are composed first and the result
+    # goes through the same containment check every other artifact argument uses. Joining them
+    # directly would let an absolute or `..`-climbing value open a database anywhere on the
+    # machine; here it is refused by its bare name, never by an absolute path.
+    catalog_path = _m3_artifact_path(evidence_root, Path(args.data_root) / args.catalog)
     state = inspect_recovery_state(
         plan=plan,
         receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
-        catalog_path=data_root / args.catalog,
+        catalog_path=catalog_path,
         data_root=data_root,
     )
 
@@ -1581,6 +1631,22 @@ def _m3_artifact_path(evidence_root: Path, relative: Path) -> Path:
         message = f"artifact path {candidate.name!r} resolves outside the evidence root"
         raise GateFailureError(message)
     return resolved
+
+
+def _read_artifact_bytes(evidence_root: Path, relative: Path) -> bytes:
+    """Read one artifact's exact bytes from below the evidence root.
+
+    A stored artifact whose identity is a hash over its bytes has to be read *as bytes*: parsing to
+    JSON and re-serializing would compare a reconstruction against a recomputation rather than
+    against what is actually on disk.
+    """
+    path = _m3_artifact_path(evidence_root, relative)
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        # `str(OSError)` embeds the absolute filename, which §9 forbids printing.
+        message = f"artifact {Path(relative).name!r} could not be read ({type(exc).__name__})"
+        raise GateFailureError(message) from exc
 
 
 def _read_json_artifact(evidence_root: Path, relative: Path) -> dict[str, object]:

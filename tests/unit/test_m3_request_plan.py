@@ -35,6 +35,7 @@ from disclosure_drift.m3.request_plan import (
     derive_a_reachable,
     derive_redirect_reachability,
     render_budget,
+    request_plan_from_document,
 )
 from disclosure_drift.sec.response_policy import MAX_TRANSIENT_RETRIES
 from disclosure_drift.sec.source_registry import SOURCES
@@ -358,3 +359,84 @@ def test_the_budget_is_pure_and_leaves_the_plan_unchanged() -> None:
     before = canonical_plan_bytes(plan)
     render_budget(plan)
     assert canonical_plan_bytes(plan) == before
+
+
+# --------------------------------------------------------------------------- #
+# A stored plan is reconstructed from its own bytes, never replanned from its inputs
+# --------------------------------------------------------------------------- #
+def test_a_stored_plan_reconstructs_to_itself_exactly() -> None:
+    """Every plan field is in the payload, so the reconstruction is exact, not approximate."""
+    plan = build(already_satisfied_index_keys=frozenset({"2024QTR1"}))
+    stored = canonical_plan_bytes(plan)
+
+    restored = request_plan_from_document(stored)
+
+    assert restored == plan
+    assert canonical_plan_bytes(restored) == stored
+    assert restored.request_plan_sha256 == plan.request_plan_sha256
+
+
+def test_a_stored_plan_keeps_the_ceiling_the_cache_exclusion_produced() -> None:
+    """The property F8 turned on: the satisfied set is not an input, so a replan cannot restore it.
+
+    A plan that excluded a satisfied instance has a smaller ceiling and a different hash than one
+    rebuilt from its own recorded inputs. Reading the document preserves both; replanning does not.
+    """
+    satisfied = build(already_satisfied_index_keys=frozenset({"2024QTR1"}))
+    replanned = build(already_satisfied_index_keys=frozenset())
+
+    restored = request_plan_from_document(canonical_plan_bytes(satisfied))
+
+    assert satisfied.expected_cache_hits == 1
+    assert replanned.expected_cache_hits == 0
+    assert replanned.hard_request_ceiling > satisfied.hard_request_ceiling
+    assert replanned.request_plan_sha256 != satisfied.request_plan_sha256
+    assert restored.expected_cache_hits == satisfied.expected_cache_hits
+    assert restored.hard_request_ceiling == satisfied.hard_request_ceiling
+    assert restored.request_plan_sha256 == satisfied.request_plan_sha256
+
+
+def test_a_document_that_does_not_round_trip_is_refused() -> None:
+    """A derived total edited to disagree with the route it derives from is not a canonical plan."""
+    stored = canonical_plan_bytes(build())
+    tampered = stored.replace(b'"maximum_physical_attempts":', b'"maximum_physical_attempts":9', 1)
+    assert tampered != stored
+
+    with pytest.raises(RequestPlanInputError, match="does not reproduce the stored bytes"):
+        request_plan_from_document(tampered)
+
+
+def test_a_reserialized_but_non_canonical_document_is_refused() -> None:
+    """Canonical form is part of the plan's identity.
+
+    Pretty-printing the same fields produces a different document, which may not assert the
+    original's hash.
+    """
+    plan = build()
+    pretty = (json.dumps(plan.as_payload(), indent=2) + "\n").encode()
+
+    with pytest.raises(RequestPlanInputError, match="does not reproduce the stored bytes"):
+        request_plan_from_document(pretty)
+
+
+def test_a_document_of_another_schema_version_is_refused() -> None:
+    stored = canonical_plan_bytes(build())
+    other = stored.replace(b'"m3-request-plan/1.0"', b'"m3-request-plan/2.0"')
+
+    with pytest.raises(RequestPlanInputError, match="schema"):
+        request_plan_from_document(other)
+
+
+@pytest.mark.parametrize("removed", ["inputs", "routes", "required_index_keys"])
+def test_a_document_missing_a_required_section_is_refused(removed: str) -> None:
+    document = build().as_payload()
+    document.pop(removed)
+    payload = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    with pytest.raises(RequestPlanInputError):
+        request_plan_from_document(payload)
+
+
+def test_unreadable_bytes_are_refused_rather_than_guessed_at() -> None:
+    with pytest.raises(RequestPlanInputError, match="JSON"):
+        request_plan_from_document(b"not a plan at all\n")

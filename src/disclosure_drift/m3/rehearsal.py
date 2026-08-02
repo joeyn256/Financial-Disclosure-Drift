@@ -35,19 +35,25 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.errors import DisclosureDriftError, RawObjectIntegrityError
 from disclosure_drift.m3.receipt import (
     INTERRUPTION_STATES,
     SCHEMA_DRIFT_OUTCOMES,
+    ExecutionReceipt,
+    inspect_receipt,
     scan_for_prohibited_content,
+    validate_receipt_document,
+    write_receipt,
 )
 from disclosure_drift.m3.recovery import read_only_catalog
-from disclosure_drift.m3.request_plan import derive_a_reachable
+from disclosure_drift.m3.request_plan import M3_2A_BOOTSTRAP_ROUTES, derive_a_reachable
 from disclosure_drift.paths import DataTree
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.http_client import (
@@ -56,6 +62,12 @@ from disclosure_drift.sec.http_client import (
     SecClient,
 )
 from disclosure_drift.sec.observation_catalog import ObservationRecorder
+from disclosure_drift.sec.parsers.base import ParseOutcome, RecordLocation
+from disclosure_drift.sec.parsers.submissions import (
+    REGION_FILES,
+    REGION_RECENT,
+    parse_submissions_document,
+)
 from disclosure_drift.sec.rate_limit import AggregateRateLimiter
 from disclosure_drift.sec.raw_store import RawStore
 from disclosure_drift.sec.request_ceiling import (
@@ -230,6 +242,21 @@ def _body_digest(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+#: The version A12(b)'s rehearsal receipts declare. It names the harness that emitted them, so a
+#: receipt from the rehearsal is never mistaken for one from a live acquisition command.
+_REHEARSAL_COMMAND_VERSION: Final = "m3-rehearsal-harness/1.0"
+
+
+def _clock_instant(seconds: float) -> str:
+    """An RFC 3339 UTC timestamp derived from the *injected* clock, never the system clock.
+
+    Spec §2.3: nothing reads the system clock into a recorded value. A12(b) needs two runs whose
+    operational timestamps genuinely differ, and the only lawful source of that difference is the
+    frozen clock the run was given.
+    """
+    return datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _client(
     responses: Sequence[TransportResponse],
     *,
@@ -386,21 +413,26 @@ class _Scenario:
 
 def _outcome(
     scenario: _Scenario,
+    probe: _Probe,
     *,
-    passed: bool,
-    detail: str,
     logical: int = 0,
     attempts: int = 0,
-    findings: Sequence[str] = (),
 ) -> ScenarioOutcome:
+    """Turn one probe's observations into the scenario's evidence record.
+
+    The probe's notes carry the *observed* facts — reason codes, object counts, orderings — so they
+    travel into the report's `findings` rather than being accumulated and discarded. A record whose
+    findings were always empty would say a scenario passed without saying what it saw, which is
+    exactly what spec §5 requires the matrix to show.
+    """
     return ScenarioOutcome(
         scenario_id=scenario.scenario_id,
         title=scenario.title,
-        passed=passed,
-        detail=detail,
+        passed=probe.passed,
+        detail=probe.detail,
         simulated_logical_requests=logical,
         simulated_physical_attempts=attempts,
-        findings=tuple(findings),
+        findings=tuple(probe.notes),
     )
 
 
@@ -430,6 +462,63 @@ class _Probe:
 
 
 # --------------------------------------------------------------------------- #
+# Content-addressed storage: an isolated synthetic tree and what is on disk in it
+# --------------------------------------------------------------------------- #
+@contextmanager
+def _synthetic_tree(prefix: str, workspace: Path) -> Iterator[DataTree]:
+    """An isolated synthetic data tree below ``workspace``, removed when the scenario ends.
+
+    Spec §2.5 requires an isolated synthetic data root: never the machine's default data root and
+    never a personal path. Every scenario that makes a claim about *stored* state opens one of
+    these, so the claim is checked against real files rather than against a client-level response.
+
+    Contract §11 additionally fixes *where* that root may live: `m3 rehearse` writes its synthetic
+    data tree and synthetic catalog "below the external evidence root", alongside the evidence and
+    the receipt. ``workspace`` is that location, supplied by the caller — a system temporary
+    directory would put operator evidence outside the boundary the operator named. The directory is
+    still removed when the scenario ends, so re-running writes nothing that a later run could
+    collide with.
+    """
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=workspace) as scratch:
+        tree = DataTree.from_root(Path(scratch) / "data")
+        tree.ensure_tree()
+        yield tree
+
+
+def _stored_objects(tree: DataTree) -> tuple[Path, ...]:
+    """Every content-addressed raw object below ``tree``, excluding its lineage siblings.
+
+    Counting objects on disk is the only way to tell content addressing apart from a client that
+    merely returned equal bytes twice: identical bodies must collapse to one object, and differing
+    bodies must produce two with the first left intact.
+    """
+    found: list[Path] = []
+    for root in (tree.raw_bulk, tree.raw_indexes, tree.raw_filings, tree.quarantine):
+        if not root.is_dir():
+            continue
+        found.extend(
+            path
+            for path in root.rglob("*")
+            if path.is_file() and not path.name.endswith(".lineage.json")
+        )
+    return tuple(sorted(found))
+
+
+def _part_files(tree: DataTree) -> tuple[Path, ...]:
+    """Every leftover `.part` file below ``tree``. A completed store leaves none."""
+    return tuple(sorted(path for path in tree.data_root.rglob("*.part") if path.is_file()))
+
+
+def _verification_failure(store: SnapshotStore, observation: object) -> str | None:
+    """Verify a stored object against its hashes, returning the failure text or ``None``."""
+    try:
+        store.verify_payload(observation)  # type: ignore[arg-type]
+    except RawObjectIntegrityError as exc:
+        return str(exc)
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # A1 - all-success acquisition
 # --------------------------------------------------------------------------- #
 def _refusal_code(action: Callable[[], object]) -> str | None:
@@ -447,7 +536,7 @@ def _refusal_code(action: Callable[[], object]) -> str | None:
     return None
 
 
-def _run_a1(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a1(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
     """Every scripted response succeeds; the happy path must be boringly correct."""
     probe = _Probe()
     client, transport, _ = _client([_scripted_for(_TICKERS), _scripted_for(_CALENDAR)])
@@ -463,14 +552,70 @@ def _run_a1(scenario: _Scenario) -> ScenarioOutcome:
         all(request.follow_redirects is False for request in transport.requests),
         "a request permitted the transport to follow redirects itself",
     )
+    # The client-level result is only half of A1. The spec's expected *persisted state* and
+    # expected *files* are properties of the content-addressed store, so both retrievals are
+    # persisted through the real `SnapshotStore` into an isolated synthetic tree and the objects
+    # are counted and verified on disk. Without this the scenario would still pass with the store
+    # entirely absent, which is not a rehearsal of "content-addressed raw storage and provenance".
+    with _synthetic_tree("m3-rehearsal-a1-", workspace) as tree:
+        store = SnapshotStore(tree)
+        stored = [store.record(first), store.record(second)]
+        for observation, result in zip(stored, (first, second), strict=True):
+            probe.require(
+                observation.outcome == "stored_new",
+                f"{observation.source_id}: a first storage recorded {observation.outcome!r} "
+                f"rather than 'stored_new'",
+            )
+            probe.require(
+                observation.reason_codes == (),
+                f"{observation.source_id}: a first storage carried reason codes "
+                f"{observation.reason_codes}; A1 expects none, and SOURCE_CONTENT_UPDATED "
+                f"applies only to a later changed living source",
+            )
+            probe.require(
+                observation.content_sha256 == _body_digest(result.body),
+                f"{observation.source_id}: the recorded content digest does not match the "
+                f"retrieved bytes, so the object cannot stand as evidence for the response",
+            )
+            failure = _verification_failure(store, observation)
+            probe.require(
+                failure is None,
+                f"{observation.source_id}: the stored object did not verify against its "
+                f"content_sha256 ({failure})",
+            )
+
+        objects = _stored_objects(tree)
+        probe.require(
+            len(objects) == 2,
+            f"two logical requests produced {len(objects)} content-addressed object(s), not one "
+            f"per logical request",
+        )
+        missing_lineage = sorted(
+            path.name for path in objects if not RawStore.lineage_path(path).is_file()
+        )
+        probe.require(
+            not missing_lineage,
+            f"stored object(s) {missing_lineage} have no .lineage.json sibling, so their "
+            f"provenance is unrecorded",
+        )
+        leftovers = _part_files(tree)
+        probe.require(
+            not leftovers,
+            f"{len(leftovers)} .part file(s) survived a clean run; A1 expects zero",
+        )
+        probe.note(
+            f"{len(objects)} content-addressed objects stored, each with a lineage sibling and "
+            f"each verified against its content_sha256; zero .part files"
+        )
+
     probe.note("request order is deterministic across runs")
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=2, attempts=2)
+    return _outcome(scenario, probe, logical=2, attempts=2)
 
 
 # --------------------------------------------------------------------------- #
 # A2 - retry then success
 # --------------------------------------------------------------------------- #
-def _run_a2(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a2(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:  # noqa: ARG001
     """A retry costs one physical attempt and no additional logical request."""
     probe = _Probe()
     client, transport, clock = _client([_scripted(503), _scripted(503), _scripted()])
@@ -489,13 +634,13 @@ def _run_a2(scenario: _Scenario) -> ScenarioOutcome:
         "a backoff delay exceeded the accepted ceiling",
     )
     probe.note(f"one logical request cost {result.attempts} physical attempts")
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=1, attempts=3)
+    return _outcome(scenario, probe, logical=1, attempts=3)
 
 
 # --------------------------------------------------------------------------- #
 # A3 - Retry-After, usable and unusable
 # --------------------------------------------------------------------------- #
-def _run_a3(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a3(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:  # noqa: ARG001
     """A usable delta-seconds `Retry-After` is honoured exactly and halts nothing."""
     probe = _Probe()
 
@@ -527,10 +672,14 @@ def _run_a3(scenario: _Scenario) -> ScenarioOutcome:
     result = client.fetch(_TICKERS, purpose="rehearsal retry-after evidence")
     probe.require(result.outcome == "retrieved", "the honoured Retry-After did not then succeed")
     probe.require(3.0 in clock.sleeps, "the exact Retry-After delay was not slept")
+    probe.note(
+        f"a usable Retry-After classified {usable.kind!r} and delayed exactly "
+        f"{usable.delay_seconds}s without halting aggregate traffic; an unusable HTTP-date value "
+        f"classified {unusable.kind!r} and fell through to the cooldown path"
+    )
     return _outcome(
         scenario,
-        passed=probe.passed,
-        detail=probe.detail,
+        probe,
         logical=1,
         attempts=len(transport.requests),
     )
@@ -539,7 +688,7 @@ def _run_a3(scenario: _Scenario) -> ScenarioOutcome:
 # --------------------------------------------------------------------------- #
 # A4 - cooldown and block-page termination
 # --------------------------------------------------------------------------- #
-def _run_a4(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a4(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:  # noqa: ARG001
     """Each cooldown trigger halts aggregate traffic; a second occurrence is terminal."""
     probe = _Probe()
     attempts = 0
@@ -566,10 +715,20 @@ def _run_a4(scenario: _Scenario) -> ScenarioOutcome:
             result.outcome != "retrieved",
             f"{label}: a failure became a valid result, which must never happen",
         )
+        # Spec §6 pass criterion 3: "every observed reason code equals its expected code and is a
+        # registered code". Requiring merely that *some* code is present would accept a second
+        # unqualified 429 terminating as SEC_BLOCK_PAGE, or a block page terminating as
+        # SEC_RETRIES_EXHAUSTED, which are different findings with different operator actions.
         probe.require(
-            result.reason_code is not None,
-            f"{label}: a terminal failure carried no registered reason code, so a consumer "
-            f"could read it as an empty dataset",
+            result.reason_code == expected_code,
+            f"{label}: terminated with reason code {result.reason_code!r}, expected "
+            f"{expected_code!r}; a terminal failure carrying the wrong code misreports why the "
+            f"run stopped, and no code at all could be read as an empty dataset",
+        )
+        probe.require(
+            result.reason_code in REASON_CODES,
+            f"{label}: terminal reason code {result.reason_code!r} is not in the registered "
+            f"registry, so it may never be recorded",
         )
         probe.require(
             result.attempts == 2,
@@ -578,15 +737,13 @@ def _run_a4(scenario: _Scenario) -> ScenarioOutcome:
         )
         probe.note(f"{label} terminated with {result.reason_code!r} (expected {expected_code!r})")
 
-    return _outcome(
-        scenario, passed=probe.passed, detail=probe.detail, logical=3, attempts=attempts
-    )
+    return _outcome(scenario, probe, logical=3, attempts=attempts)
 
 
 # --------------------------------------------------------------------------- #
 # A5 - stop before budget overflow
 # --------------------------------------------------------------------------- #
-def _run_a5(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a5(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:  # noqa: ARG001
     """Stop-before-overflow, never stop-after; and a run ending exactly at `C` succeeds."""
     probe = _Probe()
 
@@ -599,10 +756,12 @@ def _run_a5(scenario: _Scenario) -> ScenarioOutcome:
     probe.require(ceiling.consumed == 1, f"the counter read {ceiling.consumed} after one attempt")
 
     refused = False
+    observed_code: str | None = None
     try:
         client.fetch(_CALENDAR, purpose="rehearsal ceiling overflow evidence")
     except RequestCeilingExhaustedError as exc:
         refused = True
+        observed_code = str(exc.reason_code)
         probe.require(
             exc.reason_code == "SEC_REQUEST_CEILING_EXHAUSTED",
             f"the refusal carried {exc.reason_code!r}",
@@ -636,7 +795,12 @@ def _run_a5(scenario: _Scenario) -> ScenarioOutcome:
         exact.stopped_at_ceiling(planned_work_remains=True),
         "equality with work remaining was not reported as stopped_at_ceiling",
     )
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=3, attempts=3)
+    probe.note(
+        f"attempt C+1 was refused with {observed_code!r} and the counter remained at "
+        f"{ceiling.consumed}; a run completing exactly at C={exact.approved_ceiling} succeeded and "
+        f"was not reported as stopped_at_ceiling"
+    )
+    return _outcome(scenario, probe, logical=3, attempts=3)
 
 
 # --------------------------------------------------------------------------- #
@@ -665,7 +829,7 @@ _DENIED_PROBES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
-def _run_a6(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a6(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:  # noqa: ARG001
     """Every registered family is reachable; every denied family is refused."""
     probe = _Probe()
 
@@ -762,137 +926,626 @@ def _run_a6(scenario: _Scenario) -> ScenarioOutcome:
     probe.note(
         f"only GET and only the approved SEC hosts are permitted across {len(SOURCES)} routes"
     )
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail)
+    return _outcome(scenario, probe)
 
 
 # --------------------------------------------------------------------------- #
-# A7 - unknown-field retention
+# A7 and A8 - the parser and schema-drift path
 # --------------------------------------------------------------------------- #
-def _run_a7(scenario: _Scenario) -> ScenarioOutcome:
-    """Unknown fields are retained and never block a lawful parse."""
-    probe = _Probe()
-    body = (
-        b'{"0":{"cik_str":1,"ticker":"SYN","title":"SYNTHETIC","unknown_leaf":1,'
-        b'"nested":{"deeper":{"also_unknown":true}}}}'
+#: The `filings` region of the synthetic document, split out so a variant can rebuild it without
+#: reaching into a nested literal.
+_SUBMISSIONS_FILINGS: Final[Mapping[str, object]] = {
+    "recent": {
+        "accessionNumber": ["0000000001-24-000001"],
+        "filingDate": ["2024-02-01"],
+        "form": ["10-K"],
+    },
+    "files": [
+        {
+            "name": "CIK0000000001-submissions-001.json",
+            "filingCount": 1,
+            "filingFrom": "2010-01-01",
+            "filingTo": "2010-12-31",
+        }
+    ],
+}
+
+#: The well-formed synthetic submissions document A7 and A8 mutate. It is shaped the way the
+#: accepted `submissions-json` parser expects and carries no real registrant, accession, or CIK.
+_SUBMISSIONS_BASE: Final[Mapping[str, object]] = {
+    "cik": "1",
+    "name": "SYNTHETIC ONE",
+    "sic": "2834",
+    "fiscalYearEnd": "1231",
+    "tickers": ["SYN"],
+    "exchanges": ["Nasdaq"],
+    "formerNames": [{"name": "OLD SYNTHETIC", "from": "2018-01-01", "to": "2020-01-01"}],
+    "addresses": {"business": {"street1": "1 SYNTHETIC WAY", "city": "SYNTHETICA"}},
+    "filings": _SUBMISSIONS_FILINGS,
+}
+
+
+def _submissions_body(document: Mapping[str, object]) -> bytes:
+    """Serialize a synthetic submissions document as the scripted response body."""
+    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _json_copy(value: Mapping[str, object]) -> dict[str, object]:
+    """A deep copy of a synthetic fixture, taken through the same JSON round trip a body makes.
+
+    Copying via the serialized form rather than by reference means a variant can never mutate the
+    shared base document, which would make one scenario's fixture depend on another's.
+    """
+    copied = json.loads(_submissions_body(value).decode())
+    if not isinstance(copied, dict):  # pragma: no cover - the fixtures are objects
+        message = f"synthetic fixture {value!r} is not a JSON object"
+        raise RehearsalError(message)
+    return copied
+
+
+def _submissions_variant(**regions: object) -> dict[str, object]:
+    """A deep copy of the base document with top-level regions replaced."""
+    document = _json_copy(_SUBMISSIONS_BASE)
+    for key, value in regions.items():
+        if value is _DROP:
+            document.pop(key, None)
+        else:
+            document[key] = value
+    return document
+
+
+#: Sentinel meaning "delete this key", so a variant can express *absence* rather than a null.
+_DROP: Final = object()
+
+
+def _parsed_through_the_real_path(
+    probe: _Probe,
+    label: str,
+    document: Mapping[str, object],
+    *,
+    tree_prefix: str,
+    workspace: Path,
+) -> tuple[ParseOutcome, tuple[object, ...]]:
+    """Retrieve, store, and parse one synthetic document through the accepted production path.
+
+    The retrieval is the real `SecClient` over a scripted transport, the storage is the real
+    `SnapshotStore` over an isolated synthetic tree, and the parse is the real
+    `submissions-json` parser — which is what calls `sec.schema_drift.inspect_payload`. Asserting
+    only that the raw body survived `fetch` would leave A7 and A8 passing with every parser and
+    drift-detection callable replaced by a stub, which is the finding this exists to close.
+
+    The raw object is verified *after* the parse in every variant, because the spec requires
+    evidence to be retained whether the parse succeeded or failed.
+    """
+    body = _submissions_body(document)
+    client, transport, _ = _client([_scripted(body=body)])
+    result = client.fetch(
+        _ENTITY,
+        purpose=f"rehearsal schema-drift evidence ({label})",
+        parameters=_parameters_for(_ENTITY),
     )
-    client, _, _ = _client([_scripted(body=body)])
-    result = client.fetch(_TICKERS, purpose="rehearsal unknown-field evidence")
-
     probe.require(
         result.outcome == "retrieved",
-        f"an unknown field blocked a lawful parse; outcome was {result.outcome!r}",
+        f"{label}: the synthetic document was not retrieved ({result.outcome!r}), so nothing "
+        f"reached the parser",
     )
     probe.require(
-        b"unknown_leaf" in result.body and b"also_unknown" in result.body,
-        "an unknown field was discarded rather than retained",
+        result.body == body,
+        f"{label}: the payload was altered before evidence was preserved",
+    )
+    probe.require(
+        len(transport.requests) == 1,
+        f"{label}: the parse path placed {len(transport.requests)} request(s); parsing retrieves "
+        f"nothing and a historical reference is recorded, never followed",
+    )
+
+    with _synthetic_tree(tree_prefix, workspace) as tree:
+        store = SnapshotStore(tree)
+        observation = store.record(result)
+        outcome, references = parse_submissions_document(
+            json.loads(result.body.decode()),
+            RecordLocation(observation_id=observation.observation_id, source_id=_ENTITY),
+        )
+        stored = tree.data_root / str(observation.relative_storage_path)
+        probe.require(
+            stored.is_file(),
+            f"{label}: the raw object was deleted; evidence is retained in every variant",
+        )
+        probe.require(
+            RawStore.lineage_path(stored).is_file(),
+            f"{label}: the retained raw object has no lineage sibling",
+        )
+        failure = _verification_failure(store, observation)
+        probe.require(
+            failure is None,
+            f"{label}: the retained raw object did not verify against its content_sha256 "
+            f"({failure})",
+        )
+        probe.require(
+            not _part_files(tree),
+            f"{label}: a .part file survived the parse",
+        )
+    return outcome, references
+
+
+def _validated_drift_receipt(
+    probe: _Probe,
+    label: str,
+    *,
+    outcome_value: str,
+    event_count: int,
+    completion_status: str,
+    reason_code: str | None,
+) -> None:
+    """Build and validate the receipt the spec names for this scenario, without writing one.
+
+    Contract §4 emits exactly one receipt per rehearsal *invocation*, so a per-scenario receipt is
+    never written to the evidence root. It is still constructed and validated here, because A7 and
+    A8 each specify an expected `schema_drift_outcome` and A8 an expected `completion_status`, and a
+    membership check against the enum would not prove the schema accepts the whole combination.
+    """
+    if outcome_value not in SCHEMA_DRIFT_OUTCOMES:
+        probe.failures.append(
+            f"{label}: the receipt schema has no {outcome_value!r} drift outcome to record"
+        )
+        return
+    try:
+        receipt = ExecutionReceipt(
+            command_name="m3 rehearse",
+            command_version=_REHEARSAL_COMMAND_VERSION,
+            phase="M3.1A",
+            invocation_mode="rehearsal",
+            configuration_fingerprint=hashlib.sha256(label.encode()).hexdigest(),
+            migration_chain_head="none",
+            started_at_utc=_clock_instant(1_000.0),
+            completed_at_utc=_clock_instant(1_001.0),
+            elapsed_seconds=1.0,
+            actual_logical_request_count=0,
+            actual_physical_attempt_count=0,
+            schema_drift_outcome=outcome_value,
+            schema_drift_event_count=event_count,
+            completion_status=completion_status,
+            reason_code=reason_code,
+            reason_detail=(
+                None
+                if reason_code is None
+                else "the synthetic document was refused by the accepted parser."
+            ),
+            rehearsal_evidence_reference=f"m3-1a-rehearsal-report-{'0' * 64}",
+        )
+        validate_receipt_document(receipt.as_document())
+    except DisclosureDriftError as exc:
+        probe.failures.append(
+            f"{label}: the receipt the spec names for this scenario does not validate: {exc}"
+        )
+
+
+def _run_a7(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
+    """Unknown fields are retained, admitted, and never block a lawful parse."""
+    probe = _Probe()
+
+    # Unknown fields at four depths: top level, inside `filings`, inside `filings.recent`, and
+    # inside a nested address block. Only a walker that really descends finds the last three.
+    filings = _json_copy(_SUBMISSIONS_FILINGS)
+    filings["unknownRegion"] = {"deeper": True}
+    recent = filings["recent"]
+    if isinstance(recent, dict):
+        recent["unknownColumn"] = ["synthetic"]
+    addresses = {"business": {"street1": "1 SYNTHETIC WAY", "unknownAddressField": "synthetic"}}
+    document = _submissions_variant(unknown_leaf=1, filings=filings, addresses=addresses)
+
+    outcome, _ = _parsed_through_the_real_path(
+        probe, "unknown fields", document, tree_prefix="m3-rehearsal-a7-", workspace=workspace
+    )
+
+    # The drift report is produced by `sec.schema_drift.inspect_payload`, which the parser calls.
+    reports = outcome.drift_reports
+    probe.require(bool(reports), "the parser produced no drift report at all")
+    blocking = tuple(event for report in reports for event in report.blocking_events)
+    probe.require(
+        not blocking,
+        f"an unknown field produced {len(blocking)} blocking drift event(s); retention must be "
+        f"non-blocking",
+    )
+    retained = tuple(
+        sorted({name for report in reports for name in report.retained_unknown_fields})
+    )
+    probe.require(
+        "unknown_leaf" in retained,
+        f"the top-level unknown field was not recorded as retained; the report retained {retained}",
+    )
+
+    expected_paths = (
+        "addresses.business.unknownAddressField",
+        "filings.recent.unknownColumn",
+        "filings.unknownRegion",
+        "unknown_leaf",
+    )
+    missing = sorted(set(expected_paths) - set(outcome.unknown_fields))
+    probe.require(
+        not missing,
+        f"unknown field(s) {missing} were discarded rather than retained with their exact paths; "
+        f"the parser recorded {outcome.unknown_fields}",
+    )
+    probe.require(
+        "PARSER_SCHEMA_DRIFT_OBSERVED" in outcome.reason_codes,
+        f"retained unknown fields did not raise PARSER_SCHEMA_DRIFT_OBSERVED; the run recorded "
+        f"{outcome.reason_codes}",
     )
     drift_code = REASON_CODES.get("PARSER_SCHEMA_DRIFT_OBSERVED")
     probe.require(
-        drift_code is not None,
-        "PARSER_SCHEMA_DRIFT_OBSERVED is not registered, so retention cannot be recorded",
+        drift_code is not None and not drift_code.blocks_release,
+        "retained unknown fields must be non-blocking; the registered code blocks release",
     )
-    if drift_code is not None:
-        probe.require(
-            not drift_code.blocks_release,
-            "retained unknown fields must be non-blocking; the registered code blocks release",
-        )
+    blocking_codes = sorted(
+        code
+        for code in outcome.reason_codes
+        if code in REASON_CODES and REASON_CODES[code].blocks_release
+    )
     probe.require(
-        "unknown_fields_retained" in SCHEMA_DRIFT_OUTCOMES,
-        "the receipt schema has no 'unknown_fields_retained' outcome to record",
+        not blocking_codes,
+        f"the unknown fields blocked a lawful parse with {blocking_codes}",
     )
-    probe.note("unknown fields at several nesting depths were retained")
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=1, attempts=1)
+
+    # "The record parsed and admitted", and its count still believable.
+    probe.require(
+        bool(outcome.records) and not outcome.quarantined,
+        f"the drifted document produced {len(outcome.records)} record(s) and "
+        f"{len(outcome.quarantined)} quarantine(s); a lawful parse admits the record",
+    )
+    probe.require(
+        outcome.counts_are_trustworthy,
+        "an unknown field made the record counts untrustworthy, which blocks a lawful parse",
+    )
+    registrant = outcome.records[0] if outcome.records else None
+    probe.require(
+        registrant is not None and "unknown_leaf" in registrant.unknown_fields,
+        "the admitted record does not carry the retained field names",
+    )
+
+    # The retained names are inside the record hash, so a discarded unknown field cannot leave the
+    # record looking identical. Without this, "retained" could mean "listed and then ignored".
+    if registrant is not None:
+        without = replace(registrant, unknown_fields=())
+        probe.require(
+            without.record_sha256 != registrant.record_sha256,
+            "dropping the retained field names left the record hash unchanged, so an unknown "
+            "field could be discarded silently",
+        )
+
+    # Inverse control: a document with no unknown field must record none. Otherwise the assertions
+    # above would pass against a parser that reports drift unconditionally.
+    clean_outcome, _ = _parsed_through_the_real_path(
+        probe,
+        "no unknown fields",
+        _submissions_variant(),
+        tree_prefix="m3-rehearsal-a7-clean-",
+        workspace=workspace,
+    )
+    probe.require(
+        clean_outcome.unknown_fields == (),
+        f"a document with no unknown field reported {clean_outcome.unknown_fields} as retained, so "
+        f"retention is reported unconditionally and proves nothing",
+    )
+    probe.require(
+        "PARSER_SCHEMA_DRIFT_OBSERVED" not in clean_outcome.reason_codes,
+        "a document with no unknown field still raised PARSER_SCHEMA_DRIFT_OBSERVED",
+    )
+
+    event_count = sum(len(report.events) for report in reports)
+    _validated_drift_receipt(
+        probe,
+        "unknown fields",
+        outcome_value="unknown_fields_retained",
+        event_count=event_count,
+        completion_status="complete",
+        reason_code=None,
+    )
+    probe.note(
+        f"unknown fields at {len(expected_paths)} depths were retained with their exact paths, "
+        f"admitted as {len(outcome.records)} parsed record(s) with no quarantine, and recorded as "
+        f"{event_count} non-blocking drift event(s) under PARSER_SCHEMA_DRIFT_OBSERVED"
+    )
+    return _outcome(scenario, probe, logical=2, attempts=2)
 
 
 # --------------------------------------------------------------------------- #
 # A8 - blocking schema drift
 # --------------------------------------------------------------------------- #
-def _run_a8(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a8(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
     """A structurally invalid payload never becomes a defaulted or coerced row."""
     probe = _Probe()
-    variants = (
-        ("required field missing", b'{"0":{"ticker":"SYN"}}'),
-        ("unexpected null", b'{"0":{"cik_str":null,"ticker":"SYN","title":"SYNTHETIC"}}'),
-        ("changed type", b'{"0":{"cik_str":"one","ticker":"SYN","title":"SYNTHETIC"}}'),
-        ("malformed nested array", b'{"0":{"cik_str":1,"ticker":["SYN",],"title":"X"}}'),
+
+    def _recent(**columns: object) -> dict[str, object]:
+        block = _json_copy(_SUBMISSIONS_FILINGS)
+        block["recent"] = columns
+        return block
+
+    #: The four blocking variants: the mutated document, the code the spec names, and the
+    #: structural state the accepted parser must reach. `None` means the failure is a top-level
+    #: required-field failure rather than a nested structural verdict.
+    variants: tuple[tuple[str, dict[str, object], str, str | None], ...] = (
         (
-            "new historical reference",
-            b'{"0":{"cik_str":1,"ticker":"SYN","title":"S","files":[{}]}}',
+            "required field missing",
+            _submissions_variant(name=_DROP),
+            "SEC_SCHEMA_REQUIRED_FIELD_MISSING",
+            None,
+        ),
+        (
+            "unexpected null",
+            _submissions_variant(filings={"recent": None, "files": []}),
+            "PARSER_STRUCTURE_NULL",
+            "null",
+        ),
+        (
+            "changed type",
+            _submissions_variant(filings={"recent": [], "files": []}),
+            "PARSER_STRUCTURE_WRONG_TYPE",
+            "wrong_type",
+        ),
+        (
+            "malformed nested array",
+            _submissions_variant(
+                filings=_recent(
+                    accessionNumber=["0000000001-24-000001", "0000000001-24-000002"],
+                    filingDate=["2024-02-01"],
+                    form=["10-K"],
+                )
+            ),
+            "PARSER_STRUCTURE_MALFORMED",
+            "malformed",
         ),
     )
-    attempts = 0
-    for label, body in variants:
-        client, _, _ = _client([_scripted(body=body)])
-        result = client.fetch(_TICKERS, purpose=f"rehearsal drift evidence ({label})")
-        attempts += result.attempts
-        probe.require(
-            result.body == body,
-            f"{label}: the payload was altered before evidence was preserved",
+
+    for index, (label, document, expected_code, expected_state) in enumerate(variants):
+        outcome, _ = _parsed_through_the_real_path(
+            probe,
+            label,
+            document,
+            tree_prefix=f"m3-rehearsal-a8-{index}-",
+            workspace=workspace,
         )
-        probe.note(f"{label}: raw evidence preserved for structural evaluation")
-    for code in (
-        "SEC_SCHEMA_REQUIRED_FIELD_MISSING",
-        "PARSER_STRUCTURE_NULL",
-        "PARSER_STRUCTURE_WRONG_TYPE",
-        "PARSER_STRUCTURE_MALFORMED",
-    ):
         probe.require(
-            code in REASON_CODES, f"{code} is not registered, so drift cannot be recorded"
+            expected_code in outcome.reason_codes,
+            f"{label}: the parser recorded {outcome.reason_codes}, not the {expected_code!r} the "
+            f"spec names; a blocking drift reported under the wrong code misstates why the run "
+            f"stopped",
         )
-        if code in REASON_CODES:
+        probe.require(
+            expected_code in REASON_CODES and REASON_CODES[expected_code].blocks_release,
+            f"{label}: {expected_code} is unregistered or does not block release; blocking drift "
+            f"that does not block is not blocking",
+        )
+        # "Processing stops": the counts may not be believed, so nothing downstream may read the
+        # region as an empty result.
+        probe.require(
+            not outcome.counts_are_trustworthy,
+            f"{label}: the parser reported trustworthy counts for a document it could not parse, "
+            f"so a structural failure could be read as a real zero",
+        )
+        if expected_state is not None:
+            observed_state = outcome.region_state(REGION_RECENT)
             probe.require(
-                REASON_CODES[code].blocks_release,
-                f"{code} must block release; blocking drift that does not block is not blocking",
+                observed_state == expected_state,
+                f"{label}: filings.recent resolved to {observed_state!r}, not {expected_state!r}",
             )
+            # Scoped to the region under test: the spec permits valid siblings to remain
+            # recorded, and `filings.files` being an honest empty list is one of them.
+            failed_region = [
+                item
+                for item in outcome.structural
+                if item.region == REGION_RECENT and (item.is_genuine_zero or item.row_count == 0)
+            ]
+            probe.require(
+                not failed_region,
+                f"{label}: the unusable region was reported as a genuine zero ({failed_region}), "
+                f"so a structural failure could be read as 'this registrant has no filings'",
+            )
+        # "No invalid/defaulted/coerced normalized row is admitted": the unusable region yields no
+        # accession record. A registrant record may lawfully survive as a valid sibling.
+        admitted = [
+            record
+            for record in outcome.records
+            if (record.location.record_path or "").startswith(REGION_RECENT)
+        ]
+        probe.require(
+            not admitted,
+            f"{label}: {len(admitted)} record(s) were admitted from an unusable region; no default "
+            f"is supplied, no type coerced, and no row dropped",
+        )
+        _validated_drift_receipt(
+            probe,
+            label,
+            outcome_value="blocked",
+            event_count=max(1, sum(len(report.events) for report in outcome.drift_reports)),
+            completion_status="failed",
+            reason_code=expected_code,
+        )
+        probe.note(f"{label}: refused with {expected_code} and the raw object retained")
+
+    # The fifth variant: a historical-file reference, malformed and merely new.
+    malformed_reference = _submissions_variant(
+        filings={
+            "recent": _json_copy(_SUBMISSIONS_FILINGS)["recent"],
+            # A name outside the accepted pattern. It is preserved as evidence and must never be
+            # turned into a URL, which is why the reference below has to be unretrievable.
+            "files": [{"name": "not-a-submissions-file.json", "filingCount": 1}],
+        }
+    )
+    outcome, references = _parsed_through_the_real_path(
+        probe,
+        "malformed historical reference",
+        malformed_reference,
+        tree_prefix="m3-rehearsal-a8-4-",
+        workspace=workspace,
+    )
     probe.require(
-        "blocked" in SCHEMA_DRIFT_OUTCOMES,
-        "the receipt schema has no 'blocked' drift outcome to record",
+        "PARSER_HISTORICAL_REFERENCE_MALFORMED" in outcome.reason_codes,
+        f"a malformed historical-file reference recorded {outcome.reason_codes}, not "
+        f"PARSER_HISTORICAL_REFERENCE_MALFORMED",
     )
-    probe.note("no default was supplied, no type coerced, and no row dropped by the retrieval path")
-    return _outcome(
-        scenario, passed=probe.passed, detail=probe.detail, logical=len(variants), attempts=attempts
+    probe.require(
+        outcome.region_state(REGION_FILES) == "malformed",
+        f"filings.files resolved to {outcome.region_state(REGION_FILES)!r}, not 'malformed'",
     )
+    probe.require(
+        bool(references) and not any(getattr(item, "is_retrievable", False) for item in references),
+        "a malformed historical reference was still marked retrievable, so it could be turned "
+        "into a URL",
+    )
+
+    new_reference = _submissions_variant()
+    fresh_outcome, fresh_references = _parsed_through_the_real_path(
+        probe,
+        "new historical reference",
+        new_reference,
+        tree_prefix="m3-rehearsal-a8-5-",
+        workspace=workspace,
+    )
+    probe.require(
+        len(fresh_references) == 1 and getattr(fresh_references[0], "is_retrievable", False),
+        "a well-formed new historical reference was not recorded as a retrievable reference",
+    )
+    probe.require(
+        not fresh_outcome.quarantined,
+        f"a merely new historical reference was quarantined ({len(fresh_outcome.quarantined)}); "
+        f"only a malformed one is",
+    )
+    # "Does not silently expand the plan": the route a historical reference would be retrieved on
+    # is not in the M3.2A window at all, so no reference can add a request to the approved budget.
+    probe.require(
+        "sec_submissions_historical" not in M3_2A_BOOTSTRAP_ROUTES,
+        "the historical-submissions route is inside the M3.2A window, so a newly observed "
+        "reference would silently expand the approved plan",
+    )
+    probe.note(
+        "a malformed historical reference was refused as unretrievable and a merely new one was "
+        "recorded without expanding the M3.2A plan"
+    )
+    return _outcome(scenario, probe, logical=6, attempts=6)
 
 
 # --------------------------------------------------------------------------- #
 # A9 - byte-identical duplicate and valid 304
 # --------------------------------------------------------------------------- #
-def _run_a9(scenario: _Scenario) -> ScenarioOutcome:
-    """Identical bodies collapse by identity; a lawful 304 reuses the preserved snapshot."""
+#: A synthetic entity tag. It never came from SEC; it exists so the conditional request in A9(b)
+#: can send a validator drawn from the observation it is revalidating, as the reuse rules require.
+_A9_ETAG: Final = '"synthetic-rehearsal-fixture"'
+
+
+def _run_a9(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
+    """Identical bodies collapse by identity; a lawful 304 reuses the preserved snapshot.
+
+    Both variants run against one real `SnapshotStore` over an isolated synthetic tree, because
+    "one object and two immutable observations" is a claim about persisted state. Comparing two
+    client-level bodies would pass with no store at all.
+    """
     probe = _Probe()
-
-    client, _, _ = _client([_scripted(), _scripted()])
-    first = client.fetch(_TICKERS, purpose="rehearsal duplicate evidence")
-    second = client.fetch(_TICKERS, purpose="rehearsal duplicate evidence")
-    probe.require(
-        first.body == second.body,
-        "two byte-identical responses did not produce identical bodies",
-    )
-    probe.require(
-        first.identity == second.identity,
-        "content addressing keyed on something other than request identity",
+    etag_headers = {"ETag": _A9_ETAG}
+    client, _, _ = _client(
+        [
+            _scripted(headers=etag_headers),
+            _scripted(headers=etag_headers),
+            _scripted(304, body=b"", headers=etag_headers),
+        ]
     )
 
-    conditional_client, conditional_transport, _ = _client([_scripted(304, body=b"")])
-    reused = conditional_client.fetch(
-        _TICKERS, purpose="rehearsal revalidation evidence", etag='"fixture"'
-    )
-    probe.require(
-        reused.outcome == "not_modified",
-        f"a valid 304 produced {reused.outcome!r} rather than a reuse",
-    )
-    probe.require(
-        conditional_transport.requests[0].headers.get("If-None-Match") == '"fixture"',
-        "the conditional request did not send the preserved validator",
-    )
-    probe.note("one object, two immutable observations, in each variant")
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=3, attempts=3)
+    with _synthetic_tree("m3-rehearsal-a9-", workspace) as tree:
+        store = SnapshotStore(tree)
+
+        # (a) the same logical request returns a byte-identical 200.
+        first = client.fetch(_TICKERS, purpose="rehearsal duplicate evidence")
+        stored_first = store.record(first)
+        after_first = _stored_objects(tree)
+        original_bytes = after_first[0].read_bytes() if after_first else b""
+
+        second = client.fetch(_TICKERS, purpose="rehearsal duplicate evidence")
+        stored_second = store.record(second)
+
+        probe.require(
+            first.body == second.body,
+            "two byte-identical responses did not produce identical bodies",
+        )
+        probe.require(
+            first.identity == second.identity,
+            "content addressing keyed on something other than request identity",
+        )
+        probe.require(
+            stored_first.outcome == "stored_new",
+            f"variant (a): the first storage recorded {stored_first.outcome!r}",
+        )
+        probe.require(
+            stored_second.outcome == "unchanged_content",
+            f"variant (a): a byte-identical second body recorded {stored_second.outcome!r} "
+            f"rather than 'unchanged_content'",
+        )
+        probe.require(
+            stored_second.reason_codes == ("SOURCE_CONTENT_UNCHANGED",),
+            f"variant (a): the second observation carried {stored_second.reason_codes} rather "
+            f"than the SOURCE_CONTENT_UNCHANGED verdict the spec names",
+        )
+        probe.require(
+            stored_second.relative_storage_path == stored_first.relative_storage_path,
+            "variant (a): the second observation claimed a second object rather than reusing "
+            "the preserved one, so identical bodies did not collapse by identity",
+        )
+
+        # (b) a conditional request receives a valid 304 and reuses the preserved snapshot.
+        reused = client.fetch(
+            _TICKERS, purpose="rehearsal revalidation evidence", etag=stored_first.etag or _A9_ETAG
+        )
+        stored_reuse = store.record(reused)
+        probe.require(
+            reused.outcome == "not_modified",
+            f"a valid 304 produced {reused.outcome!r} rather than a reuse",
+        )
+        probe.require(
+            stored_reuse.outcome == "reused_snapshot",
+            f"variant (b): a lawful 304 recorded {stored_reuse.outcome!r} rather than "
+            f"'reused_snapshot'; {stored_reuse.detail}",
+        )
+        probe.require(
+            stored_reuse.reason_codes == ("SOURCE_SNAPSHOT_REUSED",),
+            f"variant (b): the reuse observation carried {stored_reuse.reason_codes} rather than "
+            f"the SOURCE_SNAPSHOT_REUSED verdict the spec names",
+        )
+        probe.require(
+            stored_reuse.relative_storage_path == stored_first.relative_storage_path,
+            "variant (b): the reuse did not point at the preserved object",
+        )
+
+        objects = _stored_objects(tree)
+        probe.require(
+            len(objects) == 1,
+            f"three retrievals of identical content produced {len(objects)} objects; content "
+            f"addressing must collapse them to exactly one",
+        )
+        probe.require(
+            len(store.observations) == 3,
+            f"{len(store.observations)} observations were recorded; a lawful 304 and a duplicate "
+            f"200 each still record their own immutable observation",
+        )
+        probe.require(
+            bool(objects) and objects[0].read_bytes() == original_bytes,
+            "the preserved object was rewritten by a later identical retrieval",
+        )
+        missing_lineage = sorted(
+            path.name for path in objects if not RawStore.lineage_path(path).is_file()
+        )
+        probe.require(not missing_lineage, f"stored object(s) {missing_lineage} have no lineage")
+        probe.require(not _part_files(tree), "a duplicate or 304 left a .part file behind")
+        probe.note(
+            f"one raw object and {len(store.observations)} immutable observations; verdicts "
+            f"{stored_second.reason_codes[0] if stored_second.reason_codes else 'none'} and "
+            f"{stored_reuse.reason_codes[0] if stored_reuse.reason_codes else 'none'}"
+        )
+    return _outcome(scenario, probe, logical=3, attempts=3)
 
 
 # --------------------------------------------------------------------------- #
 # A10 - changed body is a new observation
 # --------------------------------------------------------------------------- #
-def _run_a10(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a10(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
     """A differing later response is always a new observation and never an overwrite."""
     probe = _Probe()
     original = b'{"0":{"cik_str":1,"ticker":"SYN","title":"SYNTHETIC"}}'
@@ -901,6 +1554,80 @@ def _run_a10(scenario: _Scenario) -> ScenarioOutcome:
     client, _, _ = _client([_scripted(body=original), _scripted(body=changed)])
     first = client.fetch(_TICKERS, purpose="rehearsal changed-body evidence")
     second = client.fetch(_TICKERS, purpose="rehearsal changed-body evidence")
+
+    # The spec's expected files are "two raw objects — the first is never overwritten", and its
+    # expected reason codes are SnapshotStore verdicts. Both are properties of the store, so the
+    # living-source variant and the closed-quarter dated-snapshot variant are persisted through
+    # the real store into isolated synthetic trees rather than asserted about.
+    with _synthetic_tree("m3-rehearsal-a10-living-", workspace) as tree:
+        store = SnapshotStore(tree)
+        stored_first = store.record(first)
+        preserved = tree.data_root / str(stored_first.relative_storage_path)
+        preserved_bytes = preserved.read_bytes()
+        stored_second = store.record(second)
+
+        probe.require(
+            stored_second.outcome == "superseded",
+            f"a changed body at a living source recorded {stored_second.outcome!r} rather than "
+            f"'superseded'",
+        )
+        probe.require(
+            stored_second.reason_codes == ("SOURCE_CONTENT_UPDATED",),
+            f"the living-source change carried {stored_second.reason_codes} rather than the "
+            f"SOURCE_CONTENT_UPDATED verdict the spec names",
+        )
+        probe.require(
+            stored_second.supersedes_observation_id == stored_first.observation_id,
+            "the supersession lineage does not name the earlier observation, so the change was "
+            "absorbed rather than recorded",
+        )
+        probe.require(
+            len(_stored_objects(tree)) == 2,
+            f"a changed body produced {len(_stored_objects(tree))} object(s); the spec requires "
+            f"two, because the first is never overwritten",
+        )
+        probe.require(
+            preserved.is_file() and preserved.read_bytes() == preserved_bytes,
+            "the first object was overwritten or removed by the later differing response "
+            "(CLAUDE.md rule 6)",
+        )
+        probe.require(not _part_files(tree), "the changed-body store left a .part file behind")
+
+    # A closed-quarter dated snapshot that changes is an anomaly requiring review, not an update.
+    with _synthetic_tree("m3-rehearsal-a10-dated-", workspace) as tree:
+        parameters = _parameters_for(_FULL_INDEX)
+        dated_client, _, _ = _client(
+            [
+                _scripted(body=b"CIK|Company Name\n1|SYNTHETIC\n", content_type="text/plain"),
+                _scripted(
+                    body=b"CIK|Company Name\n1|SYNTHETIC RENAMED\n", content_type="text/plain"
+                ),
+            ]
+        )
+        dated_store = SnapshotStore(tree)
+        dated_first = dated_client.fetch(
+            _FULL_INDEX, purpose="rehearsal dated-artifact evidence", parameters=parameters
+        )
+        dated_store.record(dated_first, period_is_closed=True)
+        dated_second = dated_client.fetch(
+            _FULL_INDEX, purpose="rehearsal dated-artifact evidence", parameters=parameters
+        )
+        dated_stored = dated_store.record(dated_second, period_is_closed=True)
+
+        probe.require(
+            "SOURCE_DATED_ARTIFACT_CHANGED" in dated_stored.reason_codes,
+            f"a closed-quarter dated snapshot that changed carried {dated_stored.reason_codes} "
+            f"rather than the SOURCE_DATED_ARTIFACT_CHANGED anomaly verdict the spec names",
+        )
+        probe.require(
+            len(_stored_objects(tree)) == 2,
+            f"the changed dated artifact produced {len(_stored_objects(tree))} object(s) rather "
+            f"than two; the earlier snapshot is evidence and is never replaced",
+        )
+        probe.note(
+            f"closed-quarter dated change recorded as {dated_stored.reason_codes} over two "
+            f"preserved objects"
+        )
 
     probe.require(first.body != second.body, "the changed body was not observed as different")
     probe.require(
@@ -934,13 +1661,13 @@ def _run_a10(scenario: _Scenario) -> ScenarioOutcome:
                 f"treated as an ordinary update",
             )
     probe.note("two distinct objects; the first is never overwritten")
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=2, attempts=2)
+    return _outcome(scenario, probe, logical=2, attempts=2)
 
 
 # --------------------------------------------------------------------------- #
 # A11 - interruption and recovery
 # --------------------------------------------------------------------------- #
-def _run_a11(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a11(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
     """Each abort point leaves a distinguishable state, and a resume re-requests nothing committed.
 
     This is the scenario the acquisition rehearsal exists for, so it is exercised against a real
@@ -949,8 +1676,8 @@ def _run_a11(scenario: _Scenario) -> ScenarioOutcome:
     """
     probe = _Probe()
 
-    with tempfile.TemporaryDirectory(prefix="m3-rehearsal-a11-") as workspace:
-        tree = DataTree.from_root(Path(workspace) / "data")
+    with tempfile.TemporaryDirectory(prefix="m3-rehearsal-a11-", dir=workspace) as scratch:
+        tree = DataTree.from_root(Path(scratch) / "data")
         tree.ensure_tree()
         with CatalogWriter(tree.catalog_database, tree.locks) as writer:
             writer.migrate()
@@ -1056,13 +1783,13 @@ def _run_a11(scenario: _Scenario) -> ScenarioOutcome:
     probe.note(
         "inspection alone changes no byte; the recovery inspector is read-only by construction"
     )
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=1, attempts=1)
+    return _outcome(scenario, probe, logical=1, attempts=1)
 
 
 # --------------------------------------------------------------------------- #
 # A12 - redaction and non-contamination
 # --------------------------------------------------------------------------- #
-def _run_a12(scenario: _Scenario) -> ScenarioOutcome:
+def _run_a12(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
     """(a) the prohibited-field scan is non-vacuous; (b) operational variation moves no identity."""
     probe = _Probe()
 
@@ -1095,13 +1822,16 @@ def _run_a12(scenario: _Scenario) -> ScenarioOutcome:
     # it is a pure function of source, URL, and parameters, with no clock or receipt input.
     identities: list[tuple[str, ...]] = []
     receipt_ids: list[str] = []
+    receipt_validation_failures: list[str] = []
     for label, clock_start, emit_receipt in (
         ("A", 1_000.0, False),
         ("B", 1_000.0, True),
         ("C", 9_999.0, True),
     ):
-        with tempfile.TemporaryDirectory(prefix=f"m3-rehearsal-a12{label}-") as workspace:
-            tree = DataTree.from_root(Path(workspace) / "data")
+        with tempfile.TemporaryDirectory(
+            prefix=f"m3-rehearsal-a12{label}-", dir=workspace
+        ) as scratch:
+            tree = DataTree.from_root(Path(scratch) / "data")
             tree.ensure_tree()
             clock = _FrozenClock(clock_start)
             transport = _ScriptedTransport([_scripted_for(_TICKERS)])
@@ -1123,16 +1853,59 @@ def _run_a12(scenario: _Scenario) -> ScenarioOutcome:
             )
 
             if emit_receipt:
-                # Receipt emission is the variable under test: it must change no value above.
-                receipt_ids.append(
-                    hashlib.sha256(
-                        f"{label}|{clock_start}|{observation.content_sha256}".encode()
-                    ).hexdigest()
+                # Receipt emission is the variable under test, so a REAL receipt is constructed
+                # and written through `m3.receipt` into this run's temporary tree. Hashing a
+                # string would make legs B and C differ only because their labels differ, which
+                # would prove nothing about receipts at all; every field that separates B from C
+                # below is derived from the injected clock, never from the leg's name.
+                receipt_root = Path(scratch) / "evidence"
+                started = _clock_instant(clock_start)
+                completed = _clock_instant(clock_start + 1.0)
+                receipt = ExecutionReceipt(
+                    command_name="m3 rehearse",
+                    command_version=_REHEARSAL_COMMAND_VERSION,
+                    phase="M3.1A",
+                    invocation_mode="rehearsal",
+                    configuration_fingerprint=hashlib.sha256(
+                        f"rehearsal-clock-{int(clock_start)}".encode()
+                    ).hexdigest(),
+                    migration_chain_head="none",
+                    started_at_utc=started,
+                    completed_at_utc=completed,
+                    elapsed_seconds=1.0,
+                    actual_logical_request_count=0,
+                    actual_physical_attempt_count=0,
+                    schema_drift_outcome="none",
+                    schema_drift_event_count=0,
+                    completion_status="complete",
+                    rehearsal_evidence_reference=(
+                        f"m3-1a-rehearsal-report-{hashlib.sha256(started.encode()).hexdigest()}"
+                    ),
                 )
+                written = write_receipt(
+                    receipt,
+                    evidence_root=receipt_root,
+                    repository_root=Path(scratch) / "checkout",
+                )
+                try:
+                    inspected = inspect_receipt(written)
+                except DisclosureDriftError as exc:
+                    receipt_validation_failures.append(f"run {label}: {exc}")
+                else:
+                    if inspected.get("receipt_id") != receipt.receipt_id:
+                        receipt_validation_failures.append(
+                            f"run {label}: the written receipt does not carry the identity it "
+                            f"computed"
+                        )
+                receipt_ids.append(receipt.receipt_id)
 
     probe.require(
         len(set(identities)) == 1,
         f"varying receipt emission or operational values moved a stored identity: {identities}",
+    )
+    probe.require(
+        not receipt_validation_failures,
+        f"a receipt emitted by run B or C did not validate: {receipt_validation_failures}",
     )
     probe.require(
         len(set(receipt_ids)) == len(receipt_ids) == 2,
@@ -1140,9 +1913,10 @@ def _run_a12(scenario: _Scenario) -> ScenarioOutcome:
         "actually vary, so the comparison proves nothing",
     )
     probe.note(
-        "every stored identity is byte-identical with receipts disabled, enabled, and varied"
+        f"every stored identity is byte-identical with receipts disabled, enabled, and varied; "
+        f"runs B and C emitted {len(set(receipt_ids))} distinct validated receipt_id values"
     )
-    return _outcome(scenario, passed=probe.passed, detail=probe.detail, logical=3, attempts=3)
+    return _outcome(scenario, probe, logical=3, attempts=3)
 
 
 # --------------------------------------------------------------------------- #
@@ -1332,12 +2106,26 @@ def _parameters_for(source_id: str) -> Mapping[str, str] | None:
     return None
 
 
-def run_rehearsal(scenario_ids: Sequence[str] | None = None) -> RehearsalReport:
+#: The directory `m3 rehearse` opens its per-invocation scratch root inside. It lives below the
+#: evidence root the operator named, per contract §11, and never survives the invocation.
+_WORKSPACE_DIRECTORY: Final = "rehearsal-workspace"
+
+
+def run_rehearsal(
+    scenario_ids: Sequence[str] | None = None,
+    *,
+    workspace_root: Path,
+) -> RehearsalReport:
     """Run the requested scenarios and return the rehearsal evidence report.
 
     Args:
         scenario_ids: the scenarios to run, or ``None`` for all twelve. Only a report over all
             twelve can satisfy the M3.1A completion token; a subset is for diagnosis.
+        workspace_root: the already-validated external evidence root. Contract §11 places the
+            synthetic data tree and synthetic catalog **below the external evidence root**, so the
+            location is required rather than defaulted: a default would silently write operator
+            evidence outside the boundary the operator named, which is the failure the argument
+            exists to prevent.
 
     Raises:
         RehearsalError: an unknown scenario was requested, or the harness could not run one.
@@ -1350,15 +2138,29 @@ def run_rehearsal(scenario_ids: Sequence[str] | None = None) -> RehearsalReport:
 
     by_id = {scenario.scenario_id: scenario for scenario in _REGISTRY}
     outcomes: list[ScenarioOutcome] = []
-    for scenario_id in SCENARIO_IDS:
-        if scenario_id not in requested:
-            continue
-        scenario = by_id[scenario_id]
-        runner = scenario.run
-        if not callable(runner):  # pragma: no cover - registry defect
-            message = f"scenario {scenario_id} has no runner"
-            raise RehearsalError(message)
-        outcomes.append(runner(scenario))
+    # One scratch root per invocation, below the evidence root and removed when the invocation
+    # ends. Nothing synthetic is retained, so a second identical run neither collides with the
+    # first nor needs the write-once artifact rule relaxed: that rule guards the named plan,
+    # evidence, and receipt, which this directory never contains.
+    scratch_parent = Path(workspace_root) / _WORKSPACE_DIRECTORY
+    scratch_parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="m3-rehearsal-", dir=scratch_parent) as workspace:
+            for scenario_id in SCENARIO_IDS:
+                if scenario_id not in requested:
+                    continue
+                scenario = by_id[scenario_id]
+                runner = scenario.run
+                if not callable(runner):  # pragma: no cover - registry defect
+                    message = f"scenario {scenario_id} has no runner"
+                    raise RehearsalError(message)
+                outcomes.append(runner(scenario, Path(workspace)))
+    finally:
+        # Leave the evidence root as it was found when nothing else put anything here. A retained
+        # empty directory is not evidence, and an operator comparing two runs should not have to
+        # explain one.
+        with suppress(OSError):
+            scratch_parent.rmdir()
 
     derived = {source_id: derive_a_reachable(spec) for source_id, spec in sorted(SOURCES.items())}
     tested, unmeasured = _tested_a_reachable()

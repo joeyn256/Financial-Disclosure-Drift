@@ -11,6 +11,8 @@ than copied from the derivation it is supposed to confirm.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from disclosure_drift.m3.rehearsal import (
@@ -26,9 +28,9 @@ from disclosure_drift.sec.source_registry import SOURCES
 
 
 @pytest.fixture(scope="module")
-def report() -> RehearsalReport:
+def report(tmp_path_factory: pytest.TempPathFactory) -> RehearsalReport:
     """One full rehearsal, reused across assertions: it drives the real client many times."""
-    return run_rehearsal()
+    return run_rehearsal(workspace_root=tmp_path_factory.mktemp("evidence"))
 
 
 # --------------------------------------------------------------------------- #
@@ -76,20 +78,100 @@ def test_every_scenario_passes(report: RehearsalReport) -> None:
     assert not failures, "; ".join(failures)
 
 
-def test_an_unknown_scenario_is_refused() -> None:
+# --------------------------------------------------------------------------- #
+# One named test per scenario (contract §12; spec §6 pass criterion 1)
+# --------------------------------------------------------------------------- #
+def _scenario(scenario_id: str, workspace_root: Path) -> None:
+    """Run one scenario on its own and fail with the assertions it found untrue.
+
+    Contract §12 requires "one named test per scenario ... none skipped or `xfail`ed". A single
+    aggregate assertion over the whole report satisfies neither obligation: it names no scenario,
+    so a reader cannot tell from the test list that all twelve exist, and a failure reports one
+    collapsed message rather than the scenario that produced it.
+    """
+    report = run_rehearsal([scenario_id], workspace_root=workspace_root)
+
+    assert tuple(outcome.scenario_id for outcome in report.outcomes) == (scenario_id,)
+    outcome = report.outcomes[0]
+    assert outcome.passed, f"{scenario_id}: {outcome.detail}"
+    assert outcome.title.strip()
+    # Every scenario records what it observed. A record with no findings would report that a
+    # scenario passed without saying what it saw.
+    assert outcome.findings, f"{scenario_id} recorded no observed findings"
+
+
+def test_a1_all_success_acquisition(tmp_path: Path) -> None:
+    _scenario("A1", tmp_path)
+
+
+def test_a2_retry_then_success(tmp_path: Path) -> None:
+    _scenario("A2", tmp_path)
+
+
+def test_a3_retry_after_usable_and_unusable(tmp_path: Path) -> None:
+    _scenario("A3", tmp_path)
+
+
+def test_a4_cooldown_and_block_page_termination(tmp_path: Path) -> None:
+    _scenario("A4", tmp_path)
+
+
+def test_a5_stop_before_budget_overflow(tmp_path: Path) -> None:
+    _scenario("A5", tmp_path)
+
+
+def test_a6_route_allowlist_and_denylist_enforcement(tmp_path: Path) -> None:
+    _scenario("A6", tmp_path)
+
+
+def test_a7_unknown_field_retention(tmp_path: Path) -> None:
+    _scenario("A7", tmp_path)
+
+
+def test_a8_blocking_schema_drift(tmp_path: Path) -> None:
+    _scenario("A8", tmp_path)
+
+
+def test_a9_byte_identical_duplicate_and_valid_304(tmp_path: Path) -> None:
+    _scenario("A9", tmp_path)
+
+
+def test_a10_changed_body_new_observation_behaviour(tmp_path: Path) -> None:
+    _scenario("A10", tmp_path)
+
+
+def test_a11_raw_store_and_catalog_interruption_recovery(tmp_path: Path) -> None:
+    _scenario("A11", tmp_path)
+
+
+def test_a12_receipt_non_contamination_and_non_vacuous_scanning(tmp_path: Path) -> None:
+    _scenario("A12", tmp_path)
+
+
+def test_there_is_a_named_test_for_every_registered_scenario() -> None:
+    """The registry and the named tests above cannot drift apart unnoticed."""
+    named = {
+        name.split("_", 2)[1].upper()
+        for name in globals()
+        if name.startswith("test_a") and name.split("_", 2)[1].lstrip("a").isdigit()
+    }
+    assert named == set(SCENARIO_IDS)
+
+
+def test_an_unknown_scenario_is_refused(tmp_path: Path) -> None:
     with pytest.raises(RehearsalError, match="A13"):
-        run_rehearsal(["A13"])
+        run_rehearsal(["A13"], workspace_root=tmp_path)
 
 
-def test_a_subset_runs_but_does_not_claim_completeness() -> None:
-    partial = run_rehearsal(["A1", "A2"])
+def test_a_subset_runs_but_does_not_claim_completeness(tmp_path: Path) -> None:
+    partial = run_rehearsal(["A1", "A2"], workspace_root=tmp_path)
 
     assert not partial.complete
     assert tuple(outcome.scenario_id for outcome in partial.outcomes) == ("A1", "A2")
 
 
-def test_scenarios_run_in_registry_order_regardless_of_request_order() -> None:
-    partial = run_rehearsal(["A9", "A2"])
+def test_scenarios_run_in_registry_order_regardless_of_request_order(tmp_path: Path) -> None:
+    partial = run_rehearsal(["A9", "A2"], workspace_root=tmp_path)
 
     assert tuple(outcome.scenario_id for outcome in partial.outcomes) == ("A2", "A9")
 
@@ -184,3 +266,69 @@ def test_the_report_names_every_scenario(report: RehearsalReport) -> None:
     text = report.canonical_bytes().decode("utf-8")
     for scenario_id in SCENARIO_IDS:
         assert f'"{scenario_id}"' in text
+
+
+# --------------------------------------------------------------------------- #
+# A7 and A8 exercise the real parser and schema-drift path, not a restatement of it
+# --------------------------------------------------------------------------- #
+def _detail(scenario_id: str, workspace_root: Path) -> tuple[bool, str]:
+    outcome = run_rehearsal([scenario_id], workspace_root=workspace_root).outcomes[0]
+    return outcome.passed, outcome.detail
+
+
+def test_a7_fails_when_schema_drift_inspection_goes_blind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A7 must be sensitive to the production drift path, not merely to the raw bytes.
+
+    Both scenarios once asserted only that `SecClient.fetch` returned the body it was given, so
+    they passed with every callable in `sec/parsers/base.py` and `sec/schema_drift.py` replaced by
+    a stub. This substitutes a drift inspection that reports nothing and requires A7 to notice.
+    """
+    from disclosure_drift.sec import schema_drift
+    from disclosure_drift.sec.parsers import submissions
+
+    def _blind(*_args: object, **kwargs: object) -> schema_drift.DriftReport:
+        return schema_drift.DriftReport(
+            source_class=str(kwargs.get("source_class", "")),
+            events=(),
+            retained_unknown_fields=(),
+        )
+
+    monkeypatch.setattr(submissions, "inspect_payload", _blind)
+    passed, detail = _detail("A7", tmp_path)
+
+    assert not passed, "A7 passed with schema-drift inspection reporting nothing"
+    assert "retained" in detail
+
+
+def test_a8_fails_when_structural_verdicts_carry_no_reason_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A8 must read the codes the accepted parser layer really emits for each structural state."""
+    from disclosure_drift.sec.parsers import base
+
+    monkeypatch.setattr(
+        base,
+        "STRUCTURAL_REASON_BY_STATE",
+        dict.fromkeys(base.STRUCTURAL_REASON_BY_STATE, ""),
+    )
+    passed, detail = _detail("A8", tmp_path)
+
+    assert not passed, "A8 passed with every structural reason code suppressed"
+    assert "PARSER_STRUCTURE" in detail
+
+
+def test_a8_fails_when_an_unusable_count_is_reported_as_trustworthy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The false-zero property is the point of A8: an unknown count must never read as zero."""
+    from disclosure_drift.sec.parsers import base
+
+    monkeypatch.setattr(
+        base.StructuralObservation, "count_is_trustworthy", property(lambda _self: True)
+    )
+    passed, detail = _detail("A8", tmp_path)
+
+    assert not passed, "A8 passed with every unusable count reported as believable"
+    assert "trustworthy counts" in detail

@@ -56,6 +56,7 @@ __all__ = [
     "derive_a_reachable",
     "derive_redirect_reachability",
     "render_budget",
+    "request_plan_from_document",
 ]
 
 #: The plan schema this module implements. A change to the plan's shape or meaning is a version
@@ -395,6 +396,95 @@ def build_m3_2a_request_plan(
         expected_cache_hits=len(satisfied_in_plan),
         routes=routes,
     )
+
+
+def request_plan_from_document(payload: bytes) -> RequestPlan:
+    """Reconstruct the plan a stored plan document *is*, rather than rebuilding it from inputs.
+
+    A stored plan is the artifact the owner approved and the receipt chain recorded a hash of. It is
+    therefore the authority on its own ceiling and its own hash, and a consumer that needs the plan
+    an interrupted run was executing must read it, not re-derive it. Rebuilding from the recorded
+    ``inputs`` section alone cannot reproduce the plan: the exclusion of already-satisfied instances
+    happens *before* the plan is formed, and the satisfied set is not an input the document carries.
+    A rebuild therefore silently plans the cached instances again, producing a larger ceiling and a
+    different hash — which would make every plan that had a cache hit fail its own "plan hash
+    unchanged" check.
+
+    Every :class:`RequestPlan` and :class:`RoutePlan` field is present in
+    :meth:`RequestPlan.as_payload`, so the reconstruction is exact rather than approximate, and it
+    is *proved* exact here: the reconstructed plan is re-serialized and compared against the
+    supplied bytes. A document that does not round-trip is refused rather than repaired, because
+    anything less would let a hand-edited or non-canonical document assert a hash it does not hash
+    to. Passing that comparison means ``request_plan_sha256`` equals the SHA-256 of the stored bytes
+    by construction, so nothing about the governed identity is recomputed or re-derived.
+
+    Args:
+        payload: the exact stored plan bytes, as written by ``m3 plan-requests``.
+
+    Raises:
+        RequestPlanInputError: the bytes are not a canonical document of this schema version.
+    """
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        message = f"the stored request plan is not readable UTF-8 JSON: {exc}"
+        raise RequestPlanInputError(message) from exc
+    if not isinstance(document, dict):
+        message = "the stored request plan is not a JSON object"
+        raise RequestPlanInputError(message)
+
+    version = document.get("request_plan_schema_version")
+    if version != REQUEST_PLAN_SCHEMA_VERSION:
+        message = (
+            f"the stored request plan declares schema {version!r}, not "
+            f"{REQUEST_PLAN_SCHEMA_VERSION!r}; a plan of another schema is not this plan"
+        )
+        raise RequestPlanInputError(message)
+
+    try:
+        inputs = document["inputs"]
+        routes = document["routes"]
+        required_keys = document["required_index_keys"]
+        if not isinstance(inputs, dict) or not isinstance(routes, list):
+            raise TypeError  # noqa: TRY301 - joined with the KeyError path below
+        plan = RequestPlan(
+            acquisition_window=str(document["acquisition_window"]),
+            coverage_start=date.fromisoformat(str(inputs["coverage_start"])),
+            coverage_end=date.fromisoformat(str(inputs["coverage_end"])),
+            as_of_date=date.fromisoformat(str(inputs["as_of_date"])),
+            include_open_quarter=bool(inputs["include_open_quarter"]),
+            calendar_year=int(inputs["calendar_year"]),
+            calendar_evidence_entry_count=int(inputs["calendar_evidence_entry_count"]),
+            requests_per_second=float(inputs["requests_per_second"]),
+            required_index_keys=tuple(str(key) for key in required_keys),
+            expected_cache_hits=int(document["expected_cache_hits"]),
+            routes=tuple(
+                RoutePlan(
+                    source_id=str(route["source_id"]),
+                    host=str(route["host"]),
+                    planned_unique_logical_requests=int(route["planned_unique_logical_requests"]),
+                    a_reachable=int(route["a_reachable"]),
+                    basis=str(route["basis"]),
+                )
+                for route in routes
+                if isinstance(route, dict)
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        message = (
+            f"the stored request plan does not carry the fields "
+            f"{REQUEST_PLAN_SCHEMA_VERSION} defines: {exc}"
+        )
+        raise RequestPlanInputError(message) from exc
+
+    if canonical_plan_bytes(plan) != payload:
+        message = (
+            "re-serializing the reconstructed plan does not reproduce the stored bytes, so the "
+            "stored document is not a canonical plan of this schema and its recorded hash cannot "
+            "be trusted; a correction is a new plan, never a repaired read"
+        )
+        raise RequestPlanInputError(message)
+    return plan
 
 
 def calendar_year_bounds(calendar_year: int) -> tuple[date, date]:

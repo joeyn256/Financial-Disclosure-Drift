@@ -922,3 +922,176 @@ def test_inspection_refuses_a_receipt_written_under_an_unknown_schema_version(
 
     with pytest.raises(ReceiptValidationError, match="receipt_schema_version"):
         inspect_receipt(path)
+
+
+# --------------------------------------------------------------------------- #
+# §11 identity non-contamination, asserted at the suite level
+# --------------------------------------------------------------------------- #
+# Contract §11 is explicit: "A suite-level test must prove every accepted governed identity
+# byte-identical with receipts disabled, enabled, and varied." Rehearsal A12(b) proves it for the
+# acquisition-layer identities it can reach; the S5 selection identity and the S6 manifest root are
+# the governed identities the milestone actually protects, and no test computed them across a
+# varying receipt at all. A receipt that entered one of them would be a phase-stopping defect
+# (§18 stop condition 8), so the property is proven here rather than argued from the absence of an
+# import edge.
+_GOVERNED_SNAPSHOT_ID = "a" * 64
+_GOVERNED_NODE_LIMIT = 2_000_000
+
+
+def _governed_identities() -> tuple[str, ...]:
+    """Compute the S5 selection identity and the S6 manifest root from fixed synthetic inputs.
+
+    Pure functions only: no catalog, no clock, no filesystem, no receipt. Recomputing this while a
+    receipt is absent, present, and varied is the whole experiment, so it must depend on nothing
+    but its literal inputs.
+    """
+    from disclosure_drift.release import pilot_manifest as pm
+    from disclosure_drift.sec.accession_selection_store import (
+        FrozenJointCandidateSet,
+        build_joint_selection_run_identity,
+    )
+
+    candidate_set = FrozenJointCandidateSet(
+        snapshot_id=_GOVERNED_SNAPSHOT_ID,
+        candidate_snapshot_sha256=hashlib.sha256(b"candidate-tables").hexdigest(),
+        entity_count=24,
+        accession_count=2,
+        entities=(),
+        accessions=(),
+        entity_content_sha256=hashlib.sha256(b"entities").hexdigest(),
+        accession_content_sha256=hashlib.sha256(b"accessions").hexdigest(),
+    )
+    selection = build_joint_selection_run_identity(candidate_set, node_limit=_GOVERNED_NODE_LIMIT)
+
+    components = pm.ManifestComponents(
+        source_observation_set_sha256=hashlib.sha256(b"c1").hexdigest(),
+        candidate_tables_sha256=hashlib.sha256(b"c2").hexdigest(),
+        quota_definitions_sha256=hashlib.sha256(b"c3").hexdigest(),
+        selector_policy_sha256=hashlib.sha256(b"c4").hexdigest(),
+        selected_entities_sha256=hashlib.sha256(b"c5").hexdigest(),
+        selected_accessions_sha256=hashlib.sha256(b"c6").hexdigest(),
+        reserves_sha256=hashlib.sha256(b"c7").hexdigest(),
+        quota_report_sha256=hashlib.sha256(b"c8").hexdigest(),
+    )
+    result = pm.selection_result_sha256(
+        manifest_hash_policy_version="pilot-manifest/1.0",
+        selection_run_id=selection.selection_run_id,
+        snapshot_id=selection.snapshot_id,
+        selection_input_sha256=selection.selection_input_sha256,
+        selection_input_schema_version="pilot-joint-selection-input/1.0",
+        run_state="feasible",
+        selected_entity_count=24,
+        selected_accession_count=2,
+        expanded_node_count=42,
+        node_limit_exhausted=0,
+        components=components,
+    )
+    root = pm.root_manifest_sha256(
+        manifest_schema_version="pilot-manifest/1.0",
+        selection_run_id=selection.selection_run_id,
+        snapshot_id=selection.snapshot_id,
+        selection_result=result,
+        components=components,
+    )
+    return (selection.selection_input_sha256, selection.selection_run_id, result, root)
+
+
+def test_no_governed_identity_is_contaminated_by_a_receipt(tmp_path: Path) -> None:
+    """Receipts disabled, enabled, and varied: every governed identity is byte-identical."""
+    evidence_root = tmp_path / "private-evidence"
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    # Leg A -- receipts disabled: no receipt is constructed, serialized, or written at all.
+    disabled = _governed_identities()
+    assert not receipts_directory(evidence_root).exists()
+
+    # Leg B -- receipts enabled: one is constructed and written, then the identities recomputed.
+    first = rehearsal()
+    write_receipt(first, evidence_root=evidence_root, repository_root=checkout)
+    enabled = _governed_identities()
+
+    # Leg C -- receipts varied: every operational value the receipt carries is different.
+    second = rehearsal(
+        command_name="m3 rehearse-again",
+        command_version="m3.1a/9.9",
+        configuration_fingerprint="f" * 64,
+        migration_chain_head="0007_something_else",
+        started_at_utc="2027-01-02T03:04:05Z",
+        completed_at_utc="2027-01-02T03:04:06Z",
+        elapsed_seconds=1.0,
+        completion_status="interrupted",
+        interruption_state="after_catalog_commit",
+        reason_code="SEC_ACQUISITION_INTERRUPTED",
+        reason_detail="a synthetic operational difference.",
+        schema_drift_outcome="unknown_fields_retained",
+        schema_drift_event_count=3,
+        rehearsal_evidence_reference="m3-1a-rehearsal-report-0002",
+    )
+    write_receipt(second, evidence_root=evidence_root, repository_root=checkout)
+    varied = _governed_identities()
+
+    assert disabled == enabled == varied
+    for identity in disabled:
+        assert len(identity) == 64
+
+    # The anti-tautology control: the two receipts really did differ, and both really exist.
+    assert first.receipt_id != second.receipt_id
+    written = sorted(receipts_directory(evidence_root).glob("receipt-*.json"))
+    assert len(written) == 2
+    assert inspect_receipt(written[0])["receipt_id"] != inspect_receipt(written[1])["receipt_id"]
+
+
+def test_the_governed_identity_probe_is_sensitive_to_its_own_inputs() -> None:
+    """The inverse control.
+
+    A probe that returned constants would report non-contamination no matter what a receipt did.
+    Changing one governed input must move the identities the previous test compares.
+    """
+    from disclosure_drift.sec.accession_selection_store import (
+        FrozenJointCandidateSet,
+        build_joint_selection_run_identity,
+    )
+
+    baseline = _governed_identities()
+    moved = build_joint_selection_run_identity(
+        FrozenJointCandidateSet(
+            snapshot_id="b" * 64,
+            candidate_snapshot_sha256=hashlib.sha256(b"candidate-tables").hexdigest(),
+            entity_count=24,
+            accession_count=2,
+            entities=(),
+            accessions=(),
+            entity_content_sha256=hashlib.sha256(b"entities").hexdigest(),
+            accession_content_sha256=hashlib.sha256(b"accessions").hexdigest(),
+        ),
+        node_limit=_GOVERNED_NODE_LIMIT,
+    )
+
+    assert moved.selection_run_id != baseline[1]
+    assert moved.selection_input_sha256 != baseline[0]
+
+
+def test_no_governed_module_imports_the_receipt_module() -> None:
+    """A structural companion to the byte comparison: there is no path for contamination.
+
+    The byte-identity test proves the property today; this proves there is no import edge that
+    could make it false tomorrow without the change being visible in a diff.
+    """
+    import importlib
+    import sys
+
+    governed = (
+        "disclosure_drift.release.pilot_manifest",
+        "disclosure_drift.release.manifest",
+        "disclosure_drift.release.hashing",
+        "disclosure_drift.sec.accession_selection_store",
+        "disclosure_drift.sec.entity_selection_store",
+        "disclosure_drift.sec.pilot_manifest_store",
+    )
+    for name in governed:
+        module = importlib.import_module(name)
+        source = Path(str(module.__file__)).read_text(encoding="utf-8")
+        assert "m3.receipt" not in source, f"{name} references the receipt module"
+        assert "ExecutionReceipt" not in source, f"{name} references the receipt type"
+    assert all(name in sys.modules for name in governed)

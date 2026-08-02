@@ -58,7 +58,13 @@ def evidence_root(tmp_path: Path) -> Path:
     return root
 
 
-def _rehearse(repo_root: Path, evidence_root: Path) -> subprocess.CompletedProcess[str]:
+def _rehearse(
+    repo_root: Path,
+    evidence_root: Path,
+    *,
+    evidence_out: str = "reports/a1-a12.json",
+    receipt_out: str = "receipts/rehearse.json",
+) -> subprocess.CompletedProcess[str]:
     return _run(
         [
             "m3",
@@ -66,9 +72,9 @@ def _rehearse(repo_root: Path, evidence_root: Path) -> subprocess.CompletedProce
             "--evidence-root",
             str(evidence_root),
             "--evidence-out",
-            "reports/a1-a12.json",
+            evidence_out,
             "--receipt-out",
-            "receipts/rehearse.json",
+            receipt_out,
         ],
         repo_root,
     )
@@ -723,3 +729,770 @@ def test_no_command_prints_the_sec_identity(repo_root: Path, evidence_root: Path
 
     assert identity not in rehearsal.stdout
     assert identity not in rehearsal.stderr
+
+
+# --------------------------------------------------------------------------- #
+# The completion token is gated on the A_reachable agreement, not merely told about it
+# --------------------------------------------------------------------------- #
+def _rehearse_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    *,
+    tested: dict[str, int],
+) -> int:
+    """Run `m3 rehearse` in-process over a report whose tested bounds are supplied.
+
+    The gate cannot be reached from a subprocess without perturbing production code, so the report
+    is substituted at the one seam the command reads it from. Everything else — the argument
+    parsing, the artifact writes, the receipt, the token decision — is the real command.
+    """
+    from disclosure_drift import cli
+    from disclosure_drift.m3.rehearsal import RehearsalReport, run_rehearsal
+
+    real = run_rehearsal(["A1"], workspace_root=evidence_root)
+    substituted = RehearsalReport(
+        outcomes=real.outcomes,
+        derived_a_reachable=real.derived_a_reachable,
+        tested_a_reachable=tested,
+        unmeasured_routes={},
+    )
+    monkeypatch.setattr(cli, "run_rehearsal", lambda _requested, **_kwargs: substituted)
+    return cli.main(
+        [
+            "m3",
+            "rehearse",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence-out",
+            "reports/bounds.json",
+            "--receipt-out",
+            "receipts/bounds.json",
+        ]
+    )
+
+
+def test_a_disagreeing_a_reachable_bound_is_a_gate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Master plan §17 stop condition 9.
+
+    The summary printed the agreement all along; nothing acted on it. A route whose worst reachable
+    path was never confirmed cannot back a ceiling, so the run must exit 4 and emit no token.
+    """
+    from disclosure_drift.m3.request_plan import derive_a_reachable
+    from disclosure_drift.sec.source_registry import SOURCES
+
+    disagreeing = {
+        source_id: derive_a_reachable(spec) + 1 for source_id, spec in sorted(SOURCES.items())
+    }
+
+    code = _rehearse_in_process(monkeypatch, evidence_root, tested=disagreeing)
+
+    assert code == EXIT_GATE_FAILURE
+    captured = capsys.readouterr()
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in captured.out
+
+
+def test_an_agreeing_a_reachable_bound_still_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The inverse control: the gate must not refuse every run it is asked about."""
+    from disclosure_drift.m3.request_plan import derive_a_reachable
+    from disclosure_drift.sec.source_registry import SOURCES
+
+    agreeing = {source_id: derive_a_reachable(spec) for source_id, spec in sorted(SOURCES.items())}
+
+    code = _rehearse_in_process(monkeypatch, evidence_root, tested=agreeing)
+
+    assert code == EXIT_OK
+    captured = capsys.readouterr()
+    assert "A_reachable agrees : yes" in " ".join(captured.out.split())
+
+
+# --------------------------------------------------------------------------- #
+# plan-requests takes exactly the §9 argument list
+# --------------------------------------------------------------------------- #
+def test_plan_requests_rejects_an_undeclared_open_quarter_flag(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """§9's argument list has no open-quarter switch.
+
+    The flag changed the planned quarter set and therefore the hard ceiling the owner signs, so it
+    is not a convenience: an invocation that names it must be a usage error rather than a quietly
+    different budget.
+    """
+    _write_manifest(evidence_root, 0)
+    result = _run(
+        [
+            "m3",
+            "plan-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--calendar-evidence-manifest",
+            "manifest.json",
+            "--catalog",
+            "catalog/catalog.db",
+            "--coverage-start",
+            "2024-01-01",
+            "--coverage-end",
+            "2024-09-30",
+            "--as-of",
+            "2024-08-15",
+            "--calendar-year",
+            "2024",
+            "--include-open-quarter",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_USAGE
+    assert "--include-open-quarter" in result.stderr
+
+
+def test_the_plan_always_excludes_the_provisional_open_quarter(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The inverse control for the removed flag.
+
+    An as-of date inside an open quarter beyond the coverage end is exactly the invocation the flag
+    used to change. The declared inputs must record the open quarter as excluded, so the ceiling is
+    the closed-quarter one Decision 013 §1 requires and not a switchable value.
+    """
+    _write_manifest(evidence_root, 0)
+    result = _run(
+        [
+            "m3",
+            "plan-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--calendar-evidence-manifest",
+            "manifest.json",
+            "--catalog",
+            "catalog/catalog.db",
+            "--coverage-start",
+            "2024-01-01",
+            "--coverage-end",
+            "2024-09-30",
+            "--as-of",
+            "2024-08-15",
+            "--calendar-year",
+            "2024",
+            "--plan-out",
+            "plans/closed.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK
+    document = json.loads((evidence_root / "plans" / "closed.json").read_text(encoding="utf-8"))
+    assert document["inputs"]["include_open_quarter"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Artifacts are write-once: re-running never overwrites an existing one (§11, §15)
+# --------------------------------------------------------------------------- #
+def test_rerunning_the_rehearsal_may_rewrite_byte_identical_evidence(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The inverse control. A write-once rule that refused every replay would be unusable."""
+    first = _rehearse(repo_root, evidence_root, receipt_out="receipts/one.json")
+    second = _rehearse(repo_root, evidence_root, receipt_out="receipts/two.json")
+
+    assert first.returncode == EXIT_OK
+    assert second.returncode == EXIT_OK, second.stderr
+
+
+def test_the_rehearsal_refuses_to_overwrite_different_evidence(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """§11: re-running never overwrites an existing artifact; §15: evidence is not rewritten."""
+    _rehearse(repo_root, evidence_root, receipt_out="receipts/one.json")
+    report = evidence_root / "reports" / "a1-a12.json"
+    retained = b'{"retained":"operator evidence"}\n'
+    report.write_bytes(retained)
+
+    result = _rehearse(repo_root, evidence_root, receipt_out="receipts/two.json")
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "never overwrites an existing artifact" in result.stderr
+    assert report.read_bytes() == retained, "the retained evidence was silently rewritten"
+    assert str(evidence_root) not in result.stderr
+
+
+def test_plan_requests_may_rewrite_a_byte_identical_plan(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The inverse control: two identical dry runs are the Gate F procedure, not an error."""
+    _write_manifest(evidence_root, 0)
+    arguments = [
+        "m3",
+        "plan-requests",
+        "--evidence-root",
+        str(evidence_root),
+        "--calendar-evidence-manifest",
+        "manifest.json",
+        "--catalog",
+        "catalog/catalog.db",
+        "--coverage-start",
+        "2024-01-01",
+        "--coverage-end",
+        "2024-06-30",
+        "--as-of",
+        "2024-06-30",
+        "--calendar-year",
+        "2024",
+        "--plan-out",
+        "plans/same.json",
+    ]
+    first = _run([*arguments, "--receipt-out", "receipts/one.json"], repo_root)
+    second = _run([*arguments, "--receipt-out", "receipts/two.json"], repo_root)
+
+    assert first.returncode == EXIT_OK
+    assert second.returncode == EXIT_OK, second.stderr
+
+
+def test_plan_requests_refuses_to_overwrite_a_different_plan(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _plan(repo_root, evidence_root, out="plans/kept.json")
+    stored = evidence_root / "plans" / "kept.json"
+    retained = b'{"retained":"an approved plan"}\n'
+    stored.write_bytes(retained)
+
+    result = _plan(repo_root, evidence_root, out="plans/kept.json")
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "never overwrites an existing artifact" in result.stderr
+    assert stored.read_bytes() == retained, "an approved plan was silently rewritten"
+
+
+# --------------------------------------------------------------------------- #
+# recovery-state
+# --------------------------------------------------------------------------- #
+def _recovery_inputs(repo_root: Path, evidence_root: Path) -> None:
+    """A plan, a receipt chain head, and a migrated synthetic catalog below the evidence root."""
+    from disclosure_drift.paths import DataTree
+    from disclosure_drift.storage.catalog import CatalogWriter
+
+    _plan(repo_root, evidence_root, out="plans/interrupted.json")
+    tree = DataTree.from_root(evidence_root / "tree")
+    tree.ensure_tree()
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.migrate()
+        writer.seed_reference_data()
+
+
+def _recovery_state(
+    repo_root: Path,
+    evidence_root: Path,
+    *,
+    catalog: str = "catalog/sec_ingestion.sqlite3",
+    data_root: str = "tree",
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--receipt-chain-head",
+            "receipts/plan.json",
+            "--catalog",
+            catalog,
+            "--data-root",
+            data_root,
+        ],
+        repo_root,
+    )
+
+
+def test_recovery_state_reports_a_determination_and_every_condition(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """§9: the command prints the interruption point, the state, and one of the three verdicts."""
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _recovery_state(repo_root, evidence_root)
+
+    normalized = " ".join(result.stdout.split())
+    assert "Safe-resume determination" in normalized
+    assert "nothing was repaired" in normalized
+    for label in (
+        "interruption state",
+        "consumed physical attempts",
+        "orphan objects",
+        "partial files",
+        "determination",
+        "required action",
+    ):
+        assert label in normalized
+    determination = next(
+        line.split(":", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("determination")
+    )
+    assert determination in {"SAFE", "UNSAFE", "UNDETERMINED"}
+    # §9: exit 0 only for SAFE; the other two determinations exit 4.
+    assert result.returncode == (EXIT_OK if determination == "SAFE" else EXIT_GATE_FAILURE)
+
+
+def test_recovery_state_writes_nothing_it_inspected(repo_root: Path, evidence_root: Path) -> None:
+    """§11 and stop condition 10: inspection never writes. Proven by byte comparison."""
+    import hashlib
+
+    _recovery_inputs(repo_root, evidence_root)
+    before = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(evidence_root.rglob("*"))
+        if path.is_file()
+    }
+
+    _recovery_state(repo_root, evidence_root)
+
+    after = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(evidence_root.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_recovery_state_takes_no_run_or_repair_flag(repo_root: Path, evidence_root: Path) -> None:
+    """§9: "There is no `--run` shortcut and no repair flag"."""
+    for flag in ("--run", "--repair"):
+        result = _run(
+            [
+                "m3",
+                "recovery-state",
+                "--evidence-root",
+                str(evidence_root),
+                "--plan",
+                "plans/interrupted.json",
+                "--receipt-chain-head",
+                "receipts/plan.json",
+                "--catalog",
+                "catalog/sec_ingestion.sqlite3",
+                "--data-root",
+                "tree",
+                flag,
+            ],
+            repo_root,
+        )
+
+        assert result.returncode == EXIT_USAGE
+        assert flag in result.stderr
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        "../../../../../../../etc/hosts",
+        "/etc/hosts",
+        "../../escaped.sqlite3",
+    ],
+)
+def test_recovery_state_refuses_a_catalog_outside_the_evidence_root(
+    repo_root: Path, evidence_root: Path, catalog: str
+) -> None:
+    """The catalog is an artifact argument, so the boundary binds it like every other one.
+
+    Composing it with `--data-root` and opening the result directly let an absolute or climbing
+    value reach any SQLite-readable file on the machine. The refusal names the bare filename only.
+    """
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _recovery_state(repo_root, evidence_root, catalog=catalog)
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    combined = result.stdout + result.stderr
+    assert "artifact path" in result.stderr
+    assert "evidence-root" in result.stderr or "evidence root" in result.stderr
+    assert "/etc/hosts" not in combined
+    assert str(evidence_root) not in combined
+    # The refusal happens before inspection, so no determination is ever printed for it.
+    assert "determination" not in combined
+
+
+def test_a_contained_catalog_path_is_still_accepted(repo_root: Path, evidence_root: Path) -> None:
+    """The inverse control: a boundary that refused every value would be equally broken.
+
+    `tree/../tree/catalog/…` climbs and returns, staying inside the root, and must be accepted.
+    """
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _recovery_state(
+        repo_root, evidence_root, catalog="../tree/catalog/sec_ingestion.sqlite3"
+    )
+
+    assert "resolves outside the evidence root" not in result.stderr
+    assert "determination" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# The plan a resume is judged against is the stored one, not a rebuilt one
+# --------------------------------------------------------------------------- #
+def _catalog_with_satisfied_instances(evidence_root: Path, keys: tuple[str, ...]) -> None:
+    """A synthetic catalog whose index instances are already retrieved and parse-usable.
+
+    `plan-requests` excludes these before the plan is formed, so the stored plan has a *smaller*
+    ceiling and a different hash than one rebuilt from its own recorded inputs would.
+    """
+    from disclosure_drift.paths import DataTree
+    from disclosure_drift.sec.http_client import FetchResult
+    from disclosure_drift.sec.observation_catalog import ObservationRecorder
+    from disclosure_drift.sec.snapshots import SnapshotStore
+    from disclosure_drift.storage.catalog import CatalogWriter
+
+    tree = DataTree.from_root(evidence_root / "tree")
+    tree.ensure_tree()
+    # One retrieval the interrupted run had already completed, committed with its object on disk.
+    # It is what the consumed attempt on the head receipt was spent on, so the headroom check has
+    # a real completion to credit rather than an attempt charged against nothing.
+    observation = SnapshotStore(tree).record(
+        FetchResult(
+            outcome="retrieved",
+            source_id="sec_company_tickers",
+            url="https://www.sec.gov/files/company_tickers.json",
+            purpose="synthetic interrupted-run evidence",
+            status=200,
+            body=b'{"0":{"cik_str":1,"ticker":"SYN","title":"SYNTHETIC"}}',
+            etag='"synthetic"',
+            declared_content_type="application/json",
+            attempts=1,
+        )
+    )
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.migrate()
+        writer.seed_reference_data()
+        ObservationRecorder(writer, tree).record(observation)
+        for key in keys:
+            year, quarter = key.split("QTR")
+            writer.connection.execute(
+                "INSERT OR REPLACE INTO census_index_instances (census_run_id, instance_key, "
+                "year, quarter, required, retrieved, parse_usable, observation_id, "
+                "recorded_at_utc) VALUES (?, ?, ?, ?, 1, 1, 1, NULL, '2024-07-01T00:00:00Z')",
+                ("synthetic-run", key, int(year), int(quarter)),
+            )
+        ObservationRecorder(writer, tree).flush_projection()
+    (evidence_root / "catalog").mkdir(parents=True, exist_ok=True)
+    (evidence_root / "catalog" / "catalog.db").write_bytes(tree.catalog_database.read_bytes())
+
+
+def _interrupted_head_receipt(evidence_root: Path, plan_sha256: str) -> None:
+    """A live receipt describing an interruption and naming the plan the run was executing."""
+    from disclosure_drift.m3.receipt import ExecutionReceipt
+
+    receipt = ExecutionReceipt(
+        command_name="m3 acquire",
+        command_version="m3.2a/1.0",
+        phase="M3.2A",
+        invocation_mode="live",
+        configuration_fingerprint="a" * 64,
+        migration_chain_head="0013_m23_manifest_lifecycle_guards",
+        started_at_utc="2026-08-01T12:00:00Z",
+        completed_at_utc="2026-08-01T12:00:09Z",
+        elapsed_seconds=9.0,
+        source_registry_version="m2.2-source-registry/1.0",
+        index_plan_policy_version="quarterly-index-instances/2.0",
+        request_plan_schema_version="m3-request-plan/1.0",
+        parser_versions={"company-tickers": "1.0"},
+        acquisition_window="M3.2A",
+        request_plan_id="plan-0001",
+        request_plan_sha256=plan_sha256,
+        approved_request_ceiling=200,
+        planned_logical_request_count=7,
+        maximum_physical_attempt_count=60,
+        planned_per_route={"sec_company_tickers": 7},
+        actual_logical_request_count=1,
+        actual_physical_attempt_count=1,
+        actual_per_route={
+            "sec_company_tickers": {"logical_request_count": 1, "physical_attempt_count": 1}
+        },
+        response_classification_totals={
+            "proceed": 1,
+            "retry": 0,
+            "retry_after": 0,
+            "cooldown": 0,
+            "fail": 0,
+            "quarantine": 0,
+        },
+        status_code_totals={"200": 1},
+        raw_object_count=0,
+        duplicate_object_count=0,
+        cache_hit_count=0,
+        not_modified_count=0,
+        quarantined_object_count=0,
+        redirect_hop_count=0,
+        cooldown_count=0,
+        schema_drift_outcome="none",
+        schema_drift_event_count=0,
+        completion_status="interrupted",
+        reason_code="SEC_ACQUISITION_INTERRUPTED",
+        reason_detail="the acquisition was interrupted before any byte reached the raw store.",
+        interruption_state="before_raw_store_write",
+    )
+    head = evidence_root / "receipts" / "head.json"
+    head.parent.mkdir(parents=True, exist_ok=True)
+    head.write_bytes(receipt.canonical_bytes())
+
+
+def _interrupted_run(
+    repo_root: Path, evidence_root: Path, *, satisfied: tuple[str, ...]
+) -> dict[str, object]:
+    """A stored plan, a matching head receipt, and a clean synthetic store."""
+    import hashlib
+
+    _catalog_with_satisfied_instances(evidence_root, satisfied)
+    _write_manifest(evidence_root, 0)
+    result = _run(
+        [
+            "m3",
+            "plan-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--calendar-evidence-manifest",
+            "manifest.json",
+            "--catalog",
+            "catalog/catalog.db",
+            "--coverage-start",
+            "2000-01-01",
+            "--coverage-end",
+            "2024-06-30",
+            "--as-of",
+            "2024-06-30",
+            "--calendar-year",
+            "2024",
+            "--plan-out",
+            "plans/interrupted.json",
+            "--receipt-out",
+            "receipts/plan.json",
+        ],
+        repo_root,
+    )
+    assert result.returncode == EXIT_OK, result.stderr
+    stored = (evidence_root / "plans" / "interrupted.json").read_bytes()
+    _interrupted_head_receipt(evidence_root, hashlib.sha256(stored).hexdigest())
+    document = json.loads(stored.decode("utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def _determination(result: subprocess.CompletedProcess[str]) -> str:
+    return next(
+        line.split(":", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("determination")
+    )
+
+
+def _condition(result: subprocess.CompletedProcess[str], number: str) -> str:
+    line = next(
+        item for item in result.stdout.splitlines() if item.strip().startswith(f"{number} ")
+    )
+    return "NOT MET" if "NOT MET" in line else "MET"
+
+
+def test_a_plan_that_had_cache_hits_is_still_judged_against_itself(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The plan a run was executing is the stored document, never a rebuild from its inputs.
+
+    Already-satisfied instances are excluded *before* the plan is formed and the satisfied set is
+    not part of the plan payload, so a rebuild plans them again: a larger ceiling and a different
+    hash. Judging the run against that rebuild made condition 8.10 fail for the very plan being
+    executed — an inverse-control failure, a gate refusing the lawful case.
+    """
+    document = _interrupted_run(repo_root, evidence_root, satisfied=("2020QTR1",))
+    assert document["expected_cache_hits"] == 1, "the fixture did not actually produce a cache hit"
+
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--receipt-chain-head",
+            "receipts/head.json",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+
+    assert _condition(result, "8.10") == "MET", result.stdout
+    assert _condition(result, "8.8") == "MET", result.stdout
+    assert _determination(result) == "SAFE", result.stdout
+    assert result.returncode == EXIT_OK
+
+    # And the fixture really is the case a rebuild would misjudge: replanning from the plan's own
+    # recorded inputs, which carry no satisfied set, yields a larger ceiling and a different hash.
+    import hashlib
+    from datetime import date
+
+    from disclosure_drift.m3.request_plan import build_m3_2a_request_plan
+
+    inputs = document["inputs"]
+    assert isinstance(inputs, dict)
+    rebuilt = build_m3_2a_request_plan(
+        coverage_start=date.fromisoformat(str(inputs["coverage_start"])),
+        coverage_end=date.fromisoformat(str(inputs["coverage_end"])),
+        as_of_date=date.fromisoformat(str(inputs["as_of_date"])),
+        include_open_quarter=bool(inputs["include_open_quarter"]),
+        calendar_year=int(inputs["calendar_year"]),
+        calendar_evidence_entry_count=int(inputs["calendar_evidence_entry_count"]),
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=float(inputs["requests_per_second"]),
+    )
+    totals = document["totals"]
+    assert isinstance(totals, dict)
+    stored_bytes = (evidence_root / "plans" / "interrupted.json").read_bytes()
+    assert rebuilt.hard_request_ceiling > int(str(totals["hard_request_ceiling"]))
+    assert rebuilt.request_plan_sha256 != hashlib.sha256(stored_bytes).hexdigest()
+
+
+def test_a_genuinely_unsafe_state_is_still_unsafe(repo_root: Path, evidence_root: Path) -> None:
+    """The inverse control. A gate that now accepts everything is as broken as one that refused."""
+    _interrupted_run(repo_root, evidence_root, satisfied=("2020QTR1",))
+    orphan = evidence_root / "tree" / "raw" / "indexes" / "synthetic" / "orphan.bin"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"an object on disk with no committed row")
+
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--receipt-chain-head",
+            "receipts/head.json",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+
+    assert _condition(result, "8.5") == "NOT MET", result.stdout
+    assert _determination(result) == "UNSAFE", result.stdout
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert orphan.is_file(), "inspection deleted the orphan it was only supposed to report"
+
+
+def test_a_plan_whose_bytes_were_edited_is_refused(repo_root: Path, evidence_root: Path) -> None:
+    """The stored document is the authority, so it has to hash to what it claims.
+
+    Trusting the parsed fields alone would let a hand-edited plan assert a ceiling and a hash its
+    own bytes do not produce, which is exactly the substitution the plan hash exists to prevent.
+    """
+    _interrupted_run(repo_root, evidence_root, satisfied=("2020QTR1",))
+    stored = evidence_root / "plans" / "interrupted.json"
+    original = stored.read_bytes()
+    # A derived per-route total edited to disagree with the route it is derived from. Reading the
+    # parsed fields alone would recompute it and never notice; the bytes are the authority.
+    tampered = original.replace(
+        b'"maximum_physical_attempts":', b'"maximum_physical_attempts":9', 1
+    )
+    assert tampered != original
+    stored.write_bytes(tampered)
+
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--receipt-chain-head",
+            "receipts/head.json",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "does not reproduce the stored bytes" in result.stderr
+    assert "determination" not in result.stdout
+    assert str(evidence_root) not in result.stdout + result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# §11: the synthetic data tree and catalog live below the external evidence root
+# --------------------------------------------------------------------------- #
+def test_rehearse_writes_its_synthetic_tree_below_the_evidence_root(
+    repo_root: Path, evidence_root: Path, tmp_path: Path
+) -> None:
+    """§11 names the location, not just the isolation: "below the external evidence root".
+
+    A system temporary directory is isolated but outside the boundary the operator named, so this
+    watches the temp directory the harness would otherwise have used and requires it untouched,
+    while requiring the rehearsal to have opened its scratch root inside the evidence root.
+    """
+    import tempfile
+
+    system_temp = tmp_path / "system-temp"
+    system_temp.mkdir()
+    observed: list[str] = []
+    real_temporary_directory = tempfile.TemporaryDirectory
+
+    def _watched(*args: object, **kwargs: object) -> object:
+        observed.append(str(kwargs.get("dir", "")))
+        return real_temporary_directory(*args, **kwargs)  # type: ignore[arg-type]
+
+    from disclosure_drift.m3 import rehearsal
+
+    original = rehearsal.tempfile.TemporaryDirectory
+    rehearsal.tempfile.TemporaryDirectory = _watched  # type: ignore[assignment,misc]
+    try:
+        rehearsal.run_rehearsal(["A1", "A9", "A11", "A12"], workspace_root=evidence_root)
+    finally:
+        rehearsal.tempfile.TemporaryDirectory = original  # type: ignore[misc]
+
+    assert observed, "the rehearsal opened no scratch directory at all"
+    for location in observed:
+        assert location, "a scratch directory was opened without an explicit parent directory"
+        assert Path(location).is_relative_to(evidence_root), (
+            f"a synthetic data tree was opened at {location}, which is not below the evidence root"
+        )
+
+
+def test_rehearse_leaves_no_synthetic_tree_behind_and_reruns_identically(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Moving the tree must not defeat re-runnability or the write-once artifact rule.
+
+    Gate F runs the command twice and compares bytes, so the synthetic tree has to be removed and
+    the named artifacts have to remain byte-identical across runs.
+    """
+    first = _rehearse(repo_root, evidence_root, receipt_out="receipts/one.json")
+    after_first = sorted(
+        str(path.relative_to(evidence_root)) for path in evidence_root.rglob("*") if path.is_file()
+    )
+    evidence = (evidence_root / "reports" / "a1-a12.json").read_bytes()
+
+    second = _rehearse(repo_root, evidence_root, receipt_out="receipts/two.json")
+
+    assert first.returncode == EXIT_OK, first.stderr
+    assert second.returncode == EXIT_OK, second.stderr
+    assert (evidence_root / "reports" / "a1-a12.json").read_bytes() == evidence
+    assert not (evidence_root / "rehearsal-workspace").exists(), (
+        "the scratch workspace survived the invocation"
+    )
+    leftovers = [name for name in after_first if "rehearsal-workspace" in name]
+    assert not leftovers, f"synthetic artifacts were retained as operator evidence: {leftovers}"

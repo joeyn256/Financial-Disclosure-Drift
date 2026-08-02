@@ -245,7 +245,7 @@ python -m disclosure_drift m3 rehearse --scenarios all \
 | Network | **None.** Opens no socket; asserts none was opened |
 | Clock | Deterministic clock inputs supplied explicitly; nothing read from the system clock into any recorded identity |
 | Arguments | `--scenarios {all,<id>[,<id>…]}`; required `--evidence-root <absolute-external-path>`; `--evidence-out <relative-path>` and `--receipt-out <relative-path>` below that root; `--config <path>` |
-| Stdout | One line per scenario: `id`, name, outcome, reason code; then a summary line with counts |
+| Stdout | One line per scenario: the scenario id, `PASS` or `FAIL`, and the scenario title — **not** its outcome fields and **not** its reason codes, which are recorded in the stored evidence report's per-scenario `findings` list; a failing scenario adds one indented line carrying the failed assertions; then a `Rehearsal summary.` block of labelled lines (`scenarios run`, `all twelve run`, `every scenario passed`, `A_reachable agrees`, `routes measured`, `routes unmeasurable`, `simulated logical requests`, `simulated physical attempts`, `actual network requests`, `evidence reference`), one line per unmeasurable route, the evidence and receipt names, the `receipt_id`, and — only on a complete passing run — the M3.1A completion token |
 | Side effects | Writes only under an isolated synthetic data root and the named evidence path |
 | Exit codes | `0` all scenarios passed · `1` configuration error · `2` usage · `3` stage not enabled · `4` gate failure (any scenario failed) |
 | Receipt | Emits one execution receipt per invocation, `invocation_mode = "rehearsal"`, with **actual network counts of `0`**; simulated totals go to the evidence report |
@@ -259,24 +259,39 @@ python -m disclosure_drift m3 rehearse-report \
   --evidence-root <absolute-external-path> --evidence <relative-path>
 ```
 
-**Intended interface contract:** read-only; prints the per-scenario matrix — setup, expected reason
-code, observed reason code, persisted state, files, receipt, rollback, recovery, validation — plus the
-identity-noncontamination result and the derived per-route `A_reachable`. Exit `0` only when all
-twelve acquisition scenarios pass and the noncontamination proof holds.
+**Interface contract:** read-only. What it prints, in this order:
+
+1. **one line per scenario** — the scenario id, `PASS` or `FAIL`, and the scenario title. It is a
+   pass/fail roster, not the ten-field matrix of
+   [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md) §5. The observed reason codes and the
+   other observed facts are recorded in the stored evidence report's per-scenario `findings` list;
+   read them there, or from the file, rather than expecting them on this screen;
+2. **the route-bounds table** — one row per registered route, its derived `A_reachable`, its
+   independently tested bound, and whether the two agree, followed by one line per route that could
+   not be exercised and the reason it could not;
+3. **four summary lines** — `all twelve recorded`, `every scenario passed`,
+   `identity non-contamination`, and `A_reachable agrees`.
+
+Exit `0` only when all twelve are recorded, all twelve passed, and the derived and tested bounds
+agree. The verdict is recomputed from the stored scenario list and the stored bounds, so a report
+whose own summary claims success while its scenario list disagrees still exits `4`.
 
 **Check by hand, against [`offline_rehearsal_spec.md`](offline_rehearsal_spec.md) §5:**
 
 - all twelve scenarios A1–A12 present, none skipped, none `xfail`ed;
-- every observed reason code equals its expected registered code;
+- every observed reason code in the stored report's `findings` equals its expected registered code;
 - **A6** proves every registered route reachable and every denied family refused;
-- **A11** proves `m3 recovery-state` is read-only, reports `UNSAFE` before required repair and
-  `SAFE` only after the isolated rehearsal applies deterministic repair, and resumes without a
-  duplicate substantive write;
+- **A11** proves each injected abort point leaves a distinguishable state and that the resumed pass
+  issues **zero** requests for an already-committed retrieval. **It does not exercise
+  `m3 recovery-state` and it applies no repair**, so it demonstrates no `UNSAFE` → repair → `SAFE`
+  cycle. Run `m3 recovery-state` yourself at step 27 when you actually need a determination;
 - **A12** shows the receipt sample carries **none** of the prohibited fields, and the positive control
   proves the scan is not vacuous;
 - **A12** shows every governed value identical with receipts disabled, enabled, and varied;
 - **every rehearsal receipt reports actual network counts of `0`**;
-- **`A_reachable` is derived per route and independently tested** against the worst reachable path;
+- **`A_reachable` is derived per route and independently tested** against the worst reachable path,
+  and any route the table shows as unmeasurable is a **gap in the Gate F evidence** for as long as
+  that route can contribute to the ceiling — not an inert row;
 - **no snapshot, selection, reserve, sealing, manifest, or root scenario appears here.**
 
 **Stop if** any of those fails. A rehearsal finding is a design finding, and it is cheap here and

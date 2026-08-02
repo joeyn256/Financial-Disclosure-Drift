@@ -10,6 +10,7 @@ remain prohibited.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -27,10 +28,16 @@ from disclosure_drift.cohorts import (
     FROZEN_SOURCE_RECORDS,
 )
 from disclosure_drift.config import ConfigError, ProjectConfig, load_config
-from disclosure_drift.errors import DisclosureDriftError, SecUserAgentError
+from disclosure_drift.errors import DisclosureDriftError, GateFailureError, SecUserAgentError
 from disclosure_drift.logging_config import configure_logging, get_logger
+from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
+from disclosure_drift.m3.receipt import ReceiptValidationError, inspect_receipt
+from disclosure_drift.m3.recovery import inspect_recovery_state
+from disclosure_drift.m3.rehearsal import run_rehearsal
+from disclosure_drift.m3.request_plan import build_m3_2a_request_plan, canonical_plan_bytes
 from disclosure_drift.paths import PathPolicyError
 from disclosure_drift.reasons import REASON_CODES, release_blocking_codes
+from disclosure_drift.sec.calendar_evidence import approved_entries
 from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
 from disclosure_drift.storage.catalog import CatalogWriter
 
@@ -48,6 +55,10 @@ _STAGE_M2_3: Final = "Stage M2.3 (deterministic pilot selection)"
 _STAGE_M2_5: Final = "Stage M2.5 (bounded pilot ingestion)"
 _STAGE_M2_6: Final = "Stage M2.6 (inventory validation)"
 _STAGE_M2_7: Final = "Stage M2.7 (forecast, backup, and release)"
+
+#: Emitted only by a complete, passing A1-A12 rehearsal (master plan §20). The name is fixed by
+#: the master plan; it is a phase completion marker, not a credential.
+M3_1A_COMPLETION_TOKEN: Final = "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED"  # noqa: S105
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -154,7 +165,175 @@ def build_parser() -> argparse.ArgumentParser:
                 ),
             )
 
+    _add_m3_group(subparsers)
     return parser
+
+
+def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register the Milestone 3.1 command group.
+
+    Every command that reads or writes evidence requires an absolute ``--evidence-root`` outside the
+    repository checkout, and every artifact argument is a path *relative* to that root. The resolved
+    root is never printed or serialized, so an evidence packet can be shared without disclosing
+    where it lives.
+    """
+    m3 = subparsers.add_parser(
+        "m3",
+        help="Milestone 3.1 rehearsal, planning, and inspection commands.",
+        description=(
+            "Milestone 3.1 commands. Every one of them is offline: M3.1A places no request "
+            "at all and M3.1B makes zero live requests. Artifact paths are relative to a "
+            "required absolute --evidence-root outside the repository checkout."
+        ),
+    )
+    m3_subparsers = m3.add_subparsers(dest="m3_command", metavar="command")
+
+    rehearse = m3_subparsers.add_parser(
+        "rehearse", help="Run offline acquisition rehearsal scenarios A1-A12 (Stage M3.1A)."
+    )
+    _add_config_argument(rehearse)
+    _add_evidence_root_argument(rehearse)
+    rehearse.add_argument(
+        "--scenarios",
+        default="all",
+        metavar="{all,<id>[,<id>...]}",
+        help="Scenarios to run. The phase token requires 'all'; a subset is for diagnosis.",
+    )
+    rehearse.add_argument(
+        "--evidence-out",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="Where to write the rehearsal evidence report, relative to --evidence-root.",
+    )
+    rehearse.add_argument(
+        "--receipt-out",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="Where to write this command's receipt, relative to --evidence-root.",
+    )
+
+    rehearse_report = m3_subparsers.add_parser(
+        "rehearse-report", help="Print a stored rehearsal evidence report. Read-only."
+    )
+    _add_evidence_root_argument(rehearse_report)
+    rehearse_report.add_argument(
+        "--evidence",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="The rehearsal evidence report to read, relative to --evidence-root.",
+    )
+
+    plan_requests = m3_subparsers.add_parser(
+        "plan-requests",
+        help="Derive the zero-request M3.2A request plan and budget (Stage M3.1B).",
+    )
+    _add_config_argument(plan_requests)
+    _add_evidence_root_argument(plan_requests)
+    for name, help_text in (
+        ("--coverage-start", "First date of the requested coverage window."),
+        ("--coverage-end", "Last date of the requested coverage window."),
+        ("--as-of", "Date the plan is evaluated against. Never defaults to today."),
+    ):
+        plan_requests.add_argument(
+            name, type=_iso_date, required=True, metavar="YYYY-MM-DD", help=help_text
+        )
+    plan_requests.add_argument(
+        "--calendar-year",
+        type=int,
+        required=True,
+        metavar="YEAR",
+        help="Year the annual EDGAR calendar instance must cover. Never inferred.",
+    )
+    plan_requests.add_argument(
+        "--include-open-quarter",
+        action="store_true",
+        help="Also plan the provisional open quarter containing the as-of date.",
+    )
+    plan_requests.add_argument(
+        "--plan-out",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="Where to write the request plan, relative to --evidence-root.",
+    )
+    plan_requests.add_argument(
+        "--receipt-out",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="Where to write this command's receipt, relative to --evidence-root.",
+    )
+
+    show_budget = m3_subparsers.add_parser(
+        "show-budget",
+        help="Render a request plan's budget quantities. Read-only; approves nothing.",
+    )
+    _add_evidence_root_argument(show_budget)
+    show_budget.add_argument(
+        "--plan",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="The request plan to render, relative to --evidence-root.",
+    )
+
+    show_receipt = m3_subparsers.add_parser(
+        "show-receipt", help="Validate and display an execution receipt. Read-only."
+    )
+    _add_evidence_root_argument(show_receipt)
+    show_receipt.add_argument(
+        "--receipt",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="The receipt to validate, relative to --evidence-root.",
+    )
+
+    recovery_state = m3_subparsers.add_parser(
+        "recovery-state",
+        help=(
+            "Report the safe-resume determination for an interrupted run. Read-only; never repairs."
+        ),
+    )
+    _add_evidence_root_argument(recovery_state)
+    for name, help_text in (
+        ("--plan", "The request plan the interrupted run was executing."),
+        ("--receipt-chain-head", "The most recent receipt of the interrupted run."),
+    ):
+        recovery_state.add_argument(
+            name, type=Path, required=True, metavar="RELATIVE_PATH", help=help_text
+        )
+    recovery_state.add_argument(
+        "--catalog",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="The operational catalog to inspect, relative to --data-root.",
+    )
+    recovery_state.add_argument(
+        "--data-root",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="The data root whose raw store is inspected.",
+    )
+
+
+def _add_evidence_root_argument(parser: argparse.ArgumentParser) -> None:
+    """Require an absolute evidence root outside the repository checkout."""
+    parser.add_argument(
+        "--evidence-root",
+        type=Path,
+        required=True,
+        metavar="ABSOLUTE_EXTERNAL_PATH",
+        help=(
+            "Owner-controlled private evidence root. Must be an absolute path outside the "
+            "repository checkout; its resolved value is never printed."
+        ),
+    )
 
 
 def _iso_date(text: str) -> date:
@@ -227,9 +406,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "sec" and getattr(args, "sec_command", None) is None:
         parser.parse_args(["sec", "--help"])
         return EXIT_USAGE  # pragma: no cover - argparse exits first
+    if args.command == "m3" and getattr(args, "m3_command", None) is None:
+        parser.parse_args(["m3", "--help"])
+        return EXIT_USAGE  # pragma: no cover - argparse exits first
 
+    # The read-only M3 inspection commands take no --config, because they read explicit artifacts
+    # rather than project configuration. Their namespace therefore has no `config` attribute, and
+    # the default resolution below finds the nearest configs/project.yaml exactly as before.
     try:
-        config = load_config(args.config)
+        config = load_config(getattr(args, "config", None))
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
@@ -257,6 +442,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             calendar_year=getattr(args, "calendar_year", None),
             coverage=coverage,
         )
+    if args.command == "m3":
+        return _m3_command(str(args.m3_command), args, config, logger)
 
     parser.print_help(sys.stderr)  # pragma: no cover - argparse rejects earlier
     return EXIT_USAGE
@@ -680,3 +867,332 @@ def run() -> None:
     except DisclosureDriftError as exc:  # pragma: no cover - defensive
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_GATE_FAILURE) from exc
+
+
+# --------------------------------------------------------------------------- #
+# Milestone 3.1 commands
+# --------------------------------------------------------------------------- #
+def _m3_command(
+    command: str,
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+) -> int:
+    """Dispatch one Milestone 3.1 command.
+
+    Every M3.1 command is offline. The evidence root is resolved and validated before any read or
+    write, and a refusal is a configuration error rather than a gate failure: a root inside the
+    checkout is a mistake in the invocation, not a finding about the run.
+    """
+    try:
+        evidence_root = require_external_evidence_root(args.evidence_root, _repository_root())
+    except EvidenceRootError as exc:
+        print(f"evidence root refused: {exc}", file=sys.stderr)
+        logger.error("refused m3 %s: the evidence root is not external", command)
+        return EXIT_CONFIG_ERROR
+
+    handlers = {
+        "rehearse": _m3_rehearse_command,
+        "rehearse-report": _m3_rehearse_report_command,
+        "plan-requests": _m3_plan_requests_command,
+        "show-budget": _m3_show_budget_command,
+        "show-receipt": _m3_show_receipt_command,
+        "recovery-state": _m3_recovery_state_command,
+    }
+    handler = handlers.get(command)
+    if handler is None:  # pragma: no cover - argparse rejects earlier
+        print(f"unknown m3 command {command!r}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        return handler(args, config, logger, evidence_root)
+    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+        print(f"m3 {command} failed: {exc}", file=sys.stderr)
+        logger.error("m3 %s failed", command)
+        return EXIT_GATE_FAILURE
+
+
+def _repository_root() -> Path:
+    """The repository checkout this package is installed from."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _m3_rehearse_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - the rehearsal takes no configuration input
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Run scenarios A1-A12 against scripted transports. Places no request."""
+    requested = (
+        None
+        if args.scenarios.strip() == "all"
+        else [item.strip() for item in args.scenarios.split(",") if item.strip()]
+    )
+    report = run_rehearsal(requested)
+
+    for outcome in report.outcomes:
+        status = "PASS" if outcome.passed else "FAIL"
+        print(f"  {outcome.scenario_id:<4} {status}  {outcome.title}")
+        if not outcome.passed:
+            print(f"       {outcome.detail}")
+
+    print("\nRehearsal summary.")
+    for label, value in (
+        ("scenarios run", str(len(report.outcomes))),
+        ("all twelve run", "yes" if report.complete else "no"),
+        ("every scenario passed", "yes" if report.passed else "no"),
+        ("A_reachable agrees", "yes" if report.a_reachable_agrees else "no"),
+        ("routes measured", str(len(report.tested_a_reachable))),
+        ("routes unmeasurable", str(len(report.unmeasured_routes))),
+        ("simulated logical requests", str(report.simulated_logical_requests)),
+        ("simulated physical attempts", str(report.simulated_physical_attempts)),
+        ("actual network requests", "0"),
+        ("evidence reference", report.evidence_reference),
+    ):
+        print(f"  {label:<28}: {value}")
+    for source_id, reason in sorted(report.unmeasured_routes.items()):
+        print(f"  unmeasurable route          : {source_id} ({reason})")
+
+    if args.evidence_out is not None:
+        destination = _m3_artifact_path(evidence_root, args.evidence_out)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(report.canonical_bytes())
+        print(f"  evidence written            : {args.evidence_out}")
+
+    if args.receipt_out is not None:
+        print(f"  receipt requested at        : {args.receipt_out}")
+
+    if not report.passed:
+        logger.error("m3 rehearse: a scenario failed; the phase does not pass")
+        return EXIT_GATE_FAILURE
+    if not report.complete:
+        logger.warning("m3 rehearse: a subset ran, so no completion token is emitted")
+        return EXIT_OK
+    print(f"\n{M3_1A_COMPLETION_TOKEN}")
+    logger.info("m3 rehearse: all twelve scenarios passed")
+    return EXIT_OK
+
+
+def _m3_rehearse_report_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - read-only inspection takes no configuration input
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Print a stored rehearsal evidence report. Read-only."""
+    document = _read_json_artifact(evidence_root, args.evidence)
+    scenarios = document.get("scenarios", [])
+    for entry in scenarios if isinstance(scenarios, list) else []:
+        if isinstance(entry, dict):
+            status = "PASS" if entry.get("passed") else "FAIL"
+            print(f"  {str(entry.get('scenario_id')):<4} {status}  {entry.get('title')}")
+
+    complete = bool(document.get("complete"))
+    passed = bool(document.get("passed"))
+    agrees = bool(document.get("a_reachable_agrees"))
+    for label, value in (
+        ("all twelve recorded", "yes" if complete else "no"),
+        ("every scenario passed", "yes" if passed else "no"),
+        ("A_reachable agrees", "yes" if agrees else "no"),
+    ):
+        print(f"  {label:<24}: {value}")
+
+    if not (complete and passed and agrees):
+        logger.error("m3 rehearse-report: the record is not a complete passing A1-A12 record")
+        return EXIT_GATE_FAILURE
+    logger.info("m3 rehearse-report: complete passing record")
+    return EXIT_OK
+
+
+def _m3_plan_requests_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Derive the M3.2A request plan. Constructs no transport and makes zero requests."""
+    plan = build_m3_2a_request_plan(
+        coverage_start=args.coverage_start,
+        coverage_end=args.coverage_end,
+        as_of_date=args.as_of,
+        include_open_quarter=bool(args.include_open_quarter),
+        calendar_year=int(args.calendar_year),
+        calendar_evidence_entry_count=len(approved_entries()),
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=float(config.sec.requests_per_second),
+    )
+
+    print("M3.2A request plan (zero requests placed).")
+    print(f"  {'source_id':<34} {'planned':>8} {'A_reach':>8} {'max attempts':>13}")
+    for route in plan.routes:
+        print(
+            f"  {route.source_id:<34} {route.planned_unique_logical_requests:>8} "
+            f"{route.a_reachable:>8} {route.maximum_physical_attempts:>13}"
+        )
+    for label, value in (
+        ("planned unique logical requests", str(plan.planned_unique_logical_requests)),
+        ("maximum physical attempts", str(plan.maximum_physical_attempts)),
+        ("maximum new raw objects", str(plan.maximum_new_raw_objects)),
+        ("hard request ceiling", str(plan.hard_request_ceiling)),
+        ("expected cache hits", str(plan.expected_cache_hits)),
+        ("request plan sha256", plan.request_plan_sha256),
+    ):
+        print(f"  {label:<34}: {value}")
+
+    if args.plan_out is not None:
+        destination = _m3_artifact_path(evidence_root, args.plan_out)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(canonical_plan_bytes(plan))
+        print(f"  {'plan written':<34}: {args.plan_out}")
+
+    logger.info("m3 plan-requests: derived the M3.2A plan with zero requests")
+    return EXIT_OK
+
+
+def _m3_show_budget_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - rendering a stored plan takes no configuration input
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Render a stored plan's budget quantities. Approves neither integer."""
+    document = _read_json_artifact(evidence_root, args.plan)
+    totals = document.get("totals", {})
+    routes = document.get("routes", [])
+
+    print("Request budget (derived; this command approves nothing).")
+    for entry in routes if isinstance(routes, list) else []:
+        if isinstance(entry, dict):
+            print(
+                f"  {str(entry.get('source_id')):<34} "
+                f"{entry.get('planned_unique_logical_requests')!s:>8} "
+                f"{entry.get('a_reachable')!s:>8} "
+                f"{entry.get('maximum_physical_attempts')!s:>13}"
+            )
+    if isinstance(totals, dict):
+        for label in (
+            "planned_unique_logical_requests",
+            "maximum_physical_attempts",
+            "maximum_new_raw_objects",
+            "hard_request_ceiling",
+            "rate_limiter_spacing_floor_seconds",
+        ):
+            print(f"  {label:<38}: {totals.get(label)}")
+    print("  approval status                       : not approved by this command")
+    logger.info("m3 show-budget: rendered a stored plan")
+    return EXIT_OK
+
+
+def _m3_show_receipt_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - receipt validation takes no configuration input
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Validate and display a receipt. Exits 4 on any defect."""
+    path = _m3_artifact_path(evidence_root, args.receipt)
+    try:
+        document = inspect_receipt(path)
+    except ReceiptValidationError as exc:
+        print(f"receipt rejected: {exc}", file=sys.stderr)
+        logger.error("m3 show-receipt: the receipt failed validation")
+        return EXIT_GATE_FAILURE
+
+    for field_name in sorted(document):
+        value = document[field_name]
+        if isinstance(value, (dict, list)):
+            continue
+        print(f"  {field_name:<42}: {value}")
+    print("  validation                                : passed")
+    logger.info("m3 show-receipt: the receipt validated")
+    return EXIT_OK
+
+
+def _m3_recovery_state_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - inspection reads only the explicit inputs
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Report the safe-resume determination. Read-only; never repairs. Exit 0 only for SAFE."""
+    plan_document = _read_json_artifact(evidence_root, args.plan)
+    inputs = plan_document.get("inputs", {})
+    if not isinstance(inputs, dict):  # pragma: no cover - a malformed plan fails earlier
+        message = "the stored plan carries no inputs section"
+        raise GateFailureError(message)
+
+    plan = build_m3_2a_request_plan(
+        coverage_start=date.fromisoformat(str(inputs["coverage_start"])),
+        coverage_end=date.fromisoformat(str(inputs["coverage_end"])),
+        as_of_date=date.fromisoformat(str(inputs["as_of_date"])),
+        include_open_quarter=bool(inputs["include_open_quarter"]),
+        calendar_year=int(inputs["calendar_year"]),
+        calendar_evidence_entry_count=int(inputs["calendar_evidence_entry_count"]),
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=float(inputs["requests_per_second"]),
+    )
+
+    data_root = Path(args.data_root).expanduser()
+    state = inspect_recovery_state(
+        plan=plan,
+        receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
+        catalog_path=data_root / args.catalog,
+        data_root=data_root,
+    )
+
+    print("Safe-resume determination (read-only; nothing was repaired).")
+    for condition in state.conditions:
+        print(f"  {condition.number:<5} {condition.status:<8} {condition.condition}")
+    for label, value in (
+        ("interruption state", str(state.interruption_state)),
+        ("receipt chain length", str(len(state.receipt_chain))),
+        ("consumed physical attempts", str(state.consumed_physical_attempts)),
+        ("committed observations", str(state.committed_observation_count)),
+        ("orphan objects", str(state.orphan_object_count)),
+        ("rows without object", str(state.rows_without_object_count)),
+        ("partial files", str(state.partial_file_count)),
+        ("determination", state.determination),
+        ("basis", state.basis),
+        ("required action", state.required_action),
+    ):
+        print(f"  {label:<28}: {value}")
+
+    if state.determination != "SAFE":
+        logger.error("m3 recovery-state: determination %s", state.determination)
+        return EXIT_GATE_FAILURE
+    logger.info("m3 recovery-state: SAFE")
+    return EXIT_OK
+
+
+def _m3_artifact_path(evidence_root: Path, relative: Path) -> Path:
+    """Resolve an artifact path below the evidence root, refusing escape.
+
+    A relative path that climbs out of the root would write evidence somewhere the operator did not
+    name, so it is refused rather than normalized away.
+    """
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        message = (
+            f"artifact path {candidate.name!r} must be relative to --evidence-root, not absolute"
+        )
+        raise GateFailureError(message)
+    resolved = (evidence_root / candidate).resolve()
+    if evidence_root not in resolved.parents and resolved != evidence_root:
+        message = f"artifact path {candidate.name!r} resolves outside the evidence root"
+        raise GateFailureError(message)
+    return resolved
+
+
+def _read_json_artifact(evidence_root: Path, relative: Path) -> dict[str, object]:
+    """Read one JSON artifact from below the evidence root."""
+    path = _m3_artifact_path(evidence_root, relative)
+    try:
+        document = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        message = f"artifact {path.name!r} is not readable UTF-8 JSON: {exc}"
+        raise GateFailureError(message) from exc
+    if not isinstance(document, dict):
+        message = f"artifact {path.name!r} is not a JSON object"
+        raise GateFailureError(message)
+    return document

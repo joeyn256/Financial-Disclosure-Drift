@@ -1,0 +1,394 @@
+"""Milestone 3.1 command group (`Milestones/contracts/m3_1.md` §9).
+
+These tests drive the real CLI as a subprocess, so what they assert is what an operator would
+actually see and what a gate would actually read: exit codes, the evidence-root boundary, the
+completion token, and the two properties Gate F depends on — that two dry runs agree byte for byte,
+and that no command discloses an absolute path or the SEC identity.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+
+import pytest
+
+ENV_PREFIX = "DISCLOSURE_DRIFT_"
+EXIT_OK = 0
+EXIT_CONFIG_ERROR = 1
+EXIT_USAGE = 2
+EXIT_GATE_FAILURE = 4
+
+M3_COMMANDS = (
+    "rehearse",
+    "rehearse-report",
+    "plan-requests",
+    "show-budget",
+    "show-receipt",
+    "recovery-state",
+)
+
+
+def _run(
+    arguments: list[str],
+    cwd: Path,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    clean = {key: value for key, value in os.environ.items() if not key.startswith(ENV_PREFIX)}
+    clean.update(env or {})
+    return subprocess.run(
+        [sys.executable, "-m", "disclosure_drift", *arguments],
+        cwd=cwd,
+        env=clean,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.fixture
+def evidence_root(tmp_path: Path) -> Path:
+    """An evidence root outside any repository checkout."""
+    root = tmp_path / "private-evidence"
+    root.mkdir()
+    return root
+
+
+def _rehearse(repo_root: Path, evidence_root: Path) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "m3",
+            "rehearse",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence-out",
+            "reports/a1-a12.json",
+        ],
+        repo_root,
+    )
+
+
+def _plan(
+    repo_root: Path, evidence_root: Path, out: str = "plans/m3-2a.json"
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "m3",
+            "plan-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--coverage-start",
+            "2024-01-01",
+            "--coverage-end",
+            "2024-06-30",
+            "--as-of",
+            "2024-06-30",
+            "--calendar-year",
+            "2024",
+            "--plan-out",
+            out,
+        ],
+        repo_root,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Registration
+# --------------------------------------------------------------------------- #
+def test_the_m3_group_is_registered(repo_root: Path) -> None:
+    result = _run(["m3", "--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    normalized = " ".join(result.stdout.split())
+    for command in M3_COMMANDS:
+        assert command in normalized
+
+
+def test_the_top_level_help_lists_the_m3_group(repo_root: Path) -> None:
+    result = _run(["--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    assert "m3" in " ".join(result.stdout.split())
+
+
+def test_the_group_without_a_subcommand_prints_help(repo_root: Path) -> None:
+    result = _run(["m3"], repo_root)
+
+    assert result.returncode in {EXIT_OK, EXIT_USAGE}
+    assert "rehearse" in result.stdout + result.stderr
+
+
+def test_an_unknown_subcommand_is_a_usage_error(repo_root: Path) -> None:
+    result = _run(["m3", "acquire"], repo_root)
+
+    assert result.returncode == EXIT_USAGE
+
+
+# --------------------------------------------------------------------------- #
+# The evidence root is mandatory, absolute, and external
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("command", M3_COMMANDS)
+def test_every_command_requires_an_evidence_root(repo_root: Path, command: str) -> None:
+    result = _run(["m3", command], repo_root)
+
+    assert result.returncode == EXIT_USAGE
+    assert "--evidence-root" in result.stderr
+
+
+def test_an_evidence_root_inside_the_checkout_is_refused(repo_root: Path) -> None:
+    result = _run(
+        [
+            "m3",
+            "show-budget",
+            "--evidence-root",
+            str(repo_root / "inside-the-checkout"),
+            "--plan",
+            "plan.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_CONFIG_ERROR
+    assert "evidence root refused" in result.stderr
+
+
+def test_a_relative_evidence_root_is_refused(repo_root: Path) -> None:
+    result = _run(
+        ["m3", "show-budget", "--evidence-root", "relative/evidence", "--plan", "plan.json"],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_CONFIG_ERROR
+
+
+# --------------------------------------------------------------------------- #
+# rehearse
+# --------------------------------------------------------------------------- #
+def test_rehearse_runs_all_twelve_and_emits_the_completion_token(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    result = _rehearse(repo_root, evidence_root)
+
+    assert result.returncode == EXIT_OK
+    normalized = " ".join(result.stdout.split())
+    for scenario in ("A1", "A5", "A9", "A12"):
+        assert scenario in normalized
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" in result.stdout
+
+
+def test_rehearse_reports_zero_actual_network_requests(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    result = _rehearse(repo_root, evidence_root)
+
+    assert "actual network requests : 0" in " ".join(result.stdout.split())
+
+
+def test_rehearse_writes_its_evidence_report(repo_root: Path, evidence_root: Path) -> None:
+    _rehearse(repo_root, evidence_root)
+
+    written = evidence_root / "reports" / "a1-a12.json"
+    assert written.is_file()
+    document = json.loads(written.read_text(encoding="utf-8"))
+    assert document["complete"] is True
+    assert document["passed"] is True
+    assert len(document["scenarios"]) == 12
+
+
+def test_a_subset_runs_without_emitting_the_completion_token(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    result = _run(
+        ["m3", "rehearse", "--evidence-root", str(evidence_root), "--scenarios", "A1,A2"],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK
+    assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in result.stdout
+
+
+def test_an_unknown_scenario_is_a_gate_failure(repo_root: Path, evidence_root: Path) -> None:
+    result = _run(
+        ["m3", "rehearse", "--evidence-root", str(evidence_root), "--scenarios", "A99"],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
+# --------------------------------------------------------------------------- #
+# rehearse-report
+# --------------------------------------------------------------------------- #
+def test_rehearse_report_accepts_a_complete_passing_record(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _rehearse(repo_root, evidence_root)
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/a1-a12.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK
+    assert "all twelve recorded : yes" in " ".join(result.stdout.split())
+
+
+def test_rehearse_report_refuses_an_incomplete_record(repo_root: Path, evidence_root: Path) -> None:
+    _rehearse(repo_root, evidence_root)
+    path = evidence_root / "reports" / "a1-a12.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["complete"] = False
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    result = _run(
+        [
+            "m3",
+            "rehearse-report",
+            "--evidence-root",
+            str(evidence_root),
+            "--evidence",
+            "reports/a1-a12.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
+# --------------------------------------------------------------------------- #
+# plan-requests and show-budget
+# --------------------------------------------------------------------------- #
+def test_plan_requests_derives_a_plan_and_writes_it(repo_root: Path, evidence_root: Path) -> None:
+    result = _plan(repo_root, evidence_root)
+
+    assert result.returncode == EXIT_OK
+    assert (evidence_root / "plans" / "m3-2a.json").is_file()
+    normalized = " ".join(result.stdout.split())
+    assert "hard request ceiling" in normalized
+    assert "zero requests placed" in normalized
+
+
+def test_two_dry_runs_produce_byte_identical_plans(repo_root: Path, evidence_root: Path) -> None:
+    """Gate F requires exact agreement; a difference is the finding, not a retry trigger."""
+    _plan(repo_root, evidence_root, out="plans/first.json")
+    _plan(repo_root, evidence_root, out="plans/second.json")
+
+    first = (evidence_root / "plans" / "first.json").read_bytes()
+    second = (evidence_root / "plans" / "second.json").read_bytes()
+    assert first == second
+
+
+def test_show_budget_renders_the_plan_and_approves_nothing(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _plan(repo_root, evidence_root)
+
+    result = _run(
+        ["m3", "show-budget", "--evidence-root", str(evidence_root), "--plan", "plans/m3-2a.json"],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK
+    normalized = " ".join(result.stdout.split())
+    assert "hard_request_ceiling" in normalized
+    assert "not approved by this command" in normalized
+
+
+def test_the_ceiling_is_the_sum_of_planned_requests_times_a_reachable(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _plan(repo_root, evidence_root)
+    document = json.loads((evidence_root / "plans" / "m3-2a.json").read_text(encoding="utf-8"))
+
+    expected = sum(
+        route["planned_unique_logical_requests"] * route["a_reachable"]
+        for route in document["routes"]
+    )
+    assert document["totals"]["hard_request_ceiling"] == expected
+
+
+def test_an_artifact_path_escaping_the_evidence_root_is_refused(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    result = _run(
+        ["m3", "show-budget", "--evidence-root", str(evidence_root), "--plan", "../escaped.json"],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
+# --------------------------------------------------------------------------- #
+# show-receipt
+# --------------------------------------------------------------------------- #
+def test_show_receipt_exits_four_on_a_defective_receipt(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    path = evidence_root / "receipts" / "receipt-broken.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"receipt_schema_version":"m3-execution-receipt/1.0"}\n', encoding="utf-8")
+
+    result = _run(
+        [
+            "m3",
+            "show-receipt",
+            "--evidence-root",
+            str(evidence_root),
+            "--receipt",
+            "receipts/receipt-broken.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
+def test_show_receipt_exits_four_on_a_missing_receipt(repo_root: Path, evidence_root: Path) -> None:
+    result = _run(
+        [
+            "m3",
+            "show-receipt",
+            "--evidence-root",
+            str(evidence_root),
+            "--receipt",
+            "receipts/absent.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+
+
+# --------------------------------------------------------------------------- #
+# Disclosure
+# --------------------------------------------------------------------------- #
+def test_no_command_prints_the_resolved_evidence_root(repo_root: Path, evidence_root: Path) -> None:
+    """The root is validated and used, but its absolute value is never displayed."""
+    rehearsal = _rehearse(repo_root, evidence_root)
+    plan = _plan(repo_root, evidence_root)
+
+    for result in (rehearsal, plan):
+        assert str(evidence_root) not in result.stdout
+
+
+def test_no_command_prints_the_sec_identity(repo_root: Path, evidence_root: Path) -> None:
+    identity = "Rehearsal Operator operator@example.invalid"  # noqa: S105 - a contact identity
+    rehearsal = _run(
+        ["m3", "rehearse", "--evidence-root", str(evidence_root)],
+        repo_root,
+        env={"DISCLOSURE_DRIFT_SEC_USER_AGENT": identity},
+    )
+
+    assert identity not in rehearsal.stdout
+    assert identity not in rehearsal.stderr

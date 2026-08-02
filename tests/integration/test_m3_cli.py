@@ -67,6 +67,8 @@ def _rehearse(repo_root: Path, evidence_root: Path) -> subprocess.CompletedProce
             str(evidence_root),
             "--evidence-out",
             "reports/a1-a12.json",
+            "--receipt-out",
+            "receipts/rehearse.json",
         ],
         repo_root,
     )
@@ -91,6 +93,8 @@ def _plan(
             "2024",
             "--plan-out",
             out,
+            "--receipt-out",
+            "receipts/plan.json",
         ],
         repo_root,
     )
@@ -154,6 +158,35 @@ def test_an_evidence_root_inside_the_checkout_is_refused(repo_root: Path) -> Non
 
     assert result.returncode == EXIT_CONFIG_ERROR
     assert "evidence root refused" in result.stderr
+    # The refusal must not leak what the boundary exists to protect. Asserting only the message
+    # prefix let an absolute-path leak pass unnoticed once already.
+    assert str(repo_root) not in result.stderr
+    assert str(repo_root) not in result.stdout
+
+
+def test_a_refusal_names_no_absolute_path_for_any_command(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Master plan §17 stop condition 12: no absolute personal path in any output."""
+    for command, argument in (
+        ("show-budget", "--plan"),
+        ("show-receipt", "--receipt"),
+        ("rehearse-report", "--evidence"),
+    ):
+        result = _run(
+            [
+                "m3",
+                command,
+                "--evidence-root",
+                str(repo_root / "inside-the-checkout"),
+                argument,
+                "artifact.json",
+            ],
+            repo_root,
+        )
+        combined = result.stdout + result.stderr
+        assert str(repo_root) not in combined
+        assert str(evidence_root) not in combined
 
 
 def test_a_relative_evidence_root_is_refused(repo_root: Path) -> None:
@@ -218,6 +251,77 @@ def test_an_unknown_scenario_is_a_gate_failure(repo_root: Path, evidence_root: P
     )
 
     assert result.returncode == EXIT_GATE_FAILURE
+
+
+# --------------------------------------------------------------------------- #
+# Receipts — every command that runs produces one
+# --------------------------------------------------------------------------- #
+def test_rehearse_writes_a_receipt(repo_root: Path, evidence_root: Path) -> None:
+    """A passing rehearsal that produced no receipt is an incomplete command."""
+    _rehearse(repo_root, evidence_root)
+
+    written = evidence_root / "receipts" / "rehearse.json"
+    assert written.is_file()
+    document = json.loads(written.read_text(encoding="utf-8"))
+    assert document["invocation_mode"] == "rehearsal"
+    assert document["actual_logical_request_count"] == 0
+    assert document["actual_physical_attempt_count"] == 0
+    assert document["rehearsal_evidence_reference"].startswith("m3-1a-rehearsal-report-")
+
+
+def test_plan_requests_writes_a_dry_run_receipt(repo_root: Path, evidence_root: Path) -> None:
+    _plan(repo_root, evidence_root)
+
+    written = evidence_root / "receipts" / "plan.json"
+    assert written.is_file()
+    document = json.loads(written.read_text(encoding="utf-8"))
+    assert document["invocation_mode"] == "dry_run"
+    assert document["actual_physical_attempt_count"] == 0
+    # A dry run precedes owner approval, so it may not claim an approved ceiling.
+    assert "approved_request_ceiling" not in document
+
+
+def test_an_emitted_receipt_passes_show_receipt(repo_root: Path, evidence_root: Path) -> None:
+    """The round trip proves the emitted receipt is well-formed, not merely written."""
+    _rehearse(repo_root, evidence_root)
+
+    result = _run(
+        [
+            "m3",
+            "show-receipt",
+            "--evidence-root",
+            str(evidence_root),
+            "--receipt",
+            "receipts/rehearse.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK
+    assert "validation" in " ".join(result.stdout.split())
+
+
+def test_a_receipt_is_written_even_without_receipt_out(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """ "No receipt" is not an available outcome for a command that ran."""
+    _run(["m3", "rehearse", "--evidence-root", str(evidence_root)], repo_root)
+
+    receipts = list((evidence_root / "receipts").glob("receipt-*.json"))
+    assert receipts, "the rehearsal produced no receipt under its content-derived name"
+
+
+def test_the_dry_run_receipt_carries_the_plan_hash(repo_root: Path, evidence_root: Path) -> None:
+    """recovery-state condition 8.10 compares against this value, so it must be recorded."""
+    _plan(repo_root, evidence_root)
+
+    plan_document = json.loads((evidence_root / "plans" / "m3-2a.json").read_text(encoding="utf-8"))
+    receipt = json.loads((evidence_root / "receipts" / "plan.json").read_text(encoding="utf-8"))
+    import hashlib
+
+    expected = hashlib.sha256((evidence_root / "plans" / "m3-2a.json").read_bytes()).hexdigest()
+    assert receipt["request_plan_sha256"] == expected
+    assert plan_document["request_plan_schema_version"] == receipt["request_plan_schema_version"]
 
 
 # --------------------------------------------------------------------------- #

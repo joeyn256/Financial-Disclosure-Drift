@@ -107,7 +107,7 @@ def receipt(**overrides: object) -> ExecutionReceipt:
         "parser_versions": {"company-tickers": "1.0"},
         "acquisition_window": "M3.2A",
         "request_plan_id": "plan-0001",
-        "request_plan_sha256": "b" * 64,
+        "request_plan_sha256": plan().request_plan_sha256,
         "approved_request_ceiling": 200,
         "planned_logical_request_count": 7,
         "maximum_physical_attempt_count": 60,
@@ -142,6 +142,30 @@ def receipt(**overrides: object) -> ExecutionReceipt:
     }
     fields.update(overrides)
     return ExecutionReceipt(**fields)
+
+
+def rehearsal_receipt() -> ExecutionReceipt:
+    """A `rehearsal` receipt, which carries no request_plan_sha256 by classification."""
+    return ExecutionReceipt(
+        command_name="m3 rehearse",
+        command_version="m3.1a/1.0",
+        phase="M3.1A",
+        invocation_mode="rehearsal",
+        configuration_fingerprint="a" * 64,
+        migration_chain_head="0013_m23_manifest_lifecycle_guards",
+        started_at_utc="2026-08-01T12:00:00Z",
+        completed_at_utc="2026-08-01T12:00:04Z",
+        elapsed_seconds=4.0,
+        actual_logical_request_count=0,
+        actual_physical_attempt_count=0,
+        completion_status="interrupted",
+        reason_code="SEC_ACQUISITION_INTERRUPTED",
+        reason_detail="the rehearsal was interrupted.",
+        interruption_state="after_catalog_commit",
+        schema_drift_outcome="none",
+        schema_drift_event_count=0,
+        rehearsal_evidence_reference="m3-1a-rehearsal-report-0001",
+    )
 
 
 def write_chain(tmp_path: Path, *receipts: ExecutionReceipt) -> Path:
@@ -415,6 +439,72 @@ def test_the_remainder_fits_when_nothing_has_been_consumed(tmp_path: Path) -> No
 
     headroom = next(item for item in state.conditions if item.number == "8.8")
     assert headroom.status == "MET"
+
+
+# --------------------------------------------------------------------------- #
+# The conditions that gate a resume must be able to fail
+# --------------------------------------------------------------------------- #
+def test_a_plan_hash_that_differs_from_the_chain_is_unsafe(tmp_path: Path) -> None:
+    """Resuming against a different plan would spend a budget nobody approved."""
+    tree = build_catalog(tmp_path)
+    head = write_chain(tmp_path, receipt(request_plan_sha256="b" * 64))
+
+    state = inspect(tmp_path, tree, head)
+
+    hash_condition = next(item for item in state.conditions if item.number == "8.10")
+    assert hash_condition.status == "NOT MET"
+    assert state.determination == "UNSAFE"
+
+
+def test_a_chain_recording_no_plan_hash_cannot_establish_it_is_unchanged(tmp_path: Path) -> None:
+    tree = build_catalog(tmp_path)
+    head = write_chain(tmp_path, rehearsal_receipt())
+
+    state = inspect(tmp_path, tree, head)
+
+    hash_condition = next(item for item in state.conditions if item.number == "8.10")
+    assert hash_condition.status == "NOT MET"
+
+
+def test_a_chain_without_an_interruption_state_is_not_established(tmp_path: Path) -> None:
+    """8.2 must be decided by the recorded state, not by whether the chain resolved."""
+    tree = build_catalog(tmp_path)
+    head = write_chain(
+        tmp_path,
+        receipt(
+            completion_status="complete",
+            reason_code=None,
+            reason_detail=None,
+            interruption_state=None,
+        ),
+    )
+
+    state = inspect(tmp_path, tree, head)
+
+    established = next(item for item in state.conditions if item.number == "8.2")
+    assert established.status == "NOT MET"
+    assert state.determination == "UNSAFE"
+
+
+def test_the_two_conditions_are_decided_independently(tmp_path: Path) -> None:
+    """8.2 was previously a copy of 8.1; a resolved chain must not imply an established state."""
+    tree = build_catalog(tmp_path)
+    head = write_chain(
+        tmp_path,
+        receipt(
+            completion_status="complete",
+            reason_code=None,
+            reason_detail=None,
+            interruption_state=None,
+        ),
+    )
+
+    state = inspect(tmp_path, tree, head)
+
+    resolved = next(item for item in state.conditions if item.number == "8.1")
+    established = next(item for item in state.conditions if item.number == "8.2")
+    assert resolved.status == "MET"
+    assert established.status == "NOT MET"
 
 
 # --------------------------------------------------------------------------- #

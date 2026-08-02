@@ -183,6 +183,7 @@ class _ChainWalk:
     interruption_state: str | None
     resolved: bool
     detail: str
+    request_plan_sha256: str | None = None
 
 
 def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
@@ -196,6 +197,7 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
     seen: list[str] = []
     consumed = 0
     interruption_state: str | None = None
+    recorded_plan_sha256: str | None = None
     current = head_path
     visited: set[str] = set()
 
@@ -209,7 +211,12 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
                 interruption_state=interruption_state,
                 resolved=False,
                 detail=f"a receipt in the chain is missing or unreadable: {exc}",
+                request_plan_sha256=recorded_plan_sha256,
             )
+
+        if recorded_plan_sha256 is None:
+            recorded = document.get("request_plan_sha256")
+            recorded_plan_sha256 = None if recorded is None else str(recorded)
 
         receipt_id = str(document["receipt_id"])
         if receipt_id in visited:
@@ -219,6 +226,7 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
                 interruption_state=interruption_state,
                 resolved=False,
                 detail="the receipt chain loops back on itself and cannot reach a first attempt",
+                request_plan_sha256=recorded_plan_sha256,
             )
         visited.add(receipt_id)
         seen.append(receipt_id)
@@ -235,6 +243,7 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
                 interruption_state=interruption_state,
                 resolved=True,
                 detail="the chain resolves to a first attempt",
+                request_plan_sha256=recorded_plan_sha256,
             )
         current = receipts_dir / f"receipt-{predecessor}.json"
 
@@ -388,11 +397,12 @@ def inspect_recovery_state(
         ConditionResult(
             "8.2",
             "The interruption state is established, not guessed",
-            _MET if walk.resolved else _NOT_MET,
+            _MET if walk.interruption_state is not None else _NOT_MET,
             (
                 f"recorded as {walk.interruption_state!r} by the receipt schema"
                 if walk.interruption_state is not None
-                else "no interruption state is recorded on the chain"
+                else "no receipt on the chain records an interruption state, so the interruption "
+                "point is not established and would have to be guessed"
             ),
         ),
         ConditionResult(
@@ -452,8 +462,8 @@ def inspect_recovery_state(
         ConditionResult(
             "8.10",
             "The plan hash is unchanged",
-            _MET,
-            f"inspection ran against plan {plan.request_plan_sha256}",
+            _plan_hash_status(plan, walk),
+            _plan_hash_detail(plan, walk),
         ),
         ConditionResult(
             "8.11",
@@ -516,6 +526,34 @@ def _headroom(plan: RequestPlan, walk: _ChainWalk, store: _StoreState) -> tuple[
         f"attempt(s) against {remaining_headroom} of {ceiling} remaining headroom"
     )
     return fits, detail
+
+
+def _plan_hash_status(plan: RequestPlan, walk: _ChainWalk) -> str:
+    """Whether the supplied plan is the one the interrupted run was executing.
+
+    Resuming against a *different* plan than the one the run consumed would carry a consumed count
+    forward against a budget nobody approved, so a mismatch is not met. A chain that records no plan
+    hash also fails: the condition asks whether the hash is unchanged, and an absent hash cannot
+    establish that it is.
+    """
+    if walk.request_plan_sha256 is None:
+        return _NOT_MET
+    return _MET if walk.request_plan_sha256 == plan.request_plan_sha256 else _NOT_MET
+
+
+def _plan_hash_detail(plan: RequestPlan, walk: _ChainWalk) -> str:
+    """State what was compared, without assuming it matched."""
+    if walk.request_plan_sha256 is None:
+        return (
+            "no receipt on the chain records a request_plan_sha256, so it cannot be established "
+            "that the plan is unchanged"
+        )
+    if walk.request_plan_sha256 == plan.request_plan_sha256:
+        return f"the chain and the supplied plan agree on {plan.request_plan_sha256}"
+    return (
+        f"the chain recorded plan {walk.request_plan_sha256} but the supplied plan is "
+        f"{plan.request_plan_sha256}"
+    )
 
 
 def _determine(

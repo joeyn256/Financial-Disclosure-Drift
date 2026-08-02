@@ -10,11 +10,12 @@ remain prohibited.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import sys
-from collections.abc import Sequence
-from datetime import date
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime
 from logging import Logger
 from pathlib import Path
 from typing import Final
@@ -31,15 +32,29 @@ from disclosure_drift.config import ConfigError, ProjectConfig, load_config
 from disclosure_drift.errors import DisclosureDriftError, GateFailureError, SecUserAgentError
 from disclosure_drift.logging_config import configure_logging, get_logger
 from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
-from disclosure_drift.m3.receipt import ReceiptValidationError, inspect_receipt
+from disclosure_drift.m3.receipt import (
+    ExecutionReceipt,
+    ReceiptValidationError,
+    inspect_receipt,
+    write_receipt,
+)
 from disclosure_drift.m3.recovery import inspect_recovery_state
 from disclosure_drift.m3.rehearsal import run_rehearsal
-from disclosure_drift.m3.request_plan import build_m3_2a_request_plan, canonical_plan_bytes
+from disclosure_drift.m3.request_plan import (
+    REQUEST_PLAN_SCHEMA_VERSION,
+    build_m3_2a_request_plan,
+    canonical_plan_bytes,
+)
 from disclosure_drift.paths import PathPolicyError
 from disclosure_drift.reasons import REASON_CODES, release_blocking_codes
 from disclosure_drift.sec.calendar_evidence import approved_entries
-from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
-from disclosure_drift.storage.catalog import CatalogWriter
+from disclosure_drift.sec.index_plan import (
+    INDEX_PLAN_POLICY_VERSION,
+    CoverageWindow,
+    plan_index_instances,
+)
+from disclosure_drift.sec.source_registry import M22_SOURCE_REGISTRY_VERSION
+from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
 
 __all__ = ["build_parser", "main", "run"]
 
@@ -870,6 +885,98 @@ def run() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Milestone 3.1 receipts
+# --------------------------------------------------------------------------- #
+#: The command version each M3.1 command declares, independent of the package version.
+_M3_COMMAND_VERSIONS: Final[Mapping[str, str]] = {
+    "m3 rehearse": "m3.1a/1.0",
+    "m3 plan-requests": "m3.1b/1.0",
+}
+
+
+def _configuration_fingerprint(config: ProjectConfig) -> str:
+    """A digest over effective NON-SECRET configuration.
+
+    The SEC contact identity is never an input here — not even hashed. Receipt spec §5 is explicit
+    that encoding does not launder a prohibited value, so the identity simply never reaches this
+    function; only settings that are already safe to publish do.
+    """
+    payload = json.dumps(
+        {
+            "requests_per_second": config.sec.requests_per_second,
+            "burst": config.sec.burst,
+            "connect_timeout_seconds": config.sec.connect_timeout_seconds,
+            "read_timeout_seconds": config.sec.read_timeout_seconds,
+            "bulk_read_timeout_seconds": config.sec.bulk_read_timeout_seconds,
+            "max_retries": config.sec.max_retries,
+            "cooldown_seconds": config.sec.cooldown_seconds,
+            "network_enabled": config.network.enabled,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _migration_chain_head(config: ProjectConfig) -> str:
+    """The highest applied migration name, read without taking a writer lease."""
+    database = config.data_tree().catalog_database
+    if not database.is_file():
+        return "none"
+    try:
+        with read_only_connection(database) as connection:
+            row = connection.execute(
+                "SELECT name FROM ops_schema_migrations ORDER BY name DESC LIMIT 1"
+            ).fetchone()
+    except (sqlite3.Error, DisclosureDriftError):
+        return "none"
+    return "none" if row is None else str(row[0])
+
+
+def _utc_now() -> datetime:
+    """The wall clock, used only for receipt timing fields.
+
+    Timing is operational, never governed: receipt spec §4.3 states every timestamp here is
+    excluded from every identity, which is why a real clock is safe to read at this one point.
+    """
+    return datetime.now(UTC)
+
+
+def _rfc3339(moment: datetime) -> str:
+    """RFC 3339 UTC with a `Z` suffix, as the receipt schema requires."""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_m3_receipt(
+    receipt: ExecutionReceipt,
+    *,
+    evidence_root: Path,
+    relative: Path | None,
+) -> Path:
+    """Write a receipt beneath the evidence root, honouring an explicit relative name.
+
+    A receipt is written for every invocation. `--receipt-out` chooses where; omitting it still
+    produces one, under the content-derived name in the receipts directory, because "no receipt"
+    is not an available outcome for a command that ran.
+    """
+    if relative is None:
+        return write_receipt(
+            receipt, evidence_root=evidence_root, repository_root=_repository_root()
+        )
+    destination = _m3_artifact_path(evidence_root, relative)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = receipt.canonical_bytes()
+    if destination.exists() and destination.read_bytes() != payload:
+        message = (
+            f"a different receipt already exists at {relative}; a receipt is immutable and a "
+            f"correction is a new receipt, never an edit"
+        )
+        raise GateFailureError(message)
+    destination.write_bytes(payload)
+    return destination
+
+
+# --------------------------------------------------------------------------- #
 # Milestone 3.1 commands
 # --------------------------------------------------------------------------- #
 def _m3_command(
@@ -906,9 +1013,18 @@ def _m3_command(
 
     try:
         return handler(args, config, logger, evidence_root)
-    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+    except (DisclosureDriftError, sqlite3.Error) as exc:
         print(f"m3 {command} failed: {exc}", file=sys.stderr)
         logger.error("m3 %s failed", command)
+        return EXIT_GATE_FAILURE
+    except OSError as exc:
+        # An OSError ordinarily carries the offending filename, which may be an absolute personal
+        # path. Report the error class and the operator-supplied relative name only.
+        print(
+            f"m3 {command} failed: {type(exc).__name__} while reading or writing an artifact",
+            file=sys.stderr,
+        )
+        logger.error("m3 %s failed on a filesystem error", command)
         return EXIT_GATE_FAILURE
 
 
@@ -919,7 +1035,7 @@ def _repository_root() -> Path:
 
 def _m3_rehearse_command(
     args: argparse.Namespace,
-    config: ProjectConfig,  # noqa: ARG001 - the rehearsal takes no configuration input
+    config: ProjectConfig,
     logger: Logger,
     evidence_root: Path,
 ) -> int:
@@ -929,7 +1045,9 @@ def _m3_rehearse_command(
         if args.scenarios.strip() == "all"
         else [item.strip() for item in args.scenarios.split(",") if item.strip()]
     )
+    started = _utc_now()
     report = run_rehearsal(requested)
+    completed = _utc_now()
 
     for outcome in report.outcomes:
         status = "PASS" if outcome.passed else "FAIL"
@@ -960,8 +1078,30 @@ def _m3_rehearse_command(
         destination.write_bytes(report.canonical_bytes())
         print(f"  evidence written            : {args.evidence_out}")
 
-    if args.receipt_out is not None:
-        print(f"  receipt requested at        : {args.receipt_out}")
+    receipt = ExecutionReceipt(
+        command_name="m3 rehearse",
+        command_version=_M3_COMMAND_VERSIONS["m3 rehearse"],
+        phase="M3.1A",
+        invocation_mode="rehearsal",
+        configuration_fingerprint=_configuration_fingerprint(config),
+        migration_chain_head=_migration_chain_head(config),
+        started_at_utc=_rfc3339(started),
+        completed_at_utc=_rfc3339(completed),
+        elapsed_seconds=round((completed - started).total_seconds(), 3),
+        # A rehearsal places no request, so both network counts are zero. The simulated totals
+        # live in the evidence report above and never in these fields.
+        actual_logical_request_count=0,
+        actual_physical_attempt_count=0,
+        schema_drift_outcome="none",
+        schema_drift_event_count=0,
+        completion_status="complete" if report.passed else "failed",
+        reason_code=None if report.passed else "SEC_ACQUISITION_INTERRUPTED",
+        reason_detail=None if report.passed else "a rehearsal scenario did not pass.",
+        rehearsal_evidence_reference=report.evidence_reference,
+    )
+    written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
+    print(f"  receipt written             : {args.receipt_out or written.name}")
+    print(f"  receipt_id                  : {receipt.receipt_id}")
 
     if not report.passed:
         logger.error("m3 rehearse: a scenario failed; the phase does not pass")
@@ -969,6 +1109,11 @@ def _m3_rehearse_command(
     if not report.complete:
         logger.warning("m3 rehearse: a subset ran, so no completion token is emitted")
         return EXIT_OK
+    # The token is emitted only after the receipt exists on disk: the phase claims a rehearsal
+    # passed, and a passing rehearsal that produced no evidence is an incomplete command.
+    if not written.is_file():  # pragma: no cover - the write above raises on failure
+        message = "the rehearsal receipt was not written; the phase produces no completion token"
+        raise GateFailureError(message)
     print(f"\n{M3_1A_COMPLETION_TOKEN}")
     logger.info("m3 rehearse: all twelve scenarios passed")
     return EXIT_OK
@@ -1012,6 +1157,7 @@ def _m3_plan_requests_command(
     evidence_root: Path,
 ) -> int:
     """Derive the M3.2A request plan. Constructs no transport and makes zero requests."""
+    started = _utc_now()
     plan = build_m3_2a_request_plan(
         coverage_start=args.coverage_start,
         coverage_end=args.coverage_end,
@@ -1045,6 +1191,37 @@ def _m3_plan_requests_command(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(canonical_plan_bytes(plan))
         print(f"  {'plan written':<34}: {args.plan_out}")
+
+    completed = _utc_now()
+    receipt = ExecutionReceipt(
+        command_name="m3 plan-requests",
+        command_version=_M3_COMMAND_VERSIONS["m3 plan-requests"],
+        phase="M3.1B",
+        invocation_mode="dry_run",
+        configuration_fingerprint=_configuration_fingerprint(config),
+        migration_chain_head=_migration_chain_head(config),
+        started_at_utc=_rfc3339(started),
+        completed_at_utc=_rfc3339(completed),
+        elapsed_seconds=round((completed - started).total_seconds(), 3),
+        source_registry_version=M22_SOURCE_REGISTRY_VERSION,
+        index_plan_policy_version=INDEX_PLAN_POLICY_VERSION,
+        request_plan_schema_version=REQUEST_PLAN_SCHEMA_VERSION,
+        acquisition_window=plan.acquisition_window,
+        request_plan_id=plan.request_plan_id,
+        request_plan_sha256=plan.request_plan_sha256,
+        # No approved ceiling: a dry run precedes owner approval, so the field is omitted.
+        planned_logical_request_count=plan.planned_unique_logical_requests,
+        maximum_physical_attempt_count=plan.maximum_physical_attempts,
+        planned_per_route={
+            route.source_id: route.planned_unique_logical_requests for route in plan.routes
+        },
+        actual_logical_request_count=0,
+        actual_physical_attempt_count=0,
+        completion_status="complete",
+    )
+    written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
+    print(f"  {'receipt written':<34}: {args.receipt_out or written.name}")
+    print(f"  {'receipt_id':<34}: {receipt.receipt_id}")
 
     logger.info("m3 plan-requests: derived the M3.2A plan with zero requests")
     return EXIT_OK

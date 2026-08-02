@@ -67,6 +67,11 @@ def _contains(ancestor: tuple[str, ...], descendant: tuple[str, ...]) -> bool:
 def require_external_evidence_root(root: str | Path, repository_root: str | Path) -> Path:
     """Return the resolved evidence root, or refuse it.
 
+    No refusal message names either resolved path. Master plan §17 stop condition 12 bars an
+    absolute personal path from any output, and a refusal is printed to the operator, so naming the
+    path here would leak exactly what this boundary exists to protect. The operator supplied the
+    root and already knows it; the message states the rule that was broken.
+
     Refuses, with symlinks resolved on both sides beforehand:
 
     - a root that is not an absolute path;
@@ -82,8 +87,8 @@ def require_external_evidence_root(root: str | Path, repository_root: str | Path
     supplied = Path(root)
     if not supplied.is_absolute():
         message = (
-            f"evidence root {str(root)!r} must be an absolute path; a relative path would be "
-            f"resolved against the working directory, which is not a stated external location"
+            "the supplied evidence root must be an absolute path; a relative path would be "
+            "resolved against the working directory, which is not a stated external location"
         )
         raise EvidenceRootError(message)
 
@@ -95,8 +100,8 @@ def require_external_evidence_root(root: str | Path, repository_root: str | Path
 
     if evidence_parts == checkout_parts:
         message = (
-            f"evidence root {evidence} is equal to the repository checkout; completed evidence "
-            f"must live in an owner-controlled private root outside the public repository"
+            "the supplied evidence root is equal to the repository checkout; completed evidence "
+            "must live in an owner-controlled private root outside the public repository"
         )
         raise EvidenceRootError(message)
 
@@ -107,15 +112,15 @@ def require_external_evidence_root(root: str | Path, repository_root: str | Path
             else ""
         )
         message = (
-            f"evidence root {evidence} is inside the repository checkout {checkout}{reserved}; "
+            f"the supplied evidence root is inside the repository checkout{reserved}; "
             f"completed evidence must live outside the public repository"
         )
         raise EvidenceRootError(message)
 
     if _contains(evidence_parts, checkout_parts):
         message = (
-            f"evidence root {evidence} is an ancestor of the repository checkout {checkout} and "
-            f"so contains it; the checkout must not lie inside the evidence tree"
+            "the supplied evidence root is an ancestor of the repository checkout and so contains "
+            "it; the checkout must not lie inside the evidence tree"
         )
         raise EvidenceRootError(message)
 

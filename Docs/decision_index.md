@@ -370,8 +370,10 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 
 **What the planning pack does not claim.** No Gate F has passed. **Neither offline rehearsal has been
 run.** No live acquisition occurred. No Gate H has passed. No real snapshot, selection, manifest, or
-approval exists. **The M3.1 contract exists only as a draft pending independent review, and
-implementation authorization remains `NO`.**
+approval exists. **The M3.1 contract is accepted with `IMPLEMENTATION_AUTHORIZATION: YES`, and its
+implementation exists in the tree without being accepted; Decision 029 code remediation is
+implemented and the disposable-clone validation run on the corrected tree is complete, and a frozen
+commit and the first durable §17 review remain outstanding.**
 
 **D023-O1 remains the sole unresolved owner-ruling condition** and is referred only if a real run
 reaches it. Accepted Decision 028 records the owner rulings for **M3-L11** and **M3-L12**, preserving
@@ -419,7 +421,9 @@ witness per route** in place of three separately measured terms, requires the M3
 all four of `passed`, `complete`, `a_reachable_agrees`, and `a_reachable_fully_tested`, and records
 that **no durable §17 review artifact exists and none covers the current tree**. It changes no
 receipt schema field or digest preimage, creates no migration, and grants no network authority. The
-next action is the Decision 029 §11 remediation, then the **first durable §17 review**.
+Decision 029 §11 code remediation is implemented and the disposable-clone validation run on the
+corrected tree is complete; the next action is a frozen commit and the **first durable §17 review**,
+which reproduces and records that validation.
 
 ## Deviation register — where deviations are recorded
 

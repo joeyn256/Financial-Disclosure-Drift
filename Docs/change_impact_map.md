@@ -578,9 +578,11 @@ Zero impact is explicit:
 
 `INDEPENDENT_M3_1_CONTRACT_REVIEW` is discharged — the contract is accepted with
 `IMPLEMENTATION_AUTHORIZATION: YES`, and the M3.1 implementation exists in the tree without being
-accepted. The next action is the **Decision 029 §11 remediation**, then the **first durable §17
-review** by a session that wrote none of the M3.1 work. No durable review artifact exists today and
-none covers the current tree; a fix commit never converts a prior `FAIL` into a `PASS`.
+accepted. The Decision 029 §11 code remediation is implemented and the disposable-clone validation
+run on the corrected tree is complete; the next action is a frozen commit and the **first durable §17
+review** by a session that wrote none of the M3.1 work, which reproduces and records that validation.
+No durable review artifact exists today and none covers the current tree; a fix commit never converts
+a prior `FAIL` into a `PASS`.
 
 ## Notes on reading this table
 

@@ -23,7 +23,7 @@ invents none for a future milestone.
 | **Milestone 0** | The research and governance foundation: research question and framing, the novelty review and its prohibited-claims boundary, the approved preregistration, the frozen cohorts and outcome cutoffs, bootstrap seed `20260725`, the leakage register, the deviation register and D001, and Decisions 001–006. It owns no source module; the frozen definitions it fixed are executed by `cohorts.py` in §1 below | **Formally closed** (Decision 026 §6). Its frozen research definitions remain frozen — closure does not unfreeze one, and changing any still requires an approved decision record plus a reviewed code change (CLAUDE.md rule 3) |
 | **Milestone 1** | Foundational configuration, frozen cohort definitions, CLI and exit-code boundary, logging, packaging, and the offline safety baseline — §§1 and 9 below | **Formally closed** (Decision 026 §7). Implemented, accepted, and in production use since Milestone 1 |
 | **Milestone 2** | SEC source policy and the offline census (§2); raw-object, inventory, and catalog layers (§3); the candidate/selection/manifest schema (§4); entity selection (§5); joint accession selection (§6); reserve packages (§7); and pilot-manifest construction, terminal result identity, lifecycle enforcement, verification, and atomicity (§8) | **Formally closed** (Decision 026 §§8–10) — the deterministic **offline** SEC, storage, selection, replay, and manifest architecture through accepted Stage M2.3 S6, checkpointed at `m2.3-s6-complete`. **No live SEC pilot has been executed**: S6 creates only a `proposed` manifest, over fixtures |
-| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** acquisition-path rehearsal and Gate F; **M3.2** controlled metadata-only SEC acquisition in **two sequential windows** and Gate H; **M3.3** the candidate-snapshot builder and execution rehearsal, then the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** the accepted approval entry point, then explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **Planning complete; Decision 028 accepted after independent PASS; bounded M3.1 contract drafted pending independent review** (Decision 024 §5.1; [Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md); accepted [Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md); [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md)). **Not implemented or authorized.** No Milestone 3 runtime module, migration, table, CLI command, network allowlist, real snapshot, real manifest, approved root, or publication path exists |
+| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** acquisition-path rehearsal and Gate F; **M3.2** controlled metadata-only SEC acquisition in **two sequential windows** and Gate H; **M3.3** the candidate-snapshot builder and execution rehearsal, then the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** the accepted approval entry point, then explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **Master planning complete; Decisions 028 and 029 accepted after independent PASS; bounded M3.1 contract accepted and implementation-authorized** (Decision 024 §5.1; [Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md); accepted [Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md); accepted [Decision 029](Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md); [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md)). **The M3.1 acquisition-rehearsal and Gate-F planning implementation exists in the tree under `src/disclosure_drift/m3/`, `sec/request_ceiling.py`, and the `m3` CLI subcommands, and is NOT accepted.** No Milestone 3 migration, table, network allowlist, real snapshot, real manifest, approved root, or publication path exists, and no later phase is implemented or authorized |
 
 **Assignment to Milestone 3 is not authorization to begin it** (Decision 024 §8), and **planning a
 phase is not authorization to begin it either** (Decision 027 §20). Every Milestone 3 phase
@@ -34,8 +34,10 @@ Milestone 2 closeout must precede any Milestone 3 implementation — **it grante
 authority**, and implementation authorization remains `NO` for every phase (Decision 026 §21;
 Decision 027 §20). `INDEPENDENT_M3_1_CONTRACT_REVIEW` is discharged: `Milestones/contracts/m3_1.md`
 is accepted with `IMPLEMENTATION_AUTHORIZATION: YES`, and the M3.1 implementation exists in the tree
-without being accepted. The next authorized action is the **Decision 029 §11 remediation**, then the
-**first durable §17 review** by a non-author session.
+without being accepted. The **Decision 029 §11 code remediation** is implemented and the
+disposable-clone validation run on the corrected tree is complete; a frozen commit and the **first
+durable §17 review** by a non-author session remain — the review reproduces and records that
+validation.
 
 ### Milestone 3 planning artifacts — documentation only, naming no runtime path
 
@@ -47,10 +49,10 @@ None is a module, a migration, a table, a CLI command, or a runtime path, and no
 | Artifact | What it fixes |
 |---|---|
 | [`Docs/Decisions/decision_028_m3_1_readiness_corrections.md`](Decisions/decision_028_m3_1_readiness_corrections.md) | The accepted bounded planner-v2, A1–A12, reason-code, receipt-v2, budget, ceiling, recovery, and M3-L11 owner rulings. **Authorizes no implementation** |
-| [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md) | Exact-path bounded M3.1 contract draft. **Pending independent review; implementation authorization `NO`** |
+| [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md) | Exact-path bounded M3.1 contract. **Accepted; `IMPLEMENTATION_AUTHORIZATION: YES`; the M3.1 implementation exists in the tree and is not accepted** |
 | [`Milestones/milestone_03_master_plan.md`](../Milestones/milestone_03_master_plan.md) | The five phases, each with 36 specified fields, and their frozen internal subdivisions; the request-volume policy; the two-layer evidence model; the mandatory contents of every future phase contract |
 | [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled `AVAILABLE NOW` or `PLANNED — NOT YET IMPLEMENTED` |
-| [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **Neither implemented and neither run** |
+| [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **A1–A12 is implemented but has not been run to a passing operational token; E1–E8 remains unimplemented and belongs to M3.3A** |
 | [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The proposed `m3-execution-receipt/2.0` design for dry-run and live commands — permitted fields, prohibited fields, serialization, storage, retention, redaction, replay, recovery, versioning, validation. **Creates no code and no table** |
 | [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus twelve new Milestone 3 entries. **Closes none** |
 | [`Docs/m3/templates/`](m3/templates/request_budget.md) | The eight frozen operational templates: request budget, Gate F, Gate H, schema-drift incident, interrupted-run recovery, real-snapshot evidence, root-hash approval, and the public evidence index |
@@ -399,8 +401,10 @@ S4 implementation; it does not introduce any new state or transition.
   **M3.1, M3.2, M3.3, and M3.4** under Decision 024 §5.1, which renamed them and altered none of
   their substance. S6 requires a `feasible` S5 joint run, which exists as an implemented path.
   **S6 is implemented, accepted, and checkpointed** (Decision 023), and **accepted S6 is the end of
-  Milestone 2 implementation** (Decision 024 §2). **No Milestone 3 phase has begun and none is
-  authorized**; no S7 or Milestone 3 contract exists and no Milestone 3 implementation exists. The
+  Milestone 2 implementation** (Decision 024 §2). **At the Milestone 2 / Milestone 3 boundary Decision
+  024 recorded, no Milestone 3 phase had begun, none was authorized, no S7 or Milestone 3 contract
+  existed, and no Milestone 3 implementation existed** — the M3.1 bounded authorization and
+  implementation described below came afterwards. The
   **Milestone 2 / Milestone 3 boundary is recorded** (Decision 024), the final independent integrated
   Milestones 1–2 audit and its bounded corrections and rereviews are complete, and **Milestones 0, 1,
   and 2 are now formally closed** (Decision 026, `MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED`).
@@ -414,5 +418,7 @@ S4 implementation; it does not introduce any new state or transition.
   runtime path. Decision 028 is accepted after independent PASS, and **Decision 029 is accepted**
   (2026-08-02) as the bounded M3.1 remediation record — it likewise creates no module, table,
   migration, or runtime path, and grants no network authority. The M3.1 contract is accepted with
-  `IMPLEMENTATION_AUTHORIZATION: YES`; the next action is the **Decision 029 §11 remediation**, then
-  the **first durable §17 review**.
+  `IMPLEMENTATION_AUTHORIZATION: YES` and the M3.1 implementation exists in the tree without being
+  accepted; the Decision 029 §11 code remediation is implemented and the disposable-clone validation
+  run on the corrected tree is complete, so a frozen commit and the **first durable §17 review** —
+  which reproduces and records that validation — remain.

@@ -1,17 +1,22 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
-**Status:** `DECISION_028_ACCEPTED_M3_1_CONTRACT_DRAFT_PENDING_INDEPENDENT_REVIEW`
-**Implementation authorization:** `NO` — for every phase, without exception
+**Status:** `DECISIONS_028_029_ACCEPTED_M3_1_CONTRACT_ACCEPTED_IMPLEMENTATION_EXISTS_NOT_ACCEPTED`
+**Implementation authorization:** `NO` — this document grants none for any phase; the bounded M3.1
+grant is carried by `Milestones/contracts/m3_1.md`, not by this plan
 **Controlling records:** [Decision 027](../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 (`ACCEPTED — OWNER APPROVED 2026-07-31`, outcome
 `M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED`), as narrowly corrected by accepted
-[Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md).
-**Next authorized action:** `INDEPENDENT_M3_1_CONTRACT_REVIEW`
+[Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md) and narrowly superseded
+in two clauses by accepted
+[Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md).
+**Next authorized action:** `FIRST_DURABLE_M3_1_SECTION_17_REVIEW` — the Decision 029 §11 code
+remediation is implemented and the disposable-clone validation run on the corrected tree is complete;
+a frozen commit precedes the review, which reproduces and records that validation
 
 **This document is a governance roadmap, not an authorization.** It plans five phases. It starts
-none of them. The M3.1 contract exists only as an unaccepted draft; no Milestone 3 implementation exists, no SEC network
-access has occurred, no real snapshot or manifest exists, no root has been approved, and nothing has
-been published.
+none of them. The M3.1 contract is accepted and its implementation exists in the tree without being
+accepted; no live SEC network access has occurred, no real snapshot or manifest exists, no root has
+been approved, and nothing has been published.
 
 ---
 

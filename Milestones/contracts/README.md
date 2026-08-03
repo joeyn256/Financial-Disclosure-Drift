@@ -79,13 +79,15 @@ authorized is carried by that contract's own status and by `IMPLEMENTATION_AUTHO
 `STATUS.md`, not by the fact that the marker names a path.** A completed or superseded contract stays
 on record as its stage's scope statement and never authorizes new work.
 
-**No contract in this directory currently authorizes implementation**, S6 included — but for a
-different reason than before: **every contract here is now accepted and closed**, and a completed
-contract authorizes nothing further (see the rule above). All three S5 contracts and the S6 contract
-are `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`.
+**The legacy S5 and S6 contracts in this directory are accepted and closed** — all three S5 contracts
+and the S6 contract are `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`, and a
+completed contract authorizes nothing further (see the rule above). **The M3.1 contract
+[`m3_1.md`](m3_1.md) is the exception: it is accepted and carries bounded implementation
+authorization** — `IMPLEMENTATION_AUTHORIZATION: YES`, `NETWORK_AUTHORIZATION_M3_1A: NONE`,
+`NETWORK_AUTHORIZATION_M3_1B: ZERO LIVE REQUESTS` — over exactly its §§6–7 paths.
 
-**Nothing in this directory authorizes Milestone 3, live SEC work, real pilot execution, publication,
-or manifest approval.** No S7 contract exists and no Milestone 3 contract exists.
+**Nothing in this directory authorizes live SEC work, real pilot execution, publication, or manifest
+approval, and no contract for M3.2 or any later Milestone 3 phase exists.**
 
 **The Milestone 2 / Milestone 3 boundary is recorded**, in
 [Decision 024](../../Docs/Decisions/decision_024_m2_m3_boundary_governance.md)
@@ -134,12 +136,13 @@ classification.
 
 **Decision 026 is a decision record, not a contract, and it appears nowhere in this index as one.**
 Like Decisions 024 and 025 before it, it authorizes no implementation and creates no contract.
-**Every contract in this directory remains closed** — all three S5 contracts and the S6 contract are
-`ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`, unchanged by closeout — and **none
-currently authorizes implementation**. **No Milestone 3 implementation contract exists, none was
-created at closeout, and no Milestone 3 implementation is authorized**: closure satisfied only the
-precondition Decision 024 §8 imposed, and all five of that record's entry conditions still apply to
-every phase.
+**The legacy S5 and S6 contracts in this directory remain closed** — all three S5 contracts and the
+S6 contract are `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`, unchanged by
+closeout. **No Milestone 3 implementation contract was created at closeout** — closure satisfied only
+the precondition Decision 024 §8 imposed. The bounded M3.1 contract [`m3_1.md`](m3_1.md) was drafted,
+reviewed, and **accepted afterwards**, and now carries `IMPLEMENTATION_AUTHORIZATION: YES` over its
+§§6–7 paths with zero live requests; **no contract for M3.2 or any later phase exists or is
+authorized**, and all five Decision 024 §8 entry conditions still apply to every later phase.
 
 **That master planning has run, and has since been corrected to v0.2.** It is recorded in
 [Decision 027](../../Docs/Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
@@ -161,7 +164,8 @@ against the real catalog prohibited.
 
 **Decision 027 is a decision record, not a contract, and it appears nowhere in this index as one.**
 Like Decisions 024, 025, and 026 before it, it authorizes no implementation and **creates no
-contract**. **Every contract in this directory remains closed**, unchanged by planning.
+contract**. **Planning created no contract and left every then-existing contract closed**; the M3.1
+contract was drafted and accepted afterwards.
 
 The independent Decision 027 v0.2 rereview did not pass. Accepted
 [Decision 028](../../Docs/Decisions/decision_028_m3_1_readiness_corrections.md) records the bounded
@@ -184,18 +188,22 @@ proof, failure and rollback behaviour, commit and tag policy, completion report 
 completion token.
 
 **The independent review and owner acceptance of [`m3_1.md`](m3_1.md) is discharged.** The contract
-is `ACCEPTED_READY_FOR_IMPLEMENTATION` with `IMPLEMENTATION_AUTHORIZATION: YES`. **The next
-authorized action is the [Decision 029](../../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
-§11 remediation, then the first durable §17 review by a non-author session.** A contract is only one
+is `ACCEPTED_READY_FOR_IMPLEMENTATION` with `IMPLEMENTATION_AUTHORIZATION: YES`. **The
+[Decision 029](../../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
+§11 code remediation is implemented and the disposable-clone validation run on the corrected working
+tree is complete; a frozen commit and the first durable §17 review by a non-author session remain
+outstanding.** A contract is only one
 of Decision 024 §8's five entry conditions and never grants implementation authority on its own.
 Every Milestone 3 phase gets its own contract in this directory, written to the required-sections
 shape above and to the master plan's §16 additions.
 
 **No Gate F has passed, neither offline rehearsal has been run to a passing token, no live
 acquisition occurred, no Gate H has passed, and no real snapshot, selection, manifest, or approval
-exists. The M3.1 implementation exists in the tree and is NOT accepted: Decision 029 remediation is
-outstanding, no durable §17 review artifact exists and none covers the current tree, the M3.2A budget
-and ceiling are unapproved, and neither completion token has been emitted.**
+exists. The M3.1 implementation exists in the tree and is NOT accepted: Decision 029 code remediation
+is implemented and the disposable-clone validation run on the corrected working tree is complete; a
+frozen commit and the first durable §17 review remain outstanding, no durable §17 review artifact
+exists and none covers the current tree, the M3.2A budget and ceiling are unapproved, and neither
+completion token has been emitted.**
 
 **Two active corrections block Gate F.** M3-L12 is an inherited exact-quarter-end planner defect:
 the future contract must implement `quarterly-index-instances/2.0` while leaving Decision 013
@@ -210,8 +218,9 @@ four-predicate M3.1A token gate.
 - [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F.
   **Accepted; implementation exists and is not accepted.** `STATUS: ACCEPTED_READY_FOR_IMPLEMENTATION`,
   `IMPLEMENTATION_AUTHORIZATION: YES`, `NETWORK_AUTHORIZATION_M3_1A: NONE`,
-  `NETWORK_AUTHORIZATION_M3_1B: ZERO LIVE REQUESTS`. Active blocker: the **Decision 029** remediation
-  and the **first durable §17 review**. No network access is authorized.
+  `NETWORK_AUTHORIZATION_M3_1B: ZERO LIVE REQUESTS`. Active blocker: **a frozen commit** and the
+  **first durable §17 review** (the **Decision 029** code remediation is implemented and the
+  disposable-clone validation run on the unfrozen tree is complete). No network access is authorized.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

@@ -5,8 +5,15 @@ formally closed; Milestone 3 master planning is complete at Decision 027 v0.2; D
 are accepted; the bounded M3.1 contract is accepted and implementation-authorized; and the M3.1
 implementation EXISTS but is NOT ACCEPTED. Decision 029 code remediation is implemented, the
 implementation is frozen at `970e050deb06910adcde8588101564beb7d19c74`, the first durable §17
-review is complete and passed, and the Decision 029 §12 step 9 operational rehearsal has been run
-once and passed with the M3.1A token emitted; steps 10–13 and Gate F all remain outstanding.** This
+review is complete and passed, and Decision 029 §12 steps 9, 10, and 11 are complete — the step 9
+operational rehearsal passed with the M3.1A token emitted; the step 10 deterministic request plan
+ran twice byte-identically (request-plan SHA-256
+`19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, q = 70, 75 planned unique
+logical requests, 801 maximum physical attempts); and the step 11 canonical budget display passed,
+with the owner approving the exact hard request ceiling 801 on 2026-08-03. Step 12 preparation is
+complete and the Gate F checklist awaits the owner's signature decision, with one
+repository-hygiene finding referred for owner adjudication; steps 12–13 and Gate F all remain
+outstanding.** This
 file records
 workflow state; it never overrides a decision record, a migration, or `src/disclosure_drift/`. When
 this file and an authoritative source (`Docs/Decisions/` — with
@@ -36,7 +43,7 @@ remaining**.
 | **Milestone 0** — research question, novelty boundary, preregistration, frozen definitions, registers | **`FORMALLY_CLOSED`** | Decision 026 §6 | `m0-complete` |
 | **Milestone 1** — reproducible engineering foundation | **`FORMALLY_CLOSED`** | Decision 026 §7 | `m1-complete` |
 | **Milestone 2** — M2.1 offline SEC policy, M2.2 controlled live-metadata readiness, M2.3 through accepted S6 | **`FORMALLY_CLOSED`** | Decision 026 §§8–10 | `m2-complete` |
-| **Milestone 3** — M3.1–M3.5 | **Master planning complete; Decisions 028 and 029 accepted; the bounded M3.1 contract is accepted and implementation-authorized. M3.1 implementation EXISTS and is NOT ACCEPTED** — Decision 029 code remediation implemented; the implementation is frozen at `970e050deb06910adcde8588101564beb7d19c74`, and the **first durable §17 review is complete and passed** (`M3_1_SECTION_17_REVIEW: PASS`, artifact committed at `66e4c5433a393815c74f9e3087300613a516e2fb`, owner-accepted); Decision 029 §12 step 8 prepared and validated the external evidence root and operator manifest, and the **step 9 operational rehearsal ran once on 2026-08-03 and passed** — all twelve A1–A12 scenarios PASS, zero actual SEC requests, and `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` emitted by the canonical command; steps 10–13 have not begun, Gate F not begun, M3.2A budget and ceiling unapproved, the Gate F readiness token unemitted. M3.2 onward **not authorized** and **not begun** | Decision 024 §5.1; Decision 027 v0.2; accepted [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md); accepted [Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md); accepted [`contracts/m3_1.md`](contracts/m3_1.md) | — |
+| **Milestone 3** — M3.1–M3.5 | **Master planning complete; Decisions 028 and 029 accepted; the bounded M3.1 contract is accepted and implementation-authorized. M3.1 implementation EXISTS and is NOT ACCEPTED** — Decision 029 code remediation implemented; the implementation is frozen at `970e050deb06910adcde8588101564beb7d19c74`, and the **first durable §17 review is complete and passed** (`M3_1_SECTION_17_REVIEW: PASS`, artifact committed at `66e4c5433a393815c74f9e3087300613a516e2fb`, owner-accepted); Decision 029 §12 step 8 prepared and validated the external evidence root and operator manifest, and the **step 9 operational rehearsal ran once on 2026-08-03 and passed** — all twelve A1–A12 scenarios PASS, zero actual SEC requests, and `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` emitted by the canonical command; **steps 10 and 11 are complete** — two byte-identical zero-request M3.2A plans (request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, q = 70, 75 planned unique logical requests, 801 maximum physical attempts) and a passing canonical budget display, with the **owner approving the exact hard request ceiling 801 on 2026-08-03** (three response-outcome expectations deliberately unresolved); **step 12 is prepared and not signed** — the private M3.2A request-budget document is recorded and backed up, the proposed Gate F checklist is returned for the owner's signature decision, and one repository-hygiene finding is referred for owner adjudication; Gate F not begun and not authorized, the Gate F readiness token unemitted, M3.1 not finally accepted. M3.2 onward **not authorized** and **not begun** | Decision 024 §5.1; Decision 027 v0.2; accepted [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md); accepted [Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md); accepted [`contracts/m3_1.md`](contracts/m3_1.md) | — |
 
 **M2.3 Stage S6 is accepted and immutable at `m2.3-s6-complete`.** The three completion tags
 **supplement** every earlier checkpoint tag and move, replace, or re-point none of them.
@@ -82,9 +89,12 @@ implementation-authorized, and the M3.1 implementation exists but is **not accep
 code remediation is implemented, the implementation is frozen at
 `970e050deb06910adcde8588101564beb7d19c74`, and the first durable §17 review passed
 (`M3_1_SECTION_17_REVIEW: PASS`, artifact committed at
-`66e4c5433a393815c74f9e3087300613a516e2fb`), and the Decision 029 §12 step 9 operational rehearsal
-ran once and passed with the M3.1A token emitted, while steps 10–13 and Gate F all remain
-outstanding.** The rest of this
+`66e4c5433a393815c74f9e3087300613a516e2fb`), and Decision 029 §12 steps 9–11 are complete — the
+step 9 rehearsal passed with the M3.1A token emitted, step 10 produced two byte-identical
+zero-request plans (request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`),
+and step 11's canonical budget display passed with the owner approving the exact hard request
+ceiling 801 on 2026-08-03 — while step 12 awaits the owner's Gate F signature decision with one
+repository-hygiene finding under owner adjudication, and Gate F remains not begun.** The rest of this
 section is the accepted historical record of how Milestone 2.3 reached that point.
 
 M2.3 (deterministic pilot selection). Stage S4 (entity-only selection) is accepted. Decision 018
@@ -498,9 +508,17 @@ remediation is implemented, the implementation is frozen at
 session is complete, passed with verdict `M3_1_SECTION_17_REVIEW: PASS`, and is owner-accepted, its
 artifact committed governance-only at `66e4c5433a393815c74f9e3087300613a516e2fb`. Decision 029 §12
 step 8 prepared and validated the external evidence root and operator manifest; the step 9
-operational rehearsal ran once on 2026-08-03 and passed, emitting the M3.1A token; steps 10–13 have
-not begun; Gate F has not begun; the M3.2A budget and
-ceiling are unapproved; the Gate F readiness token has not been emitted; and no tag exists beyond
+operational rehearsal ran once on 2026-08-03 and passed, emitting the M3.1A token; **step 10 ran
+the deterministic zero-request M3.2A plan twice on 2026-08-03 with byte-identical results**
+(request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`; q = 70;
+75 planned unique logical requests; 801 maximum physical attempts); **step 11 rendered the
+canonical budget display and the owner approved the exact hard request ceiling 801 on
+2026-08-03**, deliberately leaving three response-outcome expectations unresolved as
+`EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`; **step 12 preparation is complete** — the
+private M3.2A request-budget document records the approval and the evidence root is backed up
+locally — while the Gate F checklist remains **unsigned**, one repository-hygiene finding is
+referred for owner adjudication, Gate F has not begun and is not authorized, the Gate F readiness
+token has not been emitted, M3.1 is not finally accepted, and no tag exists beyond
 `m2.3-s6-complete`.**
 Nothing below is an active work item — the rest of this section is
 the accepted record of the last implementation stage Milestone 2 closed over.
@@ -809,20 +827,29 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**`POST_STEP_9_BACKUP_AND_OWNER_SUPPLIED_STEP_10_PLAN_INPUTS`** — the next decision belongs to the
-project owner, not to an implementation session. **Nothing in this file authorizes step 10, the
-owner-signed ceiling, Gate F, or the Gate F readiness token.**
+**`OWNER_ADJUDICATION_OF_STEP_12_BLOCKER`** — the next decision belongs to the project owner, not
+to an implementation session. **Nothing in this file authorizes a session to sign the Gate F
+checklist, to emit the Gate F readiness token, to begin Gate F, or to begin M3.2.**
 
 The next required owner actions, in order:
 
-1. **Back up the post-step-9 evidence root off-device.** The run directory now holds the only copy of
-   evidence that cannot be regenerated, and `_write_m3_artifact_once()` will refuse to overwrite it.
-   The owner's pre-run attestation of 2026-08-03 covered the operator manifest only.
-2. **Supply the Decision 029 §12 step 10 plan inputs**, none of which may be inferred:
-   `--coverage-start`, `--coverage-end`, `--as-of` (the CLI never defaults it to today),
-   `--calendar-year` (never inferred), and `--catalog`.
-3. **Authorize step 10** — `m3 plan-requests` twice to different immutable output names, requiring
-   byte-identical plans.
+1. **Adjudicate the step-12 blocker.** `make hygiene` fails at the current HEAD with exactly one
+   finding: the committed §17 review artifact
+   (`Docs/m3/reviews/m3_1_section_17_review_970e050deb06910adcde8588101564beb7d19c74.md`, line
+   134) contains an absolute home path, which the repository's own hygiene gate refuses and which
+   master plan M3.1 §17 stop condition 12 names. Hygiene was green at the frozen implementation
+   SHA; the finding arrived with the review artifact's commit (`66e4c54`), and `make secrets`
+   passes. Resolution — a bounded owner-authorized redaction, a hygiene-allowlist ruling, or a
+   recorded owner acceptance — requires owner authority; no session may alter the accepted review
+   artifact on its own.
+2. **Review and sign Decision 029 §12 step 12** — the proposed completed Gate F checklist returned
+   by the step-12 preparation report — including the owner-side acts it names: set and validate
+   the SEC contact identity (`validate-sec-config`; `.env` is currently absent), restore
+   `HEAD == origin/main` by an owner-instructed push or a live-remote verification, record the
+   §13 operator-runbook acknowledgement, and sign or decline the §15 owner sign-off block.
+3. **Only after 1 and 2:** authorize step 13 — recording
+   `M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION`. No session may emit it before the
+   owner's signature decision.
 
 `DECISION_029_SECTION_12_STEP_9` is **discharged.** The single authorized offline operational
 rehearsal ran on 2026-08-03 at `2026-08-03T12:35:01Z`, exit status `0`. All twelve A1–A12 scenarios
@@ -838,6 +865,61 @@ artifacts live under the external evidence root at
 `sha256:4b42f95e4a00d5865eeb05ccc9f06fe08c51c68f07c56d5512d441c2ee7118ce`. The absolute private path
 is never recorded here.
 
+`DECISION_029_SECTION_12_STEP_10` is **discharged.** Under owner-supplied plan inputs (coverage
+2009-01-01 → 2026-06-30, as-of 2026-06-30, calendar year 2026, an explicitly empty operator
+calendar-evidence manifest, and a nonexistent operational catalog), `m3 plan-requests` ran exactly
+twice on 2026-08-03 to different immutable output names and produced **byte-identical plans**:
+request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68` for both
+files, under schema `m3-request-plan/1.0` and planner policy `quarterly-index-instances/2.0`. The
+plan enumerates the seven M3.2A bootstrap routes with **q = 70** required quarterly-index
+instances (2009QTR1–2026QTR2, including the closed 2026 Q2 required by Decision 013 §1), zero
+already-satisfied instances, **75 planned unique logical requests**, **801 maximum physical
+attempts**, 75 maximum new raw objects, 0 expected cache hits, and a 200.0-second rate-limiter
+spacing floor. Both dry-run receipts validate (`invocation_mode` `dry_run`; actual logical-request
+and physical-attempt counts both `0`). The accepted classification is
+`STEP_10_PASS_BYTE_IDENTICAL`. The artifacts are immutable under the external evidence root at
+`runs/m3_1b_plan_970e050deb06910adcde8588101564beb7d19c74/` — both plans
+`sha256:19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, receipts
+`sha256:d7f602d8a537c925483cbb9b5021ca0313eb3288d26dcb7759aa9b1843f4f149` and
+`sha256:ff116259d5f129aba94093bd0516b14fdbb4a5517538a2c29d59240823573111`, stdout logs
+`sha256:e3bf5650871bde150dde4a2fe48f0bfbbb26e821a52750a9e90f000b2396cfff` and
+`sha256:660e9c01396af9dfa471f160c6a11e8ecbee04b45db97f410286a02fa7d43bce`. The absolute private
+path is never recorded here.
+
+`DECISION_029_SECTION_12_STEP_11` is **discharged.** The read-only canonical `m3 show-budget`
+command rendered the stored plan's eight governed budget quantities and the derived hard request
+ceiling **801** (`31 + (11 × 70) = 801`), captured at
+`runs/m3_1b_plan_970e050deb06910adcde8588101564beb7d19c74/show_budget_stdout.log`
+(`sha256:0e6722dcd960c54a49e4a1af44a5c15587d03109b262c7ee471a46b8071db508`); the accepted
+classification is `STEP_11_BUDGET_DISPLAY_PASS`. **The owner approved the exact plan-bound hard
+request ceiling 801 on 2026-08-03**, bound to request-plan SHA-256
+`19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, with 75 planned unique logical
+requests, 75 maximum new raw objects, 0 expected cache hits, and no contingency allowance. **Three
+response-outcome quantities remain deliberately unresolved** as
+`EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN` by the owner's ruling — expected successful
+responses, expected not-modified responses, and expected governed non-success responses; no
+integer was approved or invented for them. The approval completes step 11 only: it does not
+complete or sign the Gate F checklist, does not emit the readiness token, and does not authorize
+live SEC access.
+
+**Step 12 preparation is complete; the owner signature is outstanding.** The refreshed
+after-step-11 local backup of the external evidence root verified completely (11 files, every
+SHA-256 matching, including the canonical budget display and all step-9 and step-10 evidence),
+and the private **M3.2A request-budget document** was then created once, immutably, in the
+evidence root's M3.1B run directory — 21,633 bytes, 307 lines, SHA-256
+`2d453e0b6d1b65b0d474d454e4fa1540fb615b1c78572956acdb2cfcb17cab3f` — recording the plan-derived
+quantities, the per-route independently tested `A_reachable` witnesses, the verbatim owner ceiling
+approval of 2026-08-03, and the three deliberately unresolved response-outcome markers. The
+after-step-12-prep local backup then verified completely (12 files, every SHA-256 matching, budget
+document included). **Both backups are same-device protection against accidental deletion only,
+not an off-device or device-loss backup; a separate owner-controlled off-device backup remains an
+owner matter.** The proposed completed Gate F checklist was prepared with every supported
+non-owner field populated and returned for the owner's step-12 signature decision; **no owner
+field was signed, the checklist was not written to the repository or the evidence root, the
+readiness token was not emitted, and Gate F was not begun.** One blocker is referred for owner
+adjudication: `make hygiene` fails at the current HEAD on the committed §17 review artifact's
+absolute home path (its line 134), while `make secrets` passes and the working tree is clean.
+
 `FIRST_DURABLE_M3_1_SECTION_17_REVIEW` is **discharged and historical.** The M3.1 implementation was
 frozen at `970e050deb06910adcde8588101564beb7d19c74`; a session that wrote none of the M3.1 work
 produced
@@ -851,15 +933,15 @@ reviewed, corrected, and accepted with `IMPLEMENTATION_AUTHORIZATION: YES`.
 
 The
 [Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
-§12 sequence stands at the end of **step 9**. Steps 1–9 are complete. Step 8 prepared and validated
-the external evidence root and the explicit operator manifest, and the owner attested on 2026-08-03
-that the root was backed up; **that attestation covered the manifest only, and the post-step-9 run
-artifacts are not yet backed up.** **Step 9 ran exactly once and passed**, emitting the M3.1A
-completion token. **Steps 10–13 have not begun**: no duplicate request-plan dry run, no
-`hard_request_ceiling` derived or owner-signed, the Gate F checklist unfilled and unsigned, and the
-Gate F readiness token unemitted. **Gate F has not begun and is not authorized.** M3.1 is **not
-finally accepted**, and M3.2 onward is **not authorized**. The owner-signed ceiling and the
-`m3.1-complete` tag follow in the order Decision 029 §12 freezes.
+§12 sequence stands at the end of **step 11, with step 12 prepared and unsigned**. Steps 1–11 are
+complete: the M3.1A rehearsal token, the two byte-identical zero-request plans, the passing
+canonical budget display, and the owner-approved hard request ceiling 801 all exist as durable
+evidence, and the post-step-11 and post-step-12-preparation evidence-root states are backed up
+same-device. **Step 12 has not been completed or signed**: the Gate F checklist is prepared but
+carries no owner signature, and one repository-hygiene finding awaits owner adjudication. **Step
+13 has not begun** and the Gate F readiness token is unemitted. **Gate F has not begun and is not
+authorized.** M3.1 is **not finally accepted**, and M3.2 onward is **not authorized**. The owner
+signature and the `m3.1-complete` tag follow in the order Decision 029 §12 freezes.
 
 Milestones 0, 1, and 2 are formally closed
 ([Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md),
@@ -918,14 +1000,16 @@ authorization in §§6–7; and inherited prerequisite gates via Decision 026), 
 `IMPLEMENTATION_AUTHORIZATION` reads `YES` for M3.1 and the M3.1 contract is **accepted**. The five
 conditions remain unsatisfied for every later phase, whose authorization stays `NO`, and **no live
 SEC access, real pilot execution, real snapshot, real manifest construction, root approval, or
-publication is authorized.** **No Gate F has passed, neither offline rehearsal has been run, no live
-acquisition occurred, and no Gate H has passed.**
+publication is authorized.** **No Gate F has passed, the M3.3A execution rehearsal (E1–E8) has not
+been run (the M3.1A acquisition rehearsal A1–A12 ran and passed on 2026-08-03), no live acquisition
+occurred, and no Gate H has passed.**
 
-**Two conditions are unresolved and owner-facing.** **D023-O1** is inherited and referred only if a
-real run reaches it. **M3-L12** — the accepted planner classifies 2026 Q2 as the provisional open
-quarter and excludes it, while Decision 013 §1 requires coverage through the **closed** 2026 Q2
-quarter — **must be ruled on before Gate F can pass**, and Decision 013 is not edited to accommodate
-the planner.
+**Two conditions remain owner-facing.** **D023-O1** is inherited and referred only if a real run
+reaches it. **M3-L12**'s owner ruling is recorded (Decision 028 §4) and its planner-v2 correction
+is implemented in the frozen reviewed tree — the accepted step-10 plan's required-quarter set
+includes the **closed** 2026 Q2 exactly as Decision 013 §1 requires, under
+`quarterly-index-instances/2.0` — while the register entry remains `ACTIVE` until independent
+M3.1 acceptance and a committed checkpoint; Decision 013 remains byte-for-byte unchanged.
 
 **Historical — the approval path that closed the first two gates.**
 S6 governance is drafted and has been through **three** full review cycles: the v0.1 review returned
@@ -1004,8 +1088,12 @@ new explicit owner authorization.
   Decision 029 code remediation is complete, and the first durable §17 review passed
   (`M3_1_SECTION_17_REVIEW: PASS`, artifact committed at
   `66e4c5433a393815c74f9e3087300613a516e2fb`, owner-accepted). The Decision 029 §12 step 9
-  operational rehearsal ran once on 2026-08-03 and passed, emitting the M3.1A token; steps 10–13
-  have not begun, and Gate F has not begun. Every later Milestone 3 phase is **not
+  operational rehearsal ran once on 2026-08-03 and passed, emitting the M3.1A token; steps 10 and
+  11 completed on 2026-08-03 — two byte-identical zero-request plans (request-plan SHA-256
+  `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`) and the owner-approved hard
+  request ceiling 801; step 12 is prepared and awaits the owner's signature, with one
+  repository-hygiene finding under owner adjudication; step 13 has not begun, and Gate F has not
+  begun. Every later Milestone 3 phase is **not
   started and not authorized**, requiring all five Decision 024 §8 entry conditions per phase.
 
 ## Nonblocking maintenance notes
@@ -1063,22 +1151,26 @@ script behaviour.
 MILESTONE_0_STATUS: FORMALLY_CLOSED — Decision 026 section 6; annotated tag m0-complete; frozen research definitions and standing limitations remain binding
 MILESTONE_1_STATUS: FORMALLY_CLOSED — Decision 026 section 7; annotated tag m1-complete
 MILESTONE_2_STATUS: FORMALLY_CLOSED — Decision 026 sections 8 to 10; accepted implementation ends at M2.3 Stage S6; annotated tag m2-complete; no live SEC pilot was executed
-MILESTONE_3_STATUS: MASTER PLANNING COMPLETE; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT ACCEPTED AND IMPLEMENTATION-AUTHORIZED; M3.1 IMPLEMENTATION EXISTS, IS FROZEN AT 970e050deb06910adcde8588101564beb7d19c74, AND IS NOT ACCEPTED; DECISION 029 CODE REMEDIATION COMPLETE; FIRST DURABLE SECTION 17 REVIEW COMPLETE AND PASSED; DECISION 029 SECTION 12 STEPS 8 AND 9 COMPLETE; STEP 9 OPERATIONAL REHEARSAL RAN ONCE ON 2026-08-03 AND PASSED; M3.1A TOKEN EMITTED AND DURABLY CAPTURED; STEPS 10 TO 13 NOT BEGUN; GATE F NOT BEGUN AND NOT AUTHORIZED; M3.2 ONWARD NOT AUTHORIZED AND NOT BEGUN
+MILESTONE_3_STATUS: MASTER PLANNING COMPLETE; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT ACCEPTED AND IMPLEMENTATION-AUTHORIZED; M3.1 IMPLEMENTATION EXISTS, IS FROZEN AT 970e050deb06910adcde8588101564beb7d19c74, AND IS NOT ACCEPTED; DECISION 029 CODE REMEDIATION COMPLETE; FIRST DURABLE SECTION 17 REVIEW COMPLETE AND PASSED; DECISION 029 SECTION 12 STEPS 8 TO 11 COMPLETE; M3.1A TOKEN EMITTED AND DURABLY CAPTURED; TWO BYTE-IDENTICAL M3.2A PLANS WITH REQUEST-PLAN SHA-256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68; OWNER-APPROVED HARD REQUEST CEILING 801 ON 2026-08-03; STEP 12 PREPARED AND NOT SIGNED; STEP 13 NOT BEGUN; GATE F NOT BEGUN AND NOT AUTHORIZED; M3.1 NOT FINALLY ACCEPTED; M3.2 ONWARD NOT AUTHORIZED AND NOT BEGUN
 M3_1_FROZEN_IMPLEMENTATION_SHA: 970e050deb06910adcde8588101564beb7d19c74 — the reviewed implementation tree; implementation bytes are unchanged at the governance commit that recorded the review
 M3_1_SECTION_17_REVIEW_STATUS: COMPLETE — VERDICT M3_1_SECTION_17_REVIEW: PASS; artifact Docs/m3/reviews/m3_1_section_17_review_970e050deb06910adcde8588101564beb7d19c74.md; produced by a session that wrote none of the M3.1 work; committed governance-only at 66e4c5433a393815c74f9e3087300613a516e2fb; review and artifact accepted by the project owner; this marker is authoritative over any earlier wording elsewhere that predates the review
 M3_1A_REHEARSAL_STATUS: COMPLETE AND PASSED — Decision 029 section 12 step 9 executed exactly once on 2026-08-03 at 12:35:01Z under explicit owner authorization, exit status 0; all twelve A1-A12 scenarios PASS; passed, complete, a_reachable_agrees, and a_reachable_fully_tested all true; derived and tested route-key sets equal across nine routes; unmeasured_routes empty; actual_logical_request_count 0 and actual_physical_attempt_count 0; no live SEC access; receipt completion_status complete with no reason_code; M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED emitted by the canonical command and durably captured; artifacts immutable under the external evidence root at runs/m3_1a_rehearsal_970e050deb06910adcde8588101564beb7d19c74/ with report sha256 6308576a0a7df33813239f753b31b86754f3908d63d73e6521682db06a59e1e0, receipt sha256 ea1f4be2c136827ac5d865eea0fabf73f0f716802e2ee8cd23aedf1965dbc81b, and stdout log sha256 4b42f95e4a00d5865eeb05ccc9f06fe08c51c68f07c56d5512d441c2ee7118ce; not rerunnable
-M3_1A_EVIDENCE_BACKUP_STATUS: OUTSTANDING FOR THE POST-STEP-9 ARTIFACTS — the owner attested on 2026-08-03 that the external evidence root was backed up, but that attestation preceded the run and covered the operator manifest only; the three step-9 artifacts are not yet backed up off-device and are not regenerable
+M3_1A_EVIDENCE_BACKUP_STATUS: SAME-DEVICE SNAPSHOTS COMPLETE THROUGH STEP-12 PREPARATION — the external evidence root is snapshotted locally after step 9, after step 10, after step 11, and after step-12 preparation; the after-step-11 snapshot (11 files) and the after-step-12-prep snapshot (12 files, including the private request-budget document) each verified file-by-file by SHA-256 on 2026-08-03 and include all step-9 artifacts; these snapshots are same-device protection against accidental deletion only, not an off-device or device-loss backup, and a separate owner-controlled off-device backup remains an owner matter; no absolute private path is recorded here
+M3_1B_PLAN_STATUS: COMPLETE AND ACCEPTED — STEP_10_PASS_BYTE_IDENTICAL; m3 plan-requests ran exactly twice on 2026-08-03 to different immutable output names under owner-supplied explicit inputs (coverage 2009-01-01 to 2026-06-30, as-of 2026-06-30, calendar year 2026, explicitly empty operator calendar-evidence manifest, operational catalog nonexistent at planning); byte-identical plans with request_plan_sha256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68 under m3-request-plan/1.0 and quarterly-index-instances/2.0; q 70 (2009QTR1 to 2026QTR2 including closed 2026 Q2 per Decision 013 section 1); already-satisfied instances 0; planned unique logical requests 75; maximum physical attempts 801; maximum new raw objects 75; expected cache hits 0; rate-limiter spacing floor 200.0 seconds; both dry-run receipts validate with zero actual request counts; the runs are not rerunnable
+M3_1B_CEILING_APPROVAL_STATUS: STEP 11 COMPLETE — STEP_11_BUDGET_DISPLAY_PASS; the canonical m3 show-budget stdout is durably captured with sha256 0e6722dcd960c54a49e4a1af44a5c15587d03109b262c7ee471a46b8071db508; OWNER_CEILING_APPROVAL APPROVED received 2026-08-03 for the exact plan-bound hard request ceiling 801 bound to request-plan sha256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68, with planned unique logical requests 75, maximum new raw objects 75, expected cache hits 0, and no contingency allowance; three response-outcome quantities remain deliberately unresolved as EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN (expected successful, expected not-modified, expected governed non-success) with no integer approved or invented; the approval does not complete or sign the Gate F checklist, does not emit the readiness token, and does not authorize live SEC access
+M3_1B_BUDGET_DOCUMENT_STATUS: CREATED 2026-08-03 — the private M3.2A request-budget document was instantiated once, immutably, from Docs/m3/templates/request_budget.md into the external evidence root's M3.1B run directory (runs/m3_1b_plan_970e050deb06910adcde8588101564beb7d19c74/request_budget.md); 21633 bytes, 307 lines, sha256 2d453e0b6d1b65b0d474d454e4fa1540fb615b1c78572956acdb2cfcb17cab3f; it records the plan-derived quantities, the per-route independently tested A_reachable witnesses, the verbatim owner ceiling approval of 2026-08-03, and the three deliberately unresolved response-outcome markers; the public evidence-index entry is deliberately deferred to the owner; the absolute private path is never recorded here
+STEP_12_PREPARATION_STATUS: COMPLETE AND BLOCKED FOR OWNER ADJUDICATION — classification STEP_12_BLOCKED; the proposed completed Gate F checklist was prepared with every supported non-owner field populated and returned for the owner signature decision; no owner field was signed; one adjudicable finding: make hygiene fails at HEAD because the committed section 17 review artifact line 134 carries an absolute home path (introduced at 66e4c54; hygiene was green at the frozen implementation SHA; make secrets passes; working tree clean); owner-side acts remaining: adjudicate the finding, set and validate the SEC contact identity, push or live-verify origin/main, record the operator acknowledgement, and sign or decline the owner sign-off; the readiness token is not emitted
 DECISION_026_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED; controls formal closeout and completion tags; grants no Milestone 3 authority
 DECISION_027_STATUS: v0.2; ACCEPTED — OWNER APPROVED 2026-07-31; outcome M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED; controls the accepted Milestone 3 master plan as narrowly corrected by accepted Decision 028; grants no implementation authority
 DECISION_029_STATUS: ACCEPTED — OWNER APPROVED 2026-08-02; outcome M3_1_REHEARSAL_COMPLETENESS_AND_REASON_SEMANTICS_ACCEPTED; narrowly supersedes two Decision 028 clauses only; controls the per-route full-path A_reachable witness (a zero U never waives it), the rehearsal-only manifest-resolution fixture, the single code OFFLINE_REHEARSAL_SCENARIO_MISMATCH (integrity, blocks_release true, requires_manual_review false by owner ruling), the four-predicate M3.1A token gate, and the first durable section 17 review artifact; changes no receipt schema field or digest preimage; creates no migration; grants no network authority and no tag
 DECISION_028_STATUS: ACCEPTED — OWNER APPROVED 2026-08-01; outcome M3_1_READINESS_CORRECTIONS_ACCEPTED; independent rereview PASS; records planner-v2, corrected A1-A12, two future reason codes, receipt-v2, budget, ceiling, recovery-ownership, and M3-L11 rulings; grants no implementation or network authority
-CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT INDEPENDENTLY REVIEWED, CORRECTED, AND ACCEPTED; M3.1 IMPLEMENTATION FROZEN AT 970e050deb06910adcde8588101564beb7d19c74 AND NOT ACCEPTED. THE FIRST DURABLE SECTION 17 REVIEW EXISTS, COVERS THAT FROZEN TREE, PASSED, AND IS OWNER-ACCEPTED. DECISION 029 SECTION 12 STEPS 8 AND 9 ARE COMPLETE; THE STEP 9 OPERATIONAL REHEARSAL RAN ONCE ON 2026-08-03 AND PASSED; THE M3.1A COMPLETION TOKEN WAS EMITTED BY THE CANONICAL COMMAND AND IS DURABLY CAPTURED AS PHASE EVIDENCE; STEPS 10 TO 13 HAVE NOT BEGUN; NO GATE F HAS BEGUN OR PASSED; NO LIVE ACQUISITION OCCURRED; NO GATE H HAS PASSED
-ACTIVE_BLOCKER: DECISION 029 SECTION 12 STEPS 10 TO 13 AND GATE F BLOCK M3.1 ACCEPTANCE; THE FIRST DURABLE SECTION 17 REVIEW AND THE STEP 9 REHEARSAL ARE BOTH DISCHARGED AND NO LONGER BLOCK. STEP 10 IS BLOCKED UNTIL THE OWNER SUPPLIES THE PLAN INPUTS COVERAGE-START, COVERAGE-END, AS-OF, CALENDAR-YEAR, AND CATALOG, NONE OF WHICH MAY BE INFERRED OR DEFAULTED; STEP 11 REQUIRES THE OWNER SIGNATURE ON THE EXACT EMITTED HARD REQUEST CEILING AND NO SESSION MAY SUPPLY IT; THE POST-STEP-9 EVIDENCE BACKUP IS OUTSTANDING; M3-L12 AND M3-L11 REMAIN ACTIVE AND BLOCK GATE F UNTIL IMPLEMENTATION, TESTS, ACCEPTANCE, AND CHECKPOINT; D023-O1 REMAINS THE SOLE UNRESOLVED OWNER-RULING CONDITION
+CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT INDEPENDENTLY REVIEWED, CORRECTED, AND ACCEPTED; M3.1 IMPLEMENTATION FROZEN AT 970e050deb06910adcde8588101564beb7d19c74 AND NOT ACCEPTED. THE FIRST DURABLE SECTION 17 REVIEW EXISTS, COVERS THAT FROZEN TREE, PASSED, AND IS OWNER-ACCEPTED. DECISION 029 SECTION 12 STEPS 8 TO 11 ARE COMPLETE; THE STEP 9 OPERATIONAL REHEARSAL RAN ONCE ON 2026-08-03 AND PASSED WITH THE M3.1A COMPLETION TOKEN EMITTED BY THE CANONICAL COMMAND AND DURABLY CAPTURED; STEP 10 PRODUCED TWO BYTE-IDENTICAL ZERO-REQUEST M3.2A PLANS ON 2026-08-03; STEP 11 PASSED THE CANONICAL BUDGET DISPLAY AND THE OWNER APPROVED THE EXACT HARD REQUEST CEILING 801 ON 2026-08-03; STEP 12 IS PREPARED AND AWAITS THE OWNER SIGNATURE WITH ONE HYGIENE FINDING UNDER OWNER ADJUDICATION; NO GATE F HAS BEGUN OR PASSED; NO LIVE ACQUISITION OCCURRED; NO GATE H HAS PASSED
+ACTIVE_BLOCKER: DECISION 029 SECTION 12 STEPS 12 AND 13 AND GATE F BLOCK M3.1 ACCEPTANCE; STEPS 9, 10, AND 11 ARE DISCHARGED AND NO LONGER BLOCK. STEP 12 IS BLOCKED ON ONE ADJUDICABLE FINDING: MAKE HYGIENE FAILS AT HEAD BECAUSE THE COMMITTED SECTION 17 REVIEW ARTIFACT LINE 134 CARRIES AN ABSOLUTE HOME PATH (INTRODUCED AT 66e4c54; HYGIENE WAS GREEN AT THE FROZEN IMPLEMENTATION SHA; MAKE SECRETS PASSES; TREE CLEAN); RESOLUTION REQUIRES OWNER AUTHORITY. THE GATE F CHECKLIST REMAINS UNSIGNED AND THE OWNER-SIDE ACTS REMAIN: SEC IDENTITY VALIDATION, PUSH OR LIVE VERIFICATION OF ORIGIN/MAIN, OPERATOR ACKNOWLEDGEMENT, AND THE SIGNATURE DECISION; NO SESSION MAY SIGN OR EMIT THE READINESS TOKEN. M3-L12'S GATE-F-FACING ROWS ARE SATISFIED BY THE ACCEPTED PLAN WHILE THE REGISTER ENTRY REMAINS ACTIVE UNTIL INDEPENDENT M3.1 ACCEPTANCE AND A COMMITTED CHECKPOINT; M3-L11 LIKEWISE REMAINS ACTIVE UNTIL ACCEPTANCE AND CHECKPOINT; D023-O1 REMAINS THE SOLE UNRESOLVED OWNER-RULING CONDITION
 DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controls crosswalk item 46 reserve-rank applicability only
 DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; controls S6 acceptance, delivered-path ratification, limitations O1-O4, and checkpoint authorization
 DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED; controls the M2 to M3 phase boundary and five entry conditions; grants no implementation authority
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED
 IMPLEMENTATION_AUTHORIZATION: YES — bounded strictly to the exact paths in Milestones/contracts/m3_1.md sections 6 and 7, issued under the owner's delegation of owner authority recorded 2026-08-01. No network enablement, live acquisition, real snapshot, real manifest, root approval, publication, tag, or any M3.2 work is authorized
 ACTIVE_STAGE_CONTRACT: Milestones/contracts/m3_1.md
-NEXT_AUTHORIZED_ACTION: POST_STEP_9_BACKUP_AND_OWNER_SUPPLIED_STEP_10_PLAN_INPUTS — the next decision belongs to the project owner: back up the post-step-9 evidence root off-device, then supply the step 10 plan inputs (coverage-start, coverage-end, as-of, calendar-year, catalog), then authorize step 10. This entry authorizes no session to run step 10, to derive or approve the hard request ceiling, to complete or sign the Gate F checklist, to emit M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION, or to begin Gate F; network permission NONE; no tag
+NEXT_AUTHORIZED_ACTION: OWNER_ADJUDICATION_OF_STEP_12_BLOCKER — the next decision belongs to the project owner: adjudicate the single repository-hygiene finding at HEAD (the committed section 17 review artifact's absolute home path), then review the prepared Decision 029 section 12 step-12 Gate F checklist and perform the owner-side acts it names (SEC identity validation, push or live verification of origin/main, operator acknowledgement), then sign or decline the owner sign-off. This entry authorizes no session to complete or sign the Gate F checklist, to emit M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION, to begin Gate F, or to begin M3.2; network permission NONE; no tag
 ```

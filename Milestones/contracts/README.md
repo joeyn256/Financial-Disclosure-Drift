@@ -82,12 +82,18 @@ on record as its stage's scope statement and never authorizes new work.
 **The legacy S5 and S6 contracts in this directory are accepted and closed** — all three S5 contracts
 and the S6 contract are `ACCEPTED_AND_COMPLETE` with `IMPLEMENTATION_AUTHORIZATION: NO`, and a
 completed contract authorizes nothing further (see the rule above). **The M3.1 contract
-[`m3_1.md`](m3_1.md) is the exception: it is accepted and carries bounded implementation
-authorization** — `IMPLEMENTATION_AUTHORIZATION: YES`, `NETWORK_AUTHORIZATION_M3_1A: NONE`,
-`NETWORK_AUTHORIZATION_M3_1B: ZERO LIVE REQUESTS` — over exactly its §§6–7 paths.
+[`m3_1.md`](m3_1.md) is now likewise complete**: M3.1 is owner-accepted (accepted
+[Decision 031](../../Docs/Decisions/decision_031_m3_1_acceptance.md),
+`M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed at the annotated `m3.1-complete` tag, so its stage
+shipped, the header authorization lines it still carries are the historical grant that stage
+exercised, and — per the completed-contract rule above — it authorizes nothing further; reopening
+M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) exists
+only as `DRAFT — PENDING OWNER REVIEW AND ACCEPTANCE` with `IMPLEMENTATION_AUTHORIZATION: NO`** —
+a draft authorizes nothing.
 
 **Nothing in this directory authorizes live SEC work, real pilot execution, publication, or manifest
-approval, and no contract for M3.2 or any later Milestone 3 phase exists.**
+approval. The only M3.2-or-later contract is the unaccepted [`m3_2.md`](m3_2.md) draft, which
+authorizes nothing; no contract for any later Milestone 3 phase exists.**
 
 **The Milestone 2 / Milestone 3 boundary is recorded**, in
 [Decision 024](../../Docs/Decisions/decision_024_m2_m3_boundary_governance.md)

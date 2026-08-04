@@ -54,8 +54,8 @@ Every Milestone 3 phase:
 | Decision 023 §7 — S6 acceptance | 4 | 3 `ACTIVE`, **O1** `ACTIVE — OWNER RULING PENDING` |
 | Decision 024 — boundary consequences | 2 | all `ACTIVE` |
 | Decision 026 — standing obligations | 3 | all `ACTIVE` |
-| Milestone 3 — new at planning | 12 | all open; **M3-L11** and **M3-L12** are `CLOSURE-READY PENDING STEP 16` (Decision 031 — owner acceptance recorded; the committed checkpoint tag is the sole remaining closure criterion) and the other 10 are `ACTIVE` |
-| **Total** | **37 open (35 `ACTIVE`, 2 `CLOSURE-READY PENDING STEP 16`), 1 closed** | |
+| Milestone 3 — new at planning | 12 | 10 `ACTIVE`; **M3-L11** and **M3-L12** **`CLOSED` 2026-08-03** (owner step-17 closure authorization; Decision 031; verified `m3.1-complete` checkpoint, tag object `638a02b7…`, peeled `4cd2c72…`) |
+| **Total** | **35 open (all `ACTIVE`), 3 closed** | |
 
 ---
 
@@ -776,7 +776,7 @@ Every Milestone 3 phase:
 | **Origin** | Decision 027 v0.2 §10.1; owner ruling recorded by accepted Decision 028 §11 |
 | **Description** | The two-layer evidence model requires completed operational evidence to live in an owner-controlled private evidence root **outside the repository**. `.gitignore` has **not** been updated to defend against an accidental in-tree private root, because `.gitignore` is a configuration file and the planning sessions are documentation-only |
 | **Affected M3 phase** | M3.1 onward — every phase that produces evidence |
-| **Status** | `CLOSURE-READY PENDING STEP 16` — every closure-evidence item exists (the exact `.gitignore` entry, the hygiene refusal, the resolved-path CLI tests with ancestor and symlink bypasses, full validation, independent M3.1 acceptance, and the owner acceptance recorded by Decision 031) except the committed checkpoint, which is the step-16 `m3.1-complete` tag; not closed |
+| **Status** | **`CLOSED` — 2026-08-03**, under the owner's explicit Decision 029 §12 step-17 closure authorization, on the register's own closure-evidence list, every item satisfied: the exact `.gitignore` entry (`/.m3-private-evidence`, in the frozen accepted tree); the hygiene refusal for a file, directory, or symlink at the reserved path (`scripts/check_repo_hygiene.py` + `tests/unit/test_repo_hygiene.py`); the resolved-path CLI protection with equal/inside/ancestor and bidirectional symlink-bypass tests (`m3/evidence_paths.py` + `tests/unit/test_m3_evidence_paths.py`); full validation (first durable §17 review `M3_1_SECTION_17_REVIEW: PASS` and the step-14 independent acceptance review, both green over the full gate sequence); independent M3.1 acceptance (`M3_1_INDEPENDENT_ACCEPTANCE_REVIEW: PASS`, artifact SHA-256 `caf9f26e6a2690a05a9d6a238d5572533b858789638b35a24da06c64a4c5ae4e`, commit `24fba32413bb6c5dade60a64182e42510afe6f88`) with owner acceptance recorded by accepted Decision 031; and the committed checkpoint — annotated tag `m3.1-complete` (tag object `638a02b780d912ff7b37a2f523277b9d451a015a`, peeled target `4cd2c7299ae30ca499108bd7f0a17a0adaf215f4`), verified locally and remotely. Residual nonblocking note, disclosed and owner-accepted (Decision 031): private-evidence backups remain same-device accidental-deletion snapshots only; an off-device backup remains an owner matter and is a pre-live-operation decision under the M3.2 contract |
 | **Methodology impact** | None |
 | **Reproducibility impact** | None |
 | **Security impact** | **Material.** The repository is public. Without the ignore entry, an evidence root created inside the checkout could be staged by a careless `git add`, publishing completed packets — including an unpublished root — irreversibly |
@@ -795,7 +795,7 @@ Every Milestone 3 phase:
 | **Origin** | Decision 027 v0.2 §15.1; owner ruling recorded by accepted Decision 028 §4 |
 | **Description** | [Decision 013](../Decisions/decision_013_pilot_selection_mechanics.md) §1 requires closed 2026 Q2 at as-of `2026-06-30`. The planner checks “containing quarter” before `quarter_end <= as_of_date`, contrary to its own module contract, and misclassifies an exact quarter end as provisional. Decision 028 preserves Decision 013 and requires the total order `start > as_of` → unplanned; else `end <= as_of` → closed; else open, under `quarterly-index-instances/2.0` |
 | **Affected M3 phase** | **M3.1B (Gate F)**, then M3.2A |
-| **Status** | **`CLOSURE-READY PENDING STEP 16`** — Gate-F-facing requirement satisfied; administrative closure deferred to the later M3.1 acceptance and checkpoint sequence (Decision 030 Ruling D). The acceptance half of that sequence is recorded (Decision 031); the committed checkpoint (the step-16 `m3.1-complete` tag) is the sole remaining closure criterion; not closed |
+| **Status** | **`CLOSED` — 2026-08-03**, under the owner's explicit Decision 029 §12 step-17 closure authorization, on the register's own closure-evidence list, every item satisfied: planner-v2 implementation (`quarterly-index-instances/2.0`) with the exact-quarter-end, interior-date, future-quarter, open-quarter, and version-mismatch boundary tests, in the frozen accepted tree; full validation (the §17 review and the step-14 independent acceptance review, both green); independent M3.1 acceptance (artifact SHA-256 `caf9f26e6a2690a05a9d6a238d5572533b858789638b35a24da06c64a4c5ae4e`, commit `24fba32413bb6c5dade60a64182e42510afe6f88`) with owner acceptance recorded by accepted Decision 031; the committed checkpoint — annotated tag `m3.1-complete` (tag object `638a02b780d912ff7b37a2f523277b9d451a015a`, peeled target `4cd2c7299ae30ca499108bd7f0a17a0adaf215f4`), verified locally and remotely; and a Gate F plan whose required-quarter set matches accepted authority (request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, 70 quarters `2009QTR1`–`2026QTR2` including the closed 2026 Q2 that Decision 013 §1 requires at as-of `2026-06-30`). Sequencing distinction preserved exactly per Decision 030 Ruling D: the **Gate-F-facing requirement was satisfied on 2026-08-03, before the Gate F checklist was signed** (`M3-L12 GATE-F-FACING REQUIREMENT: SATISFIED`), and only the **administrative closure** was deferred to the M3.1 acceptance and checkpoint sequence now complete — M3-L12 was not a Gate F blocker after Decision 030. Decision 013 remains byte-for-byte unchanged |
 | **Methodology impact** | **Material.** One quarter of accepted coverage is either included or excluded, changing the candidate universe the pilot is drawn from |
 | **Reproducibility impact** | Both behaviours are deterministic. The problem is not nondeterminism — it is that the deterministic answer disagrees with the accepted record |
 | **Security impact** | None |
@@ -814,11 +814,13 @@ authority. **Every entry marked `ACTIVE` is live and binds the phases it names.*
 
 **D023-O1 is the sole unresolved owner-ruling condition** and is referred only if a real run reaches
 it — `LATENT FAIL-CLOSED REFERRAL CONDITION — NONBLOCKING UNLESS TRIGGERED` (Decision 030 Ruling E).
-The owner rulings for **M3-L11** and **M3-L12** are recorded by accepted Decision 028; their bounded
-implementation, tests, and full validation exist in the frozen accepted tree, the independent M3.1
-acceptance review passed, and the owner acceptance is recorded by accepted Decision 031, so both
-entries are `CLOSURE-READY PENDING STEP 16` — the committed checkpoint (the `m3.1-complete` tag) is
-the sole remaining closure-evidence item, and neither entry is closed by this register. The former
-"Gate F cannot pass while M3-L12 remains active" sentence is historical: Decision 030 Ruling D
-recorded `M3-L12 GATE-F-FACING REQUIREMENT: SATISFIED` before the Gate F checklist was signed, with
-administrative closure deferred to the acceptance and checkpoint sequence.
+Every future Milestone 3 phase carries it forward as a mandatory stop-and-refer condition.
+**M3-L11 and M3-L12 are `CLOSED` (2026-08-03)** under the owner's explicit Decision 029 §12 step-17
+closure authorization, each on its own complete closure-evidence list: bounded implementation and
+tests in the frozen accepted tree, full validation, independent M3.1 acceptance
+(`M3_1_INDEPENDENT_ACCEPTANCE_REVIEW: PASS`), owner acceptance recorded by accepted Decision 031,
+and the committed checkpoint — the annotated `m3.1-complete` tag (object `638a02b7…`, peeled
+`4cd2c72…`), verified locally and remotely. The former "Gate F cannot pass while M3-L12 remains
+active" sentence is historical: Decision 030 Ruling D recorded
+`M3-L12 GATE-F-FACING REQUIREMENT: SATISFIED` before the Gate F checklist was signed, with only the
+administrative closure deferred to the acceptance and checkpoint sequence now complete.

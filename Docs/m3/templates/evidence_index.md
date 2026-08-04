@@ -1,8 +1,9 @@
-# TEMPLATE — Public Evidence Index
+# Public Evidence Index — living instance
 
-**This file is a blank template. No Milestone 3 evidence exists, so no row below is filled.**
-Copy it, fill it as evidence accumulates, and keep the completed copy **tracked in the repository** —
-this is the one Milestone 3 evidence artifact that is public by design.
+**This is the authoritative completed public evidence index, kept tracked in the repository** —
+the one Milestone 3 evidence artifact that is public by design. It is the recording destination
+the M3.1 contract §6, master plan §§12.1, 12.3, and M3.1 §30, and the operator runbook all name.
+Rows accumulate as evidence completes; the index is append-only (§6).
 
 **Purpose:** to make the existence, phase, status, and integrity of every private evidence artifact
 publicly verifiable **without publishing any of its content**.
@@ -68,17 +69,25 @@ stop-and-report condition — completed evidence is immutable.
 
 | Field | Value |
 |---|---|
-| Index version | `_______` |
-| Owner | `_______` |
-| Last updated (UTC) | `_______` |
+| Index version | 1.0 |
+| Owner | Joseph Nihill (project owner) |
+| Last updated (UTC) | 2026-08-03 |
+| Recorder | Claude Code operator session (owner-authorized), 2026-08-03 |
 | Private evidence root | **not recorded here, by design** |
-| Backup confirmed | `YES` / `NO` — a private root with no separate owner-controlled backup is a single point of loss |
+| Backup confirmed | YES — same-device snapshots of the private evidence root exist through the after-step-12-signed state, each verified file-by-file by SHA-256; they protect against accidental deletion only, and a separate owner-controlled off-device backup remains an owner matter |
 
 ## 4. The index
 
 | Ref | Artifact type | Phase | Status | SHA-256 | Date (UTC) | Note |
 |---|---|---|---|---|---|---|
-| `EV-____-___` | `_______` | `_______` | `_______` | `_______` | `_______` | `_______` |
+| `EV-M31A-001` | `rehearsal_evidence_report` | M3.1A | COMPLETE | `6308576a0a7df33813239f753b31b86754f3908d63d73e6521682db06a59e1e0` | 2026-08-03 | A1–A12 acquisition rehearsal report; all twelve scenarios PASS; zero actual network counts |
+| `EV-M31A-002` | `execution_receipt` | M3.1A | COMPLETE | `ea1f4be2c136827ac5d865eea0fabf73f0f716802e2ee8cd23aedf1965dbc81b` | 2026-08-03 | rehearsal receipt (`receipt_id` `1c1980429833e41f6eaf07d3df7fb5a780daab2ffe291d9a67858821a1a618d6`); actual counts 0 |
+| `EV-M31B-001` | `request_plan` | M3.1B | COMPLETE | `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68` | 2026-08-03 | first zero-request M3.2A plan; hash identical to `EV-M31B-002` |
+| `EV-M31B-002` | `request_plan` | M3.1B | COMPLETE | `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68` | 2026-08-03 | second dry run; byte-identical to `EV-M31B-001` |
+| `EV-M31B-003` | `execution_receipt` | M3.1B | COMPLETE | `d7f602d8a537c925483cbb9b5021ca0313eb3288d26dcb7759aa9b1843f4f149` | 2026-08-03 | first planning receipt; dry run; actual counts 0 |
+| `EV-M31B-004` | `execution_receipt` | M3.1B | COMPLETE | `ff116259d5f129aba94093bd0516b14fdbb4a5517538a2c29d59240823573111` | 2026-08-03 | second planning receipt; dry run; actual counts 0 |
+| `EV-M31B-005` | `request_budget` | M3.1B | OWNER_SIGNED | `2d453e0b6d1b65b0d474d454e4fa1540fb615b1c78572956acdb2cfcb17cab3f` | 2026-08-03 | M3.2A window; owner-approved hard request ceiling 801, recorded 2026-08-03 |
+| `EV-M31B-006` | `gate_f_checklist` | M3.1B | OWNER_SIGNED | `34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc` | 2026-08-03 | result PASS; owner-signed 2026-08-03; the step-13 readiness token is not emitted and Gate F is not begun |
 
 **Artifact types**, matching the frozen template set and the run artifacts:
 
@@ -117,7 +126,7 @@ raw data is (CLAUDE.md rule 6).
 
 | Ref | Superseded by | Reason | Date (UTC) |
 |---|---|---|---|
-| `EV-____-___` | `EV-____-___` | `_______` | `_______` |
+| — | — | none — no entry has been superseded | — |
 
 ## 7. Referencing evidence from a public decision
 
@@ -131,9 +140,9 @@ any substantive row — no matter how a later session phrases the request.
 
 | Field | Value |
 |---|---|
-| Owner | `_______` |
-| Date (UTC) | `_______` |
-| Every listed digest verified against its private artifact | `YES` / `NO` |
-| Private evidence root backed up separately | `YES` / `NO` |
-| No prohibited content in this index | `YES` / `NO` |
-| Signature or recorded acceptance reference | `_______` |
+| Owner | PENDING OWNER ATTESTATION — NOT SIGNED BY CLAUDE |
+| Date (UTC) | PENDING OWNER ATTESTATION — NOT SIGNED BY CLAUDE |
+| Every listed digest verified against its private artifact | YES — recomputed by the recording operator session on 2026-08-03; the owner attestation itself remains pending |
+| Private evidence root backed up separately | YES — same-device verified snapshots (see §3); off-device backup remains an owner matter |
+| No prohibited content in this index | YES — digests, types, phases, statuses, dates, and non-sensitive notes only |
+| Signature or recorded acceptance reference | PENDING OWNER ATTESTATION — NOT SIGNED BY CLAUDE |

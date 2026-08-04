@@ -10,13 +10,12 @@ operational rehearsal passed with the M3.1A token emitted; the step 10 determini
 ran twice byte-identically (request-plan SHA-256
 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, q = 70, 75 planned unique
 logical requests, 801 maximum physical attempts); and the step 11 canonical budget display passed,
-with the owner approving the exact hard request ceiling 801 on 2026-08-03. Step 12 preparation is
-complete; accepted Decision 030 resolved the sole step-12 hygiene blocker by a provably
-non-substantive one-path provenance redaction of the §17 review artifact (verdict unchanged,
-`make hygiene` passes) and recorded the owner's Gate F interpretation rulings; the Gate F
-checklist awaits the owner-side signing preflight — SEC identity provisioning, branch
-synchronization or live verification, operator acknowledgement, and the signature decision;
-steps 12–13 and Gate F all remain outstanding.** This
+with the owner approving the exact hard request ceiling 801 on 2026-08-03. **Step 12 is signed and
+complete on 2026-08-03**: the signing preflight validated the SEC contact identity at the boundary
+(value never displayed) and synchronized `main` with the live remote, and the owner-signed Gate F
+checklist (result `PASS`, no unresolved blocker) is durable private evidence, publicly referenced
+in the evidence index. **Step 13 (readiness-token recording) has not begun and is not authorized,
+and Gate F has not begun.** This
 file records
 workflow state; it never overrides a decision record, a migration, or `src/disclosure_drift/`. When
 this file and an authoritative source (`Docs/Decisions/` — with
@@ -46,7 +45,7 @@ remaining**.
 | **Milestone 0** — research question, novelty boundary, preregistration, frozen definitions, registers | **`FORMALLY_CLOSED`** | Decision 026 §6 | `m0-complete` |
 | **Milestone 1** — reproducible engineering foundation | **`FORMALLY_CLOSED`** | Decision 026 §7 | `m1-complete` |
 | **Milestone 2** — M2.1 offline SEC policy, M2.2 controlled live-metadata readiness, M2.3 through accepted S6 | **`FORMALLY_CLOSED`** | Decision 026 §§8–10 | `m2-complete` |
-| **Milestone 3** — M3.1–M3.5 | **Master planning complete; Decisions 028 and 029 accepted; the bounded M3.1 contract is accepted and implementation-authorized. M3.1 implementation EXISTS and is NOT ACCEPTED** — Decision 029 code remediation implemented; the implementation is frozen at `970e050deb06910adcde8588101564beb7d19c74`, and the **first durable §17 review is complete and passed** (`M3_1_SECTION_17_REVIEW: PASS`, artifact committed at `66e4c5433a393815c74f9e3087300613a516e2fb`, owner-accepted); Decision 029 §12 step 8 prepared and validated the external evidence root and operator manifest, and the **step 9 operational rehearsal ran once on 2026-08-03 and passed** — all twelve A1–A12 scenarios PASS, zero actual SEC requests, and `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` emitted by the canonical command; **steps 10 and 11 are complete** — two byte-identical zero-request M3.2A plans (request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, q = 70, 75 planned unique logical requests, 801 maximum physical attempts) and a passing canonical budget display, with the **owner approving the exact hard request ceiling 801 on 2026-08-03** (three response-outcome expectations deliberately unresolved); **step 12 is prepared and not signed** — the private M3.2A request-budget document is recorded and backed up, the proposed Gate F checklist is returned for the owner's signature decision, and the sole step-12 hygiene blocker is **resolved by accepted Decision 030** (non-substantive provenance redaction; review verdict unchanged; hygiene passes), leaving only the owner-side signing preflight (SEC identity, branch synchronization or live verification, operator acknowledgement, signature); Gate F not begun and not authorized, the Gate F readiness token unemitted, M3.1 not finally accepted. M3.2 onward **not authorized** and **not begun** | Decision 024 §5.1; Decision 027 v0.2; accepted [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md); accepted [Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md); accepted [`contracts/m3_1.md`](contracts/m3_1.md) | — |
+| **Milestone 3** — M3.1–M3.5 | **Master planning complete; Decisions 028 and 029 accepted; the bounded M3.1 contract is accepted and implementation-authorized. M3.1 implementation EXISTS and is NOT ACCEPTED** — Decision 029 code remediation implemented; the implementation is frozen at `970e050deb06910adcde8588101564beb7d19c74`, and the **first durable §17 review is complete and passed** (`M3_1_SECTION_17_REVIEW: PASS`, artifact committed at `66e4c5433a393815c74f9e3087300613a516e2fb`, owner-accepted); Decision 029 §12 step 8 prepared and validated the external evidence root and operator manifest, and the **step 9 operational rehearsal ran once on 2026-08-03 and passed** — all twelve A1–A12 scenarios PASS, zero actual SEC requests, and `M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED` emitted by the canonical command; **steps 10 and 11 are complete** — two byte-identical zero-request M3.2A plans (request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, q = 70, 75 planned unique logical requests, 801 maximum physical attempts) and a passing canonical budget display, with the **owner approving the exact hard request ceiling 801 on 2026-08-03** (three response-outcome expectations deliberately unresolved); **step 12 is signed and complete (2026-08-03)** — the sole hygiene blocker was resolved by accepted Decision 030, the signing preflight validated the SEC identity and synchronized `main` (`HEAD == origin/main`), and the **owner-signed Gate F checklist** (result `PASS`; every item accepted; no unresolved blocker) is immutable private evidence with its SHA-256 recorded in the public evidence index alongside the plans, receipts, and the owner-approved request budget (ceiling 801); **step 13 not begun and not authorized**, the Gate F readiness token unemitted, Gate F not begun and not authorized, M3.1 not finally accepted. M3.2 onward **not authorized** and **not begun** | Decision 024 §5.1; Decision 027 v0.2; accepted [Decision 028](../Docs/Decisions/decision_028_m3_1_readiness_corrections.md); accepted [Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md); accepted [`contracts/m3_1.md`](contracts/m3_1.md) | — |
 
 **M2.3 Stage S6 is accepted and immutable at `m2.3-s6-complete`.** The three completion tags
 **supplement** every earlier checkpoint tag and move, replace, or re-point none of them.
@@ -96,8 +95,9 @@ code remediation is implemented, the implementation is frozen at
 step 9 rehearsal passed with the M3.1A token emitted, step 10 produced two byte-identical
 zero-request plans (request-plan SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`),
 and step 11's canonical budget display passed with the owner approving the exact hard request
-ceiling 801 on 2026-08-03 — while step 12 awaits the owner's Gate F signature decision; the sole
-step-12 hygiene blocker is resolved by accepted Decision 030, and Gate F remains not begun.** The rest of this
+ceiling 801 on 2026-08-03 — and step 12 was signed and completed on 2026-08-03 (checklist result
+`PASS`; the sole hygiene blocker having been resolved by accepted Decision 030), while step 13 has
+not begun and is not authorized and Gate F remains not begun.** The rest of this
 section is the accepted historical record of how Milestone 2.3 reached that point.
 
 M2.3 (deterministic pilot selection). Stage S4 (entity-only selection) is accepted. Decision 018
@@ -517,14 +517,18 @@ the deterministic zero-request M3.2A plan twice on 2026-08-03 with byte-identica
 75 planned unique logical requests; 801 maximum physical attempts); **step 11 rendered the
 canonical budget display and the owner approved the exact hard request ceiling 801 on
 2026-08-03**, deliberately leaving three response-outcome expectations unresolved as
-`EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`; **step 12 preparation is complete** — the
-private M3.2A request-budget document records the approval and the evidence root is backed up
-locally — and **accepted Decision 030 resolved the sole step-12 hygiene blocker** by a provably
-non-substantive one-path provenance redaction of the §17 review artifact (verdict
-`M3_1_SECTION_17_REVIEW: PASS` unchanged; `make hygiene` passes with zero findings), while the
-Gate F checklist remains **unsigned** pending the owner-side signing preflight, Gate F has not
-begun and is not authorized, the Gate F readiness token has not been emitted, M3.1 is not finally
-accepted, and no tag exists beyond
+`EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN`; **accepted Decision 030 resolved the sole
+step-12 hygiene blocker** by a provably non-substantive one-path provenance redaction of the §17
+review artifact (verdict `M3_1_SECTION_17_REVIEW: PASS` unchanged; `make hygiene` passes with zero
+findings); and **step 12 is signed and complete**: the signing preflight validated the SEC contact
+identity at the canonical boundary (value never displayed), synchronized `main`
+(`HEAD == origin/main` at `55cf244a00428fbc8fa38d7b70af1bac8a7c45e9`), and recorded the operator
+acknowledgement, and the **owner-signed Gate F checklist** (result `PASS`; owner Joseph Nihill,
+project owner acting through the ChatGPT owner decision; 2026-08-03) is immutable private
+evidence, SHA-256 `34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc`, backed up
+and publicly referenced in the evidence index. **Step 13 has not begun and is not authorized**,
+the Gate F readiness token has not been emitted, Gate F has not begun and is not authorized, M3.1
+is not finally accepted, and no tag exists beyond
 `m2.3-s6-complete`.**
 Nothing below is an active work item — the rest of this section is
 the accepted record of the last implementation stage Milestone 2 closed over.
@@ -833,27 +837,43 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**`OWNER_PROVISION_SEC_CONTACT_IDENTITY_AND_AUTHORIZE_BRANCH_SYNCHRONIZATION_AND_FINAL_STEP_12_SIGNING_PREFLIGHT`**
-— the next decision belongs to the project owner, not to an implementation session. **Nothing in
-this file authorizes a session to configure or print the SEC identity, to push, to sign the Gate F
-checklist, to emit the Gate F readiness token, to begin Gate F, or to begin M3.2.**
+**`OWNER_ADJUDICATION_AND_AUTHORIZATION_OF_DECISION_029_SECTION_12_STEP_13_READINESS_TOKEN`** —
+the next decision belongs to the project owner, not to an implementation session. **Nothing in
+this file authorizes a session to emit or record the Gate F readiness token, to begin Gate F, or
+to begin M3.2.**
 
-The remaining owner-side step-12 requirements, in order:
+`DECISION_029_SECTION_12_STEP_12` is **signed and complete.** The final signing preflight
+(2026-08-03) validated the owner-approved SEC contact identity at the canonical boundary
+(`SEC contact identity: valid; value not displayed`; the value lives only in the ignored local
+configuration and is never printed), synchronized `main` by one authorized, ancestry-proven,
+normal fast-forward push and verified `HEAD == origin/main` at
+`55cf244a00428fbc8fa38d7b70af1bac8a7c45e9`, and recorded the operator-runbook acknowledgement.
+The owner then signed the checklist on 2026-08-03 — Owner **Joseph Nihill, project owner acting
+through the ChatGPT owner decision**; Gate F result **`PASS`**; recorded acceptance reference
+bound to the repository baseline `55cf244a00428fbc8fa38d7b70af1bac8a7c45e9`, the request-plan
+SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, the request-budget
+SHA-256 `2d453e0b6d1b65b0d474d454e4fa1540fb615b1c78572956acdb2cfcb17cab3f`, and the sanitized §17
+review SHA-256 `9c40a82934ec52227202f0160d49fc5acd0e53f61af86d6f53b6e0b26e041fe3` (a transparent
+recorded owner acceptance reference, not a handwritten, cryptographic, or third-party digital
+signature). The **signed checklist** was instantiated once, immutably, in the evidence root's
+M3.1B run directory — 23,463 bytes, 284 lines, SHA-256
+`34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc` — with every template field
+populated, every item `PASS`, no unresolved blocker, the operator acknowledgement and the
+Decision 030 dispositions included, and the two explicit step-13 boundary lines preserved (the
+readiness token **not emitted**; Gate F authorization **not granted**; the token literal occurs
+nowhere in the artifact). The after-step-12-signed local backup verified completely (13 files,
+every SHA-256 matching; `.env` excluded), and the public evidence index
+([`Docs/m3/templates/evidence_index.md`](../Docs/m3/templates/evidence_index.md) — the recording
+destination the M3.1 contract §6, master plan §§12.1/12.3 and M3.1 §30, and the operator runbook
+name) now carries the eight non-sensitive M3.1A/M3.1B rows `EV-M31A-001`–`EV-M31B-006`,
+including the signed checklist's digest; its §8 owner attestation remains pending.
 
-1. **Provision and validate the SEC contact identity** — set `DISCLOSURE_DRIFT_SEC_USER_AGENT` in
-   the git-ignored `.env` (currently absent) per `.env.example` and run
-   `python -m disclosure_drift validate-sec-config`, requiring
-   `SEC contact identity: valid; value not displayed`. The value is never printed, logged,
-   pasted, or recorded.
-2. **Authorize branch synchronization or verify the live remote** — restore `HEAD ==
-   origin/main` by an owner-instructed push of the accumulated governance commits, or verify the
-   live remote head read-only, then confirm with `make context`.
-3. **Record the operator-runbook acknowledgement** (Gate F checklist §13).
-4. **Review and sign or decline Decision 029 §12 step 12** — the proposed completed Gate F
-   checklist returned by the step-12 preparation report, instantiated at signing.
-5. **Only after 1–4:** authorize step 13 — recording
-   `M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION`. No session may emit it before the
-   owner's signature decision.
+The next required owner action: **adjudicate this recording and, if accepted, separately
+authorize Decision 029 §12 step 13** — the recording of the Gate F readiness token. No session
+may emit it without that explicit authorization. After step 13, the frozen order continues with
+steps 14–17: the separate independent M3.1 acceptance review, the master-plan §33 governance-only
+acceptance commit, the annotated `m3.1-complete` tag under explicit authorization, and only then
+the bounded M3.2 contract.
 
 **The step-12 hygiene blocker is resolved.** Accepted
 [Decision 030](../Docs/Decisions/decision_030_gate_f_step_12_owner_rulings_and_hygiene_remediation.md)
@@ -964,18 +984,18 @@ reviewed, corrected, and accepted with `IMPLEMENTATION_AUTHORIZATION: YES`.
 
 The
 [Decision 029](../Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md)
-§12 sequence stands at the end of **step 11, with step 12 prepared and unsigned**. Steps 1–11 are
-complete: the M3.1A rehearsal token, the two byte-identical zero-request plans, the passing
-canonical budget display, and the owner-approved hard request ceiling 801 all exist as durable
-evidence, and the post-step-11 and post-step-12-preparation evidence-root states are backed up
-same-device. **Step 12 has not been completed or signed**: the Gate F checklist is prepared but
-carries no owner signature; the sole hygiene blocker preparation found is **resolved by accepted
-Decision 030**, and the remaining acts are owner-side — SEC contact-identity provisioning and
-validation, branch synchronization or live `HEAD == origin/main` verification, the operator
-acknowledgement, and the signature decision itself. **Step 13 has not begun** and the Gate F
-readiness token is unemitted. **Gate F has not begun and is not authorized.** M3.1 is **not
-finally accepted**, and M3.2 onward is **not authorized**. The owner signature and the
-`m3.1-complete` tag follow in the order Decision 029 §12 freezes.
+§12 sequence stands at the end of **step 12, signed and complete**. Steps 1–12 are complete: the
+M3.1A rehearsal token, the two byte-identical zero-request plans, the passing canonical budget
+display, the owner-approved hard request ceiling 801, the Decision 030 hygiene remediation and
+Gate F interpretation rulings, the validated SEC contact identity (value never displayed), the
+synchronized branch (`HEAD == origin/main`), the operator acknowledgement, and the owner-signed
+Gate F checklist (result `PASS`, SHA-256 `34fc0567…`) all exist as durable evidence, with the
+evidence-root states backed up same-device through the after-step-12-signed snapshot and the
+public evidence index carrying the non-sensitive references. **Step 13 has not begun and is not
+authorized** and the Gate F readiness token is unemitted — no session may emit it without
+explicit owner authorization. **Gate F has not begun and is not authorized.** M3.1 is **not
+finally accepted**, and M3.2 onward is **not authorized**. The readiness token, the independent
+acceptance review, and the `m3.1-complete` tag follow in the order Decision 029 §12 freezes.
 
 Milestones 0, 1, and 2 are formally closed
 ([Decision 026](../Docs/Decisions/decision_026_milestones_0_1_2_final_closeout.md),
@@ -1125,10 +1145,10 @@ new explicit owner authorization.
   operational rehearsal ran once on 2026-08-03 and passed, emitting the M3.1A token; steps 10 and
   11 completed on 2026-08-03 — two byte-identical zero-request plans (request-plan SHA-256
   `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`) and the owner-approved hard
-  request ceiling 801; step 12 is prepared and awaits the owner's signature — its sole hygiene
-  blocker resolved by accepted Decision 030, leaving the owner-side signing preflight (SEC
-  identity, branch synchronization or live verification, operator acknowledgement, signature);
-  step 13 has not begun, and Gate F has not
+  request ceiling 801; step 12 was signed and completed on 2026-08-03 — its sole hygiene blocker
+  resolved by accepted Decision 030, the signing preflight satisfied, and the owner-signed Gate F
+  checklist (result `PASS`, SHA-256 `34fc0567…`) durably recorded and publicly referenced in the
+  evidence index; step 13 has not begun and is not authorized, and Gate F has not
   begun. Every later Milestone 3 phase is **not
   started and not authorized**, requiring all five Decision 024 §8 entry conditions per phase.
 
@@ -1187,27 +1207,29 @@ script behaviour.
 MILESTONE_0_STATUS: FORMALLY_CLOSED — Decision 026 section 6; annotated tag m0-complete; frozen research definitions and standing limitations remain binding
 MILESTONE_1_STATUS: FORMALLY_CLOSED — Decision 026 section 7; annotated tag m1-complete
 MILESTONE_2_STATUS: FORMALLY_CLOSED — Decision 026 sections 8 to 10; accepted implementation ends at M2.3 Stage S6; annotated tag m2-complete; no live SEC pilot was executed
-MILESTONE_3_STATUS: MASTER PLANNING COMPLETE; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT ACCEPTED AND IMPLEMENTATION-AUTHORIZED; M3.1 IMPLEMENTATION EXISTS, IS FROZEN AT 970e050deb06910adcde8588101564beb7d19c74, AND IS NOT ACCEPTED; DECISION 029 CODE REMEDIATION COMPLETE; FIRST DURABLE SECTION 17 REVIEW COMPLETE AND PASSED; DECISION 029 SECTION 12 STEPS 8 TO 11 COMPLETE; M3.1A TOKEN EMITTED AND DURABLY CAPTURED; TWO BYTE-IDENTICAL M3.2A PLANS WITH REQUEST-PLAN SHA-256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68; OWNER-APPROVED HARD REQUEST CEILING 801 ON 2026-08-03; DECISION 030 ACCEPTED 2026-08-03 AND THE SOLE STEP-12 HYGIENE BLOCKER RESOLVED BY A PROVEN NON-SUBSTANTIVE REDACTION (REVIEW VERDICT UNCHANGED; HYGIENE PASSES); STEP 12 PREPARED, NOT SIGNED, AWAITING THE OWNER-SIDE SIGNING PREFLIGHT; STEP 13 NOT BEGUN; GATE F NOT BEGUN AND NOT AUTHORIZED; M3.1 NOT FINALLY ACCEPTED; M3.2 ONWARD NOT AUTHORIZED AND NOT BEGUN
+MILESTONE_3_STATUS: MASTER PLANNING COMPLETE; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT ACCEPTED AND IMPLEMENTATION-AUTHORIZED; M3.1 IMPLEMENTATION EXISTS, IS FROZEN AT 970e050deb06910adcde8588101564beb7d19c74, AND IS NOT ACCEPTED; DECISION 029 CODE REMEDIATION COMPLETE; FIRST DURABLE SECTION 17 REVIEW COMPLETE AND PASSED; DECISION 029 SECTION 12 STEPS 8 TO 11 COMPLETE; M3.1A TOKEN EMITTED AND DURABLY CAPTURED; TWO BYTE-IDENTICAL M3.2A PLANS WITH REQUEST-PLAN SHA-256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68; OWNER-APPROVED HARD REQUEST CEILING 801 ON 2026-08-03; DECISION 030 ACCEPTED 2026-08-03 AND THE SOLE STEP-12 HYGIENE BLOCKER RESOLVED BY A PROVEN NON-SUBSTANTIVE REDACTION (REVIEW VERDICT UNCHANGED; HYGIENE PASSES); STEP 12 SIGNED AND COMPLETE ON 2026-08-03 WITH CHECKLIST RESULT PASS AND THE SIGNED CHECKLIST DURABLY RECORDED; STEP 13 NOT BEGUN AND NOT AUTHORIZED; READINESS TOKEN NOT EMITTED; GATE F NOT BEGUN AND NOT AUTHORIZED; M3.1 NOT FINALLY ACCEPTED; M3.2 ONWARD NOT AUTHORIZED AND NOT BEGUN
 M3_1_FROZEN_IMPLEMENTATION_SHA: 970e050deb06910adcde8588101564beb7d19c74 — the reviewed implementation tree; implementation bytes are unchanged at the governance commit that recorded the review
 M3_1_SECTION_17_REVIEW_STATUS: COMPLETE — VERDICT M3_1_SECTION_17_REVIEW: PASS; artifact Docs/m3/reviews/m3_1_section_17_review_970e050deb06910adcde8588101564beb7d19c74.md; produced by a session that wrote none of the M3.1 work; committed governance-only at 66e4c5433a393815c74f9e3087300613a516e2fb; review and artifact accepted by the project owner; this marker is authoritative over any earlier wording elsewhere that predates the review
 M3_1A_REHEARSAL_STATUS: COMPLETE AND PASSED — Decision 029 section 12 step 9 executed exactly once on 2026-08-03 at 12:35:01Z under explicit owner authorization, exit status 0; all twelve A1-A12 scenarios PASS; passed, complete, a_reachable_agrees, and a_reachable_fully_tested all true; derived and tested route-key sets equal across nine routes; unmeasured_routes empty; actual_logical_request_count 0 and actual_physical_attempt_count 0; no live SEC access; receipt completion_status complete with no reason_code; M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED emitted by the canonical command and durably captured; artifacts immutable under the external evidence root at runs/m3_1a_rehearsal_970e050deb06910adcde8588101564beb7d19c74/ with report sha256 6308576a0a7df33813239f753b31b86754f3908d63d73e6521682db06a59e1e0, receipt sha256 ea1f4be2c136827ac5d865eea0fabf73f0f716802e2ee8cd23aedf1965dbc81b, and stdout log sha256 4b42f95e4a00d5865eeb05ccc9f06fe08c51c68f07c56d5512d441c2ee7118ce; not rerunnable
-M3_1A_EVIDENCE_BACKUP_STATUS: SAME-DEVICE SNAPSHOTS COMPLETE THROUGH STEP-12 PREPARATION — the external evidence root is snapshotted locally after step 9, after step 10, after step 11, and after step-12 preparation; the after-step-11 snapshot (11 files) and the after-step-12-prep snapshot (12 files, including the private request-budget document) each verified file-by-file by SHA-256 on 2026-08-03 and include all step-9 artifacts; these snapshots are same-device protection against accidental deletion only, not an off-device or device-loss backup, and a separate owner-controlled off-device backup remains an owner matter; no absolute private path is recorded here
+M3_1A_EVIDENCE_BACKUP_STATUS: SAME-DEVICE SNAPSHOTS COMPLETE THROUGH THE STEP-12 SIGNATURE — the external evidence root is snapshotted locally after step 9, after step 10, after step 11, after step-12 preparation, and after the step-12 signature; the after-step-11 snapshot (11 files), the after-step-12-prep snapshot (12 files, including the private request-budget document), and the after-step-12-signed snapshot (13 files, including the owner-signed Gate F checklist) each verified file-by-file by SHA-256 on 2026-08-03, include all step-9 artifacts, and exclude the ignored local configuration file; these snapshots are same-device protection against accidental deletion only, not an off-device or device-loss backup, and a separate owner-controlled off-device backup remains an owner matter; no absolute private path is recorded here
 M3_1B_PLAN_STATUS: COMPLETE AND ACCEPTED — STEP_10_PASS_BYTE_IDENTICAL; m3 plan-requests ran exactly twice on 2026-08-03 to different immutable output names under owner-supplied explicit inputs (coverage 2009-01-01 to 2026-06-30, as-of 2026-06-30, calendar year 2026, explicitly empty operator calendar-evidence manifest, operational catalog nonexistent at planning); byte-identical plans with request_plan_sha256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68 under m3-request-plan/1.0 and quarterly-index-instances/2.0; q 70 (2009QTR1 to 2026QTR2 including closed 2026 Q2 per Decision 013 section 1); already-satisfied instances 0; planned unique logical requests 75; maximum physical attempts 801; maximum new raw objects 75; expected cache hits 0; rate-limiter spacing floor 200.0 seconds; both dry-run receipts validate with zero actual request counts; the runs are not rerunnable
 M3_1B_CEILING_APPROVAL_STATUS: STEP 11 COMPLETE — STEP_11_BUDGET_DISPLAY_PASS; the canonical m3 show-budget stdout is durably captured with sha256 0e6722dcd960c54a49e4a1af44a5c15587d03109b262c7ee471a46b8071db508; OWNER_CEILING_APPROVAL APPROVED received 2026-08-03 for the exact plan-bound hard request ceiling 801 bound to request-plan sha256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68, with planned unique logical requests 75, maximum new raw objects 75, expected cache hits 0, and no contingency allowance; three response-outcome quantities remain deliberately unresolved as EXACT_COUNT_RESOLVED_BY_GATE_F_ZERO_REQUEST_PLAN (expected successful, expected not-modified, expected governed non-success) with no integer approved or invented; the approval does not complete or sign the Gate F checklist, does not emit the readiness token, and does not authorize live SEC access
 M3_1B_BUDGET_DOCUMENT_STATUS: CREATED 2026-08-03 — the private M3.2A request-budget document was instantiated once, immutably, from Docs/m3/templates/request_budget.md into the external evidence root's M3.1B run directory (runs/m3_1b_plan_970e050deb06910adcde8588101564beb7d19c74/request_budget.md); 21633 bytes, 307 lines, sha256 2d453e0b6d1b65b0d474d454e4fa1540fb615b1c78572956acdb2cfcb17cab3f; it records the plan-derived quantities, the per-route independently tested A_reachable witnesses, the verbatim owner ceiling approval of 2026-08-03, and the three deliberately unresolved response-outcome markers; the public evidence-index entry is deliberately deferred to the owner; the absolute private path is never recorded here
-STEP_12_PREPARATION_STATUS: COMPLETE — HYGIENE BLOCKER RESOLVED; the proposed completed Gate F checklist was prepared with every supported non-owner field populated and returned for the owner signature decision; no owner field was signed; the sole adjudicable finding (a machine-local absolute path in the committed section 17 review artifact's clone-provenance sentence) is resolved by accepted Decision 030 through a proven non-substantive one-path redaction — review verdict M3_1_SECTION_17_REVIEW: PASS unchanged and occurring exactly once, make hygiene passing with zero findings, make secrets passing, implementation and test bytes unchanged; owner-side acts remaining: provision and validate the SEC contact identity, authorize branch synchronization or live-verify origin/main, record the operator acknowledgement, and sign or decline the owner sign-off; the readiness token is not emitted and step 12 is not signed or complete
+STEP_12_PREPARATION_STATUS: COMPLETE AND DISCHARGED — the proposed checklist was prepared with every supported non-owner field populated; the sole adjudicable finding was resolved by accepted Decision 030 (proven non-substantive one-path redaction; review verdict M3_1_SECTION_17_REVIEW: PASS unchanged; make hygiene passing); the owner-side signing-preflight acts were completed on 2026-08-03 (SEC identity validated at the boundary with the value never displayed; main synchronized by one ancestry-proven normal push; operator acknowledgement recorded) and the owner signed the checklist; see STEP_12_SIGNATURE_STATUS
+STEP_12_SIGNATURE_STATUS: SIGNED AND COMPLETE 2026-08-03 — owner Joseph Nihill, project owner acting through the ChatGPT owner decision; Gate F checklist result PASS with every template field populated, every item PASS, and no unresolved blocker; recorded acceptance reference bound to repository baseline 55cf244a00428fbc8fa38d7b70af1bac8a7c45e9, request-plan sha256 19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68, request-budget sha256 2d453e0b6d1b65b0d474d454e4fa1540fb615b1c78572956acdb2cfcb17cab3f, and sanitized section 17 review sha256 9c40a82934ec52227202f0160d49fc5acd0e53f61af86d6f53b6e0b26e041fe3 (a transparent recorded owner acceptance reference, not a handwritten, cryptographic, or third-party digital signature); the signed checklist is immutable private evidence in the M3.1B run directory of the external evidence root, 23463 bytes, 284 lines, sha256 34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc, containing the operator acknowledgement, the Decision 030 dispositions, and the two explicit step-13 boundary lines; the readiness-token literal occurs nowhere in it; step 13 is not begun and not authorized; Gate F is not begun and not authorized
+M3_EVIDENCE_INDEX_STATUS: LIVE — Docs/m3/templates/evidence_index.md is the completed public evidence index (the recording destination named by contract m3_1.md section 6, master plan sections 12.1/12.3 and M3.1 section 30, and the operator runbook); rows EV-M31A-001 through EV-M31B-006 recorded 2026-08-03 covering the rehearsal report and receipt, both request plans, both planning receipts, the owner-signed request budget, and the owner-signed Gate F checklist; digests, types, phases, statuses, dates, and non-sensitive notes only; no private path, identity, or receipt content; the section 8 owner attestation remains pending
 DECISION_030_STATUS: ACCEPTED — OWNER APPROVED 2026-08-03; outcome GATE_F_STEP_12_OWNER_RULINGS_AND_HYGIENE_REMEDIATION_ACCEPTED; authorizes exactly one proven non-substantive redaction of the section 17 review artifact's clone-provenance path material (pre-redaction sha256 73cb1eacf0fb5e29a8a1c2ea871692068caf3ebdc48cae161d6aef677ba8f3a3 remains the historical identity; sanitized sha256 9c40a82934ec52227202f0160d49fc5acd0e53f61af86d6f53b6e0b26e041fe3 is the current tracked identity; verdict unchanged; history not rewritten; scanner not weakened; no allowlist); rules the three request-budget response-outcome markers permitted and nonblocking with no integer guessed; records M3-L12 GATE-F-FACING REQUIREMENT: SATISFIED with administrative closure deferred to the later M3.1 acceptance and checkpoint sequence; records D023-O1: LATENT FAIL-CLOSED REFERRAL CONDITION — NONBLOCKING UNLESS TRIGGERED; signs no checklist, emits no token, and grants no network, Gate F, or M3.2 authority
 DECISION_026_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome MILESTONES_0_1_2_FORMALLY_ACCEPTED_AND_CLOSED; controls formal closeout and completion tags; grants no Milestone 3 authority
 DECISION_027_STATUS: v0.2; ACCEPTED — OWNER APPROVED 2026-07-31; outcome M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED; controls the accepted Milestone 3 master plan as narrowly corrected by accepted Decision 028; grants no implementation authority
 DECISION_029_STATUS: ACCEPTED — OWNER APPROVED 2026-08-02; outcome M3_1_REHEARSAL_COMPLETENESS_AND_REASON_SEMANTICS_ACCEPTED; narrowly supersedes two Decision 028 clauses only; controls the per-route full-path A_reachable witness (a zero U never waives it), the rehearsal-only manifest-resolution fixture, the single code OFFLINE_REHEARSAL_SCENARIO_MISMATCH (integrity, blocks_release true, requires_manual_review false by owner ruling), the four-predicate M3.1A token gate, and the first durable section 17 review artifact; changes no receipt schema field or digest preimage; creates no migration; grants no network authority and no tag
 DECISION_028_STATUS: ACCEPTED — OWNER APPROVED 2026-08-01; outcome M3_1_READINESS_CORRECTIONS_ACCEPTED; independent rereview PASS; records planner-v2, corrected A1-A12, two future reason codes, receipt-v2, budget, ceiling, recovery-ownership, and M3-L11 rulings; grants no implementation or network authority
-CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT INDEPENDENTLY REVIEWED, CORRECTED, AND ACCEPTED; M3.1 IMPLEMENTATION FROZEN AT 970e050deb06910adcde8588101564beb7d19c74 AND NOT ACCEPTED. THE FIRST DURABLE SECTION 17 REVIEW EXISTS, COVERS THAT FROZEN TREE, PASSED, AND IS OWNER-ACCEPTED. DECISION 029 SECTION 12 STEPS 8 TO 11 ARE COMPLETE; THE STEP 9 OPERATIONAL REHEARSAL RAN ONCE ON 2026-08-03 AND PASSED WITH THE M3.1A COMPLETION TOKEN EMITTED BY THE CANONICAL COMMAND AND DURABLY CAPTURED; STEP 10 PRODUCED TWO BYTE-IDENTICAL ZERO-REQUEST M3.2A PLANS ON 2026-08-03; STEP 11 PASSED THE CANONICAL BUDGET DISPLAY AND THE OWNER APPROVED THE EXACT HARD REQUEST CEILING 801 ON 2026-08-03; DECISION 030 IS ACCEPTED AND THE SOLE STEP-12 HYGIENE BLOCKER IS RESOLVED; STEP 12 IS PREPARED AND AWAITS THE OWNER-SIDE SIGNING PREFLIGHT AND SIGNATURE; NO GATE F HAS BEGUN OR PASSED; NO LIVE ACQUISITION OCCURRED; NO GATE H HAS PASSED
-ACTIVE_BLOCKER: DECISION 029 SECTION 12 STEPS 12 AND 13 AND GATE F BLOCK M3.1 ACCEPTANCE; STEPS 9, 10, AND 11 ARE DISCHARGED AND NO LONGER BLOCK. THE SOLE STEP-12 HYGIENE FINDING IS RESOLVED BY ACCEPTED DECISION 030 (PROVEN NON-SUBSTANTIVE REDACTION; VERDICT UNCHANGED; MAKE HYGIENE PASSES WITH ZERO FINDINGS; MAKE SECRETS PASSES; TREE CLEAN). THE GATE F CHECKLIST REMAINS UNSIGNED AND THE OWNER-SIDE ACTS REMAIN: SEC CONTACT-IDENTITY PROVISIONING AND VALIDATION, OWNER-AUTHORIZED BRANCH SYNCHRONIZATION OR LIVE VERIFICATION OF ORIGIN/MAIN, OPERATOR ACKNOWLEDGEMENT, AND THE SIGNATURE DECISION; NO SESSION MAY SIGN OR EMIT THE READINESS TOKEN. UNDER DECISION 030: M3-L12 GATE-F-FACING REQUIREMENT SATISFIED, ADMINISTRATIVE CLOSURE DEFERRED TO THE LATER M3.1 ACCEPTANCE AND CHECKPOINT SEQUENCE; M3-L11 LIKEWISE REMAINS ACTIVE UNTIL ACCEPTANCE AND CHECKPOINT; D023-O1 IS A LATENT FAIL-CLOSED REFERRAL CONDITION — NONBLOCKING UNLESS TRIGGERED
+CURRENT_STAGE: MILESTONES 0, 1, AND 2 FORMALLY CLOSED; DECISIONS 028 AND 029 ACCEPTED; M3.1 CONTRACT INDEPENDENTLY REVIEWED, CORRECTED, AND ACCEPTED; M3.1 IMPLEMENTATION FROZEN AT 970e050deb06910adcde8588101564beb7d19c74 AND NOT ACCEPTED. THE FIRST DURABLE SECTION 17 REVIEW EXISTS, COVERS THAT FROZEN TREE, PASSED, AND IS OWNER-ACCEPTED. DECISION 029 SECTION 12 STEPS 8 TO 11 ARE COMPLETE; THE STEP 9 OPERATIONAL REHEARSAL RAN ONCE ON 2026-08-03 AND PASSED WITH THE M3.1A COMPLETION TOKEN EMITTED BY THE CANONICAL COMMAND AND DURABLY CAPTURED; STEP 10 PRODUCED TWO BYTE-IDENTICAL ZERO-REQUEST M3.2A PLANS ON 2026-08-03; STEP 11 PASSED THE CANONICAL BUDGET DISPLAY AND THE OWNER APPROVED THE EXACT HARD REQUEST CEILING 801 ON 2026-08-03; DECISION 030 IS ACCEPTED AND THE SOLE STEP-12 HYGIENE BLOCKER IS RESOLVED; STEP 12 IS SIGNED AND COMPLETE (2026-08-03) WITH CHECKLIST RESULT PASS AND THE SIGNED CHECKLIST DURABLY RECORDED AS PRIVATE EVIDENCE WITH ITS DIGEST IN THE PUBLIC EVIDENCE INDEX; STEP 13 HAS NOT BEGUN AND IS NOT AUTHORIZED; NO READINESS TOKEN EXISTS; NO GATE F HAS BEGUN OR PASSED; NO LIVE ACQUISITION OCCURRED; NO GATE H HAS PASSED
+ACTIVE_BLOCKER: DECISION 029 SECTION 12 STEP 13 AND THE SUBSEQUENT ACCEPTANCE SEQUENCE (STEPS 14 TO 17) BLOCK M3.1 FINAL ACCEPTANCE; STEPS 9 THROUGH 12 ARE DISCHARGED AND NO LONGER BLOCK — STEP 12 IS SIGNED AND COMPLETE WITH NO UNRESOLVED BLOCKER. STEP 13 (RECORDING THE GATE F READINESS TOKEN) REQUIRES EXPLICIT OWNER AUTHORIZATION AND NO SESSION MAY EMIT OR RECORD IT WITHOUT THAT AUTHORIZATION. UNDER DECISION 030: M3-L12 GATE-F-FACING REQUIREMENT SATISFIED, ADMINISTRATIVE CLOSURE DEFERRED TO THE LATER M3.1 ACCEPTANCE AND CHECKPOINT SEQUENCE; M3-L11 LIKEWISE REMAINS ACTIVE UNTIL ACCEPTANCE AND CHECKPOINT; D023-O1 IS A LATENT FAIL-CLOSED REFERRAL CONDITION — NONBLOCKING UNLESS TRIGGERED
 DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controls crosswalk item 46 reserve-rank applicability only
 DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; controls S6 acceptance, delivered-path ratification, limitations O1-O4, and checkpoint authorization
 DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED; controls the M2 to M3 phase boundary and five entry conditions; grants no implementation authority
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED
 IMPLEMENTATION_AUTHORIZATION: YES — bounded strictly to the exact paths in Milestones/contracts/m3_1.md sections 6 and 7, issued under the owner's delegation of owner authority recorded 2026-08-01. No network enablement, live acquisition, real snapshot, real manifest, root approval, publication, tag, or any M3.2 work is authorized
 ACTIVE_STAGE_CONTRACT: Milestones/contracts/m3_1.md
-NEXT_AUTHORIZED_ACTION: OWNER_PROVISION_SEC_CONTACT_IDENTITY_AND_AUTHORIZE_BRANCH_SYNCHRONIZATION_AND_FINAL_STEP_12_SIGNING_PREFLIGHT — the next decision belongs to the project owner: provision and validate the SEC contact identity (value never printed), authorize branch synchronization or verify the live remote so HEAD equals origin/main, record the operator acknowledgement, and then review and sign or decline the prepared Decision 029 section 12 step-12 Gate F checklist. This entry authorizes no session to configure or print the SEC identity, to push, to complete or sign the Gate F checklist, to emit M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION, to begin Gate F, or to begin M3.2; network permission NONE; no tag
+NEXT_AUTHORIZED_ACTION: OWNER_ADJUDICATION_AND_AUTHORIZATION_OF_DECISION_029_SECTION_12_STEP_13_READINESS_TOKEN — the next decision belongs to the project owner: adjudicate the durably recorded owner-signed Gate F checklist (result PASS; sha256 34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc) and, if accepted, separately authorize Decision 029 section 12 step 13 — the recording of M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION. This entry does not itself emit or record that token and authorizes no session to emit it, to begin Gate F, to enable network access, or to begin M3.2; after step 13 the frozen order continues with the independent M3.1 acceptance review, the section 33 acceptance commit, and the m3.1-complete tag under explicit authorization; network permission NONE; no tag
 ```

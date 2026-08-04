@@ -421,9 +421,11 @@ witness per route** in place of three separately measured terms, requires the M3
 all four of `passed`, `complete`, `a_reachable_agrees`, and `a_reachable_fully_tested`, and records
 that **no durable §17 review artifact exists and none covers the current tree**. It changes no
 receipt schema field or digest preimage, creates no migration, and grants no network authority. The
-Decision 029 §11 code remediation is implemented and the disposable-clone validation run on the
-corrected tree is complete; the next action is a frozen commit and the **first durable §17 review**,
-which reproduces and records that validation.
+Decision 029 §11 code remediation was implemented, frozen at `970e050…`, and passed the first
+durable §17 review (`M3_1_SECTION_17_REVIEW: PASS`); M3.1 is owner-accepted (Decision 031,
+`M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed at the verified `m3.1-complete` tag. For the
+current next authorized action, consult `Milestones/STATUS.md` (`NEXT_AUTHORIZED_ACTION`), which
+this index never overrides.
 
 ## Deviation register — where deviations are recorded
 

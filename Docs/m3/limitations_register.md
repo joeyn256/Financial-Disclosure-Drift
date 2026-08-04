@@ -54,8 +54,8 @@ Every Milestone 3 phase:
 | Decision 023 §7 — S6 acceptance | 4 | 3 `ACTIVE`, **O1** `ACTIVE — OWNER RULING PENDING` |
 | Decision 024 — boundary consequences | 2 | all `ACTIVE` |
 | Decision 026 — standing obligations | 3 | all `ACTIVE` |
-| Milestone 3 — new at planning | 12 | all `ACTIVE`; **M3-L12** owner ruling recorded, implementation pending |
-| **Total** | **37 active, 1 closed** | |
+| Milestone 3 — new at planning | 12 | all open; **M3-L11** and **M3-L12** are `CLOSURE-READY PENDING STEP 16` (Decision 031 — owner acceptance recorded; the committed checkpoint tag is the sole remaining closure criterion) and the other 10 are `ACTIVE` |
+| **Total** | **37 open (35 `ACTIVE`, 2 `CLOSURE-READY PENDING STEP 16`), 1 closed** | |
 
 ---
 
@@ -776,7 +776,7 @@ Every Milestone 3 phase:
 | **Origin** | Decision 027 v0.2 §10.1; owner ruling recorded by accepted Decision 028 §11 |
 | **Description** | The two-layer evidence model requires completed operational evidence to live in an owner-controlled private evidence root **outside the repository**. `.gitignore` has **not** been updated to defend against an accidental in-tree private root, because `.gitignore` is a configuration file and the planning sessions are documentation-only |
 | **Affected M3 phase** | M3.1 onward — every phase that produces evidence |
-| **Status** | `ACTIVE` — owner ruling recorded; implementation and committed validation pending |
+| **Status** | `CLOSURE-READY PENDING STEP 16` — every closure-evidence item exists (the exact `.gitignore` entry, the hygiene refusal, the resolved-path CLI tests with ancestor and symlink bypasses, full validation, independent M3.1 acceptance, and the owner acceptance recorded by Decision 031) except the committed checkpoint, which is the step-16 `m3.1-complete` tag; not closed |
 | **Methodology impact** | None |
 | **Reproducibility impact** | None |
 | **Security impact** | **Material.** The repository is public. Without the ignore entry, an evidence root created inside the checkout could be staged by a careless `git add`, publishing completed packets — including an unpublished root — irreversibly |
@@ -795,7 +795,7 @@ Every Milestone 3 phase:
 | **Origin** | Decision 027 v0.2 §15.1; owner ruling recorded by accepted Decision 028 §4 |
 | **Description** | [Decision 013](../Decisions/decision_013_pilot_selection_mechanics.md) §1 requires closed 2026 Q2 at as-of `2026-06-30`. The planner checks “containing quarter” before `quarter_end <= as_of_date`, contrary to its own module contract, and misclassifies an exact quarter end as provisional. Decision 028 preserves Decision 013 and requires the total order `start > as_of` → unplanned; else `end <= as_of` → closed; else open, under `quarterly-index-instances/2.0` |
 | **Affected M3 phase** | **M3.1B (Gate F)**, then M3.2A |
-| **Status** | **`ACTIVE` — owner ruling recorded; implementation, tests, acceptance, and checkpoint pending** |
+| **Status** | **`CLOSURE-READY PENDING STEP 16`** — Gate-F-facing requirement satisfied; administrative closure deferred to the later M3.1 acceptance and checkpoint sequence (Decision 030 Ruling D). The acceptance half of that sequence is recorded (Decision 031); the committed checkpoint (the step-16 `m3.1-complete` tag) is the sole remaining closure criterion; not closed |
 | **Methodology impact** | **Material.** One quarter of accepted coverage is either included or excluded, changing the candidate universe the pilot is drawn from |
 | **Reproducibility impact** | Both behaviours are deterministic. The problem is not nondeterminism — it is that the deterministic answer disagrees with the accepted record |
 | **Security impact** | None |
@@ -813,6 +813,12 @@ It closes nothing. It changes no accepted decision, methodology, identity, or li
 authority. **Every entry marked `ACTIVE` is live and binds the phases it names.**
 
 **D023-O1 is the sole unresolved owner-ruling condition** and is referred only if a real run reaches
-it. The owner rulings for **M3-L11** and **M3-L12** are recorded by accepted Decision 028, but both
-entries remain active until their bounded implementation, tests, acceptance, and committed
-checkpoint exist. Gate F cannot pass while M3-L12 remains active.
+it — `LATENT FAIL-CLOSED REFERRAL CONDITION — NONBLOCKING UNLESS TRIGGERED` (Decision 030 Ruling E).
+The owner rulings for **M3-L11** and **M3-L12** are recorded by accepted Decision 028; their bounded
+implementation, tests, and full validation exist in the frozen accepted tree, the independent M3.1
+acceptance review passed, and the owner acceptance is recorded by accepted Decision 031, so both
+entries are `CLOSURE-READY PENDING STEP 16` — the committed checkpoint (the `m3.1-complete` tag) is
+the sole remaining closure-evidence item, and neither entry is closed by this register. The former
+"Gate F cannot pass while M3-L12 remains active" sentence is historical: Decision 030 Ruling D
+recorded `M3-L12 GATE-F-FACING REQUIREMENT: SATISFIED` before the Gate F checklist was signed, with
+administrative closure deferred to the acceptance and checkpoint sequence.

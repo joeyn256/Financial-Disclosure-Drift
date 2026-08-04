@@ -87,17 +87,21 @@ completed contract authorizes nothing further (see the rule above). **The M3.1 c
 `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed at the annotated `m3.1-complete` tag, so its stage
 shipped, the header authorization lines it still carries are the historical grant that stage
 exercised, and — per the completed-contract rule above — it authorizes nothing further; reopening
-M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) exists
-only as a corrected draft — `DRAFT — CORRECTED (DECISION 032) — PENDING INDEPENDENT REREVIEW AND
-OWNER ACCEPTANCE`, `IMPLEMENTATION_AUTHORIZATION: NO`**: independently reviewed 2026-08-04
-(`M3_2_CONTRACT_INDEPENDENT_REVIEW: PASS_WITH_REQUIRED_CORRECTIONS`), corrected under accepted
-[Decision 032](../../Docs/Decisions/decision_032_m3_2_contract_corrections.md), and awaiting a
-fresh independent rereview by one non-author session using no subagents, then the owner's T1
-acceptance decision — a draft authorizes nothing.
+M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) is now
+ACCEPTED at T1 — `ACCEPTED (T1) — DECISION 034 (2026-08-04) — IMPLEMENTATION NOT AUTHORIZED`,
+`IMPLEMENTATION_AUTHORIZATION: NO`, `NETWORK_AUTHORIZATION: NONE`**: independently reviewed
+2026-08-04 (`M3_2_CONTRACT_INDEPENDENT_REVIEW: PASS_WITH_REQUIRED_CORRECTIONS`), corrected under
+accepted [Decision 032](../../Docs/Decisions/decision_032_m3_2_contract_corrections.md),
+rereviewed fresh with no subagents (`M3_2_CORRECTED_CONTRACT_INDEPENDENT_REREVIEW: PASS`), and
+accepted unchanged at T1 by accepted
+[Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md). **Acceptance is not
+implementation authorization** — T2 remains a separate owner act under all five Decision 024 §8
+conditions, and a T1-accepted contract still authorizes no work by itself.
 
 **Nothing in this directory authorizes live SEC work, real pilot execution, publication, or manifest
-approval. The only M3.2-or-later contract is the unaccepted [`m3_2.md`](m3_2.md) draft, which
-authorizes nothing; no contract for any later Milestone 3 phase exists.**
+approval. The only M3.2-or-later contract is the T1-accepted [`m3_2.md`](m3_2.md), which authorizes
+no implementation and no live operation until its §8 transitions T2–T6 are separately granted; no
+contract for any later Milestone 3 phase exists.**
 
 **The Milestone 2 / Milestone 3 boundary is recorded**, in
 [Decision 024](../../Docs/Decisions/decision_024_m2_m3_boundary_governance.md)
@@ -152,7 +156,7 @@ closeout. **No Milestone 3 implementation contract was created at closeout** —
 the precondition Decision 024 §8 imposed. The bounded M3.1 contract [`m3_1.md`](m3_1.md) was drafted,
 reviewed, accepted, implemented under its bounded grant, and is now **complete** (owner-accepted,
 Decision 031; its historical grant is exhausted); **the only M3.2-or-later contract is the
-unaccepted corrected [`m3_2.md`](m3_2.md) draft, which authorizes nothing**, and all five
+T1-accepted [`m3_2.md`](m3_2.md), which authorizes no implementation**, and all five
 Decision 024 §8 entry conditions still apply to every later phase.
 
 **That master planning has run, and has since been corrected to v0.2.** It is recorded in
@@ -218,8 +222,13 @@ been run.
 **No correction blocks the next step.** M3-L11 and M3-L12 are `CLOSED` (2026-08-03) on their
 complete closure-evidence lists, and every Decision 028/029 ruling (planner v2, the per-route
 `A_reachable` witnesses, the reason codes, the four-predicate M3.1A token gate, the three-layer
-M3-L11 protection) is implemented in the frozen accepted tree. The next step is the fresh
-independent rereview of the corrected M3.2 contract (accepted Decision 032).
+M3-L11 protection) is implemented in the frozen accepted tree. The fresh independent no-subagent
+rereview of the corrected M3.2 contract completed 2026-08-04
+(`M3_2_CORRECTED_CONTRACT_INDEPENDENT_REREVIEW: PASS`) and the owner accepted the contract
+unchanged at T1 (accepted
+[Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md)). The next step is
+preparation and owner review of the bounded M3.2 T2 implementation-authorization packet —
+preparing it authorizes nothing.
 
 - [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F. **Complete.** The
   stage is owner-accepted (accepted Decision 031, `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed
@@ -230,16 +239,21 @@ independent rereview of the corrected M3.2 contract (accepted Decision 032).
   new explicit owner authorization. Active blocker: **none**. No network access is authorized.
 
 - [`m3_2.md`](m3_2.md) — Milestone 3.2 controlled metadata-only SEC acquisition (M3.2A/M3.2B) and
-  Gate H. **Corrected draft; authorizes nothing.** `STATUS: DRAFT — CORRECTED (DECISION 032) —
-  PENDING INDEPENDENT REREVIEW AND OWNER ACCEPTANCE`, `IMPLEMENTATION_AUTHORIZATION: NO`,
+  Gate H. **Accepted at T1; implementation not authorized.** `STATUS: ACCEPTED (T1) — DECISION 034
+  (2026-08-04) — IMPLEMENTATION NOT AUTHORIZED`, `IMPLEMENTATION_AUTHORIZATION: NO`,
   `NETWORK_AUTHORIZATION: NONE`. Independently reviewed 2026-08-04
   (`M3_2_CONTRACT_INDEPENDENT_REVIEW: PASS_WITH_REQUIRED_CORRECTIONS`; artifact SHA-256
-  `fbf8c68c…`, review commit `3fbaa12d…`); the owner-adopted corrections are applied under
-  accepted [Decision 032](../../Docs/Decisions/decision_032_m3_2_contract_corrections.md)
-  (completion semantics; the named command-scoped network-enable change; the complete expected
-  surface; the conservative crash-segment accounting rule; the sentinel gloss; positive-control
-  and nonchange-proof requirements). Active blocker: the **fresh independent rereview by one
-  non-author session using no subagents**, then the owner's T1 acceptance decision.
+  `fbf8c68c…`, review commit `3fbaa12d…`); the owner-adopted corrections applied under accepted
+  [Decision 032](../../Docs/Decisions/decision_032_m3_2_contract_corrections.md); rereviewed
+  fresh with no subagents on 2026-08-04 (`M3_2_CORRECTED_CONTRACT_INDEPENDENT_REREVIEW: PASS`;
+  artifact SHA-256 `91235a1a…`, rereview commit `3069b03e…`; zero BLOCKER, zero MAJOR);
+  **accepted unchanged at T1 by accepted
+  [Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md)**, which carries
+  rereview finding R1 (MINOR) forward as mandatory T2-packet content and accepts R2
+  (OPTIMIZATION) as nonblocking. Active blocker: **T2** — the separate Decision 024 §8
+  implementation authorization; the next step is preparation and owner review of the T2 packet
+  (`PREPARE_M3_2_T2_IMPLEMENTATION_AUTHORIZATION_PACKET`), which authorizes no implementation. No
+  network access is authorized.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

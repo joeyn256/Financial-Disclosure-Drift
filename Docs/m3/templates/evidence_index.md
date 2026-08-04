@@ -74,7 +74,7 @@ stop-and-report condition — completed evidence is immutable.
 | Last updated (UTC) | 2026-08-03 |
 | Recorder | Claude Code operator session (owner-authorized), 2026-08-03 |
 | Private evidence root | **not recorded here, by design** |
-| Backup confirmed | YES — same-device snapshots of the private evidence root exist through the after-step-12-signed state, each verified file-by-file by SHA-256; they protect against accidental deletion only, and a separate owner-controlled off-device backup remains an owner matter |
+| Backup confirmed | YES — same-device snapshots of the private evidence root exist through the after-step-13-token state, each verified file-by-file by SHA-256; they protect against accidental deletion only, and a separate owner-controlled off-device backup remains an owner matter |
 
 ## 4. The index
 
@@ -140,9 +140,52 @@ any substantive row — no matter how a later session phrases the request.
 
 | Field | Value |
 |---|---|
-| Owner | PENDING OWNER ATTESTATION — NOT SIGNED BY CLAUDE |
-| Date (UTC) | PENDING OWNER ATTESTATION — NOT SIGNED BY CLAUDE |
-| Every listed digest verified against its private artifact | YES — recomputed by the recording operator session on 2026-08-03; the owner attestation itself remains pending |
+| Owner | Joseph Nihill, project owner acting through the ChatGPT owner decision |
+| Date (UTC) | 2026-08-03 |
+| Every listed digest verified against its private artifact | YES — owner attestation of 2026-08-03 (instrument items 1–2 below); each digest also recomputed by the recording operator session on 2026-08-03 |
 | Private evidence root backed up separately | YES — same-device verified snapshots (see §3); off-device backup remains an owner matter |
-| No prohibited content in this index | YES — digests, types, phases, statuses, dates, and non-sensitive notes only |
-| Signature or recorded acceptance reference | PENDING OWNER ATTESTATION — NOT SIGNED BY CLAUDE |
+| No prohibited content in this index | YES — owner attestation of 2026-08-03 (instrument items 3–4 below); digests, types, phases, statuses, dates, and non-sensitive notes only |
+| Signature or recorded acceptance reference | ChatGPT owner evidence-index attestation dated 2026-08-03, bound to public governance commit 0334294bd420a829033094080a13e4df900da078 and signed Gate F checklist SHA-256 34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc. This is a transparent recorded owner acceptance reference, not a handwritten, cryptographic, or third-party digital signature. |
+
+**Recorded owner attestation instrument (verbatim, received 2026-08-03):**
+
+```text
+OWNER_EVIDENCE_INDEX_ATTESTATION: APPROVED
+The project owner has reviewed the M3.1A and M3.1B public evidence-index entries
+recorded in `Docs/m3/templates/evidence_index.md`.
+The owner attests that:
+
+1. Each indexed row refers to an accepted private evidence artifact.
+2. Each listed SHA-256 matches the accepted artifact identity.
+3. The index contains only permitted non-sensitive metadata.
+4. No private evidence path, SEC contact identity, credential, response body,
+or private receipt content is disclosed.
+5. The two request-plan rows intentionally carry the same SHA-256 because two
+independent planning executions produced byte-identical canonical plans.
+6. The request-budget row is bound to the owner-approved hard request ceiling
+of 801.
+7. The Gate F checklist row is bound to the signed checklist SHA-256
+34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc
+and checklist result PASS.
+8. At the time of this attestation, the Decision 029 §12 step-13 readiness
+token has not been emitted or recorded.
+9. This attestation does not authorize live SEC access, begin Gate F, finally
+accept M3.1, or authorize M3.2 execution.
+
+Owner:
+Joseph Nihill, project owner acting through the ChatGPT owner decision
+Date:
+2026-08-03
+Recorded acceptance reference:
+ChatGPT owner evidence-index attestation dated 2026-08-03, bound to public
+governance commit 0334294bd420a829033094080a13e4df900da078 and signed Gate F
+checklist SHA-256
+34fc0567dd31b75b83d8bb12f31e172c04074bd1a0a3b1487b0461d170339fbc.
+This is a transparent recorded owner acceptance reference, not a handwritten,
+cryptographic, or third-party digital signature.
+```
+
+**Timing note.** Instrument item 8 was true at attestation time; the Decision 029 §12 step-13
+readiness token was recorded later the same day under the owner's separate step-13 authorization.
+The current token state is carried by the governance ledger (`Milestones/STATUS.md`), not by this
+index: the index vocabulary defines no readiness-token artifact type, so no token row is added.

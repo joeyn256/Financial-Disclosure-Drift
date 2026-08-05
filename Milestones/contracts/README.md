@@ -99,10 +99,12 @@ T1 by accepted
 **staged T2 authority** by accepted
 [Decision 035](../../Docs/Decisions/decision_035_m3_2_t2_staged_implementation_authorization.md),
 which approves the six-stage T2.1–T2.6 framework, amends §22 to that cadence, and grants
-executable authority for **stage T2.1 alone** (six exact paths). **Stages T2.2–T2.6 remain
-owner-gated and unauthorized, and no implementation session may begin until the separate exact
-T2.1 implementation packet is issued** — neither the contract nor a staged framework starts work
-by itself.
+executable authority for **stage T2.1 alone** (six exact paths). **Stage T2.1 is now complete,
+owner-accepted, and published** (accepted
+[Decision 036](../../Docs/Decisions/decision_036_m3_2_t2_1_stage_completion.md)); **stages
+T2.2–T2.6 remain owner-gated and unauthorized**, each requiring its own owner act after the prior
+stage is reviewed, accepted, and published — neither the contract nor a staged framework starts
+work by itself.
 
 **Nothing in this directory authorizes live SEC work, real pilot execution, publication, or manifest
 approval. The only M3.2-or-later contract is the T1-accepted [`m3_2.md`](m3_2.md), which authorizes
@@ -263,10 +265,16 @@ preparing it authorizes nothing.
   granted **staged T2 authority limited to stage T2.1** (paths `configs/project.yaml`,
   `config.py`, `cli.py`, `m3/__init__.py`, `tests/integration/test_m3_cli.py`,
   `tests/unit/test_config.py`), amending §22 to the six-stage T2.1–T2.6 commit and review
-  cadence. Post-amendment contract SHA-256 `7a3fe7ff…`. Active blocker: **issuance of the exact
-  T2.1 implementation packet** — no implementation session may begin without it; stages T2.2–T2.6
-  remain owner-gated. **No network access is authorized**, and the F4 evidence-vocabulary decision
-  remains open and due no later than T4.
+  cadence. Post-amendment contract SHA-256 `7a3fe7ff…`. **Stage T2.1 is complete, owner-accepted,
+  and published** (accepted
+  [Decision 036](../../Docs/Decisions/decision_036_m3_2_t2_1_stage_completion.md), commit
+  `7b2ffe64…`): the configuration and fail-closed command-authority layer, delivered inside its
+  exact six-path authorization, with both tracked network switches still `false` and all six M3.2
+  command surfaces fail-closed. Active blocker: **preparation and owner review of the exact T2.2
+  implementation packet** — stages T2.2–T2.6 remain owner-gated, each requiring its own owner act
+  after the prior stage is reviewed, accepted, and published. **No network access is authorized**,
+  no transport, catalog, receipt, or acquisition exists, ceiling 801 remains unused, and the F4
+  evidence-vocabulary decision remains open and due no later than T4.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

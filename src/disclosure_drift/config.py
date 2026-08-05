@@ -204,9 +204,21 @@ class SecSection(_Section):
 
 
 class NetworkSection(_Section):
-    """Network posture. Disabled by default; M2.2 requires explicit enablement."""
+    """Network posture. Two independent switches, both disabled by default.
+
+    ``enabled`` is the global kill switch Stage M2.2 requires. ``m3_acquire_enabled`` is the
+    command-scoped Milestone 3.2 acquisition switch, read only by ``m3 acquire --live``.
+
+    **Neither field implies the other.** Enabling the global switch grants no acquisition
+    permission, and enabling the acquire-scoped switch reaches no Stage M2.2 command. Both are
+    ``False`` in the tracked configuration and neither has an environment override; acquisition
+    is enabled only in an owner-supplied window-local configuration under a separate per-window
+    owner authorization. Being permitted by configuration is never sufficient on its own: the
+    acquisition command additionally requires its own explicit flag and every later gate.
+    """
 
     enabled: bool = False
+    m3_acquire_enabled: bool = False
 
 
 class CompanyFactsSection(_Section):

@@ -155,7 +155,10 @@ def test_the_group_without_a_subcommand_prints_help(repo_root: Path) -> None:
 
 
 def test_an_unknown_subcommand_is_a_usage_error(repo_root: Path) -> None:
-    result = _run(["m3", "acquire"], repo_root)
+    # `acquire` was this test's example until the M3.2 surfaces were recognized; a recognized
+    # command refuses (EXIT_STAGE_NOT_ENABLED) rather than failing at the parser, so the
+    # unknown-subcommand assertion needs a name that is genuinely not a command.
+    result = _run(["m3", "no-such-subcommand"], repo_root)
 
     assert result.returncode == EXIT_USAGE
 
@@ -1789,3 +1792,271 @@ def test_rehearse_leaves_no_synthetic_tree_behind_and_reruns_identically(
     )
     leftovers = [name for name in after_first if "rehearsal-workspace" in name]
     assert not leftovers, f"synthetic artifacts were retained as operator evidence: {leftovers}"
+
+
+# --------------------------------------------------------------------------- #
+# Milestone 3.2 command surfaces (stage T2.1)
+#
+# T2.1 wires the parsers and the fail-closed refusal boundary. Nothing here may reach a
+# transport, a catalog, a plan execution, or a receipt, and no combination of configuration and
+# flags may pass the refusal.
+# --------------------------------------------------------------------------- #
+EXIT_STAGE_NOT_ENABLED = 3
+
+M3_2_COMMANDS = (
+    "acquire",
+    "derive-dependent-plan",
+    "reconcile-requests",
+    "show-drift",
+    "recover",
+)
+
+
+def _config_with_network(tmp_path: Path, repo_root: Path, *, enabled: bool, acquire: bool) -> Path:
+    """Write a configuration that differs from the tracked one only in the network switches."""
+    source = (repo_root / "configs" / "project.yaml").read_text(encoding="utf-8")
+    replaced = source.replace("  enabled: false", f"  enabled: {str(enabled).lower()}", 1)
+    replaced = replaced.replace(
+        "  m3_acquire_enabled: false", f"  m3_acquire_enabled: {str(acquire).lower()}", 1
+    )
+    # A distinct name per combination: two configurations built in one test must not alias.
+    destination = tmp_path / f"network-{str(enabled).lower()}-{str(acquire).lower()}.yaml"
+    destination.write_text(replaced, encoding="utf-8")
+    return destination
+
+
+@pytest.mark.parametrize("command", M3_2_COMMANDS)
+def test_every_m3_2_command_is_recognized_by_the_parser(repo_root: Path, command: str) -> None:
+    """Positive control: the command parses, so its refusal is reached rather than a usage error."""
+    result = _run(["m3", command, "--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    assert command in result.stdout
+
+
+@pytest.mark.parametrize("command", M3_2_COMMANDS)
+def test_every_m3_2_command_refuses_deterministically(repo_root: Path, command: str) -> None:
+    result = _run(["m3", command], repo_root)
+
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED
+    assert f"m3 {command} is not available" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("command", M3_2_COMMANDS)
+def test_an_m3_2_refusal_is_repeatable(repo_root: Path, command: str) -> None:
+    """The refusal is deterministic: identical invocations produce identical results."""
+    first = _run(["m3", command], repo_root)
+    second = _run(["m3", command], repo_root)
+
+    assert first.returncode == second.returncode == EXIT_STAGE_NOT_ENABLED
+    assert first.stdout == second.stdout
+
+
+# The complete authority conjunction. No row may reach a transport, including the final row where
+# both switches are true and `--live` is explicit: the acquisition implementation and the later
+# owner authorizations that would govern a live run do not exist, and nothing here invents them.
+@pytest.mark.parametrize(
+    ("enabled", "acquire", "live"),
+    [
+        (False, False, False),
+        (False, False, True),
+        (True, False, True),
+        (False, True, True),
+        (True, True, False),
+        (True, True, True),
+    ],
+)
+def test_acquire_refuses_under_every_authority_combination(
+    repo_root: Path,
+    tmp_path: Path,
+    enabled: bool,
+    acquire: bool,
+    live: bool,
+) -> None:
+    config = _config_with_network(tmp_path, repo_root, enabled=enabled, acquire=acquire)
+    arguments = ["m3", "acquire", "--config", str(config)]
+    if live:
+        arguments.append("--live")
+
+    result = _run(arguments, repo_root)
+
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED
+    assert "m3 acquire is not available" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_the_acquire_configuration_fixture_really_sets_both_switches(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """Positive control: the conjunction fixture is not vacuous — it writes the true values."""
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    text = config.read_text(encoding="utf-8")
+
+    assert "  enabled: true" in text
+    assert "  m3_acquire_enabled: true" in text
+
+
+def test_the_configuration_fixture_does_not_alias_between_combinations(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """Positive control: two combinations built in one test are distinct files.
+
+    Without this the independence comparisons would silently compare a configuration with
+    itself, and every such assertion would pass vacuously.
+    """
+    acquire_on = _config_with_network(tmp_path, repo_root, enabled=False, acquire=True)
+    acquire_off = _config_with_network(tmp_path, repo_root, enabled=False, acquire=False)
+
+    assert acquire_on != acquire_off
+    assert "m3_acquire_enabled: true" in acquire_on.read_text(encoding="utf-8")
+    assert "m3_acquire_enabled: false" in acquire_off.read_text(encoding="utf-8")
+
+
+def test_show_scope_is_offline_and_refuses(repo_root: Path) -> None:
+    result = _run(["m3", "acquire", "--show-scope"], repo_root)
+
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED
+    assert "implementation stage T2.1 only" in result.stdout
+    assert "live acquisition      : unavailable" in result.stdout
+    assert "network authorization : none" in result.stdout
+    assert "live operation        : not authorized" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_no_m3_2_command_emits_a_token_or_receipt(repo_root: Path, tmp_path: Path) -> None:
+    """No refusal may emit a completion token or write any artifact."""
+    before = sorted(tmp_path.rglob("*"))
+    for command in M3_2_COMMANDS:
+        result = _run(["m3", command], repo_root)
+        combined = result.stdout + result.stderr
+        assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in combined
+        assert "M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION" not in combined
+        assert "M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED" not in combined
+        assert "receipt_id" not in combined
+
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+def test_an_m3_2_refusal_discloses_no_identity_or_private_path(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    for command in M3_2_COMMANDS:
+        result = _run(["m3", command, "--config", str(config)], repo_root)
+        combined = result.stdout + result.stderr
+        for marker in ("/Users/", "/home/", "C:\\Users", "@", "Authorization", "Bearer"):
+            assert marker not in combined
+
+
+def test_an_invalid_m3_2_argument_fails_at_the_parser_boundary(repo_root: Path) -> None:
+    """Positive control: the parser still rejects an unknown option before any handler runs."""
+    result = _run(["m3", "acquire", "--not-a-real-option"], repo_root)
+
+    assert result.returncode == EXIT_USAGE
+    assert "m3 acquire is not available" not in result.stderr
+
+
+def test_the_m3_2_surfaces_reach_no_transport_module(repo_root: Path) -> None:
+    """Structural proof: no acquisition module exists and the CLI imports no transport for it."""
+    assert not (repo_root / "src" / "disclosure_drift" / "m3" / "acquisition.py").exists()
+
+    cli_source = (repo_root / "src" / "disclosure_drift" / "cli.py").read_text(encoding="utf-8")
+    for forbidden in ("HttpxTransport", "httpx_transport", "m3.acquisition"):
+        assert forbidden not in cli_source
+
+
+@pytest.mark.parametrize("command", ["census", "ingest-pilot"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_m2_2_commands_are_unaffected_by_the_acquire_switch(
+    repo_root: Path, tmp_path: Path, command: str, enabled: bool
+) -> None:
+    """Behavioural proof: flipping the acquire-scoped switch changes no M2.2 command outcome.
+
+    For each setting of the global switch, the M2.2 command behaves identically whether the
+    acquire-scoped switch is true or false — so enabling M3.2 acquisition can never enable, or
+    otherwise reach, a Stage M2.2 command.
+    """
+    with_acquire = _config_with_network(tmp_path, repo_root, enabled=enabled, acquire=True)
+    without_acquire = _config_with_network(tmp_path, repo_root, enabled=enabled, acquire=False)
+
+    first = _run(["sec", command, "--config", str(with_acquire)], repo_root)
+    second = _run(["sec", command, "--config", str(without_acquire)], repo_root)
+
+    assert first.returncode == second.returncode
+    assert first.returncode != EXIT_OK
+    assert "m3_acquire_enabled" not in first.stderr
+
+
+def test_the_m2_2_network_gate_reads_only_the_global_switch(repo_root: Path) -> None:
+    """Structural proof: the Stage M2.2 command path consults `network.enabled` alone."""
+    cli_source = (repo_root / "src" / "disclosure_drift" / "cli.py").read_text(encoding="utf-8")
+    start = cli_source.index("def _sec_command(")
+    end = cli_source.index("\ndef ", start + 1)
+    sec_command_body = cli_source[start:end]
+
+    assert "config.network.enabled" in sec_command_body
+    assert "m3_acquire_enabled" not in sec_command_body
+
+
+def test_the_m3_2_surfaces_appear_in_the_group_help(repo_root: Path) -> None:
+    result = _run(["m3", "--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    for command in M3_2_COMMANDS:
+        assert command in result.stdout
+
+
+def test_the_m3_2_refusals_touch_no_socket_in_process(
+    repo_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Behavioural proof: the refusals run under the suite-wide socket guard without tripping it.
+
+    `tests/conftest.py` replaces `socket.socket`, `socket.create_connection`, and
+    `socket.getaddrinfo` with functions that raise. Driving the CLI in-process therefore proves
+    the refusal path opens no socket and resolves no hostname — the subprocess tests above
+    exercise the operator-visible contract, and this one closes the in-process gap.
+    """
+    from disclosure_drift.cli import main
+
+    configuration = str(repo_root / "configs" / "project.yaml")
+    for arguments in (
+        ["m3", "acquire", "--config", configuration, "--live"],
+        ["m3", "acquire", "--config", configuration, "--show-scope"],
+        ["m3", "derive-dependent-plan", "--config", configuration],
+        ["m3", "reconcile-requests", "--config", configuration],
+        ["m3", "show-drift", "--config", configuration],
+        ["m3", "recover", "--config", configuration],
+    ):
+        assert main(arguments) == EXIT_STAGE_NOT_ENABLED
+
+    captured = capsys.readouterr()
+    assert "is not available" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_no_http_library_is_imported_by_a_refusal(repo_root: Path) -> None:
+    """Runtime proof: refusing loads no HTTP library, so no transport can exist.
+
+    `httpx` is imported lazily and only where a transport is actually built, so its absence
+    from `sys.modules` after a refusal proves no transport was constructed or reachable. The
+    policy module `disclosure_drift.sec.http_client` is deliberately not asserted on: it is a
+    pre-existing transitive import of the CLI module, present even for unrelated commands such
+    as `show-cohorts`, and importing a policy module builds nothing.
+    """
+    probe = (
+        "import sys; from disclosure_drift.cli import main; "
+        "code = main(['m3', 'acquire', '--live']); "
+        "leaked = sorted(m for m in sys.modules if m.split('.')[0] == 'httpx'); "
+        "print(code, leaked)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == EXIT_OK
+    assert result.stdout.strip() == f"{EXIT_STAGE_NOT_ENABLED} []"

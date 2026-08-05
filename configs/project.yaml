@@ -42,6 +42,12 @@ sec:
 network:
   # Safe default. Stage M2.2 code runs only when an operator explicitly enables it.
   enabled: false
+  # Command-scoped safe default for Milestone 3.2 controlled acquisition. It is read only by
+  # `m3 acquire --live` and never by any Stage M2.2 command; `enabled` above never enables
+  # acquisition, and this key never enables the census. Both stay false in the tracked
+  # configuration: acquisition is enabled only in an owner-supplied window-local file, under a
+  # separate per-window owner authorization.
+  m3_acquire_enabled: false
 
 companyfacts:
   # Reconciliation and QA only, and never for outcome construction.

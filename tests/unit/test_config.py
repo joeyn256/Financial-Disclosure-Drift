@@ -20,6 +20,7 @@ from disclosure_drift.config import (
     SEC_USER_AGENT_ENV,
     ConfigValidationError,
     ProjectConfig,
+    UnknownEnvironmentOverrideError,
     default_config_path,
     load_config,
 )
@@ -128,3 +129,92 @@ def test_reserved_top_level_key_rejected(
     path = write_config(mapping)
     with pytest.raises(ConfigValidationError, match="reserved top-level key"):
         load_config(path, env={})
+
+
+# --------------------------------------------------------------------------- #
+# The two network switches (M3.2 stage T2.1)
+#
+# `network.enabled` is the global Stage M2.2 kill switch. `network.m3_acquire_enabled` is the
+# command-scoped M3.2 acquisition switch. They are independent in both directions, and neither is
+# ever true in the tracked configuration.
+# --------------------------------------------------------------------------- #
+def test_both_network_switches_default_to_false(config_file: Path) -> None:
+    config = load_config(config_file, env={})
+    assert config.network.enabled is False
+    assert config.network.m3_acquire_enabled is False
+
+
+def test_tracked_configuration_ships_both_network_switches_false(shipped_config: Path) -> None:
+    config = load_config(shipped_config, env={})
+    assert config.network.enabled is False
+    assert config.network.m3_acquire_enabled is False
+
+
+def test_acquire_switch_parses_explicit_false(
+    write_config: Callable[..., Path],
+    frozen_mapping: dict[str, Any],
+) -> None:
+    mapping = {**frozen_mapping, "network": {"enabled": False, "m3_acquire_enabled": False}}
+    config = load_config(write_config(mapping), env={})
+    assert config.network.m3_acquire_enabled is False
+
+
+def test_acquire_switch_parses_true_without_enabling_the_global_switch(
+    write_config: Callable[..., Path],
+    frozen_mapping: dict[str, Any],
+) -> None:
+    """The acquire-scoped switch never infers or mutates the global switch."""
+    mapping = {**frozen_mapping, "network": {"enabled": False, "m3_acquire_enabled": True}}
+    config = load_config(write_config(mapping), env={})
+    assert config.network.m3_acquire_enabled is True
+    assert config.network.enabled is False
+
+
+def test_global_switch_does_not_infer_acquire_permission(
+    write_config: Callable[..., Path],
+    frozen_mapping: dict[str, Any],
+) -> None:
+    """Enabling M2.2's network switch grants no M3.2 acquisition permission."""
+    mapping = {**frozen_mapping, "network": {"enabled": True}}
+    config = load_config(write_config(mapping), env={})
+    assert config.network.enabled is True
+    assert config.network.m3_acquire_enabled is False
+
+
+def test_unknown_network_field_is_rejected(
+    write_config: Callable[..., Path],
+    frozen_mapping: dict[str, Any],
+) -> None:
+    """Positive control: strict parsing still refuses an unknown key in this section."""
+    mapping = {
+        **frozen_mapping,
+        "network": {"enabled": False, "m3_acquire_enabled": False, "acquire_enabled": True},
+    }
+    with pytest.raises((ConfigValidationError, ValidationError)):
+        load_config(write_config(mapping), env={})
+
+
+def test_no_environment_variable_can_enable_acquisition(
+    write_config: Callable[..., Path],
+    frozen_mapping: dict[str, Any],
+) -> None:
+    """Positive control: an attempt to enable acquisition from the environment is refused.
+
+    Neither switch has an override, and the loader does not merely ignore an unrecognized
+    ``DISCLOSURE_DRIFT_*`` variable — it refuses to load at all, so a misspelled or invented
+    enablement attempt fails loudly instead of appearing to work.
+    """
+    path = write_config({**frozen_mapping, "network": {"enabled": False}})
+    with pytest.raises(UnknownEnvironmentOverrideError):
+        load_config(path, env={"DISCLOSURE_DRIFT_NETWORK_M3_ACQUIRE_ENABLED": "true"})
+
+    # With no such variable present, the switch stays false.
+    config = load_config(path, env={})
+    assert config.network.m3_acquire_enabled is False
+    assert config.network.enabled is False
+
+
+def test_network_section_stays_immutable(config_file: Path) -> None:
+    config = load_config(config_file, env={})
+    with pytest.raises(ValidationError):
+        config.network.m3_acquire_enabled = True  # type: ignore[misc]

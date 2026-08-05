@@ -66,6 +66,20 @@ EXIT_USAGE: Final = 2
 EXIT_STAGE_NOT_ENABLED: Final = 3
 EXIT_GATE_FAILURE: Final = 4
 
+#: The Milestone 3.2 surfaces are recognized but unimplemented. Each entry is the operator-facing
+#: reason the command refuses; the stage named is the one that implements it, and reaching a stage
+#: is never by itself authorization to run live (Decision 035; contract §8).
+_M3_2_UNAVAILABLE: Final[dict[str, str]] = {
+    "acquire": (
+        "controlled acquisition is implemented at a later stage, and live operation additionally "
+        "requires implementation acceptance and a separate per-window owner authorization"
+    ),
+    "derive-dependent-plan": "dependent-plan derivation is implemented at a later stage",
+    "reconcile-requests": "request reconciliation is implemented at a later stage",
+    "show-drift": "drift inspection is implemented at a later stage",
+    "recover": "recovery repair is implemented at a later stage",
+}
+
 _STAGE_M2_2: Final = "Stage M2.2 (SEC client and metadata census)"
 _STAGE_M2_3: Final = "Stage M2.3 (deterministic pilot selection)"
 _STAGE_M2_5: Final = "Stage M2.5 (bounded pilot ingestion)"
@@ -195,11 +209,13 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     """
     m3 = subparsers.add_parser(
         "m3",
-        help="Milestone 3.1 rehearsal, planning, and inspection commands.",
+        help="Milestone 3 rehearsal, planning, inspection, and acquisition commands.",
         description=(
-            "Milestone 3.1 commands. Every one of them is offline: M3.1A places no request "
+            "Milestone 3 commands. Every implemented one is offline: M3.1A places no request "
             "at all and M3.1B makes zero live requests. Artifact paths are relative to a "
-            "required absolute --evidence-root outside the repository checkout."
+            "required absolute --evidence-root outside the repository checkout. The Milestone "
+            "3.2 acquisition surfaces are recognized but not implemented: at stage T2.1 each "
+            "refuses, and none can construct a transport."
         ),
     )
     m3_subparsers = m3.add_subparsers(dest="m3_command", metavar="command")
@@ -351,6 +367,63 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         metavar="RELATIVE_PATH",
         help="The data root whose raw store is inspected, relative to --evidence-root.",
     )
+
+    _add_m3_2_parsers(m3_subparsers)
+
+
+def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Recognize the Milestone 3.2 command surfaces, none of which is implemented.
+
+    Stage T2.1 wires the parsers and the refusal boundary only. No argument here reaches a
+    transport, a catalog, a plan execution, or a receipt: every one of these commands refuses
+    in :func:`_m3_command` before any such work could begin. Arguments are deliberately
+    optional so an operator who types a runbook command reaches that refusal rather than an
+    argparse usage error, and so the refusal boundary itself is what the tests exercise.
+    """
+    acquire = m3_subparsers.add_parser(
+        "acquire",
+        help="Controlled metadata acquisition (Milestone 3.2). NOT IMPLEMENTED; always refuses.",
+        description=(
+            "Planned controlled metadata-only acquisition. Not implemented at stage T2.1: this "
+            "command constructs no transport, places no request, creates no catalog, and emits "
+            "no receipt. Live operation additionally requires implementation acceptance and a "
+            "separate per-window owner authorization that do not exist yet."
+        ),
+    )
+    _add_config_argument(acquire)
+    acquire.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Explicitly request live operation. No default. Refused at stage T2.1 regardless of "
+            "configuration: the acquisition implementation and its owner authorizations do not "
+            "exist."
+        ),
+    )
+    acquire.add_argument(
+        "--show-scope",
+        action="store_true",
+        help=(
+            "Print the current acquisition authority summary. Makes zero requests. The "
+            "operational scope report arrives with the planned acquisition surfaces."
+        ),
+    )
+
+    for name, summary in (
+        ("derive-dependent-plan", "Derive the dependent request plan from frozen objects"),
+        ("reconcile-requests", "Reconcile planned versus actual requests"),
+        ("show-drift", "List schema-drift events for a run"),
+        ("recover", "Apply one deterministic recovery repair"),
+    ):
+        parser = m3_subparsers.add_parser(
+            name,
+            help=f"{summary} (Milestone 3.2). NOT IMPLEMENTED; always refuses.",
+            description=(
+                f"Planned Milestone 3.2 surface: {summary.lower()}. Not implemented at stage "
+                "T2.1; this command refuses without reading or writing any artifact."
+            ),
+        )
+        _add_config_argument(parser)
 
 
 def _add_evidence_root_argument(parser: argparse.ArgumentParser) -> None:
@@ -1028,7 +1101,13 @@ def _m3_command(
     Every M3.1 command is offline. The evidence root is resolved and validated before any read or
     write, and a refusal is a configuration error rather than a gate failure: a root inside the
     checkout is a mistake in the invocation, not a finding about the run.
+
+    The Milestone 3.2 surfaces refuse *before* that resolution. They read nothing and write
+    nothing, so requiring an evidence root first would report the wrong problem.
     """
+    if command in _M3_2_UNAVAILABLE:
+        return _m3_2_refusal(command, args, logger)
+
     try:
         evidence_root = require_external_evidence_root(args.evidence_root, _repository_root())
     except EvidenceRootError as exc:
@@ -1064,6 +1143,37 @@ def _m3_command(
         )
         logger.error("m3 %s failed on a filesystem error", command)
         return EXIT_GATE_FAILURE
+
+
+def _m3_2_refusal(command: str, args: argparse.Namespace, logger: Logger) -> int:
+    """Refuse one unimplemented Milestone 3.2 command, fail-closed and unconditionally.
+
+    The refusal never consults the network switches, so **no combination of configuration and
+    flags can pass it**: at this stage there is no acquisition implementation to reach, and the
+    later owner authorizations that would govern a live run do not exist. Nothing here
+    constructs a transport or a client, opens a socket, touches the evidence root, creates a
+    catalog or raw object, emits a receipt, or imports a later acquisition module.
+
+    ``--show-scope`` additionally prints the current authority summary, because that is
+    non-operational status rather than the planned scope report. It is still a refusal: the
+    exit status is never success while the command is unimplemented.
+    """
+    if command == "acquire" and getattr(args, "show_scope", False):
+        for line in (
+            "m3 acquire scope — implementation stage T2.1 only",
+            "  live acquisition      : unavailable (not implemented)",
+            "  network authorization : none",
+            "  transport             : never constructed at this stage",
+            "  operational catalog   : absent (not created at this stage)",
+            "  request plan          : not executed at this stage",
+            "  live operation        : not authorized",
+        ):
+            print(line)
+
+    detail = _M3_2_UNAVAILABLE[command]
+    print(f"m3 {command} is not available: {detail}.", file=sys.stderr)
+    logger.warning("refused m3 %s: not implemented at this stage", command)
+    return EXIT_STAGE_NOT_ENABLED
 
 
 def _repository_root() -> Path:

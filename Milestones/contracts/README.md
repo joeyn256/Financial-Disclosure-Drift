@@ -87,16 +87,22 @@ completed contract authorizes nothing further (see the rule above). **The M3.1 c
 `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed at the annotated `m3.1-complete` tag, so its stage
 shipped, the header authorization lines it still carries are the historical grant that stage
 exercised, and — per the completed-contract rule above — it authorizes nothing further; reopening
-M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) is now
-ACCEPTED at T1 — `ACCEPTED (T1) — DECISION 034 (2026-08-04) — IMPLEMENTATION NOT AUTHORIZED`,
-`IMPLEMENTATION_AUTHORIZATION: NO`, `NETWORK_AUTHORIZATION: NONE`**: independently reviewed
-2026-08-04 (`M3_2_CONTRACT_INDEPENDENT_REVIEW: PASS_WITH_REQUIRED_CORRECTIONS`), corrected under
-accepted [Decision 032](../../Docs/Decisions/decision_032_m3_2_contract_corrections.md),
-rereviewed fresh with no subagents (`M3_2_CORRECTED_CONTRACT_INDEPENDENT_REREVIEW: PASS`), and
-accepted unchanged at T1 by accepted
-[Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md). **Acceptance is not
-implementation authorization** — T2 remains a separate owner act under all five Decision 024 §8
-conditions, and a T1-accepted contract still authorizes no work by itself.
+M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) is ACCEPTED at T1 and now carries STAGED T2 authority
+limited to stage T2.1 — `ACCEPTED (T1, DECISION 034) — T2 STAGED IMPLEMENTATION AUTHORIZED,
+STAGE T2.1 ONLY (DECISION 035, 2026-08-04)`, `IMPLEMENTATION_AUTHORIZATION: STAGE T2.1 ONLY`,
+`NETWORK_AUTHORIZATION: NONE`**: independently reviewed 2026-08-04
+(`M3_2_CONTRACT_INDEPENDENT_REVIEW: PASS_WITH_REQUIRED_CORRECTIONS`), corrected under accepted
+[Decision 032](../../Docs/Decisions/decision_032_m3_2_contract_corrections.md), rereviewed fresh
+with no subagents (`M3_2_CORRECTED_CONTRACT_INDEPENDENT_REREVIEW: PASS`), accepted unchanged at
+T1 by accepted
+[Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md), and granted
+**staged T2 authority** by accepted
+[Decision 035](../../Docs/Decisions/decision_035_m3_2_t2_staged_implementation_authorization.md),
+which approves the six-stage T2.1–T2.6 framework, amends §22 to that cadence, and grants
+executable authority for **stage T2.1 alone** (six exact paths). **Stages T2.2–T2.6 remain
+owner-gated and unauthorized, and no implementation session may begin until the separate exact
+T2.1 implementation packet is issued** — neither the contract nor a staged framework starts work
+by itself.
 
 **Nothing in this directory authorizes live SEC work, real pilot execution, publication, or manifest
 approval. The only M3.2-or-later contract is the T1-accepted [`m3_2.md`](m3_2.md), which authorizes
@@ -239,8 +245,9 @@ preparing it authorizes nothing.
   new explicit owner authorization. Active blocker: **none**. No network access is authorized.
 
 - [`m3_2.md`](m3_2.md) — Milestone 3.2 controlled metadata-only SEC acquisition (M3.2A/M3.2B) and
-  Gate H. **Accepted at T1; implementation not authorized.** `STATUS: ACCEPTED (T1) — DECISION 034
-  (2026-08-04) — IMPLEMENTATION NOT AUTHORIZED`, `IMPLEMENTATION_AUTHORIZATION: NO`,
+  Gate H. **Accepted at T1; staged T2 authority for stage T2.1 only.**
+  `STATUS: ACCEPTED (T1, DECISION 034) — T2 STAGED IMPLEMENTATION AUTHORIZED, STAGE T2.1 ONLY
+  (DECISION 035, 2026-08-04)`, `IMPLEMENTATION_AUTHORIZATION: STAGE T2.1 ONLY`,
   `NETWORK_AUTHORIZATION: NONE`. Independently reviewed 2026-08-04
   (`M3_2_CONTRACT_INDEPENDENT_REVIEW: PASS_WITH_REQUIRED_CORRECTIONS`; artifact SHA-256
   `fbf8c68c…`, review commit `3fbaa12d…`); the owner-adopted corrections applied under accepted
@@ -250,10 +257,16 @@ preparing it authorizes nothing.
   **accepted unchanged at T1 by accepted
   [Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md)**, which carries
   rereview finding R1 (MINOR) forward as mandatory T2-packet content and accepts R2
-  (OPTIMIZATION) as nonblocking. Active blocker: **T2** — the separate Decision 024 §8
-  implementation authorization; the next step is preparation and owner review of the T2 packet
-  (`PREPARE_M3_2_T2_IMPLEMENTATION_AUTHORIZATION_PACKET`), which authorizes no implementation. No
-  network access is authorized.
+  (OPTIMIZATION) as nonblocking. Its bounded T2 packet was then prepared, reviewed, and approved
+  at revision v2 (SHA-256 `62120146…`), and accepted
+  [Decision 035](../../Docs/Decisions/decision_035_m3_2_t2_staged_implementation_authorization.md)
+  granted **staged T2 authority limited to stage T2.1** (paths `configs/project.yaml`,
+  `config.py`, `cli.py`, `m3/__init__.py`, `tests/integration/test_m3_cli.py`,
+  `tests/unit/test_config.py`), amending §22 to the six-stage T2.1–T2.6 commit and review
+  cadence. Post-amendment contract SHA-256 `7a3fe7ff…`. Active blocker: **issuance of the exact
+  T2.1 implementation packet** — no implementation session may begin without it; stages T2.2–T2.6
+  remain owner-gated. **No network access is authorized**, and the F4 evidence-vocabulary decision
+  remains open and due no later than T4.
 
 - [`m23_s6.md`](m23_s6.md) — Stage S6 (pilot manifest construction, terminal result identity, and the
   publication boundary). **Accepted and complete.** `STATUS: ACCEPTED_AND_COMPLETE`,

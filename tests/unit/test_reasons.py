@@ -1,10 +1,11 @@
 """Reason-code registry invariants, including the M2.3 S3.1, S5.2, and S5.4 additions.
 
 Decisions 013-016 froze exactly sixteen new reason codes for the M2.3 pilot at Stage S3.1,
-Decision 018 section 21 froze exactly five more for Stage S5, and Decision 020 section 13 froze
-exactly one more for Stage S5.4. These tests prove each addition is exact (no more, no fewer, no
-renames) and that every pre-existing code from the accepted S3.0 governance baseline is
-unchanged.
+Decision 018 section 21 froze exactly five more for Stage S5, Decision 020 section 13 froze
+exactly one more for Stage S5.4, Decisions 028 and 029 froze three for Milestone 3.1, and
+Decision 040 section 4 froze exactly one more for M3.2 stage T2.4. These tests prove each
+addition is exact (no more, no fewer, no renames) and that every pre-existing code from the
+accepted S3.0 governance baseline is unchanged.
 
 Tests are hermetic: the pre-S3.1 baseline is not reloaded from Git history (a CI checkout may be
 shallow and lack that historical commit). Instead, a canonical SHA-256 fingerprint of the 87
@@ -220,12 +221,34 @@ _M3_1_D029_CODES: dict[str, dict[str, Any]] = {
     },
 }
 
+#: The one code Decision 040 section 4 approves for M3.2 stage T2.4, with no alias and no
+#: second code. It marks a required, non-quarterly-index M3.2A object terminally failed or
+#: quarantined — the required object remains unavailable — and coexists with, never replaces,
+#: a more specific accepted defect code. Quarterly-index instances keep their accepted codes.
+_T2_4_CODES: dict[str, dict[str, Any]] = {
+    "SOURCE_REQUIRED_OBJECT_UNAVAILABLE": {
+        "category": "integrity",
+        "blocks_release": True,
+        "requires_manual_review": True,
+        "decision_reference": (
+            "Docs/Decisions/decision_040_m3_2_t2_4_implementation_authorization.md"
+        ),
+    },
+}
+
+#: The exact Decision 040 section 4 description sentence, asserted verbatim.
+_T2_4_DESCRIPTION = (
+    "A required source object was not retrieved or not usably obtained at its registered "
+    "identity, so the window cannot confirm the required object present."
+)
+
 _PRE_S3_1_CODE_COUNT = 87
 _S3_1_TOTAL_COUNT = 103
 _S5_2_TOTAL_COUNT = 108
 _S5_4_TOTAL_COUNT = 109
 _M3_1_D028_TOTAL_COUNT = 111
-_TOTAL_COUNT = 112
+_M3_1_D029_TOTAL_COUNT = 112
+_TOTAL_COUNT = 113
 
 # Computed once, offline, from the accepted S3.0 governance baseline (the 87 reason codes that
 # existed before the M2.3 S3.1 addition): sort the pre-S3.1 codes by their ``code`` string, render
@@ -243,6 +266,7 @@ def _pre_s3_1_codes() -> dict[str, Any]:
         | set(_S5_4_CODES)
         | set(_M3_1_CODES)
         | set(_M3_1_D029_CODES)
+        | set(_T2_4_CODES)
     )
     return {code: entry for code, entry in REASON_CODES.items() if code not in added}
 
@@ -271,28 +295,67 @@ def test_exactly_sixteen_s3_1_five_s5_2_and_one_s5_4_code_were_added() -> None:
         | set(_S5_4_CODES)
         | set(_M3_1_CODES)
         | set(_M3_1_D029_CODES)
+        | set(_T2_4_CODES)
     )
     assert len(_NEW_CODES) == 16
     assert len(_S5_2_CODES) == 5
     assert len(_S5_4_CODES) == 1
     assert len(_M3_1_CODES) == 2
     assert len(_M3_1_D029_CODES) == 1
+    assert len(_T2_4_CODES) == 1
     assert not set(_NEW_CODES) & set(_S5_2_CODES)
     assert not (set(_NEW_CODES) | set(_S5_2_CODES)) & set(_S5_4_CODES)
     assert not (set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES)) & set(_M3_1_CODES)
     assert not (set(_NEW_CODES) | set(_S5_2_CODES) | set(_S5_4_CODES) | set(_M3_1_CODES)) & set(
         _M3_1_D029_CODES
     )
+    assert not (
+        set(_NEW_CODES)
+        | set(_S5_2_CODES)
+        | set(_S5_4_CODES)
+        | set(_M3_1_CODES)
+        | set(_M3_1_D029_CODES)
+    ) & set(_T2_4_CODES)
 
 
-def test_registry_count_is_exactly_one_hundred_twelve() -> None:
+def test_registry_count_is_exactly_one_hundred_thirteen() -> None:
     assert len(REASON_CODES) == _TOTAL_COUNT
     assert _S3_1_TOTAL_COUNT + len(_S5_2_CODES) == _S5_2_TOTAL_COUNT
     assert _S5_2_TOTAL_COUNT + len(_S5_4_CODES) == _S5_4_TOTAL_COUNT
     assert _S5_4_TOTAL_COUNT + len(_M3_1_CODES) == _M3_1_D028_TOTAL_COUNT
     # Decision 029 section 5 narrowly supersedes Decision 028 section 6's word "exactly" to admit
     # one further code, and exactly one. The delta is otherwise closed.
-    assert _M3_1_D028_TOTAL_COUNT + len(_M3_1_D029_CODES) == _TOTAL_COUNT
+    assert _M3_1_D028_TOTAL_COUNT + len(_M3_1_D029_CODES) == _M3_1_D029_TOTAL_COUNT
+    # Decision 040 section 4 approves exactly one further code for M3.2 stage T2.4, closing the
+    # delta again at one hundred thirteen.
+    assert _M3_1_D029_TOTAL_COUNT + len(_T2_4_CODES) == _TOTAL_COUNT
+
+
+def test_decision_040_code_carries_the_ruled_metadata() -> None:
+    """Decision 040 section 4: exact category, metadata, description, and decision reference."""
+    for code, expected in _T2_4_CODES.items():
+        entry = REASON_CODES[code]
+        assert entry.category == expected["category"]
+        assert entry.blocks_release == expected["blocks_release"]
+        assert entry.requires_manual_review == expected["requires_manual_review"]
+        assert entry.decision_reference == expected["decision_reference"]
+        assert (_REPO_ROOT / str(expected["decision_reference"])).is_file()
+    assert REASON_CODES["SOURCE_REQUIRED_OBJECT_UNAVAILABLE"].description == _T2_4_DESCRIPTION
+    # The code marks unavailability beside a more specific cause; it replaces none of the
+    # accepted defect codes it may coexist with, and no alias was added next to it.
+    coexisting_codes = (
+        "SEC_RESPONSE_MALFORMED",
+        "RAW_ARCHIVE_INVALID",
+        "RAW_ARCHIVE_MEMBER_REFUSED",
+    )
+    for coexisting in coexisting_codes:
+        assert coexisting in REASON_CODES
+    assert "SOURCE_REQUIRED_OBJECT_ABSENT" not in REASON_CODES
+    assert "SOURCE_REQUIRED_OBJECT_MISSING" not in REASON_CODES
+    # The quarterly-index vocabulary is untouched: both accepted index codes remain registered
+    # with their accepted metadata.
+    assert REASON_CODES["INDEX_INSTANCE_UNAVAILABLE"].category == "integrity"
+    assert REASON_CODES["INDEX_REQUIRED_INSTANCE_MISSING"].category == "integrity"
 
 
 def test_decision_029_code_carries_the_ruled_metadata() -> None:
@@ -320,6 +383,7 @@ def test_no_reason_code_beyond_the_five_approved_s5_2_additions_exists() -> None
         - set(_S5_4_CODES)
         - set(_M3_1_CODES)
         - set(_M3_1_D029_CODES)
+        - set(_T2_4_CODES)
     )
     assert beyond_s3_1 == set(_S5_2_CODES)
 
@@ -333,6 +397,7 @@ def test_no_reason_code_beyond_the_single_approved_s5_4_addition_exists() -> Non
         - set(_S5_2_CODES)
         - set(_M3_1_CODES)
         - set(_M3_1_D029_CODES)
+        - set(_T2_4_CODES)
     )
     assert beyond_s5_2 == set(_S5_4_CODES)
 
@@ -467,6 +532,7 @@ def test_no_reason_code_beyond_the_two_approved_m3_1_additions_exists() -> None:
         - set(_S5_2_CODES)
         - set(_S5_4_CODES)
         - set(_M3_1_D029_CODES)
+        - set(_T2_4_CODES)
     )
     assert beyond_s5_4 == set(_M3_1_CODES)
 
@@ -480,8 +546,23 @@ def test_no_reason_code_beyond_the_single_approved_d029_addition_exists() -> Non
         - set(_S5_2_CODES)
         - set(_S5_4_CODES)
         - set(_M3_1_CODES)
+        - set(_T2_4_CODES)
     )
     assert beyond_d028 == set(_M3_1_D029_CODES)
+
+
+def test_no_reason_code_beyond_the_single_approved_t2_4_addition_exists() -> None:
+    """Decision 040 section 4 authorizes exactly one further code, and no alias."""
+    beyond_d029 = (
+        set(REASON_CODES)
+        - set(_pre_s3_1_codes())
+        - set(_NEW_CODES)
+        - set(_S5_2_CODES)
+        - set(_S5_4_CODES)
+        - set(_M3_1_CODES)
+        - set(_M3_1_D029_CODES)
+    )
+    assert beyond_d029 == set(_T2_4_CODES)
 
 
 def test_m3_1_codes_carry_the_approved_metadata() -> None:

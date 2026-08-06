@@ -12,19 +12,23 @@ from pathlib import Path
 
 import pytest
 
+from disclosure_drift.errors import CatalogWriteError
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.archive import ArchiveMember
 from disclosure_drift.sec.http_client import FetchResult
 from disclosure_drift.sec.observation_catalog import (
     ObservationRecorder,
     load_observations,
+    open_recovery_state,
     rebuild_audit_projection,
     reconcile,
+    resolve_recovery_state,
 )
 from disclosure_drift.sec.raw_store import RawStore
 from disclosure_drift.sec.snapshots import SnapshotStore, SourceObservation
 from disclosure_drift.sec.source_registry import SOURCES
 from disclosure_drift.storage.catalog import CatalogWriter
+from disclosure_drift.storage.sqlite import transaction
 
 URL = "https://www.sec.gov/files/company_tickers.json"
 
@@ -520,3 +524,398 @@ def test_unsafe_catalog_object_path_blocks_recovery_without_external_read(
         report = reconcile(writer.connection, tree)
     assert report.blocking_reasons()
     assert any("unsafe" in event.detail for event in report.events)
+
+
+# --------------------------------------------------------------------------- #
+# Decision 041 §5 — the additive recovery-state primitive pair
+# --------------------------------------------------------------------------- #
+_JOB_A = "m3-2a-run-aaaaaaaaaaaaaaaaaaaaaaaa"
+_JOB_B = "m3-2a-run-bbbbbbbbbbbbbbbbbbbbbbbb"
+
+#: Tables the primitives must never touch. ``census_recovery_states`` is deliberately absent —
+#: it is the one table the pair writes — and the counts below prove nothing else moved.
+_UNRELATED_TABLES = (
+    "census_source_observations",
+    "census_observation_reasons",
+    "census_archive_members",
+    "census_recovery_events",
+    "census_projection_recovery_events",
+    "ops_ingestion_jobs",
+    "raw_objects",
+)
+
+
+def _register_job(writer: CatalogWriter, job_id: str) -> None:
+    """A lawful temporary ``ops_ingestion_jobs`` fixture row (Decision 041 §7 permits it)."""
+    with transaction(writer.connection) as connection:
+        connection.execute(
+            "INSERT INTO ops_ingestion_jobs "
+            "(job_id, job_kind, job_state, stage, started_at_utc) "
+            "VALUES (?, 'm3_2a_acquisition', 'stopped', 'M3.2A', '2026-08-01T12:00:00Z')",
+            (job_id,),
+        )
+
+
+def _open_state(
+    writer: CatalogWriter,
+    *,
+    run: str = _JOB_A,
+    state: str = "state-0001",
+    scenario: str = "t2_4_recovery_action",
+) -> None:
+    open_recovery_state(
+        writer,
+        census_run_id=run,
+        recovery_state_id=state,
+        scenario=scenario,
+        action_taken="quarantine-partial",
+        detail="write-ahead block opened for one explicitly requested recovery action",
+    )
+
+
+def _state_row(path: Path, run: str, state: str) -> sqlite3.Row | None:
+    """Read one recovery-state row through a genuinely fresh read-only connection."""
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT * FROM census_recovery_states "
+            "WHERE census_run_id = ? AND recovery_state_id = ?",
+            (run, state),
+        ).fetchone()
+
+
+def _table_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+        for table in _UNRELATED_TABLES
+    }
+
+
+def _deny_writes_to(table: str) -> object:
+    """An SQLite authorizer denying inserts and updates on one table.
+
+    The denial fires when the statement executes — after the primitive's validation reads and
+    inside its transaction — which is exactly the failed-write seam the rollback tests probe.
+    """
+
+    def authorize(action: int, arg1: object, arg2: object, dbname: object, source: object) -> int:
+        if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE) and arg1 == table:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    return authorize
+
+
+@pytest.fixture
+def state_writer(tmp_path: Path) -> Iterator[tuple[CatalogWriter, DataTree]]:
+    tree = DataTree.from_root(tmp_path)
+    tree.ensure_tree()
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.migrate()
+        writer.seed_reference_data()
+        _register_job(writer, _JOB_A)
+        _register_job(writer, _JOB_B)
+        yield writer, tree
+
+
+class TestOpenRecoveryState:
+    def test_a_valid_blocked_state_is_inserted_and_fresh_connection_visible(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, tree = state_writer
+        _open_state(writer)
+        row = _state_row(tree.catalog_database, _JOB_A, "state-0001")
+        assert row is not None, "the committed block is visible to a fresh connection"
+        assert row["resolution_state"] == "blocked"
+        assert row["scenario"] == "t2_4_recovery_action"
+        assert row["action_taken"] == "quarantine-partial"
+        assert row["observation_id"] is None
+        assert row["relative_path"] is None
+        assert str(row["recorded_at_utc"]).endswith("Z")
+
+    def test_opening_writes_no_event_row_and_no_projection_recovery_row(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, _ = state_writer
+        before = _table_counts(writer.connection)
+        _open_state(writer)
+        after = _table_counts(writer.connection)
+        assert after == before, "opening a block is not itself a recovery event"
+        assert after["census_recovery_events"] == 0
+        assert after["census_projection_recovery_events"] == 0
+
+    def test_opening_mutates_no_observation_and_no_unrelated_table(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, tree = state_writer
+        item = observation(tree)
+        recorder = ObservationRecorder(writer, tree)
+        recorder.record(item)
+        recorder.flush_projection()
+        observations_before = load_observations(writer.connection)
+        projection_bytes = (tree.audit / "census_source_observations.jsonl").read_bytes()
+        counts_before = _table_counts(writer.connection)
+
+        _open_state(writer)
+
+        assert load_observations(writer.connection) == observations_before
+        assert (tree.audit / "census_source_observations.jsonl").read_bytes() == projection_bytes, (
+            "no projection mutation"
+        )
+        assert _table_counts(writer.connection) == counts_before
+
+    def test_a_missing_run_id_argument_is_a_type_error(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, _ = state_writer
+        with pytest.raises(TypeError):
+            open_recovery_state(  # type: ignore[call-arg]
+                writer,
+                recovery_state_id="state-0001",
+                scenario="t2_4_recovery_action",
+                action_taken="quarantine-partial",
+                detail="no run id supplied",
+            )
+
+    @pytest.mark.parametrize("empty", ["", "   "])
+    def test_an_empty_run_id_is_refused(
+        self, state_writer: tuple[CatalogWriter, DataTree], empty: str
+    ) -> None:
+        writer, tree = state_writer
+        with pytest.raises(CatalogWriteError, match="nonempty"):
+            _open_state(writer, run=empty)
+        assert _state_row(tree.catalog_database, empty, "state-0001") is None
+
+    def test_a_nonexistent_run_id_is_refused_never_silently_skipped(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, tree = state_writer
+        with pytest.raises(CatalogWriteError, match="not a registered ops_ingestion_jobs"):
+            _open_state(writer, run="m3-2a-run-that-was-never-created")
+        assert (
+            _state_row(tree.catalog_database, "m3-2a-run-that-was-never-created", "state-0001")
+            is None
+        )
+
+    @pytest.mark.parametrize("field", ["recovery_state_id", "scenario", "action_taken", "detail"])
+    def test_every_other_empty_input_is_refused(
+        self, state_writer: tuple[CatalogWriter, DataTree], field: str
+    ) -> None:
+        writer, _ = state_writer
+        arguments: dict[str, str] = {
+            "census_run_id": _JOB_A,
+            "recovery_state_id": "state-0001",
+            "scenario": "t2_4_recovery_action",
+            "action_taken": "quarantine-partial",
+            "detail": "detail",
+        }
+        arguments[field] = "  "
+        with pytest.raises(CatalogWriteError, match="nonempty"):
+            open_recovery_state(writer, **arguments)  # type: ignore[arg-type]
+
+    def test_a_duplicate_state_identity_is_refused(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, _ = state_writer
+        _open_state(writer)
+        with pytest.raises(CatalogWriteError, match="already recorded"):
+            _open_state(writer)
+        count = writer.connection.execute("SELECT COUNT(*) FROM census_recovery_states").fetchone()[
+            0
+        ]
+        assert count == 1, "exactly one row exists; nothing was overwritten"
+
+    def test_a_failed_insert_rolls_back_and_leaves_no_partial_state(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        """The write fails inside the open transaction, after both validation reads."""
+        writer, tree = state_writer
+        counts_before = _table_counts(writer.connection)
+        writer.connection.set_authorizer(_deny_writes_to("census_recovery_states"))
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                _open_state(writer)
+        finally:
+            writer.connection.set_authorizer(None)
+        assert _state_row(tree.catalog_database, _JOB_A, "state-0001") is None
+        assert _table_counts(writer.connection) == counts_before
+        assert not writer.connection.in_transaction, "the failed transaction rolled back"
+        _open_state(writer)
+        row = _state_row(tree.catalog_database, _JOB_A, "state-0001")
+        assert row is not None and row["resolution_state"] == "blocked", (
+            "the rollback is complete, so the same identity may still be opened lawfully"
+        )
+
+
+class TestResolveRecoveryState:
+    def test_exact_single_row_resolution_returns_true_once(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, tree = state_writer
+        _open_state(writer)
+        resolved = resolve_recovery_state(
+            writer,
+            census_run_id=_JOB_A,
+            recovery_state_id="state-0001",
+            action_taken="quarantined",
+            detail="the partial was preserved in quarantine",
+        )
+        assert resolved is True
+        row = _state_row(tree.catalog_database, _JOB_A, "state-0001")
+        assert row is not None
+        assert row["resolution_state"] == "resolved"
+        assert row["action_taken"] == "quarantined", (
+            "the resolved row records the completed action result"
+        )
+        assert "the partial was preserved in quarantine" in str(row["detail"])
+        assert "write-ahead block opened" in str(row["detail"]), (
+            "the blocked detail is preserved beside the completion detail"
+        )
+
+    def test_resolution_addresses_the_full_primary_key(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        """The same state identifier under another run is a different row, untouched."""
+        writer, tree = state_writer
+        _open_state(writer, run=_JOB_A, state="shared-state-id")
+        _open_state(writer, run=_JOB_B, state="shared-state-id")
+
+        assert resolve_recovery_state(
+            writer,
+            census_run_id=_JOB_A,
+            recovery_state_id="shared-state-id",
+            action_taken="quarantined",
+            detail="resolved for run A only",
+        )
+
+        row_a = _state_row(tree.catalog_database, _JOB_A, "shared-state-id")
+        row_b = _state_row(tree.catalog_database, _JOB_B, "shared-state-id")
+        assert row_a is not None and row_a["resolution_state"] == "resolved"
+        assert row_b is not None and row_b["resolution_state"] == "blocked", (
+            "the other run's row is never bulk-resolved"
+        )
+
+    def test_a_sibling_blocked_state_is_preserved(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, tree = state_writer
+        _open_state(writer, state="state-0001")
+        _open_state(writer, state="state-0002")
+
+        assert resolve_recovery_state(
+            writer,
+            census_run_id=_JOB_A,
+            recovery_state_id="state-0001",
+            action_taken="quarantined",
+            detail="first state resolved",
+        )
+
+        sibling = _state_row(tree.catalog_database, _JOB_A, "state-0002")
+        assert sibling is not None and sibling["resolution_state"] == "blocked"
+        assert sibling["action_taken"] == "quarantine-partial", "the sibling row is untouched"
+
+    def test_resolution_is_scenario_agnostic(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        """No scenario filter exists: an arbitrary generic scenario resolves by key alone."""
+        writer, tree = state_writer
+        _open_state(writer, state="state-generic", scenario="some_future_generic_scenario")
+        assert resolve_recovery_state(
+            writer,
+            census_run_id=_JOB_A,
+            recovery_state_id="state-generic",
+            action_taken="completed",
+            detail="resolved without any scenario filtering",
+        )
+        row = _state_row(tree.catalog_database, _JOB_A, "state-generic")
+        assert row is not None and row["resolution_state"] == "resolved"
+        assert row["scenario"] == "some_future_generic_scenario", "the scenario is untouched"
+
+    def test_zero_affected_rows_is_failure(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, _ = state_writer
+        assert (
+            resolve_recovery_state(
+                writer,
+                census_run_id=_JOB_A,
+                recovery_state_id="never-opened",
+                action_taken="completed",
+                detail="nothing to resolve",
+            )
+            is False
+        )
+        _open_state(writer)
+        assert resolve_recovery_state(
+            writer,
+            census_run_id=_JOB_A,
+            recovery_state_id="state-0001",
+            action_taken="quarantined",
+            detail="first resolution",
+        )
+        assert (
+            resolve_recovery_state(
+                writer,
+                census_run_id=_JOB_A,
+                recovery_state_id="state-0001",
+                action_taken="quarantined",
+                detail="second resolution of the same row",
+            )
+            is False
+        ), "an already-resolved row is no longer blocked, so resolving it again is failure"
+
+    @pytest.mark.parametrize(
+        "field", ["census_run_id", "recovery_state_id", "action_taken", "detail"]
+    )
+    def test_empty_inputs_are_refused(
+        self, state_writer: tuple[CatalogWriter, DataTree], field: str
+    ) -> None:
+        writer, _ = state_writer
+        arguments: dict[str, str] = {
+            "census_run_id": _JOB_A,
+            "recovery_state_id": "state-0001",
+            "action_taken": "quarantined",
+            "detail": "detail",
+        }
+        arguments[field] = ""
+        with pytest.raises(CatalogWriteError, match="nonempty"):
+            resolve_recovery_state(writer, **arguments)  # type: ignore[arg-type]
+
+    def test_resolution_writes_no_event_row_and_touches_no_unrelated_table(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        writer, _ = state_writer
+        _open_state(writer)
+        before = _table_counts(writer.connection)
+        assert resolve_recovery_state(
+            writer,
+            census_run_id=_JOB_A,
+            recovery_state_id="state-0001",
+            action_taken="quarantined",
+            detail="resolved",
+        )
+        assert _table_counts(writer.connection) == before
+
+    def test_a_failed_resolution_write_rolls_back_and_leaves_the_row_blocked(
+        self, state_writer: tuple[CatalogWriter, DataTree]
+    ) -> None:
+        """The update fails inside the resolve transaction; the blocked row is untouched."""
+        writer, tree = state_writer
+        _open_state(writer)
+        writer.connection.set_authorizer(_deny_writes_to("census_recovery_states"))
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                resolve_recovery_state(
+                    writer,
+                    census_run_id=_JOB_A,
+                    recovery_state_id="state-0001",
+                    action_taken="quarantined",
+                    detail="detail",
+                )
+        finally:
+            writer.connection.set_authorizer(None)
+        row = _state_row(tree.catalog_database, _JOB_A, "state-0001")
+        assert row is not None and row["resolution_state"] == "blocked"
+        assert row["action_taken"] == "quarantine-partial", "the blocked row is exactly as it was"
+        assert "; " not in str(row["detail"]), "no completion detail was appended"
+        assert not writer.connection.in_transaction

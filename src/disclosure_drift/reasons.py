@@ -88,6 +88,7 @@ _D018: Final = "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md
 _D020: Final = "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
 _D028: Final = "Docs/Decisions/decision_028_m3_1_readiness_corrections.md"
 _D029: Final = "Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md"
+_D040: Final = "Docs/Decisions/decision_040_m3_2_t2_4_implementation_authorization.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -1004,6 +1005,27 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "signature, so that target has no reserve package.",
         requires_manual_review=True,
         decision_reference=_D020,
+    ),
+    # --- M3.2 T2.4: required-object availability (Decision 040 section 4) ------------------ #
+    #
+    # Exactly one code is approved; no alias and no second code is added, and no existing
+    # reason is redefined or remapped. It marks a REQUIRED, non-quarterly-index M3.2A logical
+    # request whose committed observation is terminally failed or quarantined: the required
+    # object remains unavailable. It may coexist with a more specific accepted defect code
+    # (for example SEC_RESPONSE_MALFORMED, RAW_ARCHIVE_INVALID, or RAW_ARCHIVE_MEMBER_REFUSED)
+    # and never replaces the more specific cause. Quarterly index instances retain
+    # INDEX_INSTANCE_UNAVAILABLE and the related accepted index codes; stopped, interrupted,
+    # ceiling-exhausted, and not-attempted requests retain their run or request
+    # classifications and do not receive this code merely for lacking an object;
+    # recent-target 404 semantics are unchanged; no M3.2B mapping is authorized.
+    _code(
+        "SOURCE_REQUIRED_OBJECT_UNAVAILABLE",
+        "integrity",
+        "A required source object was not retrieved or not usably obtained at its "
+        "registered identity, so the window cannot confirm the required object present.",
+        blocks_release=True,
+        requires_manual_review=True,
+        decision_reference=_D040,
     ),
 )
 

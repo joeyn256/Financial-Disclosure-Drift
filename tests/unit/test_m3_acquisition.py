@@ -1656,7 +1656,12 @@ class TestArchiveMemberLineage:
         bulk = outcome.outcomes[0]
         assert bulk.disposition == "quarantined"
         assert bulk.satisfies_requirement is False
-        assert bulk.reason_codes == ("RAW_ARCHIVE_INVALID",)
+        # Decision 040 §4: the required-object code coexists with — never replaces — the more
+        # specific accepted defect code on a required M3.2A object's terminal quarantine.
+        assert bulk.reason_codes == (
+            "RAW_ARCHIVE_INVALID",
+            "SOURCE_REQUIRED_OBJECT_UNAVAILABLE",
+        )
         assert outcome.completed_successfully is False
         assert (storage.tree.data_root / (bulk.relative_storage_path or "")).is_file(), (
             "the object is preserved, never deleted"
@@ -1673,7 +1678,10 @@ class TestArchiveMemberLineage:
             engine.preflight(_authorization(plan))
             outcome = engine.run()
         assert outcome.outcomes[0].disposition == "quarantined"
-        assert outcome.outcomes[0].reason_codes == ("RAW_ARCHIVE_INVALID",)
+        assert outcome.outcomes[0].reason_codes == (
+            "RAW_ARCHIVE_INVALID",
+            "SOURCE_REQUIRED_OBJECT_UNAVAILABLE",
+        )
 
 
 # =========================================================================== #
@@ -2397,7 +2405,10 @@ class TestArchiveLineageIsMemoryBounded:
 
         bulk = outcome.outcomes[0]
         assert bulk.disposition == "quarantined"
-        assert bulk.reason_codes == ("RAW_ARCHIVE_MEMBER_REFUSED",)
+        assert bulk.reason_codes == (
+            "RAW_ARCHIVE_MEMBER_REFUSED",
+            "SOURCE_REQUIRED_OBJECT_UNAVAILABLE",
+        )
         assert bulk.satisfies_requirement is False
         assert _member_rows(preparation.database_path, bulk.observation_id or "") == []
         with sqlite3.connect(preparation.database_path) as connection:
@@ -2562,3 +2573,538 @@ class TestOperationalErrorSanitization:
             outcome = engine.run()
         assert outcome.completion_status == "complete"
         assert all(item.detail != "" or True for item in outcome.outcomes)
+
+
+# =========================================================================== #
+# Stage T2.4 — catalog-authoritative reconstruction (Decision 040 §2, T2.4-A)
+# =========================================================================== #
+from disclosure_drift.m3.acquisition import (  # noqa: E402 - stage T2.4 surfaces
+    LogicalRequest,
+    conditional_validators,
+    reconcile_requests,
+    reconstruct_catalog_state,
+    verified_reusable_predecessor,
+)
+
+
+def _etag_script(plan: RequestPlan, etag: str) -> list[TransportResponse]:
+    """One successful response per planned request, each carrying the same ETag."""
+    script: list[TransportResponse] = []
+    for request in derive_logical_requests(plan):
+        response = _success_for(request.source_id)
+        headers = dict(response.headers)
+        headers["ETag"] = etag
+        script.append(
+            TransportResponse(
+                status=response.status,
+                headers=headers,
+                final_url=response.final_url,
+                body=response.body,
+            )
+        )
+    return script
+
+
+def _reconstruct(harness: _PersistentHarness) -> object:
+    return reconstruct_catalog_state(
+        catalog_path=harness.preparation.database_path, storage=harness.storage
+    )
+
+
+def _reconcile(harness: _PersistentHarness, reconstruction: object | None = None) -> object:
+    return reconcile_requests(
+        plan=harness.plan,
+        reconstruction=(reconstruction if reconstruction is not None else _reconstruct(harness)),  # type: ignore[arg-type]
+        storage=harness.storage,
+    )
+
+
+class TestCatalogAuthoritativeReconstruction:
+    def test_reconstruction_adopts_every_durable_row_into_a_fresh_store(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            reconstruction = _reconstruct(harness)
+
+            assert len(reconstruction.observations) == plan.planned_unique_logical_requests
+            assert reconstruction.store is not harness.storage.snapshot_store, (
+                "the continuation boundary constructs a fresh store; it never inherits the "
+                "predecessor process's mutable in-memory state"
+            )
+            assert reconstruction.store.observations == reconstruction.observations
+            again = _reconstruct(harness)
+            assert [o.observation_id for o in again.observations] == [
+                o.observation_id for o in reconstruction.observations
+            ], "reconstruction order is the catalog's own deterministic order"
+
+    def test_quarantined_and_failed_rows_are_facts_but_never_reusable(self, tmp_path: Path) -> None:
+        plan = _plan()
+        script = _success_script(plan)
+        tickers = next(
+            index
+            for index, request in enumerate(derive_logical_requests(plan))
+            if request.source_id == "sec_company_tickers"
+        )
+        script[tickers] = _scripted(body=b"<html>not json</html>", content_type="application/json")
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(script)
+            reconstruction = _reconstruct(harness)
+
+            quarantined = [
+                observation
+                for observation in reconstruction.observations
+                if observation.outcome == "quarantined"
+            ]
+            assert len(quarantined) == 1, "the quarantine is adopted as a fact"
+            assert verified_reusable_predecessor(reconstruction, "sec_company_tickers") is None, (
+                "a quarantined observation is never a reusable predecessor"
+            )
+            assert conditional_validators(reconstruction, "sec_company_tickers") is None
+
+    def test_reuse_reverifies_immutable_evidence_at_the_point_of_reuse(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_etag_script(plan, '"v1"'))
+            reconstruction = _reconstruct(harness)
+            index = verified_reusable_predecessor(reconstruction, "sec_company_tickers")
+            assert index is not None and index.etag == '"v1"'
+
+            stored = harness.storage.tree.data_root / str(index.relative_storage_path)
+            stored.write_bytes(b"tampered")
+            fresh = _reconstruct(harness)
+            assert verified_reusable_predecessor(fresh, "sec_company_tickers") is None, (
+                "a predecessor that no longer hashes as recorded is not lawful evidence"
+            )
+            assert conditional_validators(fresh, "sec_company_tickers") is None
+
+    def test_a_zip_predecessor_requires_complete_consistent_lineage(self, tmp_path: Path) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            reconstruction = _reconstruct(harness)
+            assert verified_reusable_predecessor(reconstruction, "sec_bulk_submissions") is not None
+
+            harness.writer.connection.execute(
+                "DELETE FROM census_archive_members WHERE archive_sha256 IN "
+                "(SELECT logical_sha256 FROM census_source_observations "
+                " WHERE source_id = 'sec_bulk_submissions')"
+            )
+            harness.writer.connection.commit()
+            stripped = _reconstruct(harness)
+            assert verified_reusable_predecessor(stripped, "sec_bulk_submissions") is None, (
+                "an archive owner without preserved member lineage is not reusable"
+            )
+
+
+# =========================================================================== #
+# Stage T2.4 — reconciliation and drift inspection (Decision 040 §2, T2.4-B)
+# =========================================================================== #
+class TestRequestReconciliationT24:
+    def test_items_follow_plan_order_and_totals_sum_to_the_plan(self, tmp_path: Path) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            reconciliation = _reconcile(harness)
+
+        assert [item.position for item in reconciliation.items] == list(
+            range(plan.planned_unique_logical_requests)
+        )
+        assert sum(reconciliation.totals.values()) == plan.planned_unique_logical_requests
+        assert reconciliation.totals == {"satisfied_new": 7}
+        assert reconciliation.already_satisfied_excluded_count == 7
+        assert reconciliation.absences == ()
+        assert reconciliation.is_clean is True
+
+    def test_identical_inputs_serialize_byte_identically(self, tmp_path: Path) -> None:
+        import json as json_module
+
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            first = json_module.dumps(_reconcile(harness).as_record(), sort_keys=True)
+            second = json_module.dumps(_reconcile(harness).as_record(), sort_keys=True)
+        assert first == second
+
+    def test_an_empty_catalog_reconciles_every_item_as_not_attempted(self, tmp_path: Path) -> None:
+        """Kill point 1: nothing consumed, nothing recorded — a fresh run plans identically."""
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            reconciliation = _reconcile(harness)
+        assert reconciliation.totals == {"not_attempted": 7}
+        assert reconciliation.already_satisfied_excluded_count == 0
+
+    def test_the_absence_enumeration_carries_registered_terminal_reasons(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        script = _success_script(plan)
+        requests = derive_logical_requests(plan)
+        tickers = next(
+            index
+            for index, request in enumerate(requests)
+            if request.source_id == "sec_company_tickers"
+        )
+        first_index = next(
+            index
+            for index, request in enumerate(requests)
+            if request.source_id == "sec_full_index_company"
+        )
+        script[tickers] = _scripted(404, body=b"", content_type=None)
+        script[first_index] = _scripted(404, body=b"", content_type=None)
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(script)
+            reconciliation = _reconcile(harness)
+
+        absences = {item.source_id: item for item in reconciliation.absences}
+        assert set(absences) == {"sec_company_tickers", "sec_full_index_company"}
+        assert absences["sec_company_tickers"].state == "absent"
+        assert absences["sec_company_tickers"].reason_codes == (
+            "SOURCE_REQUIRED_OBJECT_UNAVAILABLE",
+        )
+        assert absences["sec_full_index_company"].reason_codes == ("INDEX_INSTANCE_UNAVAILABLE",), (
+            "quarterly-index absence behaviour is unchanged by Decision 040"
+        )
+        assert reconciliation.absences_without_terminal_reason == ()
+        assert all(item.excluded_from_continuation is False for item in reconciliation.absences), (
+            "an absence is never counted already-satisfied"
+        )
+        assert all(item.verified is False for item in reconciliation.absences)
+
+    def test_out_of_plan_observations_are_reported(self, tmp_path: Path) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            stray = replace(
+                harness.storage.snapshot_store.observations[0],
+                observation_id="deadbeef" * 4,
+                source_id="sec_company_tickers",
+                identity="sec_company_tickers:out-of-plan",
+                relative_storage_path=None,
+                outcome="failed",
+                reason_codes=("SEC_RESPONSE_EMPTY",),
+            )
+            recorder = ObservationRecorder(writer=harness.writer, tree=harness.storage.tree)
+            recorder.record(stray)
+            reconciliation = _reconcile(harness)
+
+        assert ("sec_company_tickers", "sec_company_tickers:out-of-plan") in (
+            reconciliation.out_of_plan
+        )
+
+    def test_row_without_object_and_store_findings_are_surfaced_not_repaired(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            reconstruction = _reconstruct(harness)
+            tickers = verified_reusable_predecessor(reconstruction, "sec_company_tickers")
+            assert tickers is not None
+            victim = harness.storage.tree.data_root / str(tickers.relative_storage_path)
+            payload = victim.read_bytes()
+            victim.unlink()
+            (harness.storage.tree.raw_indexes).mkdir(parents=True, exist_ok=True)
+            stray_partial = harness.storage.tree.raw_indexes / "stray.part"
+            stray_partial.write_bytes(b"partial")
+            orphan = harness.storage.tree.raw_indexes / "orphan.bin"
+            orphan.write_bytes(b"orphan")
+
+            reconciliation = _reconcile(harness)
+
+            item = next(
+                entry for entry in reconciliation.items if entry.source_id == "sec_company_tickers"
+            )
+            assert item.state == "row_without_object"
+            assert item.excluded_from_continuation is False
+            kinds = {finding.kind for finding in reconciliation.store_findings}
+            assert kinds == {"partial_object", "orphan_object", "row_without_object"}
+            assert stray_partial.exists() and orphan.exists(), (
+                "reconciliation surfaces findings and repairs nothing"
+            )
+            victim.write_bytes(payload)
+
+    def test_tampered_evidence_is_a_hash_mismatch_item(self, tmp_path: Path) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            reconstruction = _reconstruct(harness)
+            tickers = verified_reusable_predecessor(reconstruction, "sec_company_tickers")
+            assert tickers is not None
+            victim = harness.storage.tree.data_root / str(tickers.relative_storage_path)
+            victim.write_bytes(b"tampered")
+            reconciliation = _reconcile(harness)
+
+        item = next(
+            entry for entry in reconciliation.items if entry.source_id == "sec_company_tickers"
+        )
+        assert item.state == "hash_mismatch"
+        assert "hash_mismatch" in item.conditions
+        assert item.excluded_from_continuation is False
+
+    def test_the_drift_listing_separates_blocking_from_nonblocking(self, tmp_path: Path) -> None:
+        plan = _plan()
+        script = _success_script(plan)
+        requests = derive_logical_requests(plan)
+        tickers = next(
+            index
+            for index, request in enumerate(requests)
+            if request.source_id == "sec_company_tickers"
+        )
+        script[tickers] = _scripted(body=b"<html>not json</html>", content_type="application/json")
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(script)
+            exchange = next(
+                index
+                for index, request in enumerate(requests)
+                if request.source_id == "sec_company_tickers_exchange"
+            )
+            second = _success_script(plan)
+            second[exchange] = _scripted(body=b'{"ok":2,"changed":true}')
+            harness.run(second)
+            reconciliation = _reconcile(harness)
+
+        blocking_codes = {
+            code for entry in reconciliation.blocking_drift for code in entry.reason_codes
+        }
+        nonblocking_codes = {
+            code for entry in reconciliation.nonblocking_drift for code in entry.reason_codes
+        }
+        assert "SEC_RESPONSE_MALFORMED" in blocking_codes
+        assert "SOURCE_CONTENT_UPDATED" in nonblocking_codes
+        assert not (blocking_codes & nonblocking_codes)
+
+
+# =========================================================================== #
+# Stage T2.4 — accounting vocabulary and lawful conditional reuse (§6, T2.4-C)
+# =========================================================================== #
+class TestAccountingVocabularyT24:
+    def test_already_satisfied_304_and_duplicate_200_stay_distinct(self, tmp_path: Path) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_etag_script(plan, '"v1"'))
+            requests = derive_logical_requests(plan)
+            second = _etag_script(plan, '"v1"')
+            exchange = next(
+                index
+                for index, request in enumerate(requests)
+                if request.source_id == "sec_company_tickers_exchange"
+            )
+            # A byte-identical 200 for one route; every other route also replays its exact
+            # first-run bytes, so the engine reconciles duplicates rather than superseding.
+            outcome = harness.run(second)
+
+            assert outcome.duplicates_reconciled == 7
+            assert outcome.byte_identical_duplicates == outcome.duplicates_reconciled
+            assert outcome.cache_hits == 0
+            assert outcome.not_modified_reuses == outcome.cache_hits
+
+            reconciliation = _reconcile(harness)
+            assert reconciliation.duplicate_object_count == 7
+            assert reconciliation.not_modified_count == 0
+            assert reconciliation.already_satisfied_excluded_count == 7
+            del exchange
+
+    def test_a_lawful_304_satisfies_only_through_verified_evidence(self, tmp_path: Path) -> None:
+        """ETag-only, Last-Modified-only, and dual-validator reuse against the accepted
+        store, plus the unreconciled-304 fail-closed refusal (Decision 040 §2, T2.4-C)."""
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            script = _success_script(plan)
+            requests = derive_logical_requests(plan)
+            tickers = next(
+                index
+                for index, request in enumerate(requests)
+                if request.source_id == "sec_company_tickers"
+            )
+            script[tickers] = _scripted(
+                headers={"ETag": '"v1"', "Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"}
+            )
+            harness.run(script)
+            reconstruction = _reconstruct(harness)
+            validators = conditional_validators(reconstruction, "sec_company_tickers")
+            assert validators == ('"v1"', "Mon, 01 Jan 2024 00:00:00 GMT")
+
+            def revalidate(etag: str | None, last_modified: str | None) -> object:
+                clock = _FrozenClock()
+                transport = _ScriptedTransport([_scripted(304, body=b"", content_type=None)])
+                limiter = AggregateRateLimiter(4.0, burst=1, clock=clock.time, sleeper=clock.sleep)
+                client = SecClient(
+                    transport,
+                    _AGENT,
+                    limiter,
+                    RetrievalPolicy(),
+                    sleeper=clock.sleep,
+                    ceiling=PhysicalAttemptCeiling(10),
+                )
+                with client.fetch(
+                    "sec_company_tickers",
+                    purpose=_PURPOSE,
+                    etag=etag,
+                    last_modified=last_modified,
+                ) as result:
+                    return reconstruction.store.record(result, retrieved_at_utc=_stamp())
+
+            etag, last_modified = validators
+            for sent in ((etag, None), (None, last_modified), (etag, last_modified)):
+                observation = revalidate(*sent)
+                assert observation.outcome == "reused_snapshot"
+                assert observation.reason_codes == ("SOURCE_SNAPSHOT_REUSED",)
+
+            mismatched = revalidate('"wrong"', None)
+            assert mismatched.outcome == "failed"
+            assert mismatched.reason_codes == ("SOURCE_SNAPSHOT_REUSE_UNRECONCILED",)
+
+    def test_an_unreconciled_304_never_counts_as_satisfied(self, tmp_path: Path) -> None:
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_etag_script(plan, '"v1"'))
+            reconstruction = _reconstruct(harness)
+            tickers = verified_reusable_predecessor(reconstruction, "sec_company_tickers")
+            assert tickers is not None
+            stored = harness.storage.tree.data_root / str(tickers.relative_storage_path)
+            stored.write_bytes(b"tampered")
+
+            clock = _FrozenClock()
+            transport = _ScriptedTransport([_scripted(304, body=b"", content_type=None)])
+            limiter = AggregateRateLimiter(4.0, burst=1, clock=clock.time, sleeper=clock.sleep)
+            client = SecClient(
+                transport,
+                _AGENT,
+                limiter,
+                RetrievalPolicy(),
+                sleeper=clock.sleep,
+                ceiling=PhysicalAttemptCeiling(10),
+            )
+            with client.fetch("sec_company_tickers", purpose=_PURPOSE, etag='"v1"') as result:
+                observation = reconstruction.store.record(result, retrieved_at_utc=_stamp())
+                recorder = ObservationRecorder(writer=harness.writer, tree=harness.storage.tree)
+                recorder.record(observation)
+
+            assert observation.outcome == "failed"
+            assert observation.reason_codes == ("SOURCE_SNAPSHOT_REUSE_UNRECONCILED",)
+            reconciliation = _reconcile(harness)
+            item = next(
+                entry for entry in reconciliation.items if entry.source_id == "sec_company_tickers"
+            )
+            assert item.excluded_from_continuation is False, (
+                "a failed-closed 304 is never a cache hit and never satisfies the request"
+            )
+
+
+# =========================================================================== #
+# Stage T2.4 — the singleton required-object reason (Decision 040 §4)
+# =========================================================================== #
+class TestSingletonRequiredObjectReason:
+    def test_a_singleton_404_carries_the_required_object_code_durably(self, tmp_path: Path) -> None:
+        plan = _plan()
+        script = _success_script(plan)
+        requests = derive_logical_requests(plan)
+        tickers = next(
+            index
+            for index, request in enumerate(requests)
+            if request.source_id == "sec_company_tickers"
+        )
+        script[tickers] = _scripted(404, body=b"", content_type=None)
+        with _persistent(tmp_path, plan) as harness:
+            outcome = harness.run(script)
+            absent = next(
+                item for item in outcome.outcomes if item.request.source_id == "sec_company_tickers"
+            )
+            assert absent.disposition == "absent"
+            assert absent.reason_codes == ("SOURCE_REQUIRED_OBJECT_UNAVAILABLE",)
+            persisted = harness.writer.connection.execute(
+                "SELECT reason_code FROM census_observation_reasons WHERE observation_id = ?",
+                (absent.observation_id,),
+            ).fetchall()
+            assert [str(row["reason_code"]) for row in persisted] == [
+                "SOURCE_REQUIRED_OBJECT_UNAVAILABLE"
+            ], "the terminal reason is durable in the catalog, not only in memory"
+
+    def test_the_code_coexists_with_the_more_specific_quarantine_cause(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        script = _success_script(plan)
+        requests = derive_logical_requests(plan)
+        tickers = next(
+            index
+            for index, request in enumerate(requests)
+            if request.source_id == "sec_company_tickers"
+        )
+        script[tickers] = _scripted(body=b"<html>not json</html>", content_type="application/json")
+        with _persistent(tmp_path, plan) as harness:
+            outcome = harness.run(script)
+        quarantined = next(
+            item for item in outcome.outcomes if item.request.source_id == "sec_company_tickers"
+        )
+        assert quarantined.disposition == "quarantined"
+        assert quarantined.reason_codes == (
+            "SEC_RESPONSE_MALFORMED",
+            "SOURCE_REQUIRED_OBJECT_UNAVAILABLE",
+        ), "the availability code coexists with — never replaces — the specific cause"
+
+    def test_the_index_route_keeps_its_accepted_code_in_every_window(self, tmp_path: Path) -> None:
+        plan = _plan()
+        script = _success_script(plan)
+        requests = derive_logical_requests(plan)
+        first_index = next(
+            index
+            for index, request in enumerate(requests)
+            if request.source_id == "sec_full_index_company"
+        )
+        script[first_index] = _scripted(404, body=b"", content_type=None)
+        with _persistent(tmp_path, plan) as harness:
+            outcome = harness.run(script)
+        absent = next(
+            item
+            for item in outcome.outcomes
+            if item.request.source_id == "sec_full_index_company" and item.disposition == "absent"
+        )
+        assert absent.reason_codes == ("INDEX_INSTANCE_UNAVAILABLE",)
+        assert "SOURCE_REQUIRED_OBJECT_UNAVAILABLE" not in absent.reason_codes
+
+    def test_no_m3_2b_mapping_exists(self, tmp_path: Path) -> None:
+        """Decision 040 §4 exclusions: the mapping is bounded to the M3.2A window."""
+        plan = _plan()
+        with _harness(tmp_path, plan=plan, responses=[]) as (engine, _, _, _):
+            failed = _failed_observation("sec_submissions_entity")
+            request = LogicalRequest(
+                source_id="sec_submissions_entity", instance_key="", parameters={}
+            )
+            engine_b = replace_engine_window(engine, "M3.2B")
+            decorated = engine_b._with_absence_reason(request, failed)
+            assert "SOURCE_REQUIRED_OBJECT_UNAVAILABLE" not in decorated.reason_codes
+            engine_a = replace_engine_window(engine, "M3.2A")
+            positive = engine_a._with_absence_reason(request, failed)
+            assert "SOURCE_REQUIRED_OBJECT_UNAVAILABLE" in positive.reason_codes, (
+                "positive control: the same observation IS decorated in the M3.2A window"
+            )
+
+
+def _failed_observation(source_id: str) -> SourceObservation:
+    return SourceObservation(
+        observation_id="ab" * 16,
+        source_id=source_id,
+        requested_url="https://data.sec.gov/submissions/CIK0000000001.json",
+        purpose=_PURPOSE,
+        retrieved_at_utc=_stamp(),
+        outcome="failed",
+        http_status=404,
+    )
+
+
+def replace_engine_window(engine: AcquisitionEngine, window: str) -> AcquisitionEngine:
+    """A window-variant engine for probing the private absence-reason mapping boundary."""
+    return AcquisitionEngine(
+        plan=engine.plan,
+        window=window,
+        ceiling=engine.ceiling,
+        client=engine.client,
+        storage=engine.storage,
+        recorder=engine.recorder,
+        clock=engine.clock,
+    )

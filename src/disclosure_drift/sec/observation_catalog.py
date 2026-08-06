@@ -76,9 +76,11 @@ __all__ = [
     "RecoveryResolution",
     "RecoveryScenario",
     "load_observations",
+    "open_recovery_state",
     "rebuild_audit_projection",
     "reconcile",
     "record_recovery_events",
+    "resolve_recovery_state",
     "validate_audit_projection",
 ]
 
@@ -1660,6 +1662,137 @@ def record_recovery_events(
                 )
             written += 1
     return written
+
+
+def _require_nonempty_state_fields(**fields: str) -> None:
+    """Refuse a recovery-state input that is empty or whitespace."""
+    for name, value in fields.items():
+        if not value or not value.strip():
+            message = f"recovery-state field {name!r} must be a nonempty string"
+            raise CatalogWriteError(message)
+
+
+def open_recovery_state(
+    writer: CatalogWriter,
+    *,
+    census_run_id: str,
+    recovery_state_id: str,
+    scenario: str,
+    action_taken: str,
+    detail: str,
+    observation_id: str | None = None,
+    relative_path: str | None = None,
+) -> None:
+    """Insert exactly one ``blocked`` recovery-state row, addressed by its full primary key.
+
+    The additive write-ahead primitive Decision 041 §5.1 authorizes. It writes the one
+    ``census_recovery_states`` row and nothing else: no ``census_recovery_events`` row (opening a
+    block is not itself a recovery event), no projection-recovery row, and no observation, object,
+    projection, receipt, or sibling-state mutation. ``census_run_id`` must identify an existing
+    ``ops_ingestion_jobs.job_id`` — a run identity is required here, never minted, derived, or
+    substituted — and there is deliberately no silent skip when it is absent. The blocked row's
+    ``action_taken`` records the explicitly requested action; ``detail`` carries only sanitized
+    text under the accepted private-path exclusion rules.
+
+    Commits through the accepted transaction convention on the supplied writer's leased
+    connection; the insert and its validation roll back together on any failure.
+
+    Raises:
+        CatalogWriteError: an input is empty, the run does not exist, or the state identity is
+            already recorded. A constraint failure or failed write propagates from SQLite, and
+            the transaction rolls back either way.
+    """
+    _require_nonempty_state_fields(
+        census_run_id=census_run_id,
+        recovery_state_id=recovery_state_id,
+        scenario=scenario,
+        action_taken=action_taken,
+        detail=detail,
+    )
+    with transaction(writer.connection) as connection:
+        run = connection.execute(
+            "SELECT 1 FROM ops_ingestion_jobs WHERE job_id = ?",
+            (census_run_id,),
+        ).fetchone()
+        if run is None:
+            message = (
+                f"recovery state {recovery_state_id} names census run {census_run_id!r}, which "
+                "is not a registered ops_ingestion_jobs.job_id; a lawful existing run identity "
+                "is required and is never minted, derived, or substituted here"
+            )
+            raise CatalogWriteError(message)
+        existing = connection.execute(
+            "SELECT 1 FROM census_recovery_states "
+            "WHERE census_run_id = ? AND recovery_state_id = ?",
+            (census_run_id, recovery_state_id),
+        ).fetchone()
+        if existing is not None:
+            message = (
+                f"recovery state ({census_run_id}, {recovery_state_id}) is already recorded; "
+                "state identities are unique and are never reopened or overwritten"
+            )
+            raise CatalogWriteError(message)
+        connection.execute(
+            "INSERT INTO census_recovery_states "
+            "(census_run_id, recovery_state_id, scenario, observation_id, relative_path, "
+            "resolution_state, action_taken, detail, recorded_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, 'blocked', ?, ?, ?)",
+            (
+                census_run_id,
+                recovery_state_id,
+                scenario,
+                observation_id,
+                relative_path,
+                action_taken,
+                detail,
+                utc_now(),
+            ),
+        )
+
+
+def resolve_recovery_state(
+    writer: CatalogWriter,
+    *,
+    census_run_id: str,
+    recovery_state_id: str,
+    action_taken: str,
+    detail: str,
+) -> bool:
+    """Resolve exactly the one ``blocked`` row addressed by its full primary key.
+
+    The additive resolution primitive Decision 041 §5.2 authorizes. The update is primary-key
+    exact and deliberately scenario-agnostic: it never filters by scenario, never bulk-resolves
+    by run or scenario, performs no projection rebuild, performs no repair, updates no sibling
+    state, and writes no recovery-event row. The resolved row's ``action_taken`` records the
+    supplied completed action result, and its ``detail`` gains the supplied sanitized completion
+    detail beside the preserved blocked detail.
+
+    Commits through the accepted transaction convention on the supplied writer's leased
+    connection.
+
+    Returns:
+        ``True`` only when exactly one currently ``blocked`` row was resolved. Zero affected
+        rows — an unknown identity, or a row no longer blocked — is failure, reported as
+        ``False``. The primary key makes more than one affected row structurally impossible.
+
+    Raises:
+        CatalogWriteError: an input is empty. A failed write propagates from SQLite and rolls
+            back, leaving the blocked row exactly as it was.
+    """
+    _require_nonempty_state_fields(
+        census_run_id=census_run_id,
+        recovery_state_id=recovery_state_id,
+        action_taken=action_taken,
+        detail=detail,
+    )
+    with transaction(writer.connection) as connection:
+        cursor = connection.execute(
+            "UPDATE census_recovery_states "
+            "SET resolution_state = 'resolved', action_taken = ?, detail = detail || '; ' || ? "
+            "WHERE census_run_id = ? AND recovery_state_id = ? AND resolution_state = 'blocked'",
+            (action_taken, detail, census_run_id, recovery_state_id),
+        )
+        return cursor.rowcount == 1
 
 
 def _classify_rerun(row: sqlite3.Row, outcome: str) -> tuple[RecoveryEvent, ...]:

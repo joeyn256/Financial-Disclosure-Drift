@@ -48,6 +48,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -60,27 +61,47 @@ from disclosure_drift.errors import (
     RawObjectIntegrityError,
 )
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
+from disclosure_drift.m3.receipt import ReceiptValidationError, inspect_receipt
+from disclosure_drift.m3.recovery import (
+    RecoveryState,
+    inspect_recovery_state,
+    read_only_catalog,
+)
 from disclosure_drift.m3.request_plan import (
     M3_2A_BOOTSTRAP_ROUTES,
     RequestPlan,
+    derive_a_reachable,
     request_plan_from_document,
 )
-from disclosure_drift.paths import DataTree, PathPolicyError
+from disclosure_drift.paths import DataTree, PathPolicyError, relative_to_root
+from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.archive import ArchiveDefenceError, ArchiveMember, iter_members
 from disclosure_drift.sec.http_client import ProhibitedRetrievalError, SecClient
 from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
-from disclosure_drift.sec.observation_catalog import ObservationRecorder
+from disclosure_drift.sec.observation_catalog import (
+    ObservationRecorder,
+    RecoveryEvent,
+    load_observations,
+    open_recovery_state,
+    rebuild_audit_projection,
+    reconcile,
+    record_recovery_events,
+    resolve_recovery_state,
+    validate_audit_projection,
+)
 from disclosure_drift.sec.raw_store import LINEAGE_SUFFIX, RawStore
 from disclosure_drift.sec.request_ceiling import (
     PhysicalAttemptCeiling,
     RequestCeilingExhaustedError,
 )
-from disclosure_drift.sec.snapshots import SnapshotStore, SourceObservation
+from disclosure_drift.sec.snapshots import SnapshotIndex, SnapshotStore, SourceObservation
 from disclosure_drift.sec.source_registry import (
+    SOURCES,
     SourceSpec,
     filing_body_url_is_prohibited,
     require_registered,
 )
+from disclosure_drift.sec.urls import request_identity
 from disclosure_drift.storage.catalog import CatalogWriter
 from disclosure_drift.storage.sqlite import applied_versions, integrity_report
 
@@ -89,26 +110,43 @@ __all__ = [
     "FINAL_MIGRATION_VERSION",
     "M3_2B_DEPENDENT_ROUTES",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
+    "RECOVERY_ACTIONS",
     "AcquisitionEngine",
     "AcquisitionError",
     "AcquisitionGateError",
     "CatalogPreparation",
     "CatalogPreparationError",
+    "CatalogReconstruction",
     "ContainmentError",
+    "ContinuationProposal",
+    "ContinuationRequest",
+    "CumulativeAttemptAccounting",
+    "DriftListingEntry",
     "LiveOperationAuthorization",
     "LogicalRequest",
+    "ReconciliationItem",
+    "RecoveryActionResult",
     "RecoveryObservation",
+    "RepairRefusedError",
     "RequestOutcome",
+    "RequestReconciliation",
     "StorageBinding",
     "StoragePreparationError",
+    "StoreFinding",
     "WindowOutcome",
+    "apply_recovery_action",
+    "conditional_validators",
     "derive_logical_requests",
     "load_approved_plan",
     "observe_recovery_state",
     "prepare_operational_catalog",
     "prepare_storage",
+    "propose_continuation",
+    "reconcile_requests",
+    "reconstruct_catalog_state",
     "resolve_within",
     "route_is_streamed",
+    "verified_reusable_predecessor",
 ]
 
 #: The operational catalog's path relative to the external evidence root (contract §16).
@@ -141,6 +179,15 @@ _INSTANCE_KEY_PATTERN: Final = re.compile(r"^(?P<year>\d{4})QTR(?P<quarter>[1-4]
 #: not retrieved or not usably parsed", which is exactly the archival-absence and quarantined-body
 #: cases this driver must make durable rather than leave uncoded.
 _INDEX_ABSENT_REASON: Final = "INDEX_INSTANCE_UNAVAILABLE"
+
+#: Reason recorded when a REQUIRED non-quarterly-index M3.2A object is left terminally absent —
+#: its committed observation is ``failed`` or ``quarantined`` (registered under Decision 040 §4).
+#: It marks that the required object remains unavailable, and it coexists with — never replaces —
+#: a more specific defect code such as ``SEC_RESPONSE_MALFORMED`` or ``RAW_ARCHIVE_INVALID``.
+#: Quarterly index instances keep ``INDEX_INSTANCE_UNAVAILABLE``; stopped, interrupted,
+#: ceiling-exhausted, and not-attempted requests keep their run classifications and never receive
+#: this code merely for lacking an object; no M3.2B mapping is authorized.
+_REQUIRED_OBJECT_ABSENT_REASON: Final = "SOURCE_REQUIRED_OBJECT_UNAVAILABLE"
 
 #: Suffix filter for bulk-archive members. The submissions archive carries one JSON document per
 #: filer; the accepted archive reader applies this filter and validates every member it yields.
@@ -897,12 +944,39 @@ class WindowOutcome:
 
     @property
     def cache_hits(self) -> int:
-        """Count of conditional requests confirming a preserved snapshot (§22 ``CACHE_HITS``)."""
+        """Count of conditional requests lawfully confirming a preserved snapshot via ``304``.
+
+        **Decision 040 §6 vocabulary ruling:** this quantity is the future receipt's
+        ``not_modified_count`` — a request that was physically attempted with accepted validators
+        and reconciled against the preserved evidence. It must **not** populate the future
+        receipt's ``cache_hit_count``, which counts instances already satisfied and therefore
+        never requested (a continuation proposal reports those separately as
+        ``already_satisfied_excluded``). :attr:`not_modified_reuses` is the unambiguous name;
+        this accepted alias is retained for existing callers.
+        """
         return sum(
             1
             for outcome in self.outcomes
             if outcome.disposition == "satisfied_reused" and outcome.satisfies_requirement
         )
+
+    @property
+    def not_modified_reuses(self) -> int:
+        """Conditional requests physically attempted and lawfully reconciled as ``304`` reuse.
+
+        The future receipt's ``not_modified_count`` (Decision 040 §6), under a name no reader can
+        mistake for the not-requested exclusion count the receipt calls ``cache_hit_count``.
+        """
+        return self.cache_hits
+
+    @property
+    def byte_identical_duplicates(self) -> int:
+        """Physically retrieved ``200`` responses whose bytes matched preserved evidence.
+
+        The future receipt's ``duplicate_object_count`` (Decision 040 §6), as the
+        receipt-vocabulary name for :attr:`duplicates_reconciled`.
+        """
+        return self.duplicates_reconciled
 
     @property
     def planned_work_remains(self) -> bool:
@@ -1330,29 +1404,43 @@ class AcquisitionEngine:
             )
             raise ArchiveDefenceError(message, "RAW_ARCHIVE_INVALID")
 
-    @staticmethod
     def _with_absence_reason(
+        self,
         request: LogicalRequest,
         observation: SourceObservation,
     ) -> SourceObservation:
-        """Attach the registered absence reason when a required index instance is left absent.
+        """Attach the registered absence reason when a required object is left absent.
 
         The accepted response policy classifies a ``404`` on an archival path as absent evidence
         and deliberately attaches no reason code, because at that layer it is an ordinary outcome.
-        At *this* layer it is a required object left absent, and T2 packet §10 item 1 makes the
-        operational catalog the durable home of that fact. So the registered code is attached to
-        the observation before it is committed, rather than only to the in-memory outcome — a
-        reconciliation report read from the catalog alone must be able to see it.
+        At *this* layer it is a required object left absent, and the operational catalog is the
+        durable home of that fact (T2 packet §10 item 1; Decision 040 §5). So the registered code
+        is attached to the observation before it is committed, rather than only to the in-memory
+        outcome — a reconciliation report read from the catalog alone must be able to see it.
+
+        Two registered codes, split exactly as Decision 040 §4 fixes. A quarterly index instance
+        keeps ``INDEX_INSTANCE_UNAVAILABLE`` in every window, unchanged. Every other required
+        M3.2A request whose committed observation is terminally ``failed`` or ``quarantined``
+        additionally carries ``SOURCE_REQUIRED_OBJECT_UNAVAILABLE`` beside — never instead of —
+        any more specific defect code the policy already attached. The new mapping is bounded to
+        the M3.2A window; Decision 040 authorizes no M3.2B mapping.
         """
-        if request.source_id != _INDEX_ROUTE:
-            return observation
         if observation.outcome not in {"failed", "quarantined"}:
             return observation
-        if _INDEX_ABSENT_REASON in observation.reason_codes:
+        if request.source_id == _INDEX_ROUTE:
+            if _INDEX_ABSENT_REASON in observation.reason_codes:
+                return observation
+            return replace(
+                observation,
+                reason_codes=(*observation.reason_codes, _INDEX_ABSENT_REASON),
+            )
+        if self.window != "M3.2A":
+            return observation
+        if _REQUIRED_OBJECT_ABSENT_REASON in observation.reason_codes:
             return observation
         return replace(
             observation,
-            reason_codes=(*observation.reason_codes, _INDEX_ABSENT_REASON),
+            reason_codes=(*observation.reason_codes, _REQUIRED_OBJECT_ABSENT_REASON),
         )
 
     def _classify(
@@ -1573,3 +1661,1773 @@ def load_approved_plan(payload: bytes) -> RequestPlan:
     acquisition run.
     """
     return request_plan_from_document(payload)
+
+
+# =========================================================================== #
+# Stage T2.4 — recovery, reconciliation, resume boundaries, and drift control
+# (Decision 040 §§2–7. Everything below is read-only except the explicit
+#  recovery-action applier, which mutates only when invoked with one action.)
+# =========================================================================== #
+
+#: The four deterministic recovery-action classes Decision 040 §2 (T2.4-D) authorizes. A request
+#: naming anything else — including a would-be combined or list-valued action — is refused,
+#: never coerced, and never partially applied.
+RECOVERY_ACTIONS: Final[tuple[str, ...]] = (
+    "adopt-orphan",
+    "quarantine-partial",
+    "rebuild-projection",
+    "remove-stale-part",
+)
+
+#: The derived audit projection the rebuild action reconstructs — the accepted filename the
+#: recorder, the read-only inspector, and ``observation_catalog.reconcile`` all share.
+_PROJECTION_NAME: Final = "census_source_observations.jsonl"
+
+#: Registered reason codes whose presence on a committed observation is a schema-drift event for
+#: the deterministic drift listing (Decision 040 §2, T2.4-B). Whether an event blocks is read
+#: from the registry's own ``blocks_release`` metadata, never re-declared here: a retained
+#: unknown-field record and an ordinary living-source update are nonblocking, and every
+#: immutable-identity mutation, validator contradiction, malformed payload, and invalid archive
+#: blocks.
+_DRIFT_REASON_CODES: Final[tuple[str, ...]] = (
+    "PARSER_SCHEMA_DRIFT_OBSERVED",
+    "RAW_ARCHIVE_INVALID",
+    "RAW_ARCHIVE_MEMBER_REFUSED",
+    "SEC_RESPONSE_MALFORMED",
+    "SOURCE_CONTENT_UPDATED",
+    "SOURCE_DATED_ARTIFACT_CHANGED",
+    "SOURCE_IMMUTABLE_IDENTITY_MUTATED",
+    "SOURCE_VALIDATOR_CONTRADICTION",
+)
+
+#: The exhaustive continuation-state partition. Every item state ``reconcile_requests`` emits
+#: belongs to **exactly one** of the four sets below, and their union is the complete
+#: emitted-state vocabulary — enforced fail-closed at emission, so a new state can never fall
+#: through the partition silently. Continuation treatment is decided from this one mechanism:
+#:
+#: * **satisfying** — verified satisfying evidence; excluded from replay, never re-requested;
+#: * **retryable** — genuinely retryable open work under the accepted Decision 040 semantics
+#:   (failed, quarantined, stopped, absent, not attempted); included exactly once in the
+#:   continuation remainder, because the work is still owed and is re-acquired under its own
+#:   accounting, never reclassified in place;
+#: * **blocking** — a defect that explicitly refuses continuation; never counted satisfied, and
+#:   omitted from the transport remainder only because the whole proposal is refused;
+#: * **uncertain** — durable persistence or attribution cannot be established; the proposal is
+#:   ``UNDETERMINED`` and continuation is prohibited.
+_SATISFYING_ITEM_STATES: Final[frozenset[str]] = frozenset(
+    {
+        "satisfied_duplicate",
+        "satisfied_new",
+        "satisfied_not_modified",
+        "satisfied_superseding",
+    }
+)
+_RETRYABLE_ITEM_STATES: Final[frozenset[str]] = frozenset(
+    {"absent", "failed", "not_attempted", "quarantined", "stopped"}
+)
+_BLOCKING_ITEM_STATES: Final[frozenset[str]] = frozenset(
+    {"archive_lineage_missing_or_invalid", "hash_mismatch"}
+)
+_UNCERTAIN_ITEM_STATES: Final[frozenset[str]] = frozenset({"row_without_object"})
+_ITEM_STATE_VOCABULARY: Final[frozenset[str]] = (
+    _SATISFYING_ITEM_STATES
+    | _RETRYABLE_ITEM_STATES
+    | _BLOCKING_ITEM_STATES
+    | _UNCERTAIN_ITEM_STATES
+)
+
+#: Item conditions that escalate a retryable item to blocking treatment. A failed, quarantined,
+#: or absent item carrying one of these has residual evidence that cannot be lawfully retried
+#: without adjudication: its evidence is unusable or unverifiable, or its absence carries no
+#: registered terminal reason and is an adjudication defect rather than ordinary open work.
+_BLOCKING_ITEM_CONDITIONS: Final[frozenset[str]] = frozenset(
+    {"absence_without_terminal_reason", "unverifiable_evidence"}
+)
+
+#: The generic write-ahead state scenario Decision 041 §6 fixes for the T2.4 applier. Stored
+#: only in ``census_recovery_states``, whose schema does not constrain scenario vocabulary; it
+#: must never be inserted into ``census_recovery_events``, whose scenario set is separately
+#: CHECK-constrained.
+_T2_4_STATE_SCENARIO: Final = "t2_4_recovery_action"
+
+#: A staging spool's nonce, exactly as the accepted snapshot store names it:
+#: ``{registered source_id}-{uuid4 hex}.part``. Registered source identifiers contain no ``-``,
+#: so the rightmost ``-`` splits the route prefix from the nonce exactly.
+_SPOOL_NONCE: Final = re.compile(r"^[0-9a-f]{32}$")
+
+
+class RepairRefusedError(AcquisitionError):
+    """Raised when the explicit recovery applier refuses a requested action.
+
+    Refusal is the applier's default posture: an unknown or multi-action request, an action that
+    differs from the deterministic recommendation, a stale or already-resolved target, any
+    ``UNDETERMINED`` state, and any request whose one authorized primitive cannot be scoped to
+    exactly the named target without unrelated mutation are all refused before anything mutates.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# T2.4-A — catalog-authoritative reconstruction
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CatalogReconstruction:
+    """Catalog-authoritative state, rebuilt fresh at one continuation boundary.
+
+    Decision 040 §2 (T2.4-A): the operational catalog is the durable source of truth. This is
+    the composition that opens it read-only, loads every durable observation in the catalog's
+    own deterministic order, and adopts them into a **fresh** :class:`SnapshotStore`. An earlier
+    process's mutable in-memory snapshot state is discarded by construction — this composition
+    simply does not accept one, so nothing can inherit it. Quarantined, failed, and otherwise
+    unusable observations are adopted as *facts* (reconciliation must see them) but are never
+    selectable for reuse: selection flows through the accepted ``latest_for`` usability rules,
+    and :func:`verified_reusable_predecessor` re-verifies immutable evidence at the point of
+    reuse.
+    """
+
+    observations: tuple[SourceObservation, ...]
+    store: SnapshotStore
+    archive_member_counts: Mapping[str, int]
+    archive_lineage_mismatches: Mapping[str, int]
+    blocked_recovery_states: int
+    blocked_t2_4_recovery_states: int
+    """Blocked write-ahead states carrying the exact T2.4 scenario.
+
+    A subset of :attr:`blocked_recovery_states`. Kept separately because an unresolved
+    ``t2_4_recovery_action`` block means a T2.4 recovery mutation may have begun without its
+    completed event and exact resolution — persistence-uncertain state that a continuation
+    proposal must classify ``UNDETERMINED``, not merely unsafe.
+    """
+
+    def latest_any(self, source_id: str, identity: str) -> SourceObservation | None:
+        """The newest observation for one request identity, usable or not."""
+        for observation in reversed(self.observations):
+            if observation.source_id == source_id and observation.identity == identity:
+                return observation
+        return None
+
+    def by_id(self, observation_id: str) -> SourceObservation | None:
+        """The observation carrying ``observation_id``, or ``None``."""
+        for observation in self.observations:
+            if observation.observation_id == observation_id:
+                return observation
+        return None
+
+
+def reconstruct_catalog_state(
+    *,
+    catalog_path: Path,
+    storage: StorageBinding,
+) -> CatalogReconstruction:
+    """Rebuild lawful in-memory state from the durable catalog, writing nothing.
+
+    The connection is the read-only inspector's own (``PRAGMA query_only``), so a write is
+    impossible rather than merely unintended. Archive-member lineage is summarized per owning
+    observation as bounded aggregates — a count and a mismatch count against the owner's own
+    recorded archive identity — never materialized row by row, so a bulk archive's lineage
+    cannot pull the whole expansion into memory.
+
+    Raises:
+        AcquisitionGateError: the catalog does not exist; reconstruction refuses to invent one.
+    """
+    if not Path(catalog_path).is_file():
+        message = (
+            "the operational catalog does not exist; catalog-authoritative reconstruction "
+            "refuses to begin from anything but the durable catalog"
+        )
+        raise AcquisitionGateError(message)
+
+    with read_only_catalog(Path(catalog_path)) as connection:
+        observations = load_observations(connection)
+        member_counts: dict[str, int] = {}
+        for row in connection.execute(
+            "SELECT observation_id, COUNT(*) AS members FROM census_archive_members "
+            "GROUP BY observation_id ORDER BY observation_id"
+        ).fetchall():
+            member_counts[str(row["observation_id"])] = int(row["members"])
+        mismatches: dict[str, int] = {}
+        for observation in observations:
+            if member_counts.get(observation.observation_id, 0) == 0:
+                continue
+            mismatch_row = connection.execute(
+                "SELECT COUNT(*) AS mismatched FROM census_archive_members "
+                "WHERE observation_id = ? AND (archive_relative_path IS NOT ? "
+                "OR archive_sha256 IS NOT ?)",
+                (
+                    observation.observation_id,
+                    observation.relative_storage_path,
+                    observation.logical_sha256,
+                ),
+            ).fetchone()
+            mismatched = int(mismatch_row["mismatched"])
+            if mismatched:
+                mismatches[observation.observation_id] = mismatched
+        blocked = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM census_recovery_states WHERE resolution_state = 'blocked'"
+            ).fetchone()[0]
+        )
+        blocked_t2_4 = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM census_recovery_states "
+                "WHERE resolution_state = 'blocked' AND scenario = ?",
+                (_T2_4_STATE_SCENARIO,),
+            ).fetchone()[0]
+        )
+
+    store = SnapshotStore(storage.tree, storage.raw_store)
+    store.adopt(observations)
+    return CatalogReconstruction(
+        observations=observations,
+        store=store,
+        archive_member_counts=member_counts,
+        archive_lineage_mismatches=mismatches,
+        blocked_recovery_states=blocked,
+        blocked_t2_4_recovery_states=blocked_t2_4,
+    )
+
+
+def verified_reusable_predecessor(
+    reconstruction: CatalogReconstruction,
+    source_id: str,
+    identity: str | None = None,
+) -> SnapshotIndex | None:
+    """The latest usable predecessor for one identity, re-verified now — or ``None``.
+
+    Lawful reuse demands more than a row (Decision 040 §2, T2.4-A/C): the latest usable
+    observation must resolve through the accepted evidence-owner chain, the owning object must
+    still hash exactly as recorded, and an archive owner must carry complete, consistent member
+    lineage. Anything less returns ``None`` — a quarantined, failed, missing, tampered, or
+    lineage-less predecessor is simply not reusable, and the distinction is reported by the
+    reconciliation rather than leaked here as an exception.
+    """
+    index = reconstruction.store.latest_for(source_id, identity)
+    if not index.has_snapshot or index.evidence_observation_id is None:
+        return None
+    owner = reconstruction.by_id(index.evidence_observation_id)
+    if owner is None:
+        return None
+    try:
+        reconstruction.store.verify_payload(owner)
+    except (DisclosureDriftError, OSError):
+        return None
+    spec = require_registered(source_id)
+    if spec.expected_content == "zip":
+        if reconstruction.archive_member_counts.get(owner.observation_id, 0) == 0:
+            return None
+        if reconstruction.archive_lineage_mismatches.get(owner.observation_id, 0):
+            return None
+    return index
+
+
+def conditional_validators(
+    reconstruction: CatalogReconstruction,
+    source_id: str,
+    identity: str | None = None,
+) -> tuple[str | None, str | None] | None:
+    """``(etag, last_modified)`` drawn from a lawful verified predecessor, else ``None``.
+
+    Decision 040 §2 (T2.4-C): validators are supplied **only** from a predecessor that verifies
+    at the point of reuse — never from an unverified, quarantined, superseded-away, or
+    lineage-less row. A predecessor carrying neither validator yields ``None`` rather than an
+    empty pair, because a conditional request with nothing to condition on is not one.
+    """
+    index = verified_reusable_predecessor(reconstruction, source_id, identity)
+    if index is None:
+        return None
+    if index.etag is None and index.last_modified is None:
+        return None
+    return (index.etag, index.last_modified)
+
+
+# --------------------------------------------------------------------------- #
+# T2.4-B — deterministic reconciliation and drift inspection (read-only)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class ReconciliationItem:
+    """One planned logical request's durable, catalog-derived state."""
+
+    position: int
+    source_id: str
+    identity_label: str
+    request_identity: str
+    state: str
+    observation_id: str | None
+    verified: bool
+    excluded_from_continuation: bool
+    attempts: int
+    reason_codes: tuple[str, ...]
+    conditions: tuple[str, ...]
+
+    def as_record(self) -> Mapping[str, object]:
+        """Deterministic mapping for serialization and comparison."""
+        return {
+            "attempts": self.attempts,
+            "conditions": list(self.conditions),
+            "excluded_from_continuation": self.excluded_from_continuation,
+            "identity_label": self.identity_label,
+            "observation_id": self.observation_id,
+            "position": self.position,
+            "reason_codes": list(self.reason_codes),
+            "request_identity": self.request_identity,
+            "source_id": self.source_id,
+            "state": self.state,
+            "verified": self.verified,
+        }
+
+
+def _classify_item(item: ReconciliationItem) -> str:
+    """Assign one reconciliation item to exactly one continuation-treatment category.
+
+    Total and fail-closed over :data:`_ITEM_STATE_VOCABULARY`: a state outside the partition
+    raises instead of falling through, so every item contributes exactly once to continuation
+    treatment. A retryable item whose conditions show unusable or unverifiable residual
+    evidence, or an absence carrying no registered terminal reason, escalates to ``blocking`` —
+    that evidence cannot be lawfully retried without adjudication.
+    """
+    state = item.state
+    if state in _UNCERTAIN_ITEM_STATES:
+        return "uncertain"
+    if state in _BLOCKING_ITEM_STATES:
+        return "blocking"
+    if state in _SATISFYING_ITEM_STATES:
+        return "satisfying"
+    if state in _RETRYABLE_ITEM_STATES:
+        if any(condition in _BLOCKING_ITEM_CONDITIONS for condition in item.conditions):
+            return "blocking"
+        return "retryable"
+    message = (
+        f"reconciliation emitted item state {state!r}, which is outside the exhaustive "
+        "continuation-state partition; an unclassifiable state refuses rather than falls "
+        "through every set"
+    )
+    raise AcquisitionGateError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class StoreFinding:
+    """One store-level inconsistency the reconciliation surfaces without acting on it."""
+
+    kind: str
+    relative_path: str | None
+    observation_id: str | None
+
+    def as_record(self) -> Mapping[str, object]:
+        """Deterministic mapping for serialization and comparison."""
+        return {
+            "kind": self.kind,
+            "observation_id": self.observation_id,
+            "relative_path": self.relative_path,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DriftListingEntry:
+    """One committed observation carrying registered drift reasons."""
+
+    observation_id: str
+    source_id: str
+    request_identity: str
+    reason_codes: tuple[str, ...]
+    blocking: bool
+
+    def as_record(self) -> Mapping[str, object]:
+        """Deterministic mapping for serialization and comparison."""
+        return {
+            "blocking": self.blocking,
+            "observation_id": self.observation_id,
+            "reason_codes": list(self.reason_codes),
+            "request_identity": self.request_identity,
+            "source_id": self.source_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RequestReconciliation:
+    """The deterministic plan-to-catalog reconciliation for one window.
+
+    Read-only by construction: every input is durable state, every output is in-memory, and
+    identical inputs produce a byte-identical :meth:`as_record` serialization. Item-level
+    absence identities live here and in the catalog — never in a receipt (Decision 040 §9).
+    """
+
+    window: str
+    plan_sha256: str
+    items: tuple[ReconciliationItem, ...]
+    out_of_plan: tuple[tuple[str, str], ...]
+    store_findings: tuple[StoreFinding, ...]
+    drift: tuple[DriftListingEntry, ...]
+    blocked_recovery_states: int
+
+    @property
+    def totals(self) -> Mapping[str, int]:
+        """Per-state item totals; always sums to the planned logical request count."""
+        counts: dict[str, int] = {}
+        for item in self.items:
+            counts[item.state] = counts.get(item.state, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @property
+    def absences(self) -> tuple[ReconciliationItem, ...]:
+        """Planned requests whose terminal disposition left the required object absent."""
+        return tuple(
+            item for item in self.items if item.state in {"absent", "failed", "quarantined"}
+        )
+
+    @property
+    def absences_without_terminal_reason(self) -> tuple[ReconciliationItem, ...]:
+        """Absences carrying no registered reason code — each one an adjudication defect."""
+        return tuple(item for item in self.absences if not item.reason_codes)
+
+    @property
+    def already_satisfied_excluded_count(self) -> int:
+        """Every request excluded from the future continuation run.
+
+        The future receipt's ``cache_hit_count`` (Decision 040 §6): already satisfied by
+        verified evidence and therefore never requested again. This is a **snapshot over the
+        whole durable history**, so it deliberately **overlaps** the two historical disposition
+        counters below — a request whose satisfying evidence is a lawful ``304``
+        (:attr:`not_modified_count`) or a byte-identical ``200``
+        (:attr:`duplicate_object_count`) is *also* excluded here. The three snapshot counters
+        must never be summed as mutually exclusive outcomes. The future receipt mapping stays:
+        excluded request → ``cache_hit_count``; physically requested lawful ``304`` →
+        ``not_modified_count``; physically requested byte-identical ``200`` →
+        ``duplicate_object_count``.
+        """
+        return sum(1 for item in self.items if item.excluded_from_continuation)
+
+    @property
+    def not_modified_count(self) -> int:
+        """Items whose satisfying evidence is a lawful conditional ``304`` reuse.
+
+        The future receipt's ``not_modified_count`` (Decision 040 §6): a request physically
+        attempted with accepted validators and reconciled against preserved evidence. As a
+        historical disposition counter it may overlap
+        :attr:`already_satisfied_excluded_count` — the same item counts in both — so the two
+        are never additive.
+        """
+        return sum(1 for item in self.items if item.state == "satisfied_not_modified")
+
+    @property
+    def duplicate_object_count(self) -> int:
+        """Items whose satisfying evidence is a byte-identical ``200`` reconciliation.
+
+        The future receipt's ``duplicate_object_count`` (Decision 040 §6): a physically
+        retrieved response whose bytes matched preserved immutable evidence. As a historical
+        disposition counter it may overlap :attr:`already_satisfied_excluded_count` — the same
+        item counts in both — so the two are never additive.
+        """
+        return sum(1 for item in self.items if item.state == "satisfied_duplicate")
+
+    @property
+    def blocking_drift(self) -> tuple[DriftListingEntry, ...]:
+        """Drift events whose registered reasons block."""
+        return tuple(entry for entry in self.drift if entry.blocking)
+
+    @property
+    def nonblocking_drift(self) -> tuple[DriftListingEntry, ...]:
+        """Drift events observed and retained without blocking."""
+        return tuple(entry for entry in self.drift if not entry.blocking)
+
+    @property
+    def is_clean(self) -> bool:
+        """Whether nothing requires adjudication, repair, or referral."""
+        return (
+            not self.absences
+            and not self.out_of_plan
+            and not self.store_findings
+            and not self.blocking_drift
+            and self.blocked_recovery_states == 0
+            and all(_classify_item(item) == "satisfying" for item in self.items)
+            and all(not item.conditions for item in self.items)
+        )
+
+    def as_record(self) -> Mapping[str, object]:
+        """Deterministic mapping: identical inputs serialize byte-identically."""
+        return {
+            "blocked_recovery_states": self.blocked_recovery_states,
+            "drift": [entry.as_record() for entry in self.drift],
+            "items": [item.as_record() for item in self.items],
+            "out_of_plan": [list(pair) for pair in self.out_of_plan],
+            "plan_sha256": self.plan_sha256,
+            "store_findings": [finding.as_record() for finding in self.store_findings],
+            "totals": dict(self.totals),
+            "window": self.window,
+        }
+
+
+def _planned_request_identity(request: LogicalRequest) -> str:
+    """The normalized request identity the driver records for one planned request."""
+    spec = require_registered(request.source_id)
+    url = spec.url(**dict(request.parameters))
+    return request_identity(request.source_id, url, dict(request.parameters))
+
+
+def _drift_flags(reason_codes: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    """The drift-family codes on one observation, and whether any of them blocks."""
+    family = tuple(code for code in reason_codes if code in _DRIFT_REASON_CODES)
+    blocking = any(REASON_CODES[code].blocks_release for code in family if code in REASON_CODES)
+    return family, blocking
+
+
+def _evidence_conditions(
+    reconstruction: CatalogReconstruction,
+    observation: SourceObservation,
+) -> tuple[str, ...]:
+    """Why a usable-looking observation's evidence does not verify, as stable conditions."""
+    conditions: list[str] = []
+    owner_id = observation.reused_observation_id or observation.observation_id
+    owner = reconstruction.by_id(owner_id) or observation
+    try:
+        path = reconstruction.store.payload_path(owner)
+    except DisclosureDriftError:
+        return ("row_without_object",)
+    if not path.is_file():
+        return ("row_without_object",)
+    try:
+        reconstruction.store.verify_payload(owner)
+    except (DisclosureDriftError, OSError):
+        conditions.append("hash_mismatch")
+    spec = SOURCES.get(observation.source_id)
+    if spec is not None and spec.expected_content == "zip":
+        members = reconstruction.archive_member_counts.get(owner.observation_id, 0)
+        mismatched = reconstruction.archive_lineage_mismatches.get(owner.observation_id, 0)
+        if members == 0 or mismatched:
+            conditions.append("archive_lineage_missing_or_invalid")
+    return tuple(conditions)
+
+
+def _item_for(
+    position: int,
+    request: LogicalRequest,
+    reconstruction: CatalogReconstruction,
+    in_flight_request_identity: str | None,
+) -> ReconciliationItem:
+    """Derive one planned request's item record from durable state alone."""
+    identity = _planned_request_identity(request)
+    predecessor = verified_reusable_predecessor(reconstruction, request.source_id, identity)
+    latest = reconstruction.latest_any(request.source_id, identity)
+    conditions: list[str] = []
+
+    if predecessor is not None and predecessor.observation_id is not None:
+        satisfying = reconstruction.by_id(predecessor.observation_id)
+        state = {
+            "stored_new": "satisfied_new",
+            "superseded": "satisfied_superseding",
+            "unchanged_content": "satisfied_duplicate",
+            "reused_snapshot": "satisfied_not_modified",
+        }[satisfying.outcome if satisfying is not None else "stored_new"]
+        observation_id = predecessor.observation_id
+        verified = True
+        excluded = True
+        attempts = satisfying.attempts if satisfying is not None else 0
+        reason_codes = satisfying.reason_codes if satisfying is not None else ()
+    elif latest is None:
+        state = "not_attempted"
+        observation_id = None
+        verified = False
+        excluded = False
+        attempts = 0
+        reason_codes = ()
+        if identity == in_flight_request_identity:
+            state = "stopped"
+            conditions.append("receiptless_in_flight")
+    else:
+        observation_id = latest.observation_id
+        verified = False
+        excluded = False
+        attempts = latest.attempts
+        reason_codes = latest.reason_codes
+        if latest.outcome == "quarantined":
+            state = "quarantined"
+        elif latest.outcome == "failed":
+            state = "absent" if latest.http_status == 404 else "failed"
+        else:
+            evidence = _evidence_conditions(reconstruction, latest)
+            conditions.extend(evidence)
+            if "row_without_object" in evidence:
+                state = "row_without_object"
+            elif "archive_lineage_missing_or_invalid" in evidence:
+                state = "archive_lineage_missing_or_invalid"
+            elif "hash_mismatch" in evidence:
+                state = "hash_mismatch"
+            else:
+                state = "failed"
+                conditions.append("unverifiable_evidence")
+
+    if state in {"absent", "failed", "quarantined"} and not reason_codes:
+        conditions.append("absence_without_terminal_reason")
+    family, blocking = _drift_flags(tuple(reason_codes))
+    if family:
+        conditions.append("drift_blocking" if blocking else "drift_nonblocking")
+
+    return ReconciliationItem(
+        position=position,
+        source_id=request.source_id,
+        identity_label=request.identity_label,
+        request_identity=identity,
+        state=state,
+        observation_id=observation_id,
+        verified=verified,
+        excluded_from_continuation=excluded,
+        attempts=attempts,
+        reason_codes=tuple(reason_codes),
+        conditions=tuple(conditions),
+    )
+
+
+def reconcile_requests(
+    *,
+    plan: RequestPlan,
+    reconstruction: CatalogReconstruction,
+    storage: StorageBinding,
+    in_flight_request_identity: str | None = None,
+) -> RequestReconciliation:
+    """Reconcile the approved plan against durable catalog and object state. Writes nothing.
+
+    Output order is the plan's own deterministic expansion order; store findings and drift
+    entries are sorted; identical inputs produce a byte-identical serialization. Detection
+    never repairs: an orphan, a partial, a missing referent, or blocking drift is *reported*,
+    and every mutation belongs to the separately invoked recovery applier.
+    """
+    requests = derive_logical_requests(plan)
+    items = tuple(
+        _item_for(position, request, reconstruction, in_flight_request_identity)
+        for position, request in enumerate(requests)
+    )
+    for item in items:
+        if item.state not in _ITEM_STATE_VOCABULARY:
+            message = (
+                f"reconciliation emitted item state {item.state!r} for "
+                f"{item.identity_label!r}, which is outside the exhaustive continuation-state "
+                "vocabulary; emission refuses rather than letting a state fall through the "
+                "partition"
+            )
+            raise AcquisitionGateError(message)
+
+    planned = {(request.source_id, _planned_request_identity(request)) for request in requests}
+    out_of_plan = tuple(
+        sorted(
+            {
+                (observation.source_id, observation.identity)
+                for observation in reconstruction.observations
+                if (observation.source_id, observation.identity) not in planned
+            }
+        )
+    )
+
+    sweep = observe_recovery_state(
+        storage=storage,
+        observations=reconstruction.observations,
+        ceiling=PhysicalAttemptCeiling(0),
+    )
+    findings: list[StoreFinding] = []
+    for relative in sweep.partial_objects:
+        findings.append(
+            StoreFinding(kind="partial_object", relative_path=relative, observation_id=None)
+        )
+    for relative in sweep.orphan_objects:
+        findings.append(
+            StoreFinding(kind="orphan_object", relative_path=relative, observation_id=None)
+        )
+    referents = {
+        observation.relative_storage_path: observation.observation_id
+        for observation in reconstruction.observations
+        if observation.relative_storage_path
+    }
+    for relative in sweep.missing_referents:
+        findings.append(
+            StoreFinding(
+                kind="row_without_object",
+                relative_path=relative,
+                observation_id=referents.get(relative),
+            )
+        )
+    findings.sort(key=lambda finding: (finding.kind, finding.relative_path or ""))
+
+    drift: list[DriftListingEntry] = []
+    for observation in reconstruction.observations:
+        family, blocking = _drift_flags(observation.reason_codes)
+        if family:
+            drift.append(
+                DriftListingEntry(
+                    observation_id=observation.observation_id,
+                    source_id=observation.source_id,
+                    request_identity=observation.identity,
+                    reason_codes=family,
+                    blocking=blocking,
+                )
+            )
+    drift.sort(key=lambda entry: entry.observation_id)
+
+    return RequestReconciliation(
+        window=plan.acquisition_window,
+        plan_sha256=plan.request_plan_sha256,
+        items=items,
+        out_of_plan=out_of_plan,
+        store_findings=tuple(findings),
+        drift=tuple(drift),
+        blocked_recovery_states=reconstruction.blocked_recovery_states,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# T2.4-C — continuation proposal and conservative attempt accounting
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CumulativeAttemptAccounting:
+    """The Decision 040 §7 cumulative consumed-attempt calculation, or its refusal.
+
+    Exactly three addends, each counted once: the resolvable predecessor receipt chain's
+    cumulative attempts; committed observation attempts deterministically attributed after the
+    final terminating receipt; and the full registered ``A_reachable`` for at most one
+    identifiable receiptless in-flight request. Any attribution ambiguity is ``UNDETERMINED``
+    and prohibits continuation — never estimated, never rounded down.
+    """
+
+    chain_consumed: int
+    post_receipt_attempts: int
+    in_flight_charge: int
+    in_flight_request_identity: str | None
+    undetermined: bool
+    basis: str
+
+    @property
+    def cumulative_consumed(self) -> int:
+        """The conservative cumulative total charged against the approved ceiling."""
+        return self.chain_consumed + self.post_receipt_attempts + self.in_flight_charge
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationRequest:
+    """One remaining logical request, with lawful conditional validators where they exist."""
+
+    position: int
+    source_id: str
+    identity_label: str
+    request_identity: str
+    etag: str | None
+    last_modified: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationProposal:
+    """A deterministic, read-only continuation proposal (Decision 040 §2, T2.4-C).
+
+    A proposal only: continuation **authorization** remains an explicit later owner act, and
+    continuation **execution** — ``m3 acquire --resume-from`` wiring — remains deferred to the
+    operator-surface stage. Nothing here places a request, constructs a transport, emits a
+    receipt, or mutates any durable state.
+    """
+
+    permitted: bool
+    determination: str
+    refusal_reasons: tuple[str, ...]
+    window: str
+    plan_sha256: str
+    approved_ceiling: int
+    predecessor_receipt_id: str | None
+    receipt_chain: tuple[str, ...]
+    accounting: CumulativeAttemptAccounting
+    remaining_headroom: int
+    worst_case_remaining_attempts: int
+    fits: bool
+    already_satisfied_excluded: tuple[str, ...]
+    remaining: tuple[ContinuationRequest, ...]
+    reconciliation: RequestReconciliation
+    inspection: RecoveryState
+
+    @property
+    def already_satisfied_excluded_count(self) -> int:
+        """The future receipt's ``cache_hit_count``: satisfied, so never requested."""
+        return len(self.already_satisfied_excluded)
+
+
+def _parse_receipt_instant(value: object) -> datetime | None:
+    """Parse one RFC 3339 UTC instant; ``None`` when it cannot be trusted for ordering."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _segment_after_receipt(
+    observations: Sequence[SourceObservation],
+    completed_at: datetime,
+) -> tuple[int, int, frozenset[tuple[str, str]], str | None]:
+    """Split committed attempts around the final terminating receipt, or explain why not.
+
+    Returns ``(pre_attempts, post_attempts, post_identities, undetermined_basis)``. A row whose
+    instant is unparseable, or that coincides exactly with the receipt boundary, cannot be
+    attributed uniquely — that is ``UNDETERMINED``, not a rounding choice.
+    """
+    pre_attempts = 0
+    post_attempts = 0
+    post_identities: set[tuple[str, str]] = set()
+    for observation in observations:
+        instant = _parse_receipt_instant(observation.retrieved_at_utc)
+        if instant is None:
+            return (
+                0,
+                0,
+                frozenset(),
+                (
+                    f"observation {observation.observation_id} carries no attributable UTC "
+                    "instant, so the post-receipt attempt segment cannot be attributed uniquely"
+                ),
+            )
+        if instant == completed_at:
+            return (
+                0,
+                0,
+                frozenset(),
+                (
+                    f"observation {observation.observation_id} coincides exactly with the "
+                    "terminating receipt boundary, so its segment cannot be attributed uniquely"
+                ),
+            )
+        if instant > completed_at:
+            post_attempts += observation.attempts
+            post_identities.add((observation.source_id, observation.identity))
+        else:
+            pre_attempts += observation.attempts
+    return pre_attempts, post_attempts, frozenset(post_identities), None
+
+
+@dataclass(frozen=True, slots=True)
+class _SpoolInterpretation:
+    """What the staging spools durably identify, or why they cannot be interpreted."""
+
+    routes: tuple[str, ...]
+    undetermined_basis: str | None
+
+
+def _interpret_staging_spools(tree: DataTree) -> _SpoolInterpretation:
+    """Interpret staging ``.part`` spools by the accepted naming structure, fail-closed.
+
+    A spool identifies a **route** only, and only when it is a regular file contained in the
+    accepted staging root whose name parses exactly as
+    ``{registered source_id}-{32-hex nonce}.part`` — the structure the accepted snapshot store
+    writes. A symlinked staging root, a symlinked or escaping spool, a prefix that is not a
+    registered source identifier, and a malformed nonce are each refused as ``UNDETERMINED``:
+    an ambiguous generic string split never stands in for the accepted structure, and
+    uncertainty never becomes a zero charge.
+    """
+    staging = tree.staging
+    if staging.is_symlink():
+        return _SpoolInterpretation(
+            (), "the staging root is a symbolic link, so spool evidence cannot be trusted"
+        )
+    if not staging.is_dir():
+        return _SpoolInterpretation((), None)
+    resolved_staging = Path(os.path.realpath(staging))
+    routes: list[str] = []
+    for path in sorted(staging.rglob("*.part")):
+        if path.is_symlink():
+            return _SpoolInterpretation(
+                (),
+                f"staging spool {path.name!r} is a symbolic link and is refused as "
+                "identification evidence",
+            )
+        if not path.is_file():
+            return _SpoolInterpretation(
+                (), f"staging entry {path.name!r} is not a regular spool file"
+            )
+        resolved = Path(os.path.realpath(path))
+        if resolved_staging != resolved.parent and resolved_staging not in resolved.parents:
+            return _SpoolInterpretation(
+                (), f"staging spool {path.name!r} resolves outside the accepted staging root"
+            )
+        prefix, separator, nonce = path.name.removesuffix(".part").rpartition("-")
+        if not separator or prefix not in SOURCES or _SPOOL_NONCE.fullmatch(nonce) is None:
+            return _SpoolInterpretation(
+                (),
+                f"staging spool {path.name!r} does not parse as the accepted "
+                "'{source_id}-{uuid}.part' structure, so its route identity cannot be "
+                "established",
+            )
+        routes.append(prefix)
+    return _SpoolInterpretation(tuple(routes), None)
+
+
+def _contradicting_store_evidence(
+    tree: DataTree,
+    observations: Sequence[SourceObservation],
+) -> tuple[str, ...]:
+    """Unaccounted raw-store artifacts that contradict any single lawful in-flight identity.
+
+    Raw-side ``.part`` partials, orphan objects, and stray lineage intents each mark durable
+    activity with no lawful route identity of their own. When any exists, a single in-flight
+    request cannot reasonably be the whole story, so identification refuses rather than
+    charging one request and silently zero-charging the rest. Read-only, and symlink-averse
+    like the accepted read-only observer.
+    """
+    recorded = {
+        observation.relative_storage_path
+        for observation in observations
+        if observation.relative_storage_path
+    }
+    findings: list[str] = []
+    for root in (tree.raw_bulk, tree.raw_indexes, tree.raw_filings):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.name.endswith(".reason"):
+                continue
+            relative = tree.relative(path)
+            if path.name.endswith(LINEAGE_SUFFIX):
+                object_path = path.with_name(path.name.removesuffix(LINEAGE_SUFFIX))
+                object_relative = tree.relative(object_path)
+                if object_relative not in recorded and not object_path.exists():
+                    findings.append(relative)
+                continue
+            if path.name.endswith(".part") or relative not in recorded:
+                findings.append(relative)
+    return tuple(sorted(findings))
+
+
+def _identify_in_flight(
+    requests: Sequence[LogicalRequest],
+    reconstruction: CatalogReconstruction,
+    post_identities: frozenset[tuple[str, str]],
+    spool_routes: tuple[str, ...],
+) -> tuple[str | None, str | None]:
+    """The one durably identified receiptless in-flight request, or why none can be named.
+
+    Identification is evidence-based, never positional — plan-order position alone may never
+    identify the request. A staging spool identifies a route; it identifies a logical request
+    only when exactly one relevant spool exists, its route parses uniquely, exactly one
+    unresolved planned request uses that route, every preceding planned request carries durable
+    satisfying or terminal evidence, and no later request shows post-receipt activity. Any
+    other reading — a route that disagrees with the sequential position, a shared route, or
+    more than one possible in-flight request — is ``UNDETERMINED``, never a guess and never a
+    zero charge.
+    """
+    if len(spool_routes) > 1:
+        return None, (
+            f"{len(spool_routes)} staging spools exist, so more than one in-flight request "
+            "appears possible"
+        )
+
+    identities = [_planned_request_identity(request) for request in requests]
+    unresolved: list[int] = []
+    for position, request in enumerate(requests):
+        satisfied = (
+            verified_reusable_predecessor(reconstruction, request.source_id, identities[position])
+            is not None
+        )
+        has_row = reconstruction.latest_any(request.source_id, identities[position]) is not None
+        if not satisfied and not has_row:
+            unresolved.append(position)
+
+    if not spool_routes:
+        return None, None
+
+    route = spool_routes[0]
+    matching = [position for position in unresolved if requests[position].source_id == route]
+    if not matching:
+        return None, (
+            f"the staging spool identifies route {route!r}, but no unresolved planned request "
+            "uses that route; the durable evidence contradicts every candidate identity"
+        )
+    if len(matching) > 1:
+        return None, (
+            f"{len(matching)} unresolved planned requests share the spool's route {route!r}, "
+            "so the in-flight logical request cannot be identified uniquely"
+        )
+    candidate = matching[0]
+    if unresolved[0] != candidate:
+        return None, (
+            f"the staging spool's route {route!r} disagrees with the first unresolved planned "
+            "request in the sequential engine's order; plan-order position alone may never "
+            "identify the request, so the contradiction is UNDETERMINED"
+        )
+    for position in range(candidate + 1, len(requests)):
+        if (requests[position].source_id, identities[position]) in post_identities:
+            return None, (
+                "post-receipt activity exists for a request after the identified one, so more "
+                "than one in-flight request appears possible"
+            )
+    return identities[candidate], None
+
+
+def propose_continuation(
+    *,
+    plan: RequestPlan,
+    receipt_chain_head: Path,
+    catalog_path: Path,
+    storage: StorageBinding,
+    window: str,
+    approved_ceiling: int,
+) -> ContinuationProposal:
+    """Derive the deterministic continuation proposal for one interrupted window.
+
+    Read-only, and bound to everything Decision 040 §2 (T2.4-C) names: the predecessor
+    receipt-chain identity, the exact plan hash, the exact acquisition window, the exact
+    approved ceiling, the durable catalog and object state, and the cumulative attempt
+    evidence. Every refusal is carried in the result rather than raised, so a refused proposal
+    is itself deterministic evidence; only caller errors (a missing catalog or head receipt)
+    raise.
+
+    Raises:
+        AcquisitionGateError: the window is not an accepted acquisition window.
+        RecoveryInspectionError: the catalog or the head receipt does not exist.
+    """
+    if window not in ACQUISITION_WINDOWS:
+        message = f"window {window!r} is not one of the accepted acquisition windows"
+        raise AcquisitionGateError(message)
+
+    refusals: list[str] = []
+    if plan.acquisition_window != window:
+        refusals.append(
+            f"the approved plan is for window {plan.acquisition_window!r}, not {window!r}"
+        )
+    if approved_ceiling != plan.hard_request_ceiling:
+        refusals.append(
+            f"the supplied ceiling {approved_ceiling} does not equal the plan's approved "
+            f"ceiling {plan.hard_request_ceiling}; the ceiling is never reinterpreted"
+        )
+
+    inspection = inspect_recovery_state(
+        plan=plan,
+        receipt_chain_head=receipt_chain_head,
+        catalog_path=catalog_path,
+        data_root=storage.data_root,
+    )
+    reconstruction = reconstruct_catalog_state(catalog_path=catalog_path, storage=storage)
+    requests = derive_logical_requests(plan)
+
+    predecessor_receipt_id: str | None = None
+    completed_at: datetime | None = None
+    undetermined_basis: str | None = None
+    try:
+        head = inspect_receipt(Path(receipt_chain_head))
+    except (OSError, ReceiptValidationError) as exc:
+        refusals.append(f"the predecessor receipt cannot be read as a valid receipt: {exc}")
+        head = None
+    if head is not None:
+        predecessor_receipt_id = str(head["receipt_id"])
+        if head.get("invocation_mode") != "live":
+            refusals.append(
+                "the predecessor receipt is not a live acquisition receipt; a continuation "
+                "binds only to a live predecessor"
+            )
+        if head.get("acquisition_window") not in {None, window}:
+            refusals.append(
+                f"the predecessor receipt names window {head.get('acquisition_window')!r}, "
+                f"not {window!r}"
+            )
+        head_ceiling = head.get("approved_request_ceiling")
+        if head_ceiling is not None and head_ceiling != approved_ceiling:
+            refusals.append(
+                f"the predecessor receipt records approved ceiling {head_ceiling}, not "
+                f"{approved_ceiling}; the ceiling is never raised, reset, or replaced"
+            )
+        completed_at = _parse_receipt_instant(head.get("completed_at_utc"))
+        if completed_at is None:
+            undetermined_basis = (
+                "the predecessor receipt carries no attributable completion instant, so the "
+                "post-receipt attempt segment cannot be attributed uniquely"
+            )
+
+    chain_resolved = all(
+        condition.status == "MET"
+        for condition in inspection.conditions
+        if condition.number == "8.1"
+    )
+    if not chain_resolved and undetermined_basis is None:
+        undetermined_basis = (
+            "the predecessor receipt chain does not resolve, so cumulative consumption "
+            "cannot be established"
+        )
+
+    pre_attempts = 0
+    post_attempts = 0
+    post_identities: frozenset[tuple[str, str]] = frozenset()
+    if undetermined_basis is None and completed_at is not None:
+        pre_attempts, post_attempts, post_identities, undetermined_basis = _segment_after_receipt(
+            reconstruction.observations, completed_at
+        )
+    if undetermined_basis is None and pre_attempts > inspection.consumed_physical_attempts:
+        undetermined_basis = (
+            f"committed rows before the terminating receipt carry {pre_attempts} attempt(s) "
+            f"but the receipt chain records {inspection.consumed_physical_attempts}; the "
+            "evidence disagrees materially"
+        )
+
+    # In-flight identity is established from durable evidence only, never from plan position
+    # alone. A streamed spool dies in staging under the accepted `{source_id}-{uuid}.part`
+    # structure and identifies a route; raw-side partials, orphans, and stray lineage intents
+    # are unaccounted activity with no lawful route identity of their own. Committed
+    # post-receipt rows are already accounted exactly by `post_attempts` and are not in-flight
+    # evidence — with no spool and no contradicting artifact there is nothing in flight to
+    # charge, while any ambiguity is UNDETERMINED rather than a zero charge.
+    in_flight_identity: str | None = None
+    in_flight_charge = 0
+    if undetermined_basis is None:
+        spools = _interpret_staging_spools(storage.tree)
+        if spools.undetermined_basis is not None:
+            undetermined_basis = spools.undetermined_basis
+        else:
+            contradicting = _contradicting_store_evidence(storage.tree, reconstruction.observations)
+            if spools.routes:
+                in_flight_identity, in_flight_basis = _identify_in_flight(
+                    requests, reconstruction, post_identities, spools.routes
+                )
+                if in_flight_identity is None:
+                    undetermined_basis = in_flight_basis
+                elif contradicting:
+                    undetermined_basis = (
+                        f"{len(contradicting)} unaccounted raw-store artifact(s) exist beside "
+                        "the staging spool, so no single in-flight identity is uncontradicted "
+                        "and more than one in-flight request appears possible"
+                    )
+                    in_flight_identity = None
+                else:
+                    in_flight_charge = derive_a_reachable(SOURCES[spools.routes[0]])
+            elif contradicting:
+                undetermined_basis = (
+                    f"{len(contradicting)} unaccounted raw-store artifact(s) (a partial, an "
+                    "orphan, or a stray lineage intent) exist with no lawful route identity, "
+                    "so in-flight attribution cannot be established; uncertainty never becomes "
+                    "a zero charge"
+                )
+
+    accounting = CumulativeAttemptAccounting(
+        chain_consumed=inspection.consumed_physical_attempts,
+        post_receipt_attempts=post_attempts,
+        in_flight_charge=in_flight_charge,
+        in_flight_request_identity=in_flight_identity,
+        undetermined=undetermined_basis is not None,
+        basis=(
+            undetermined_basis
+            if undetermined_basis is not None
+            else "every attempt segment is attributed exactly once"
+        ),
+    )
+
+    reconciliation = reconcile_requests(
+        plan=plan,
+        reconstruction=reconstruction,
+        storage=storage,
+        in_flight_request_identity=in_flight_identity,
+    )
+
+    # The exhaustive continuation-state partition is the single mechanism deciding every
+    # item's treatment: satisfying items are excluded from replay; retryable items are the
+    # remainder, each included exactly once; blocking items refuse the whole proposal and are
+    # omitted from the transport remainder only because of that refusal; uncertain items make
+    # the proposal UNDETERMINED.
+    treatments = tuple((item, _classify_item(item)) for item in reconciliation.items)
+    already_satisfied = tuple(
+        item.identity_label for item, treatment in treatments if treatment == "satisfying"
+    )
+    blocking_items = tuple(item for item, treatment in treatments if treatment == "blocking")
+    uncertain_items = tuple(item for item, treatment in treatments if treatment == "uncertain")
+    remaining: list[ContinuationRequest] = []
+    for item, treatment in treatments:
+        if treatment != "retryable":
+            continue
+        validators = conditional_validators(reconstruction, item.source_id, item.request_identity)
+        etag, last_modified = validators if validators is not None else (None, None)
+        remaining.append(
+            ContinuationRequest(
+                position=item.position,
+                source_id=item.source_id,
+                identity_label=item.identity_label,
+                request_identity=item.request_identity,
+                etag=etag,
+                last_modified=last_modified,
+            )
+        )
+
+    cumulative = accounting.cumulative_consumed
+    remaining_headroom = max(0, approved_ceiling - cumulative)
+    worst_case = sum(derive_a_reachable(SOURCES[request.source_id]) for request in remaining)
+    fits = not accounting.undetermined and worst_case <= remaining_headroom
+
+    if accounting.undetermined:
+        refusals.append(f"cumulative attempt accounting is UNDETERMINED: {accounting.basis}")
+    if cumulative > approved_ceiling and not accounting.undetermined:
+        refusals.append(
+            f"cumulative consumption {cumulative} already exceeds the approved ceiling "
+            f"{approved_ceiling}; no further physical request may occur"
+        )
+    if not fits and not accounting.undetermined and remaining:
+        refusals.append(
+            f"the worst-case remainder ({worst_case} attempt(s)) does not fit the remaining "
+            f"headroom ({remaining_headroom}); stop for re-planning and a fresh exact owner "
+            "approval — the ceiling is never raised"
+        )
+    if inspection.determination != "SAFE":
+        refusals.append(
+            f"the read-only inspection is {inspection.determination}: {inspection.basis}"
+        )
+    if reconstruction.blocked_t2_4_recovery_states:
+        refusals.append(
+            f"{reconstruction.blocked_t2_4_recovery_states} unresolved t2_4_recovery_action "
+            "write-ahead state(s) remain blocked; a recovery mutation may have begun without "
+            "its completed event and exact resolution, so continuation is prohibited until "
+            "each is exactly resolved and a fresh inspection passes"
+        )
+    blocking_defects: list[str] = []
+    if blocking_items:
+        states = sorted({item.state for item in blocking_items})
+        blocking_defects.append(f"{len(blocking_items)} item(s) in blocking state(s) {states}")
+    if reconciliation.out_of_plan:
+        blocking_defects.append(f"{len(reconciliation.out_of_plan)} out-of-plan observation(s)")
+    if reconciliation.blocking_drift:
+        blocking_defects.append(f"{len(reconciliation.blocking_drift)} blocking drift event(s)")
+    if blocking_defects:
+        refusals.append(
+            "a blocking reconciliation defect refuses continuation: "
+            + "; ".join(blocking_defects)
+            + " — a blocking defect never counts as satisfied and never silently leaves the "
+            "remainder; it is omitted from the transport remainder only because this whole "
+            "proposal is refused"
+        )
+    if uncertain_items:
+        labels = sorted(item.identity_label for item in uncertain_items)
+        refusals.append(
+            f"durable persistence cannot be established for {len(uncertain_items)} item(s) "
+            f"{labels}; the state is persistence-uncertain and continuation is prohibited"
+        )
+
+    persistence_uncertain = bool(
+        accounting.undetermined or uncertain_items or reconstruction.blocked_t2_4_recovery_states
+    )
+    determination = "UNDETERMINED" if persistence_uncertain else inspection.determination
+    # ``permitted`` and the refusal explanations are one fact stated twice: a proposal is
+    # permitted exactly when nothing appended a refusal reason, so a suppressed reason cannot
+    # leave a silently refused (or silently permitted) proposal behind.
+    permitted = not refusals
+    return ContinuationProposal(
+        permitted=permitted,
+        determination=determination,
+        refusal_reasons=tuple(refusals),
+        window=window,
+        plan_sha256=plan.request_plan_sha256,
+        approved_ceiling=approved_ceiling,
+        predecessor_receipt_id=predecessor_receipt_id,
+        receipt_chain=inspection.receipt_chain,
+        accounting=accounting,
+        remaining_headroom=remaining_headroom,
+        worst_case_remaining_attempts=worst_case,
+        fits=fits,
+        already_satisfied_excluded=already_satisfied,
+        remaining=tuple(remaining),
+        reconciliation=reconciliation,
+        inspection=inspection,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# T2.4-D — the explicit, inert recovery-action library boundary
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class RecoveryActionResult:
+    """What one explicitly requested recovery action did, and what must happen next.
+
+    No field here is the only continuation prohibition: the write-ahead
+    ``census_recovery_states`` row this result names is the durable authority, and a restarted
+    process recomputes from it. ``post_state_undetermined`` reports what *this invocation*
+    could prove; the blocked-or-resolved row is what outlives it.
+    """
+
+    action: str
+    target: str
+    census_run_id: str
+    recovery_state_id: str
+    action_taken: str
+    event_recorded: bool
+    state_resolved: bool
+    post_state_undetermined: bool
+    detail: str
+
+    @property
+    def requires_fresh_inspection(self) -> bool:
+        """A fresh read-only inspection is always required after a mutation."""
+        return True
+
+    @property
+    def continuation_prohibited(self) -> bool:
+        """Continuation stays prohibited until a fresh inspection returns ``SAFE``.
+
+        When event recording, exact resolution, or the resolution readback failed, the state
+        is ``UNDETERMINED`` and continuation is prohibited unconditionally — durably, through
+        the still-blocked write-ahead row, not through this in-memory field alone (Decision
+        040 §2, T2.4-D; Decision 041 §9).
+        """
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class _RepairSweep:
+    """A read-only sweep of everything the four repair actions could lawfully target."""
+
+    raw_partials: tuple[str, ...]
+    staging_partials: tuple[str, ...]
+    reconcile_orphans: tuple[str, ...]
+    stray_lineage_intents: tuple[str, ...]
+    projection_valid: bool
+
+
+def _repair_sweep(catalog_path: Path, storage: StorageBinding) -> _RepairSweep:
+    """Observe, without acting, exactly what ``observation_catalog.reconcile`` would touch.
+
+    Symlink-averse in exact alignment with the accepted read-only observer: a symbolic link is
+    skipped, never classified, so a symlinked staging ``.part`` can never become an authorized
+    ``remove-stale-part`` candidate and a symlinked object can never become an orphan to adopt.
+    The mutating boundary therefore refuses (target-not-a-candidate) exactly where the
+    read-only sweep ignores, the link target stays untouched, and no containment protection is
+    weakened.
+    """
+    tree = storage.tree
+    with read_only_catalog(Path(catalog_path)) as connection:
+        observations = load_observations(connection)
+        projection_valid = validate_audit_projection(
+            connection, tree.audit / _PROJECTION_NAME
+        ).is_valid
+    recorded = {
+        observation.relative_storage_path
+        for observation in observations
+        if observation.relative_storage_path
+    }
+
+    raw_partials: list[str] = []
+    staging_partials: list[str] = []
+    orphans: list[str] = []
+    for root in (tree.raw_bulk, tree.raw_indexes, tree.raw_filings, tree.staging):
+        if not root.is_dir() or root.is_symlink():
+            continue
+        in_staging = root == tree.staging
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.name.endswith(".reason") or path.name.endswith(LINEAGE_SUFFIX):
+                continue
+            relative = relative_to_root(path, tree.data_root)
+            if path.name.endswith(".part"):
+                (staging_partials if in_staging else raw_partials).append(relative)
+            elif relative not in recorded:
+                orphans.append(relative)
+
+    stray_intents: list[str] = []
+    for root in (tree.raw_bulk, tree.raw_indexes, tree.raw_filings):
+        if not root.is_dir():
+            continue
+        for lineage in sorted(root.rglob(f"*{LINEAGE_SUFFIX}")):
+            if lineage.is_symlink():
+                continue
+            object_path = lineage.with_name(lineage.name.removesuffix(LINEAGE_SUFFIX))
+            object_relative = relative_to_root(object_path, tree.data_root)
+            if object_relative in recorded or object_path.exists():
+                continue
+            stray_intents.append(relative_to_root(lineage, tree.data_root))
+
+    return _RepairSweep(
+        raw_partials=tuple(raw_partials),
+        staging_partials=tuple(staging_partials),
+        reconcile_orphans=tuple(orphans),
+        stray_lineage_intents=tuple(stray_intents),
+        projection_valid=projection_valid,
+    )
+
+
+def _refuse_repair(reason: str) -> RepairRefusedError:
+    return RepairRefusedError(f"the recovery action is refused: {reason}")
+
+
+def apply_recovery_action(
+    *,
+    action: str,
+    target: str,
+    plan: RequestPlan,
+    receipt_chain_head: Path,
+    catalog_path: Path,
+    storage: StorageBinding,
+    census_run_id: str,
+    lock_directory: Path | None = None,
+) -> RecoveryActionResult:
+    """Apply exactly one explicitly requested, deterministically required recovery action.
+
+    The applier never runs automatically — no reconstruction, reconciliation, inspection,
+    drift, or proposal code calls it — and it refuses rather than adapts: an unknown or
+    multi-action request, an ``UNDETERMINED`` state, a stale or already-resolved target, an
+    action that differs from the deterministic recommendation, and a request its one authorized
+    primitive cannot be scoped to are all refused before anything mutates.
+
+    Every mutation is durably write-ahead protected (Decision 041 §8). The corrected sequence:
+    the exact required action and target are recomputed and validated; the caller-supplied,
+    already registered ``ops_ingestion_jobs.job_id`` is validated (no run identity is ever
+    created, fabricated, or substituted here); a second action is refused while any
+    ``t2_4_recovery_action`` state for that run remains unresolved; one opaque unique
+    ``recovery_state_id`` is created and persisted ``blocked`` through the accepted
+    :func:`open_recovery_state` primitive, committed **before** the mutation and verified
+    through a genuinely fresh read-only connection; exactly one authorized mutation runs
+    through the accepted primitive for its action class; the actual completed recovery event is
+    recorded through the accepted :func:`record_recovery_events` surface with
+    ``census_run_id=None`` (opening the block is not itself a recovery event, and no second
+    state row is created); only after event recording succeeds is the exact state resolved
+    through :func:`resolve_recovery_state`; and the resolution is verified through a fresh
+    connection. A failure at any post-mutation step leaves the exact state ``blocked``, so a
+    restarted process sees the unresolved block durably — no in-memory field is ever the only
+    continuation prohibition. A committed resolution whose readback cannot complete leaves this
+    invocation ``UNDETERMINED``; a later process recomputes from durable catalog state.
+
+    Nothing acquired is ever deleted or overwritten; the one deletion this boundary performs is
+    a staging spool proven never promoted, never catalogued, never referenced, and never a
+    symbolic link. A fresh read-only inspection is required afterwards in every case, and this
+    function deliberately does not run it — re-inspection after repair is the operator
+    workflow's explicit next step, never an automatic continuation.
+
+    Raises:
+        RepairRefusedError: the request is refused; nothing was mutated. A refusal after the
+            write-ahead block committed (a verification or scoping anomaly) leaves that block
+            durably ``blocked`` for owner adjudication — fail closed, still with no mutation.
+        RecoveryInspectionError: the catalog or head receipt is absent, so the pre-mutation
+            inspection cannot even begin.
+    """
+    if action not in RECOVERY_ACTIONS:
+        reason = (
+            f"{action!r} is not one of the four authorized deterministic action classes "
+            f"{RECOVERY_ACTIONS}; combined or unknown actions are never coerced"
+        )
+        raise _refuse_repair(reason)
+    if not target or not target.strip():
+        reason = "an explicit target is required; an empty target names nothing"
+        raise _refuse_repair(reason)
+
+    inspection = inspect_recovery_state(
+        plan=plan,
+        receipt_chain_head=receipt_chain_head,
+        catalog_path=catalog_path,
+        data_root=storage.data_root,
+    )
+    if inspection.determination == "UNDETERMINED":
+        reason = (
+            f"the read-only inspection is UNDETERMINED ({inspection.basis}); every action is "
+            "refused from UNDETERMINED and the state is referred to the owner"
+        )
+        raise _refuse_repair(reason)
+
+    sweep = _repair_sweep(catalog_path, storage)
+    required: dict[str, tuple[str, ...]] = {
+        "adopt-orphan": sweep.reconcile_orphans,
+        "quarantine-partial": sweep.raw_partials,
+        "remove-stale-part": sweep.staging_partials,
+        "rebuild-projection": () if sweep.projection_valid else (_PROJECTION_NAME,),
+    }
+    if all(not targets for targets in required.values()):
+        reason = "nothing requires repair; the request is stale or already resolved"
+        raise _refuse_repair(reason)
+    candidates = required[action]
+    if not candidates:
+        recommended = ", ".join(sorted(name for name, targets in required.items() if targets))
+        reason = (
+            f"{action!r} differs from the deterministic recommendation; the current state "
+            f"requires only: {recommended}"
+        )
+        raise _refuse_repair(reason)
+    if target not in candidates:
+        reason = (
+            f"target {target!r} is not a current {action!r} candidate; the request is stale, "
+            "already resolved, or misidentified"
+        )
+        raise _refuse_repair(reason)
+
+    tree = storage.tree
+    lock_dir = Path(lock_directory) if lock_directory is not None else Path(catalog_path).parent
+
+    # Per-action scoping preconditions, still before any write of any kind.
+    if action == "adopt-orphan":
+        if len(sweep.reconcile_orphans) != 1:
+            reason = (
+                f"{len(sweep.reconcile_orphans)} orphan(s) exist; the accepted reconciliation "
+                "primitive cannot be scoped to exactly one authorized event while another "
+                "orphan would also be processed — repair one state at a time or refer to the "
+                "owner"
+            )
+            raise _refuse_repair(reason)
+        if sweep.stray_lineage_intents:
+            reason = (
+                "a lineage intent without its raw object exists; the accepted reconciliation "
+                "primitive would quarantine it alongside the requested adoption, which is an "
+                "unrelated mutation — resolve it first or refer to the owner"
+            )
+            raise _refuse_repair(reason)
+        if not sweep.projection_valid:
+            reason = (
+                "the audit projection requires recovery; the accepted reconciliation "
+                "primitive would persist a projection incident alongside the requested "
+                "adoption — rebuild the projection first"
+            )
+            raise _refuse_repair(reason)
+    if action == "remove-stale-part":
+        spool_path = tree.data_root / target
+        if spool_path.is_symlink():
+            reason = (
+                "the staging spool is a symbolic link and is never a removal candidate; the "
+                "link target stays untouched"
+            )
+            raise _refuse_repair(reason)
+        if RawStore.lineage_path(spool_path).exists():
+            reason = (
+                "the staging spool carries a lineage intent, so it cannot be proven a "
+                "never-promoted temporary; quarantine is the lawful disposition"
+            )
+            raise _refuse_repair(reason)
+
+    # The caller-supplied run identity: required, existing, and free of unresolved T2.4
+    # write-ahead states. This applier never creates an ingestion-job row, never invokes the
+    # private census-orchestrator job creator, and never substitutes a receipt identity.
+    if not census_run_id or not census_run_id.strip():
+        reason = (
+            "no census run identity was supplied; every mutating T2.4 recovery action "
+            "requires a caller-supplied, already registered ops_ingestion_jobs.job_id"
+        )
+        raise _refuse_repair(reason)
+    try:
+        with read_only_catalog(Path(catalog_path)) as connection:
+            job = connection.execute(
+                "SELECT 1 FROM ops_ingestion_jobs WHERE job_id = ?",
+                (census_run_id,),
+            ).fetchone()
+            unresolved = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM census_recovery_states "
+                    "WHERE census_run_id = ? AND scenario = ? AND resolution_state = 'blocked'",
+                    (census_run_id, _T2_4_STATE_SCENARIO),
+                ).fetchone()[0]
+            )
+    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+        reason = (
+            f"the run identity could not be validated against the catalog "
+            f"({type(exc).__name__}); the action refuses before mutation"
+        )
+        raise _refuse_repair(reason) from exc
+    if job is None:
+        reason = (
+            f"census run {census_run_id!r} does not resolve to a lawful existing governed "
+            "ops_ingestion_jobs row; a run identity is required and is never created, "
+            "fabricated, or substituted by this applier"
+        )
+        raise _refuse_repair(reason)
+    if unresolved:
+        reason = (
+            f"{unresolved} unresolved t2_4_recovery_action write-ahead state(s) already exist "
+            f"for run {census_run_id!r}; a second action is refused before mutation until "
+            "each is exactly resolved"
+        )
+        raise _refuse_repair(reason)
+
+    # Open and commit the write-ahead block before the mutation, then verify the exact row
+    # through a genuinely fresh read-only connection.
+    recovery_state_id = uuid.uuid4().hex
+    try:
+        with CatalogWriter(Path(catalog_path), lock_dir) as writer:
+            open_recovery_state(
+                writer,
+                census_run_id=census_run_id,
+                recovery_state_id=recovery_state_id,
+                scenario=_T2_4_STATE_SCENARIO,
+                action_taken=action,
+                detail=(
+                    f"write-ahead block for the explicitly requested recovery action "
+                    f"{action!r} on target {target!r}"
+                ),
+                relative_path=target,
+            )
+    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+        reason = (
+            f"the write-ahead recovery state could not be opened and committed "
+            f"({type(exc).__name__}); the action refuses before mutation"
+        )
+        raise _refuse_repair(reason) from exc
+    if not _verify_write_ahead_state(catalog_path, census_run_id, recovery_state_id, "blocked"):
+        reason = (
+            "the committed write-ahead block could not be verified through a fresh read-only "
+            "connection; the action refuses before mutation"
+        )
+        raise _refuse_repair(reason)
+
+    event: RecoveryEvent
+    action_taken: str
+    detail: str
+
+    event_recorded = False
+    state_resolved = False
+    with CatalogWriter(Path(catalog_path), lock_dir) as writer:
+        # Exactly one authorized mutation. A mutation failure raises out of this block with
+        # nothing recorded and nothing resolved — the exact write-ahead state stays blocked,
+        # which is precisely the durable fail-closed evidence a restarted process needs.
+        if action == "adopt-orphan":
+            report = reconcile(writer.connection, tree, quarantine_partial=False)
+            # Exactly one orphan exists (proven above), so the one adoption-path event this
+            # reconcile pass produced is necessarily the requested target's — whether the
+            # authoritative path adopted it verified or preserved it in quarantine unproven,
+            # in which case the event names the quarantine destination rather than the origin.
+            matching = [
+                item for item in report.events if item.scenario == "object_without_catalog_row"
+            ]
+            if not matching:
+                reason = (
+                    "the accepted reconciliation primitive reported no adoption event for "
+                    "the requested orphan; the write-ahead block stays blocked for owner "
+                    "adjudication"
+                )
+                raise _refuse_repair(reason)
+            event = matching[0]
+            action_taken = event.action_taken
+            detail = event.detail
+        elif action == "quarantine-partial":
+            quarantined = storage.raw_store.quarantine(
+                tree.data_root / target,
+                "RAW_PARTIAL_DOWNLOAD",
+                "interrupted transfer quarantined by the explicit recovery applier",
+            )
+            action_taken = "quarantined"
+            detail = (
+                "the partial raw object was preserved in quarantine through the accepted "
+                "move-and-preserve path; nothing was deleted"
+            )
+            event = RecoveryEvent(
+                scenario="interrupted_part_download",
+                action_taken=action_taken,
+                detail=detail,
+                relative_path=relative_to_root(quarantined, tree.data_root),
+            )
+        elif action == "remove-stale-part":
+            (tree.data_root / target).unlink()
+            action_taken = "removed_never_promoted_temporary"
+            detail = (
+                "the stale staging spool was removed as a never-promoted, never-catalogued, "
+                "never-referenced temporary; no acquired object was touched"
+            )
+            event = RecoveryEvent(
+                scenario="interrupted_part_download",
+                action_taken=action_taken,
+                detail=detail,
+                relative_path=target,
+            )
+        else:  # rebuild-projection
+            # The accepted rebuild primitive, deliberately without a run identity: the
+            # projection-specific bulk resolver is never reused for the write-ahead state,
+            # which is resolved exactly, by primary key, below (Decision 041 §14).
+            rebuilt = rebuild_audit_projection(writer.connection, tree.audit / _PROJECTION_NAME)
+            action_taken = "projection_rebuilt"
+            detail = (
+                f"the derived audit projection was atomically reconstructed from {rebuilt} "
+                "authoritative catalog row(s) through the accepted rebuild primitive"
+            )
+            event = RecoveryEvent(
+                scenario="audit_projection_interrupted",
+                action_taken=action_taken,
+                detail=detail,
+                relative_path=_PROJECTION_NAME,
+            )
+
+        # The actual completed recovery event, then — only after it succeeds — the exact
+        # resolution of the write-ahead state. Order is load-bearing: an event-recording
+        # failure must leave the state blocked, never resolved.
+        event_recorded = _record_repair_event(writer, event)
+        if event_recorded:
+            state_resolved = _resolve_write_ahead(
+                writer, census_run_id, recovery_state_id, action_taken, detail
+            )
+
+    resolution_verified = False
+    if state_resolved:
+        resolution_verified = _verify_write_ahead_state(
+            catalog_path, census_run_id, recovery_state_id, "resolved"
+        )
+
+    if not event_recorded:
+        detail = (
+            f"{detail}; the recovery event could not be recorded, so the exact write-ahead "
+            "state remains blocked, the state is UNDETERMINED, and continuation is prohibited"
+        )
+    elif not state_resolved:
+        detail = (
+            f"{detail}; the write-ahead state could not be exactly resolved and remains "
+            "blocked; the state is UNDETERMINED and continuation is prohibited"
+        )
+    elif not resolution_verified:
+        detail = (
+            f"{detail}; exact resolution committed but its fresh readback could not complete, "
+            "so this invocation is UNDETERMINED and must not authorize continuation; a later "
+            "process recomputes from durable catalog state"
+        )
+
+    return RecoveryActionResult(
+        action=action,
+        target=target,
+        census_run_id=census_run_id,
+        recovery_state_id=recovery_state_id,
+        action_taken=action_taken,
+        event_recorded=event_recorded,
+        state_resolved=state_resolved,
+        post_state_undetermined=not (event_recorded and state_resolved and resolution_verified),
+        detail=detail,
+    )
+
+
+def _verify_write_ahead_state(
+    catalog_path: Path,
+    census_run_id: str,
+    recovery_state_id: str,
+    expected: str,
+) -> bool:
+    """Read the exact write-ahead row through a genuinely fresh read-only connection."""
+    try:
+        with read_only_catalog(Path(catalog_path)) as connection:
+            row = connection.execute(
+                "SELECT scenario, resolution_state FROM census_recovery_states "
+                "WHERE census_run_id = ? AND recovery_state_id = ?",
+                (census_run_id, recovery_state_id),
+            ).fetchone()
+    except (DisclosureDriftError, sqlite3.Error, OSError):
+        return False
+    return (
+        row is not None
+        and str(row["scenario"]) == _T2_4_STATE_SCENARIO
+        and str(row["resolution_state"]) == expected
+    )
+
+
+def _record_repair_event(writer: CatalogWriter, event: RecoveryEvent) -> bool:
+    """Record the one actual completed recovery event, reporting failure as ``False``.
+
+    ``census_run_id=None`` deliberately: the accepted function then writes only the actual
+    ``census_recovery_events`` row and creates no second recovery-state row. The write-ahead
+    state opened before the mutation is the only state row, and it is resolved exactly, by
+    primary key, afterwards (Decision 041 §8 steps 9–11).
+    """
+    try:
+        return record_recovery_events(writer, (event,), census_run_id=None) == 1
+    except (DisclosureDriftError, sqlite3.Error, OSError):
+        return False
+
+
+def _resolve_write_ahead(
+    writer: CatalogWriter,
+    census_run_id: str,
+    recovery_state_id: str,
+    action_taken: str,
+    detail: str,
+) -> bool:
+    """Exactly resolve the write-ahead state, reporting failure as ``False``."""
+    try:
+        return resolve_recovery_state(
+            writer,
+            census_run_id=census_run_id,
+            recovery_state_id=recovery_state_id,
+            action_taken=action_taken,
+            detail=detail,
+        )
+    except (DisclosureDriftError, sqlite3.Error, OSError):
+        return False

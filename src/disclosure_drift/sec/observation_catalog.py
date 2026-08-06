@@ -41,7 +41,7 @@ import re
 import sqlite3
 import stat
 import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Final, Literal, Protocol
@@ -298,12 +298,27 @@ class ObservationRecorder:
         self,
         observation: SourceObservation,
         *,
-        members: Sequence[ArchiveMember] = (),
+        members: Iterable[ArchiveMember] = (),
     ) -> str:
         """Commit one observation, its reasons, and its member lineage atomically.
 
         The observation is recorded once this returns, whatever happens to the audit
         projection afterwards.
+
+        ``members`` is a **single-pass iterable**, consumed exactly once and never
+        materialized. A bulk archive expands to far more content than the archive itself,
+        so a caller that could only hand over an already-built sequence would have to hold
+        every member payload in memory at once purely to satisfy this signature. Accepting
+        an iterable lets the caller stream straight from the accepted archive reader, and
+        each member becomes garbage as soon as its row is written. Lists and tuples remain
+        valid inputs, so existing callers are unaffected.
+
+        Consumption happens **inside** the observation's own transaction, not before it, so
+        an iterable that fails partway through leaves no partial evidence: the observation,
+        its reasons, and every member row already written all roll back together. Rows are
+        written in the iterable's own order; no sort is applied, because sorting would
+        require holding every row first, and the reader already yields members in
+        ``member_index`` order.
 
         Raises:
             CatalogWriteError: a reason code is unregistered, or the observation
@@ -322,7 +337,6 @@ class ObservationRecorder:
             )
             raise CatalogWriteError(message)
 
-        member_rows = self._archive_member_rows(observation, members)
         now = utc_now()
         with transaction(self.writer.connection) as connection:
             connection.execute(
@@ -338,7 +352,10 @@ class ObservationRecorder:
                     "VALUES (?, ?, ?, ?)",
                     (observation.observation_id, code, observation.detail or None, now),
                 )
-            for member_row in member_rows:
+            # Streamed inside the transaction on purpose: the observation row exists first,
+            # so the member foreign key is satisfied, and a member source that fails at item
+            # k rolls the whole observation back rather than leaving k committed rows behind.
+            for member_row in self._archive_member_rows(observation, members):
                 connection.execute(
                     "INSERT OR IGNORE INTO census_archive_members "
                     "(observation_id, member_index, member_name, member_sha256, "
@@ -456,25 +473,26 @@ class ObservationRecorder:
     def _archive_member_rows(
         self,
         observation: SourceObservation,
-        members: Sequence[ArchiveMember],
-    ) -> tuple[tuple[object, ...], ...]:
-        explicit = tuple(
-            sorted(
-                (
-                    lineage["member_index"],
-                    lineage["member_name"],
-                    lineage["member_sha256"],
-                    lineage["member_compressed_size_bytes"],
-                    lineage["member_uncompressed_size_bytes"],
-                    lineage["archive_relative_path"],
-                    lineage["archive_sha256"],
-                )
-                for lineage in (member.lineage() for member in members)
-            )
-        )
+        members: Iterable[ArchiveMember],
+    ) -> Iterator[tuple[object, ...]]:
+        """Yield one persisted row per archive member, consuming ``members`` once.
+
+        Lazy on purpose. The caller iterates this inside the observation's transaction, so
+        each member is converted to its row and released before the next is read, and the
+        peak cost is one member rather than the whole expanded archive. Rows keep the
+        iterable's own order: the accepted reader already yields members in ``member_index``
+        order, and sorting here would mean holding every row first — reintroducing exactly
+        the materialization this signature exists to avoid.
+
+        A reuse observation persists the **preserved owner's** lineage, never a fresh copy,
+        so its rows come from the catalog. Any lineage a caller supplies alongside a reuse is
+        still checked against that preserved evidence, in one pass and in order.
+        """
         reused = observation.reused_observation_id
         if reused is None:
-            return explicit
+            for member in members:
+                yield _archive_member_row(member)
+            return
         prior = tuple(
             tuple(row)
             for row in self.writer.connection.execute(
@@ -502,13 +520,38 @@ class ObservationRecorder:
                 "identify the verified shared archive object"
             )
             raise CatalogWriteError(message)
-        if explicit and explicit != prior:
+        self._refuse_mismatched_reuse_lineage(reused, members, prior)
+        yield from prior
+
+    @staticmethod
+    def _refuse_mismatched_reuse_lineage(
+        reused: str,
+        members: Iterable[ArchiveMember],
+        prior: tuple[tuple[object, ...], ...],
+    ) -> None:
+        """Check any supplied lineage against the preserved evidence, in one ordered pass.
+
+        Walking the two in lockstep rather than comparing two built sets keeps the check
+        bounded: ``prior`` is already a finite catalog read, and ``members`` is consumed
+        once without ever being held. Supplying no lineage on a reuse remains lawful and
+        is the normal case — the preserved rows are authoritative either way.
+        """
+        matched = 0
+        for member in members:
+            row = _archive_member_row(member)
+            if matched >= len(prior) or row != prior[matched]:
+                message = (
+                    f"archive-member lineage for reused observation {reused} does not "
+                    "match the prior immutable evidence"
+                )
+                raise CatalogWriteError(message)
+            matched += 1
+        if matched and matched != len(prior):
             message = (
-                f"archive-member lineage for reused observation {reused} does not "
-                "match the prior immutable evidence"
+                f"archive-member lineage for reused observation {reused} covers "
+                f"{matched} member(s) but the prior immutable evidence records {len(prior)}"
             )
             raise CatalogWriteError(message)
-        return prior
 
     @staticmethod
     def _row(observation: SourceObservation, now: str) -> tuple[object, ...]:
@@ -548,6 +591,25 @@ class ObservationRecorder:
             0,
             now,
         )
+
+
+def _archive_member_row(member: ArchiveMember) -> tuple[object, ...]:
+    """The persisted lineage row for one archive member.
+
+    The row records the member's identity, hash, and sizes — never its bytes. Nothing here
+    keeps a reference to the payload, so a streamed member becomes collectable as soon as
+    its row has been written.
+    """
+    lineage = member.lineage()
+    return (
+        lineage["member_index"],
+        lineage["member_name"],
+        lineage["member_sha256"],
+        lineage["member_compressed_size_bytes"],
+        lineage["member_uncompressed_size_bytes"],
+        lineage["archive_relative_path"],
+        lineage["archive_sha256"],
+    )
 
 
 def load_observations(connection: sqlite3.Connection) -> tuple[SourceObservation, ...]:

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sqlite3
+import zipfile
+from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +23,7 @@ from disclosure_drift.sec.observation_catalog import (
 )
 from disclosure_drift.sec.raw_store import RawStore
 from disclosure_drift.sec.snapshots import SnapshotStore, SourceObservation
+from disclosure_drift.sec.source_registry import SOURCES
 from disclosure_drift.storage.catalog import CatalogWriter
 
 URL = "https://www.sec.gov/files/company_tickers.json"
@@ -110,6 +116,272 @@ def test_archive_member_lineage_is_atomic_with_observation(tmp_path: Path) -> No
     assert row["member_name"] == member.name
     assert row["member_sha256"] == member.member_sha256
     assert row["archive_sha256"] == "a" * 64
+
+
+class _SingleUseMembers:
+    """An archive-member source that refuses everything except one forward pass.
+
+    A recorder that quietly called ``tuple()``, ``len()``, or indexed its input would still
+    persist correct rows, so a row-shape assertion cannot tell a streaming recorder from a
+    materializing one. This can: every operation that implies materialization raises, and a
+    second ``__iter__`` raises too, so the only way the recorder can succeed is by iterating
+    exactly once and holding nothing.
+    """
+
+    def __init__(self, members: tuple[ArchiveMember, ...]) -> None:
+        self._members = members
+        self.iterations = 0
+        self.yielded = 0
+
+    def __iter__(self) -> Iterator[ArchiveMember]:
+        self.iterations += 1
+        if self.iterations > 1:
+            message = "the member source was iterated more than once"
+            raise AssertionError(message)
+        for member in self._members:
+            self.yielded += 1
+            yield member
+
+    def __len__(self) -> int:
+        message = "the member source was measured with len()"
+        raise AssertionError(message)
+
+    def __getitem__(self, index: object) -> ArchiveMember:
+        message = "the member source was accessed by index"
+        raise AssertionError(message)
+
+
+def _archive_bytes() -> bytes:
+    """A minimal, byte-stable ZIP. Explicit metadata keeps it independent of the clock."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        info = zipfile.ZipInfo("CIK0000000001.json", date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_STORED
+        info.create_system = 3
+        info.external_attr = 0o600 << 16
+        archive.writestr(info, '{"cik":1}')
+    return buffer.getvalue()
+
+
+def _archive_fetch() -> FetchResult:
+    return FetchResult(
+        outcome="retrieved",
+        source_id="sec_bulk_submissions",
+        url=SOURCES["sec_bulk_submissions"].url(),
+        purpose="census bulk submissions archive evidence",
+        status=200,
+        body=_archive_bytes(),
+        declared_content_type="application/zip",
+        attempts=1,
+    )
+
+
+def _member(index: int, *, archive_sha: str = "a" * 64) -> ArchiveMember:
+    return ArchiveMember(
+        name=f"CIK{index:010d}.json",
+        compressed_size=10 + index,
+        uncompressed_size=20 + index,
+        payload=f'{{"cik":{index}}}'.encode(),
+        archive_relative_path="raw/sec/bulk/fixture.zip",
+        archive_sha256=archive_sha,
+        member_index=index,
+    )
+
+
+def _member_rows(writer: CatalogWriter, observation_id: str) -> list[tuple[object, ...]]:
+    return [
+        tuple(row)
+        for row in writer.connection.execute(
+            "SELECT member_index, member_name FROM census_archive_members "
+            "WHERE observation_id = ? ORDER BY rowid",
+            (observation_id,),
+        ).fetchall()
+    ]
+
+
+@pytest.fixture
+def recorder_writer(tmp_path: Path) -> Iterator[tuple[CatalogWriter, DataTree]]:
+    tree = DataTree.from_root(tmp_path)
+    tree.ensure_tree()
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.migrate()
+        writer.seed_reference_data()
+        yield writer, tree
+
+
+@pytest.mark.parametrize("shape", ["list", "tuple", "generator"])
+def test_archive_members_accept_every_supported_input_shape(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+    shape: str,
+) -> None:
+    """Existing sequence callers keep working, and a one-shot generator now works too."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    members = (_member(0), _member(1))
+    supplied: object = {
+        "list": list(members),
+        "tuple": members,
+        "generator": (member for member in members),
+    }[shape]
+    ObservationRecorder(writer, tree).record(item, members=supplied)  # type: ignore[arg-type]
+    assert _member_rows(writer, item.observation_id) == [
+        (0, "CIK0000000000.json"),
+        (1, "CIK0000000001.json"),
+    ]
+
+
+def test_archive_members_are_consumed_exactly_once_and_never_materialized(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """The defensive source proves no len, no indexing, and no second pass."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    source = _SingleUseMembers((_member(0), _member(1), _member(2)))
+    ObservationRecorder(writer, tree).record(item, members=source)
+    assert source.iterations == 1
+    assert source.yielded == 3
+    assert len(_member_rows(writer, item.observation_id)) == 3
+
+
+def test_member_rows_are_written_while_the_source_is_still_being_consumed(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """Streaming, proved from inside the transaction rather than inferred from the result.
+
+    At the moment member ``k`` is yielded, rows ``0..k-1`` must already be visible on the
+    writer's own connection. A recorder that built the whole row set before opening its
+    transaction would show nothing at all here, so this fails against materialization even
+    though the committed rows would look identical.
+    """
+    writer, tree = recorder_writer
+    item = observation(tree)
+    visible_at_yield: list[int] = []
+
+    def _members() -> Iterator[ArchiveMember]:
+        for index in range(4):
+            visible_at_yield.append(
+                writer.connection.execute(
+                    "SELECT count(*) AS n FROM census_archive_members WHERE observation_id = ?",
+                    (item.observation_id,),
+                ).fetchone()["n"]
+            )
+            yield _member(index)
+
+    ObservationRecorder(writer, tree).record(item, members=_members())
+    assert visible_at_yield == [0, 1, 2, 3], "each row lands before the next member is read"
+    assert len(_member_rows(writer, item.observation_id)) == 4
+
+
+def test_member_rows_keep_the_source_order(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """Rows are persisted in generator order; no sort is applied and none is needed."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    ordered = (_member(0), _member(1), _member(2), _member(3))
+    ObservationRecorder(writer, tree).record(item, members=iter(ordered))
+    assert _member_rows(writer, item.observation_id) == [
+        (index, f"CIK{index:010d}.json") for index in range(4)
+    ]
+
+
+def test_an_empty_member_source_records_the_observation_with_no_lineage(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """Emptiness is lawful at this layer; whether it is lawful for a route is not its call."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    ObservationRecorder(writer, tree).record(item, members=iter(()))
+    assert _member_rows(writer, item.observation_id) == []
+    assert load_observations(writer.connection)[0].observation_id == item.observation_id
+
+
+def test_a_late_member_failure_rolls_back_the_observation_and_every_row(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """Failing at member three must leave nothing at all — not two rows, not the observation."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    recorder = ObservationRecorder(writer, tree)
+
+    def _fails_late() -> Iterator[ArchiveMember]:
+        yield _member(0)
+        yield _member(1)
+        message = "the archive reader failed partway through enumeration"
+        raise RuntimeError(message)
+
+    with pytest.raises(RuntimeError, match="partway through enumeration"):
+        recorder.record(item, members=_fails_late())
+
+    assert _member_rows(writer, item.observation_id) == []
+    assert load_observations(writer.connection) == ()
+    assert recorder.unprojected() == (), "a rolled-back observation is never queued to project"
+    # The rollback is complete, so the same identity may still be recorded lawfully.
+    recorder.record(item)
+    assert load_observations(writer.connection)[0].observation_id == item.observation_id
+
+
+def test_a_member_insert_failure_rolls_back_the_observation_and_prior_rows(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """The same guarantee when the database, not the source, is what fails."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    # The second member's index is not an integer, which the STRICT table refuses outright —
+    # a database-side failure reached only after the first member's row is already inserted.
+    # (A NOT NULL or PRIMARY KEY violation would not do: ``INSERT OR IGNORE`` swallows those,
+    # so the row would be dropped silently and nothing would roll back.)
+    malformed = (_member(0), replace(_member(1), member_index="two"))  # type: ignore[arg-type]
+    recorder = ObservationRecorder(writer, tree)
+    with pytest.raises(sqlite3.DatabaseError, match="cannot store TEXT value in INTEGER column"):
+        recorder.record(item, members=iter(malformed))
+    assert _member_rows(writer, item.observation_id) == []
+    assert load_observations(writer.connection) == ()
+
+
+def test_member_payload_bytes_are_never_persisted(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """Only identity, hash, and sizes are stored — the payload itself is never written."""
+    writer, tree = recorder_writer
+    item = observation(tree)
+    marker = b"canary-member-payload-marker"
+    member = replace(_member(0), payload=marker)
+    ObservationRecorder(writer, tree).record(item, members=iter((member,)))
+    stored = writer.connection.execute(
+        "SELECT * FROM census_archive_members WHERE observation_id = ?",
+        (item.observation_id,),
+    ).fetchone()
+    assert marker.decode() not in " ".join(str(value) for value in tuple(stored))
+    assert stored["member_sha256"] == member.member_sha256
+
+
+def test_reuse_without_explicit_members_persists_the_preserved_owner_lineage(
+    recorder_writer: tuple[CatalogWriter, DataTree],
+) -> None:
+    """The normal archive-reuse path: no members supplied, prior evidence carried forward.
+
+    Both observations come from the real snapshot store over the same archive bytes, so the
+    reuse edge carries the complete provenance the accepted catalog triggers require. A
+    hand-built pair would prove only that a forged row can be inserted.
+    """
+    writer, tree = recorder_writer
+    store = SnapshotStore(tree)
+    owner = store.record(_archive_fetch())
+    reuse = store.record(_archive_fetch())
+    assert owner.outcome == "stored_new"
+    assert reuse.outcome == "unchanged_content"
+    assert reuse.reused_observation_id == owner.observation_id
+
+    recorder = ObservationRecorder(writer, tree)
+    lineage = replace(
+        _member(0),
+        archive_relative_path=owner.relative_storage_path,
+        archive_sha256=owner.logical_sha256,
+    )
+    recorder.record(owner, members=iter((lineage,)))
+    recorder.record(reuse)
+    assert _member_rows(writer, reuse.observation_id) == [(0, "CIK0000000000.json")]
 
 
 def test_reconcile_detects_missing_and_orphan_raw_objects(tmp_path: Path) -> None:

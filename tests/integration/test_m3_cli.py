@@ -1958,8 +1958,26 @@ def test_an_invalid_m3_2_argument_fails_at_the_parser_boundary(repo_root: Path) 
 
 
 def test_the_m3_2_surfaces_reach_no_transport_module(repo_root: Path) -> None:
-    """Structural proof: no acquisition module exists and the CLI imports no transport for it."""
-    assert not (repo_root / "src" / "disclosure_drift" / "m3" / "acquisition.py").exists()
+    """Structural proof: the acquisition driver builds no transport and the CLI wires none.
+
+    Stage T2.2-T2.3 delivers ``m3/acquisition.py``, so that module's *absence* is no longer the
+    invariant. The invariant that survives — and the one that mattered all along — is that
+    nothing on the Milestone 3.2 path can construct a transport: the driver imports no transport
+    implementation and receives one only by injection, and ``cli.py`` still reaches neither the
+    driver nor a transport, so every operator surface remains refused at this stage.
+    """
+    driver = repo_root / "src" / "disclosure_drift" / "m3" / "acquisition.py"
+    assert driver.exists(), "stage T2.2-T2.3 delivers the bounded acquisition driver"
+
+    imports = [
+        line.strip()
+        for line in driver.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("import ", "from "))
+    ]
+    assert imports, "the driver declares imports at module level"
+    for line in imports:
+        for forbidden in ("httpx", "socket", "urllib", "requests"):
+            assert forbidden not in line, f"the driver must not import a transport: {line}"
 
     cli_source = (repo_root / "src" / "disclosure_drift" / "cli.py").read_text(encoding="utf-8")
     for forbidden in ("HttpxTransport", "httpx_transport", "m3.acquisition"):

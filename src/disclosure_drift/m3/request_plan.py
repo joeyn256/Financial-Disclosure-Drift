@@ -46,12 +46,14 @@ from disclosure_drift.sec.urls import MAX_REDIRECT_DEPTH
 
 __all__ = [
     "M3_2A_BOOTSTRAP_ROUTES",
+    "M3_2B_DEPENDENT_ROUTES",
     "MAX_COOLDOWN_CONTINUES",
     "REQUEST_PLAN_SCHEMA_VERSION",
     "RequestPlan",
     "RequestPlanInputError",
     "RoutePlan",
     "build_m3_2a_request_plan",
+    "build_m3_2b_dependent_plan",
     "canonical_plan_bytes",
     "derive_a_reachable",
     "derive_redirect_reachability",
@@ -74,6 +76,16 @@ M3_2A_BOOTSTRAP_ROUTES: Final[tuple[str, ...]] = (
     "sec_edgar_filing_calendar",
     "sec_edgar_calendar_announcement",
     "sec_full_index_company",
+)
+
+#: The two dependent route families of the M3.2B window (master plan §15; accepted contract §6).
+#: They are deliberately excluded from :data:`M3_2A_BOOTSTRAP_ROUTES` above and are planned only
+#: after M3.2A freezes its objects, by :func:`build_m3_2b_dependent_plan`. Declared here, beside the
+#: bootstrap tuple, so window membership has **one** definition that the planner and the acquisition
+#: driver both read rather than two that can drift apart.
+M3_2B_DEPENDENT_ROUTES: Final[tuple[str, ...]] = (
+    "sec_submissions_entity",
+    "sec_submissions_historical",
 )
 
 #: The maximum number of extra physical attempts one cooldown can add to a single retrieval. The
@@ -394,6 +406,97 @@ def build_m3_2a_request_plan(
         requests_per_second=requests_per_second,
         required_index_keys=required_index_keys,
         expected_cache_hits=len(satisfied_in_plan),
+        routes=routes,
+    )
+
+
+def build_m3_2b_dependent_plan(
+    *,
+    coverage_start: date,
+    coverage_end: date,
+    as_of_date: date,
+    include_open_quarter: bool,
+    calendar_year: int,
+    calendar_evidence_entry_count: int,
+    entity_instance_count: int,
+    historical_instance_count: int,
+    requests_per_second: float,
+) -> RequestPlan:
+    """Build the deterministic M3.2B dependent plan from explicit reconciled counts.
+
+    The dependent window plans exactly the two routes :data:`M3_2B_DEPENDENT_ROUTES` names, and
+    **never derives its own instance counts**. Both counts arrive from the caller, which obtains
+    them by reconciling frozen M3.2A objects against the explicit reconciliation set (Decision 045
+    §13); this function refuses to invent, estimate, or round either one. That is what keeps the
+    eventual exact M3.2B request count a fact about reviewed evidence rather than about this code.
+
+    The coverage inputs, calendar year, and calendar-evidence entry count are carried through from
+    the same explicit reconciliation set. They are *provenance*, not planning inputs: no M3.2B route
+    is a quarterly index or a calendar announcement, so neither the coverage window nor the calendar
+    count changes a single planned request here. They are recorded because
+    :meth:`RequestPlan.as_payload` is the frozen ``m3-request-plan/1.0`` shape shared with M3.2A,
+    and a plan document that omitted them would not be a document of that schema. ``expected_cache
+    _hits`` is ``0`` and ``required_index_keys`` is empty for the same reason: this window plans no
+    quarterly index instance, so it excludes none and requires none.
+
+    Nothing here reads the clock, the network, the catalog, or the filesystem, and the schema
+    version is unchanged, so the accepted M3.2A plan hash is untouched by this addition.
+
+    Raises:
+        RequestPlanInputError: an input cannot describe a coherent zero-request plan.
+    """
+    if entity_instance_count < 0 or historical_instance_count < 0:
+        message = (
+            f"dependent instance counts must not be negative; received "
+            f"entity={entity_instance_count}, historical={historical_instance_count}"
+        )
+        raise RequestPlanInputError(message)
+    if calendar_evidence_entry_count < 0:
+        message = (
+            f"calendar_evidence_entry_count {calendar_evidence_entry_count} is negative; a "
+            f"manifest has zero or more approved entries"
+        )
+        raise RequestPlanInputError(message)
+    if requests_per_second <= 0:
+        message = f"requests_per_second {requests_per_second} must be positive"
+        raise RequestPlanInputError(message)
+    if coverage_end < coverage_start:
+        message = (
+            f"coverage_end {coverage_end.isoformat()} precedes coverage_start "
+            f"{coverage_start.isoformat()}"
+        )
+        raise RequestPlanInputError(message)
+
+    planned_counts = {
+        "sec_submissions_entity": entity_instance_count,
+        "sec_submissions_historical": historical_instance_count,
+    }
+    bases = {
+        "sec_submissions_entity": "one per reconciled dependent entity instance",
+        "sec_submissions_historical": "one per reconciled historical submissions file",
+    }
+    routes = tuple(
+        RoutePlan(
+            source_id=source_id,
+            host=_host_of(source_id),
+            planned_unique_logical_requests=planned_counts[source_id],
+            a_reachable=derive_a_reachable(SOURCES[source_id]),
+            basis=bases[source_id],
+        )
+        for source_id in M3_2B_DEPENDENT_ROUTES
+    )
+
+    return RequestPlan(
+        acquisition_window="M3.2B",
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        as_of_date=as_of_date,
+        include_open_quarter=include_open_quarter,
+        calendar_year=calendar_year,
+        calendar_evidence_entry_count=calendar_evidence_entry_count,
+        requests_per_second=requests_per_second,
+        required_index_keys=(),
+        expected_cache_hits=0,
         routes=routes,
     )
 

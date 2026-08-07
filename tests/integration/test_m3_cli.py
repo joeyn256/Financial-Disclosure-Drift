@@ -1795,11 +1795,11 @@ def test_rehearse_leaves_no_synthetic_tree_behind_and_reruns_identically(
 
 
 # --------------------------------------------------------------------------- #
-# Milestone 3.2 command surfaces (stage T2.1)
+# Milestone 3.2 operator surfaces (stage T2.5-T2.6, Decision 045 §4)
 #
-# T2.1 wires the parsers and the fail-closed refusal boundary. Nothing here may reach a
-# transport, a catalog, a plan execution, or a receipt, and no combination of configuration and
-# flags may pass the refusal.
+# Five of the six surfaces are offline in every mode. Only `m3 acquire --live` has a live path,
+# and every test here proves it is refused before anything is constructed: no receipt is written,
+# no HTTP library is imported, and no socket is touched.
 # --------------------------------------------------------------------------- #
 EXIT_STAGE_NOT_ENABLED = 3
 
@@ -1810,6 +1810,12 @@ M3_2_COMMANDS = (
     "show-drift",
     "recover",
 )
+
+#: A controlled fixture value for the identity-gate tests. It uses the RFC-reserved `.invalid`
+#: TLD, so it is not, and cannot become, a real contact address. The canonical validator refuses
+#: every reserved placeholder domain, which is exactly the property the identity-gate tests below
+#: assert: this suite never fabricates an identity that would pass a live gate (Decision 045 §11).
+FIXTURE_PLACEHOLDER_IDENTITY = "Disclosure Drift CLI Fixture (cli-fixture@example.invalid)"
 
 
 def _config_with_network(tmp_path: Path, repo_root: Path, *, enabled: bool, acquire: bool) -> Path:
@@ -1825,65 +1831,318 @@ def _config_with_network(tmp_path: Path, repo_root: Path, *, enabled: bool, acqu
     return destination
 
 
+def _approved_plan(repo_root: Path, evidence_root: Path) -> Mapping[str, object]:
+    """Derive and store one real M3.2A plan, and return its document."""
+    _write_manifest(evidence_root)
+    result = _run(
+        [
+            "m3",
+            "plan-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--coverage-start",
+            "2010-01-01",
+            "--coverage-end",
+            "2010-06-30",
+            "--as-of",
+            "2010-07-01",
+            "--calendar-year",
+            "2010",
+            "--calendar-evidence-manifest",
+            "manifest.json",
+            "--catalog",
+            "runs/catalog.sqlite3",
+            "--plan-out",
+            "plans/m3_2a.json",
+            "--receipt-out",
+            "receipts/plan.json",
+        ],
+        repo_root,
+    )
+    assert result.returncode == EXIT_OK, result.stderr
+    document = json.loads((evidence_root / "plans" / "m3_2a.json").read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def _receipt_files(evidence_root: Path) -> list[str]:
+    """Every receipt-looking artifact below the evidence root, for no-receipt assertions.
+
+    The whole *relative path* is matched, not just the filename. Matching the name alone missed a
+    receipt written as ``receipts/live.json`` — the exact name the operator interface uses — which
+    made every no-receipt assertion weaker than it read.
+    """
+    return sorted(
+        str(path.relative_to(evidence_root))
+        for path in evidence_root.rglob("*")
+        if path.is_file() and "receipt" in str(path.relative_to(evidence_root)).lower()
+    )
+
+
 @pytest.mark.parametrize("command", M3_2_COMMANDS)
 def test_every_m3_2_command_is_recognized_by_the_parser(repo_root: Path, command: str) -> None:
-    """Positive control: the command parses, so its refusal is reached rather than a usage error."""
+    """Positive control: each surface parses, so its behaviour is reached rather than a typo."""
     result = _run(["m3", command, "--help"], repo_root)
 
     assert result.returncode == EXIT_OK
     assert command in result.stdout
 
 
-@pytest.mark.parametrize("command", M3_2_COMMANDS)
-def test_every_m3_2_command_refuses_deterministically(repo_root: Path, command: str) -> None:
-    result = _run(["m3", command], repo_root)
+def test_acquire_requires_an_explicit_mode(repo_root: Path, evidence_root: Path) -> None:
+    """Neither mode is a default: acquire with no mode flag is a usage failure, never a run."""
+    result = _run(["m3", "acquire", "--evidence-root", str(evidence_root)], repo_root)
 
-    assert result.returncode == EXIT_STAGE_NOT_ENABLED
-    assert f"m3 {command} is not available" in result.stderr
+    assert result.returncode == EXIT_USAGE
+    assert "--show-scope or --live is required" in result.stderr
     assert "Traceback" not in result.stderr
 
 
-@pytest.mark.parametrize("command", M3_2_COMMANDS)
-def test_an_m3_2_refusal_is_repeatable(repo_root: Path, command: str) -> None:
-    """The refusal is deterministic: identical invocations produce identical results."""
-    first = _run(["m3", command], repo_root)
-    second = _run(["m3", command], repo_root)
+def test_acquire_refuses_both_modes_at_once(repo_root: Path, evidence_root: Path) -> None:
+    """A scope report never acquires, so the two modes cannot be requested together."""
+    result = _run(
+        ["m3", "acquire", "--evidence-root", str(evidence_root), "--live", "--show-scope"],
+        repo_root,
+    )
 
-    assert first.returncode == second.returncode == EXIT_STAGE_NOT_ENABLED
+    assert result.returncode == EXIT_USAGE
+    assert "mutually exclusive" in result.stderr
+
+
+def test_show_scope_reports_the_window_authority_and_places_no_request(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """`--show-scope` reports the required scope deterministically and writes nothing."""
+    document = _approved_plan(repo_root, evidence_root)
+    before = sorted(str(path.relative_to(evidence_root)) for path in evidence_root.rglob("*"))
+
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--evidence-root",
+            str(evidence_root),
+            "--show-scope",
+            "--plan",
+            "plans/m3_2a.json",
+            "--window",
+            "M3.2A",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK, result.stderr
+    for required in (
+        "allowed hosts",
+        "method",
+        "route allowlist",
+        "prohibited route/family set",
+        "approved plan sha256",
+        "approved request ceiling",
+        "consumed-count baseline",
+    ):
+        assert required in result.stdout
+    assert "GET" in result.stdout
+    assert str(document["totals"]["hard_request_ceiling"]) in result.stdout  # type: ignore[index]
+    assert "consumed-count baseline" in result.stdout
+    baseline = next(
+        line for line in result.stdout.splitlines() if "consumed-count baseline" in line
+    )
+    assert baseline.rsplit(":", 1)[1].strip() == "0"
+    # Zero artifacts: no catalog, no receipt, no report.
+    assert sorted(str(path.relative_to(evidence_root)) for path in evidence_root.rglob("*")) == (
+        before
+    )
+
+
+def test_show_scope_is_byte_deterministic(repo_root: Path, evidence_root: Path) -> None:
+    """Positive control: two identical scope reports agree exactly, so the report is derived."""
+    _approved_plan(repo_root, evidence_root)
+    arguments = [
+        "m3",
+        "acquire",
+        "--evidence-root",
+        str(evidence_root),
+        "--show-scope",
+        "--plan",
+        "plans/m3_2a.json",
+        "--window",
+        "M3.2A",
+    ]
+
+    first = _run(arguments, repo_root)
+    second = _run(arguments, repo_root)
+
+    assert first.returncode == second.returncode == EXIT_OK
     assert first.stdout == second.stdout
 
 
-# The complete authority conjunction. No row may reach a transport, including the final row where
-# both switches are true and `--live` is explicit: the acquisition implementation and the later
-# owner authorizations that would govern a live run do not exist, and nothing here invents them.
+def test_show_scope_refuses_a_plan_for_another_window(repo_root: Path, evidence_root: Path) -> None:
+    """A plan is never reported against a window it was not built for."""
+    _approved_plan(repo_root, evidence_root)
+
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--evidence-root",
+            str(evidence_root),
+            "--show-scope",
+            "--plan",
+            "plans/m3_2a.json",
+            "--window",
+            "M3.2B",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "window" in result.stderr
+
+
+def test_show_scope_requires_its_governed_inputs(repo_root: Path, evidence_root: Path) -> None:
+    result = _run(
+        ["m3", "acquire", "--evidence-root", str(evidence_root), "--show-scope"], repo_root
+    )
+
+    assert result.returncode == EXIT_USAGE
+    assert "--plan" in result.stderr
+    assert "--window" in result.stderr
+
+
 @pytest.mark.parametrize(
-    ("enabled", "acquire", "live"),
+    ("enabled", "acquire", "identity", "expected"),
     [
-        (False, False, False),
-        (False, False, True),
-        (True, False, True),
-        (False, True, True),
-        (True, True, False),
-        (True, True, True),
+        (False, False, False, EXIT_STAGE_NOT_ENABLED),
+        (False, True, False, EXIT_STAGE_NOT_ENABLED),
+        (True, False, False, EXIT_STAGE_NOT_ENABLED),
+        (True, True, False, EXIT_STAGE_NOT_ENABLED),
     ],
 )
-def test_acquire_refuses_under_every_authority_combination(
+def test_live_acquire_refuses_every_incomplete_conjunction(
     repo_root: Path,
     tmp_path: Path,
+    evidence_root: Path,
     enabled: bool,
     acquire: bool,
-    live: bool,
+    identity: bool,
+    expected: int,
 ) -> None:
+    """Each live gate refuses on its own, and none of them writes a receipt.
+
+    The rows walk the conjunction one element at a time: the global switch, the acquire-scoped
+    switch, and the contact identity. Every row is exit 3 - a live operator gate unavailable or
+    disabled - and no row leaves an artifact behind.
+    """
+    document = _approved_plan(repo_root, evidence_root)
+    before = _receipt_files(evidence_root)
     config = _config_with_network(tmp_path, repo_root, enabled=enabled, acquire=acquire)
-    arguments = ["m3", "acquire", "--config", str(config)]
-    if live:
-        arguments.append("--live")
+    environment = (
+        {"DISCLOSURE_DRIFT_SEC_USER_AGENT": FIXTURE_PLACEHOLDER_IDENTITY} if identity else {}
+    )
 
-    result = _run(arguments, repo_root)
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--config",
+            str(config),
+            "--evidence-root",
+            str(evidence_root),
+            "--live",
+            "--plan",
+            "plans/m3_2a.json",
+            "--window",
+            "M3.2A",
+            "--ceiling",
+            str(document["totals"]["hard_request_ceiling"]),  # type: ignore[index]
+            "--catalog",
+            "catalog.sqlite3",
+            "--data-root",
+            "runs/live/data",
+            "--receipt-out",
+            "receipts/live.json",
+        ],
+        repo_root,
+        env=environment,
+    )
 
-    assert result.returncode == EXIT_STAGE_NOT_ENABLED
-    assert "m3 acquire is not available" in result.stderr
+    assert result.returncode == expected, result.stderr
     assert "Traceback" not in result.stderr
+    assert _receipt_files(evidence_root) == before, "a refused live invocation wrote a receipt"
+
+
+def test_the_switch_rungs_open_before_the_identity_rung(
+    repo_root: Path, tmp_path: Path, evidence_root: Path
+) -> None:
+    """Positive control for the gate ladder: it is not refusing everything at its first rung.
+
+    With both tracked switches true and a placeholder identity supplied, the refusal names the
+    *identity* gate rather than either switch - which proves the two switch rungs were evaluated
+    and passed. It stops there deliberately: the canonical validator refuses every RFC-reserved
+    placeholder domain, and Decision 045 §11 forbids fabricating an identity that would pass a
+    live gate. The remaining conjunction elements - exact plan hash, exact window, exact ceiling
+    equality, run registration ordering - are proved at the unit layer against an explicitly
+    constructed operator gate, where the fixture values are controlled and no identity is needed.
+    """
+    document = _approved_plan(repo_root, evidence_root)
+    before = _receipt_files(evidence_root)
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--config",
+            str(config),
+            "--evidence-root",
+            str(evidence_root),
+            "--live",
+            "--plan",
+            "plans/m3_2a.json",
+            "--window",
+            "M3.2A",
+            "--ceiling",
+            str(document["totals"]["hard_request_ceiling"]),  # type: ignore[index]
+            "--catalog",
+            "catalog.sqlite3",
+            "--data-root",
+            "runs/live/data",
+            "--receipt-out",
+            "receipts/live.json",
+        ],
+        repo_root,
+        env={"DISCLOSURE_DRIFT_SEC_USER_AGENT": FIXTURE_PLACEHOLDER_IDENTITY},
+    )
+
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED, result.stderr
+    assert "SEC contact identity" in result.stderr
+    assert "network.enabled" not in result.stderr
+    assert "m3_acquire_enabled" not in result.stderr
+    assert _receipt_files(evidence_root) == before
+
+
+def test_live_acquire_requires_its_governed_arguments(
+    repo_root: Path, tmp_path: Path, evidence_root: Path
+) -> None:
+    """A missing governed argument is a usage failure, never a silently defaulted run."""
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+
+    result = _run(
+        ["m3", "acquire", "--config", str(config), "--evidence-root", str(evidence_root), "--live"],
+        repo_root,
+        env={"DISCLOSURE_DRIFT_SEC_USER_AGENT": FIXTURE_PLACEHOLDER_IDENTITY},
+    )
+
+    assert result.returncode == EXIT_USAGE
+    for required in (
+        "--plan",
+        "--window",
+        "--ceiling",
+        "--catalog",
+        "--data-root",
+        "--receipt-out",
+    ):
+        assert required in result.stderr
 
 
 def test_the_acquire_configuration_fixture_really_sets_both_switches(
@@ -1900,11 +2159,7 @@ def test_the_acquire_configuration_fixture_really_sets_both_switches(
 def test_the_configuration_fixture_does_not_alias_between_combinations(
     repo_root: Path, tmp_path: Path
 ) -> None:
-    """Positive control: two combinations built in one test are distinct files.
-
-    Without this the independence comparisons would silently compare a configuration with
-    itself, and every such assertion would pass vacuously.
-    """
+    """Positive control: two combinations built in one test are distinct files."""
     acquire_on = _config_with_network(tmp_path, repo_root, enabled=False, acquire=True)
     acquire_off = _config_with_network(tmp_path, repo_root, enabled=False, acquire=False)
 
@@ -1913,40 +2168,188 @@ def test_the_configuration_fixture_does_not_alias_between_combinations(
     assert "m3_acquire_enabled: false" in acquire_off.read_text(encoding="utf-8")
 
 
-def test_show_scope_is_offline_and_refuses(repo_root: Path) -> None:
-    result = _run(["m3", "acquire", "--show-scope"], repo_root)
+def test_derive_dependent_plan_refuses_a_transport_capable_configuration(
+    repo_root: Path, tmp_path: Path, evidence_root: Path
+) -> None:
+    """A configuration that could acquire is never the one that derives (Decision 045 §4.3)."""
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=False)
+    (evidence_root / "set.json").write_text("{}", encoding="utf-8")
 
-    assert result.returncode == EXIT_STAGE_NOT_ENABLED
-    assert "implementation stage T2.1 only" in result.stdout
-    assert "live acquisition      : unavailable" in result.stdout
-    assert "network authorization : none" in result.stdout
-    assert "live operation        : not authorized" in result.stdout
+    result = _run(
+        [
+            "m3",
+            "derive-dependent-plan",
+            "--config",
+            str(config),
+            "--evidence-root",
+            str(evidence_root),
+            "--from-window",
+            "M3.2A",
+            "--catalog",
+            "catalog.sqlite3",
+            "--data-root",
+            "runs/data",
+            "--reconciliation-set",
+            "set.json",
+            "--plan-out",
+            "plans/m3_2b.json",
+            "--receipt-out",
+            "receipts/dependent.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "transport-capable" in result.stderr
+    assert not (evidence_root / "plans" / "m3_2b.json").exists()
+    assert not (evidence_root / "receipts" / "dependent.json").exists()
+
+
+def test_derive_dependent_plan_refuses_a_source_window_other_than_m3_2a(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    (evidence_root / "set.json").write_text("{}", encoding="utf-8")
+
+    result = _run(
+        [
+            "m3",
+            "derive-dependent-plan",
+            "--evidence-root",
+            str(evidence_root),
+            "--from-window",
+            "M3.2B",
+            "--catalog",
+            "catalog.sqlite3",
+            "--data-root",
+            "runs/data",
+            "--reconciliation-set",
+            "set.json",
+            "--plan-out",
+            "plans/m3_2b.json",
+            "--receipt-out",
+            "receipts/dependent.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "M3.2A" in result.stderr
+    assert not (evidence_root / "plans" / "m3_2b.json").exists()
+
+
+def test_show_drift_refuses_an_unknown_run(repo_root: Path, evidence_root: Path) -> None:
+    """There is no global-drift fallback: an unknown run identity fails closed with exit 4."""
+    result = _run(
+        [
+            "m3",
+            "show-drift",
+            "--evidence-root",
+            str(evidence_root),
+            "--catalog",
+            "catalog.sqlite3",
+            "--run",
+            "not-a-registered-run",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "Traceback" not in result.stderr
+    assert _receipt_files(evidence_root) == []
+
+
+def test_recover_refuses_an_unknown_run(repo_root: Path, evidence_root: Path) -> None:
+    """Every mutating recovery action requires an already-registered M3.2 run identity."""
+    result = _run(
+        [
+            "m3",
+            "recover",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/m3_2a.json",
+            "--receipt-chain-head",
+            "receipts/head.json",
+            "--catalog",
+            "catalog.sqlite3",
+            "--data-root",
+            "runs/data",
+            "--run",
+            "fabricated-run-identity",
+            "--action",
+            "rebuild-projection",
+            "--event",
+            "census_source_observations.jsonl",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
     assert "Traceback" not in result.stderr
 
 
-def test_no_m3_2_command_emits_a_token_or_receipt(repo_root: Path, tmp_path: Path) -> None:
-    """No refusal may emit a completion token or write any artifact."""
-    before = sorted(tmp_path.rglob("*"))
-    for command in M3_2_COMMANDS:
-        result = _run(["m3", command], repo_root)
+def test_recover_rejects_an_unregistered_action(repo_root: Path, evidence_root: Path) -> None:
+    """Positive control: the action vocabulary is closed at the parser boundary."""
+    result = _run(
+        [
+            "m3",
+            "recover",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/m3_2a.json",
+            "--receipt-chain-head",
+            "receipts/head.json",
+            "--catalog",
+            "catalog.sqlite3",
+            "--data-root",
+            "runs/data",
+            "--run",
+            "any-run",
+            "--action",
+            "delete-everything",
+            "--event",
+            "target",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_USAGE
+
+
+def test_no_refused_m3_2_command_emits_a_token_or_a_receipt(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """No refusal may emit a completion token or leave a receipt behind."""
+    invocations = (
+        ["m3", "acquire", "--evidence-root", str(evidence_root)],
+        ["m3", "show-drift", "--evidence-root", str(evidence_root), "--catalog", "c", "--run", "r"],
+    )
+    for arguments in invocations:
+        result = _run(arguments, repo_root)
         combined = result.stdout + result.stderr
         assert "M3_1A_OFFLINE_OPERATOR_REHEARSAL_PASSED" not in combined
         assert "M3_1_GATE_F_READY_FOR_CONTROLLED_METADATA_ACQUISITION" not in combined
         assert "M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED" not in combined
         assert "receipt_id" not in combined
 
-    assert sorted(tmp_path.rglob("*")) == before
+    assert _receipt_files(evidence_root) == []
 
 
 def test_an_m3_2_refusal_discloses_no_identity_or_private_path(
-    repo_root: Path, tmp_path: Path
+    repo_root: Path, tmp_path: Path, evidence_root: Path
 ) -> None:
+    """Not even with a real-looking identity in the environment and every switch enabled."""
     config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
     for command in M3_2_COMMANDS:
-        result = _run(["m3", command, "--config", str(config)], repo_root)
+        result = _run(
+            ["m3", command, "--config", str(config), "--evidence-root", str(evidence_root)],
+            repo_root,
+            env={"DISCLOSURE_DRIFT_SEC_USER_AGENT": FIXTURE_PLACEHOLDER_IDENTITY},
+        )
         combined = result.stdout + result.stderr
         for marker in ("/Users/", "/home/", "C:\\Users", "@", "Authorization", "Bearer"):
-            assert marker not in combined
+            assert marker not in combined, f"m3 {command} disclosed {marker!r}"
 
 
 def test_an_invalid_m3_2_argument_fails_at_the_parser_boundary(repo_root: Path) -> None:
@@ -1954,34 +2357,151 @@ def test_an_invalid_m3_2_argument_fails_at_the_parser_boundary(repo_root: Path) 
     result = _run(["m3", "acquire", "--not-a-real-option"], repo_root)
 
     assert result.returncode == EXIT_USAGE
-    assert "m3 acquire is not available" not in result.stderr
 
 
-def test_the_m3_2_surfaces_reach_no_transport_module(repo_root: Path) -> None:
-    """Structural proof: the acquisition driver builds no transport and the CLI wires none.
+def _enclosing_function(lines: list[str], index: int) -> str:
+    """The name of the module-level function whose body contains ``lines[index]``."""
+    for number in range(index, -1, -1):
+        if lines[number].startswith("def "):
+            return lines[number].removeprefix("def ").split("(", 1)[0]
+    return "<module scope>"
 
-    Stage T2.2-T2.3 delivers ``m3/acquisition.py``, so that module's *absence* is no longer the
-    invariant. The invariant that survives — and the one that mattered all along — is that
-    nothing on the Milestone 3.2 path can construct a transport: the driver imports no transport
-    implementation and receives one only by injection, and ``cli.py`` still reaches neither the
-    driver nor a transport, so every operator surface remains refused at this stage.
-    """
-    driver = repo_root / "src" / "disclosure_drift" / "m3" / "acquisition.py"
-    assert driver.exists(), "stage T2.2-T2.3 delivers the bounded acquisition driver"
 
-    imports = [
-        line.strip()
-        for line in driver.read_text(encoding="utf-8").splitlines()
-        if line.startswith(("import ", "from "))
+def _transport_reference_lines(source: str) -> list[int]:
+    """Executable (non-comment, non-docstring-prose) references to the transport implementation."""
+    return [
+        number
+        for number, line in enumerate(source.splitlines(), start=1)
+        if "HttpxTransport" in line and not line.lstrip().startswith(("#", "*", '"', "'"))
     ]
-    assert imports, "the driver declares imports at module level"
-    for line in imports:
+
+
+def test_only_one_live_transport_construction_site_exists_on_the_m3_path(
+    repo_root: Path,
+) -> None:
+    """Structural proof: the Milestone 3.2 path constructs a transport at exactly one site.
+
+    Decision 045 §4.2 and §6 permit one auditable construction site for this stage. The proof is
+    threefold: the acquisition driver declares no HTTP library among its module-level imports, so
+    importing it builds nothing; across the whole M3 path plus the CLI the only executable
+    references to a transport implementation are in ``m3/acquisition.py``; and every one of those
+    references lies inside ``default_live_transport_factory``.
+
+    ``sec/census_orchestrator.py`` is deliberately out of scope. It is the accepted, pre-existing
+    Stage M2.2 census caller and a prohibited path for this stage: its construction site predates
+    Decision 045 and is not the M3.2 one under test.
+    """
+    package = repo_root / "src" / "disclosure_drift"
+    driver = package / "m3" / "acquisition.py"
+    source = driver.read_text(encoding="utf-8")
+
+    module_level = [
+        line.strip() for line in source.splitlines() if line.startswith(("import ", "from "))
+    ]
+    assert module_level, "the driver declares imports at module level"
+    for line in module_level:
         for forbidden in ("httpx", "socket", "urllib", "requests"):
             assert forbidden not in line, f"the driver must not import a transport: {line}"
 
-    cli_source = (repo_root / "src" / "disclosure_drift" / "cli.py").read_text(encoding="utf-8")
-    for forbidden in ("HttpxTransport", "httpx_transport", "m3.acquisition"):
-        assert forbidden not in cli_source
+    m3_path = [*sorted((package / "m3").rglob("*.py")), package / "cli.py"]
+    elsewhere = [
+        str(path.relative_to(package))
+        for path in m3_path
+        if path != driver and _transport_reference_lines(path.read_text(encoding="utf-8"))
+    ]
+    assert elsewhere == [], f"a transport is referenced outside the one site: {elsewhere}"
+
+    lines = source.splitlines()
+    references = _transport_reference_lines(source)
+    assert references, "the driver no longer carries its construction site"
+    enclosing = {_enclosing_function(lines, number - 1) for number in references}
+    assert enclosing == {"default_live_transport_factory"}, enclosing
+
+
+def test_the_construction_site_is_lazy_and_inside_the_factory_body(repo_root: Path) -> None:
+    """Positive control: the one import is *inside* the factory, not at module scope.
+
+    A module-level import would load the HTTP library on every import of the package, which is
+    exactly what the no-network property depends on not happening. This is the complement of the
+    test above: that one proves nothing references a transport elsewhere, this one proves the
+    single reference is not itself a module-level import.
+    """
+    source = (repo_root / "src" / "disclosure_drift" / "m3" / "acquisition.py").read_text(
+        encoding="utf-8"
+    )
+    lines = source.splitlines()
+    imports = [
+        number
+        for number in _transport_reference_lines(source)
+        if lines[number - 1].lstrip().startswith("from ")
+    ]
+
+    assert len(imports) == 1, "there is exactly one transport import"
+    assert lines[imports[0] - 1].startswith("    "), "the transport import is not lazy"
+
+
+@pytest.mark.parametrize("command", M3_2_COMMANDS)
+def test_no_http_library_is_imported_by_a_refusal(repo_root: Path, command: str) -> None:
+    """Runtime proof: refusing loads no HTTP library, so no transport was constructed.
+
+    ``httpx`` is imported lazily and only where a transport is actually built, so its absence
+    from ``sys.modules`` after a refusal proves the construction site was never reached. The
+    policy module ``disclosure_drift.sec.http_client`` is deliberately not asserted on: it is a
+    pre-existing transitive import of the CLI, present even for ``show-cohorts``, and importing
+    a policy module builds nothing.
+    """
+    # A bare invocation of a surface with required arguments exits through argparse, so the
+    # probe catches SystemExit: what is under test is which modules were loaded, not the code.
+    probe = (
+        "import sys; from disclosure_drift.cli import main\n"
+        f"try:\n    main(['m3', {command!r}])\n"
+        "except SystemExit:\n    pass\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'httpx'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == EXIT_OK, result.stderr
+    assert result.stdout.strip() == "[]", result.stdout
+
+
+def test_the_m3_2_surfaces_touch_no_socket_in_process(
+    repo_root: Path, evidence_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Behavioural proof: the surfaces run under the suite-wide socket guard without tripping it.
+
+    ``tests/conftest.py`` replaces ``socket.socket``, ``socket.create_connection``, and
+    ``socket.getaddrinfo`` with functions that raise. Driving the CLI in-process therefore proves
+    these paths open no socket and resolve no hostname.
+    """
+    from disclosure_drift.cli import main
+
+    configuration = str(repo_root / "configs" / "project.yaml")
+    codes = [
+        main(["m3", "acquire", "--config", configuration, "--evidence-root", str(evidence_root)]),
+        main(
+            [
+                "m3",
+                "show-drift",
+                "--config",
+                configuration,
+                "--evidence-root",
+                str(evidence_root),
+                "--catalog",
+                "catalog.sqlite3",
+                "--run",
+                "unknown",
+            ]
+        ),
+    ]
+
+    assert codes == [EXIT_USAGE, EXIT_GATE_FAILURE]
+    assert "Traceback" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", ["census", "ingest-pilot"])
@@ -1989,12 +2509,7 @@ def test_the_m3_2_surfaces_reach_no_transport_module(repo_root: Path) -> None:
 def test_m2_2_commands_are_unaffected_by_the_acquire_switch(
     repo_root: Path, tmp_path: Path, command: str, enabled: bool
 ) -> None:
-    """Behavioural proof: flipping the acquire-scoped switch changes no M2.2 command outcome.
-
-    For each setting of the global switch, the M2.2 command behaves identically whether the
-    acquire-scoped switch is true or false — so enabling M3.2 acquisition can never enable, or
-    otherwise reach, a Stage M2.2 command.
-    """
+    """Behavioural proof: flipping the acquire-scoped switch changes no M2.2 command outcome."""
     with_acquire = _config_with_network(tmp_path, repo_root, enabled=enabled, acquire=True)
     without_acquire = _config_with_network(tmp_path, repo_root, enabled=enabled, acquire=False)
 
@@ -2017,64 +2532,1144 @@ def test_the_m2_2_network_gate_reads_only_the_global_switch(repo_root: Path) -> 
     assert "m3_acquire_enabled" not in sec_command_body
 
 
-def test_the_m3_2_surfaces_appear_in_the_group_help(repo_root: Path) -> None:
-    result = _run(["m3", "--help"], repo_root)
+# --------------------------------------------------------------------------- #
+# Reconciliation, run-scoped drift, and recovery over a real acquired window
+#
+# These drive the operator commands against evidence a real acquisition produced, built here
+# in-process over a scripted transport. Nothing below opens a socket.
+# --------------------------------------------------------------------------- #
+#: The fixture layout one acquisition writes below an evidence root.
+_FIXTURE_CATALOG = "catalogs/m3_2a_operational.sqlite3"
+_FIXTURE_DATA_ROOT = "runs/m3_2a/data"
 
-    assert result.returncode == EXIT_OK
-    for command in M3_2_COMMANDS:
-        assert command in result.stdout
+#: A contact identity for the in-process acquisition fixtures. It is never validated by the
+#: canonical validator here and never reaches a wire: the transport is always scripted.
+_FIXTURE_AGENT = "Disclosure Drift Test Harness (offline-fixture@example.invalid)"
 
 
-def test_the_m3_2_refusals_touch_no_socket_in_process(
-    repo_root: Path, capsys: pytest.CaptureFixture[str]
+class _ScriptedTransport:
+    """Replays scripted responses. Opens no socket."""
+
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.closed = False
+
+    def send(self, request: object) -> object:
+        from dataclasses import replace  # noqa: PLC0415 - narrow local import
+
+        if not self._responses:
+            message = "the scripted transport was exhausted"
+            raise AssertionError(message)
+        response = self._responses.pop(0)
+        if response.final_url == "":  # type: ignore[attr-defined]
+            response = replace(response, final_url=request.url)  # type: ignore[arg-type]
+        return response
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _fixture_response(source_id: str, *, corrupt: bool = False) -> object:
+    """One scripted 200 shaped to the route's registered expected content kind."""
+    from disclosure_drift.sec.source_registry import SOURCES  # noqa: PLC0415
+    from disclosure_drift.sec.transport import TransportResponse  # noqa: PLC0415
+
+    expected = SOURCES[source_id].expected_content
+    if expected == "zip":
+        if corrupt:
+            body, content_type = b"not-a-zip-archive", "application/zip"
+        else:
+            import io  # noqa: PLC0415
+            import zipfile  # noqa: PLC0415
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                info = zipfile.ZipInfo("CIK0000000001.json", date_time=(1980, 1, 1, 0, 0, 0))
+                info.create_system = 3
+                archive.writestr(info, b'{"cik":1}')
+            body, content_type = buffer.getvalue(), "application/zip"
+    elif expected == "html":
+        body, content_type = b"<html><body>calendar</body></html>", "text/html"
+    elif expected == "text":
+        body, content_type = b"CIK|Company Name\n1|SYNTHETIC\n", "text/plain"
+    else:
+        body, content_type = b'{"ok":1}', "application/json"
+    return TransportResponse(
+        status=200, headers={"Content-Type": content_type}, final_url="", body=body
+    )
+
+
+def _acquired_window(evidence_root: Path, *, run_id: str, quarantine_bulk: bool = False) -> Path:
+    """Run one acquisition over scripted responses, and return the stored plan's relative path.
+
+    Built here rather than imported from the unit suite: a cross-test-module import depends on the
+    repository root being importable, which is true for some pytest invocations and not others.
+    Everything below uses the public acquisition API and a scripted transport, so it opens no
+    socket and reaches no construction site.
+    """
+    from datetime import date  # noqa: PLC0415
+
+    from disclosure_drift.m3.acquisition import (  # noqa: PLC0415
+        LiveOperationAuthorization,
+        LiveOperatorGate,
+        derive_logical_requests,
+        execute_live_acquisition,
+        prepare_operational_catalog,
+        prepare_storage,
+    )
+    from disclosure_drift.m3.request_plan import (  # noqa: PLC0415
+        build_m3_2a_request_plan,
+        canonical_plan_bytes,
+    )
+    from disclosure_drift.sec.http_client import RetrievalPolicy  # noqa: PLC0415
+    from disclosure_drift.sec.rate_limit import AggregateRateLimiter  # noqa: PLC0415
+
+    plan = build_m3_2a_request_plan(
+        coverage_start=date(2010, 1, 1),
+        coverage_end=date(2010, 6, 30),
+        as_of_date=date(2010, 7, 1),
+        include_open_quarter=False,
+        calendar_year=2010,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+    script = [_fixture_response(request.source_id) for request in derive_logical_requests(plan)]
+    if quarantine_bulk:
+        script[0] = _fixture_response("sec_bulk_submissions", corrupt=True)
+
+    elapsed = [1000.0]
+
+    def _clock() -> float:
+        return elapsed[0]
+
+    def _sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    execute_live_acquisition(
+        plan=plan,
+        window="M3.2A",
+        approved_ceiling=plan.hard_request_ceiling,
+        authorization=LiveOperationAuthorization(
+            window="M3.2A",
+            plan_sha256=plan.request_plan_sha256,
+            approved_ceiling=plan.hard_request_ceiling,
+            authorization_reference="OWNER_TEST_FIXTURE_AUTHORIZATION",
+        ),
+        gate=LiveOperatorGate(
+            explicit_live=True,
+            network_enabled=True,
+            m3_acquire_enabled=True,
+            sec_identity_validated=True,
+            stage_authority_reference="OWNER_TEST_FIXTURE_STAGE_AUTHORITY",
+        ),
+        catalog=prepare_operational_catalog(
+            evidence_root=evidence_root, relative_path=_FIXTURE_CATALOG
+        ),
+        storage=prepare_storage(evidence_root=evidence_root, data_root_relative=_FIXTURE_DATA_ROOT),
+        user_agent=_FIXTURE_AGENT,
+        requests_per_second=4.0,
+        burst=1,
+        policy=RetrievalPolicy(),
+        transport_factory=lambda: _ScriptedTransport(script),  # type: ignore[arg-type,return-value]
+        run_id_factory=lambda: run_id,
+        clock=lambda: "2026-08-04T00:00:00Z",
+        sleeper=_sleep,
+        rate_limiter=AggregateRateLimiter(4.0, burst=1, clock=_clock, sleeper=_sleep),
+    )
+
+    plan_path = evidence_root / "plans" / "acquired.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_bytes(canonical_plan_bytes(plan))
+    assert (evidence_root / _FIXTURE_CATALOG).is_file()
+    return Path("plans/acquired.json")
+
+
+def _catalog_arguments() -> list[str]:
+    """The data-root and catalog arguments matching the acquisition fixture layout.
+
+    ``--catalog`` is named relative to ``--data-root``, so the fixture's root-relative catalog
+    path is expressed by climbing back out of the data root exactly as an operator would.
+    """
+    climb = Path(*[".."] * len(Path(_FIXTURE_DATA_ROOT).parts))
+    return ["--data-root", _FIXTURE_DATA_ROOT, "--catalog", str(climb / _FIXTURE_CATALOG)]
+
+
+def test_reconcile_requests_exits_zero_on_a_complete_window_and_writes_its_report(
+    repo_root: Path, evidence_root: Path
 ) -> None:
-    """Behavioural proof: the refusals run under the suite-wide socket guard without tripping it.
+    plan_relative = _acquired_window(evidence_root, run_id="run-reconcile")
 
-    `tests/conftest.py` replaces `socket.socket`, `socket.create_connection`, and
-    `socket.getaddrinfo` with functions that raise. Driving the CLI in-process therefore proves
-    the refusal path opens no socket and resolves no hostname — the subprocess tests above
-    exercise the operator-visible contract, and this one closes the in-process gap.
-    """
-    from disclosure_drift.cli import main
-
-    configuration = str(repo_root / "configs" / "project.yaml")
-    for arguments in (
-        ["m3", "acquire", "--config", configuration, "--live"],
-        ["m3", "acquire", "--config", configuration, "--show-scope"],
-        ["m3", "derive-dependent-plan", "--config", configuration],
-        ["m3", "reconcile-requests", "--config", configuration],
-        ["m3", "show-drift", "--config", configuration],
-        ["m3", "recover", "--config", configuration],
-    ):
-        assert main(arguments) == EXIT_STAGE_NOT_ENABLED
-
-    captured = capsys.readouterr()
-    assert "is not available" in captured.err
-    assert "Traceback" not in captured.err
-
-
-def test_no_http_library_is_imported_by_a_refusal(repo_root: Path) -> None:
-    """Runtime proof: refusing loads no HTTP library, so no transport can exist.
-
-    `httpx` is imported lazily and only where a transport is actually built, so its absence
-    from `sys.modules` after a refusal proves no transport was constructed or reachable. The
-    policy module `disclosure_drift.sec.http_client` is deliberately not asserted on: it is a
-    pre-existing transitive import of the CLI module, present even for unrelated commands such
-    as `show-cohorts`, and importing a policy module builds nothing.
-    """
-    probe = (
-        "import sys; from disclosure_drift.cli import main; "
-        "code = main(['m3', 'acquire', '--live']); "
-        "leaked = sorted(m for m in sys.modules if m.split('.')[0] == 'httpx'); "
-        "print(code, leaked)"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
+    result = _run(
+        [
+            "m3",
+            "reconcile-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            str(plan_relative),
+            *_catalog_arguments(),
+            "--report-out",
+            "reports/reconciliation.json",
+        ],
+        repo_root,
     )
 
-    assert result.returncode == EXIT_OK
-    assert result.stdout.strip() == f"{EXIT_STAGE_NOT_ENABLED} []"
+    assert result.returncode == EXIT_OK, result.stderr
+    report = evidence_root / "reports" / "reconciliation.json"
+    assert report.is_file()
+    document = json.loads(report.read_text(encoding="utf-8"))
+    assert document["exit_is_clean"] is True
+    assert document["absence_enumeration"] == []
+    assert document["blocking_drift"] == []
+
+
+def test_the_reconciliation_report_is_byte_deterministic(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Identical durable state produces identical report bytes, so two runs are comparable."""
+    plan_relative = _acquired_window(evidence_root, run_id="run-deterministic")
+    arguments = [
+        "m3",
+        "reconcile-requests",
+        "--evidence-root",
+        str(evidence_root),
+        "--plan",
+        str(plan_relative),
+        *_catalog_arguments(),
+    ]
+
+    first = _run([*arguments, "--report-out", "reports/first.json"], repo_root)
+    second = _run([*arguments, "--report-out", "reports/second.json"], repo_root)
+
+    assert first.returncode == second.returncode == EXIT_OK, first.stderr + second.stderr
+    assert (evidence_root / "reports" / "first.json").read_bytes() == (
+        evidence_root / "reports" / "second.json"
+    ).read_bytes()
+
+
+def test_reconcile_requests_exits_four_on_an_absence_and_still_writes_the_report(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The evidence explaining a 4 is as load-bearing as the evidence explaining a 0."""
+    plan_relative = _acquired_window(evidence_root, run_id="run-absent", quarantine_bulk=True)
+
+    result = _run(
+        [
+            "m3",
+            "reconcile-requests",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            str(plan_relative),
+            *_catalog_arguments(),
+            "--report-out",
+            "reports/absent.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE, result.stdout
+    document = json.loads((evidence_root / "reports" / "absent.json").read_text(encoding="utf-8"))
+    assert document["exit_is_clean"] is False
+    assert document["absence_enumeration"], "a quarantined required object is an absence"
+
+
+def test_show_drift_exits_zero_for_a_clean_run_and_four_for_a_drifting_one(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Run scoping is real, and blocking drift is the exit-4 condition."""
+    _acquired_window(evidence_root, run_id="run-clean")
+    _acquired_window(evidence_root, run_id="run-drifting", quarantine_bulk=True)
+    clean = _run(
+        [
+            "m3",
+            "show-drift",
+            "--evidence-root",
+            str(evidence_root),
+            "--catalog",
+            _FIXTURE_CATALOG,
+            "--run",
+            "run-clean",
+        ],
+        repo_root,
+    )
+    drifting = _run(
+        [
+            "m3",
+            "show-drift",
+            "--evidence-root",
+            str(evidence_root),
+            "--catalog",
+            _FIXTURE_CATALOG,
+            "--run",
+            "run-drifting",
+        ],
+        repo_root,
+    )
+
+    assert clean.returncode == EXIT_OK, clean.stderr
+    assert "blocking drift events" in clean.stdout
+    assert drifting.returncode == EXIT_GATE_FAILURE, drifting.stdout
+    assert "BLOCKING" in drifting.stdout
+
+
+def test_recover_refuses_a_run_registered_as_a_stage_m2_2_census(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A run identity that exists but is not an M3.2 acquisition run fails closed."""
+    from disclosure_drift.m3.acquisition import ACQUISITION_JOB_KIND  # noqa: PLC0415
+    from disclosure_drift.storage.catalog import CatalogWriter  # noqa: PLC0415
+
+    plan_relative = _acquired_window(evidence_root, run_id="run-m3-2")
+    catalog = evidence_root / _FIXTURE_CATALOG
+    with CatalogWriter(catalog, catalog.parent) as writer, writer.batch():
+        writer.insert(
+            "ops_ingestion_jobs",
+            {
+                "job_id": "run-census",
+                "job_kind": "sec_census",
+                "job_state": "running",
+                "stage": "M2.2",
+                "started_at_utc": "2026-08-04T00:00:00Z",
+                "detail": "a Stage M2.2 census run",
+            },
+        )
+    assert ACQUISITION_JOB_KIND != "sec_census"
+
+    result = _run(
+        [
+            "m3",
+            "recover",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            str(plan_relative),
+            "--receipt-chain-head",
+            "receipts/head.json",
+            *_catalog_arguments(),
+            "--run",
+            "run-census",
+            "--action",
+            "rebuild-projection",
+            "--event",
+            "census_source_observations.jsonl",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "job kind" in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# The reconciliation exit rule, one conjunct at a time (Decision 045 §4.4)
+# --------------------------------------------------------------------------- #
+def _reconciliation(**overrides: object) -> object:
+    """A clean reconciliation, with exactly one conjunct spoiled per test.
+
+    Driving the rule through the CLI can only ever exercise the conjuncts a fixture happens to
+    produce together — a quarantined required object raises an absence *and* blocking drift at
+    once, so each control masks the other and neither is individually load-bearing. Constructing
+    the reconciliation directly is what makes one conjunct testable at a time.
+    """
+    from disclosure_drift.m3.acquisition import (  # noqa: PLC0415 - narrow local import
+        DriftListingEntry,
+        ReconciliationItem,
+        RequestReconciliation,
+        StoreFinding,
+    )
+
+    fields: dict[str, object] = {
+        "window": "M3.2A",
+        "plan_sha256": "0" * 64,
+        "items": (),
+        "out_of_plan": (),
+        "store_findings": (),
+        "drift": (),
+        "blocked_recovery_states": 0,
+    }
+    builders = {
+        "absence": lambda: {
+            "items": (
+                ReconciliationItem(
+                    position=0,
+                    source_id="sec_company_tickers",
+                    identity_label="sec_company_tickers",
+                    request_identity="identity",
+                    state="absent",
+                    observation_id=None,
+                    verified=False,
+                    excluded_from_continuation=False,
+                    attempts=1,
+                    reason_codes=("SOURCE_REQUIRED_OBJECT_UNAVAILABLE",),
+                    conditions=(),
+                ),
+            )
+        },
+        "blocking_drift": lambda: {
+            "drift": (
+                DriftListingEntry(
+                    observation_id="observation-0001",
+                    source_id="sec_bulk_submissions",
+                    request_identity="identity",
+                    reason_codes=("RAW_ARCHIVE_INVALID",),
+                    blocking=True,
+                ),
+            )
+        },
+        "nonblocking_drift": lambda: {
+            "drift": (
+                DriftListingEntry(
+                    observation_id="observation-0002",
+                    source_id="sec_company_tickers",
+                    request_identity="identity",
+                    reason_codes=("PARSER_SCHEMA_DRIFT_OBSERVED",),
+                    blocking=False,
+                ),
+            )
+        },
+        "out_of_plan": lambda: {"out_of_plan": (("sec_sic_code_list", "identity"),)},
+        "store_finding": lambda: {
+            "store_findings": (
+                StoreFinding(
+                    kind="orphan_object",
+                    relative_path="raw/bulk/orphan.json",
+                    observation_id=None,
+                ),
+            )
+        },
+        "blocked_recovery_state": lambda: {"blocked_recovery_states": 1},
+    }
+    for name, enabled in overrides.items():
+        if enabled:
+            fields.update(builders[name]())
+    return RequestReconciliation(**fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "conjunct",
+    [
+        "absence",
+        "blocking_drift",
+        "out_of_plan",
+        "store_finding",
+        "blocked_recovery_state",
+    ],
+)
+def test_each_reconciliation_conjunct_alone_forces_the_governed_exit(conjunct: str) -> None:
+    """Every defect refuses exit 0 on its own, so none is masked by the others."""
+    from disclosure_drift.cli import _reconciliation_is_clean  # noqa: PLC0415 - narrow import
+
+    assert _reconciliation_is_clean(_reconciliation(**{conjunct: True})) is False  # type: ignore[arg-type]
+
+
+def test_positive_control_a_reconciliation_with_no_defect_is_clean() -> None:
+    """Without this, every case above would pass against a rule that returns False always."""
+    from disclosure_drift.cli import _reconciliation_is_clean  # noqa: PLC0415 - narrow import
+
+    assert _reconciliation_is_clean(_reconciliation()) is True  # type: ignore[arg-type]
+
+
+def test_nonblocking_drift_alone_does_not_force_the_governed_exit() -> None:
+    """Decision 045 §4.4: remaining divergence that is nonblocking still permits exit 0."""
+    from disclosure_drift.cli import _reconciliation_is_clean  # noqa: PLC0415 - narrow import
+
+    assert _reconciliation_is_clean(_reconciliation(nonblocking_drift=True)) is True  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Genuine interruption -> receipt -> accepted recovery -> real CLI resume
+#
+# Decision 045 correction, MAJOR-1. These drive the *real* operator surfaces end to end:
+# `m3 acquire --live` is interrupted at a real durable boundary, `m3 recovery-state` and
+# `m3 recover` are the accepted recovery path, and the resume is the real
+# `m3 acquire --live --resume-from`. Nothing here hand-builds a continuation proposal.
+#
+# Two seams are substituted, and only two: the HTTP transport (so no socket exists) and the SEC
+# contact identity (so no real address is ever fabricated to pass a live gate). Everything between
+# them is production code.
+# --------------------------------------------------------------------------- #
+_LIVE_CATALOG = "m3_2a_operational.sqlite3"
+_LIVE_DATA_ROOT = "runs/m3_2a/data"
+_PROJECTION_TARGET = "census_source_observations.jsonl"
+
+
+class _InterruptScript:
+    """The scripted response queue one in-process live invocation replays. Opens no socket."""
+
+    def __init__(self) -> None:
+        self.responses: list[object] = []
+        self.constructions = 0
+        self.sent = 0
+
+
+def _fixture_body(source_id: str, marker: bytes) -> object:
+    """One scripted ``200`` shaped to the route's registered expected content kind.
+
+    ``marker`` differentiates otherwise identical bodies, so two instances of the same route do
+    not collapse into a byte-identical duplicate and blur what a resume actually re-requested.
+    """
+    from disclosure_drift.sec.source_registry import SOURCES  # noqa: PLC0415
+    from disclosure_drift.sec.transport import TransportResponse  # noqa: PLC0415
+
+    expected = SOURCES[source_id].expected_content
+    if expected == "zip":
+        import io  # noqa: PLC0415
+        import zipfile  # noqa: PLC0415
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            info = zipfile.ZipInfo(
+                f"CIK000000000{marker.decode()}.json", date_time=(1980, 1, 1, 0, 0, 0)
+            )
+            info.create_system = 3
+            archive.writestr(info, b'{"cik":' + marker + b"}")
+        body, content_type = buffer.getvalue(), "application/zip"
+    elif expected == "html":
+        body, content_type = b"<html><body>calendar " + marker + b"</body></html>", "text/html"
+    elif expected == "text":
+        body, content_type = b"CIK|Company Name\n" + marker + b"|SYNTHETIC\n", "text/plain"
+    else:
+        body, content_type = b'{"ok":' + marker + b"}", "application/json"
+    return TransportResponse(
+        status=200, headers={"Content-Type": content_type}, final_url="", body=body
+    )
+
+
+def _install_live_seams(monkeypatch: pytest.MonkeyPatch, script: _InterruptScript) -> None:
+    """Substitute exactly two things: the transport implementation and the contact identity.
+
+    The transport is replaced at ``sec.httpx_transport.HttpxTransport``, which is what the one
+    auditable construction site imports at call time — so the production factory, the recording
+    wrapper, and the whole live path really run, and only the socket-owning object is fake.
+
+    The identity is stubbed at the canonical validator rather than fabricated: this suite never
+    invents a contact value that would pass a live gate (Decision 045 §11), and the placeholder it
+    returns stays in process memory. The receipt's prohibited-content scan bars it from every
+    artifact, which the assertions below rely on rather than assume.
+    """
+    from dataclasses import replace as _replace  # noqa: PLC0415
+
+    import disclosure_drift.sec.httpx_transport as httpx_transport  # noqa: PLC0415
+    from disclosure_drift.config import ProjectConfig  # noqa: PLC0415
+
+    class _Scripted:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            script.constructions += 1
+
+        def send(self, request: object) -> object:
+            if not script.responses:
+                message = "the scripted transport was exhausted"
+                raise AssertionError(message)
+            script.sent += 1
+            response = script.responses.pop(0)
+            if response.final_url == "":  # type: ignore[attr-defined]
+                response = _replace(response, final_url=request.url)  # type: ignore[arg-type]
+            return response
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(httpx_transport, "HttpxTransport", _Scripted)
+    monkeypatch.setattr(
+        ProjectConfig,
+        "require_sec_user_agent",
+        lambda self, env=None: FIXTURE_PLACEHOLDER_IDENTITY,
+    )
+
+
+def _live_plan(evidence_root: Path) -> object:
+    """Derive one real M3.2A plan and store it below the evidence root."""
+    from datetime import date  # noqa: PLC0415
+
+    from disclosure_drift.m3.request_plan import (  # noqa: PLC0415
+        build_m3_2a_request_plan,
+        canonical_plan_bytes,
+    )
+
+    plan = build_m3_2a_request_plan(
+        coverage_start=date(2010, 1, 1),
+        coverage_end=date(2010, 6, 30),
+        as_of_date=date(2010, 7, 1),
+        include_open_quarter=False,
+        calendar_year=2010,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+    destination = evidence_root / "plans" / "approved.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(canonical_plan_bytes(plan))
+    return plan
+
+
+def _acquire_argv(
+    evidence_root: Path,
+    config: Path,
+    plan: object,
+    *,
+    receipt_out: str,
+    resume_from: str | None = None,
+    window: str = "M3.2A",
+    ceiling: int | None = None,
+    catalog: str = _LIVE_CATALOG,
+) -> list[str]:
+    argv = [
+        "m3",
+        "acquire",
+        "--config",
+        str(config),
+        "--evidence-root",
+        str(evidence_root),
+        "--live",
+        "--plan",
+        "plans/approved.json",
+        "--window",
+        window,
+        "--ceiling",
+        str(plan.hard_request_ceiling if ceiling is None else ceiling),  # type: ignore[attr-defined]
+        "--data-root",
+        _LIVE_DATA_ROOT,
+        "--catalog",
+        catalog,
+        "--receipt-out",
+        receipt_out,
+    ]
+    if resume_from is not None:
+        argv += ["--resume-from", resume_from]
+    return argv
+
+
+def _recovery_state_argv(evidence_root: Path) -> list[str]:
+    return [
+        "m3",
+        "recovery-state",
+        "--evidence-root",
+        str(evidence_root),
+        "--plan",
+        "plans/approved.json",
+        "--receipt-chain-head",
+        "receipts/interrupted.json",
+        "--catalog",
+        _LIVE_CATALOG,
+        "--data-root",
+        _LIVE_DATA_ROOT,
+    ]
+
+
+def _recover_argv(
+    evidence_root: Path, config: Path, *, run_id: str, action: str, event: str
+) -> list[str]:
+    return [
+        "m3",
+        "recover",
+        "--config",
+        str(config),
+        "--evidence-root",
+        str(evidence_root),
+        "--plan",
+        "plans/approved.json",
+        "--receipt-chain-head",
+        "receipts/interrupted.json",
+        "--catalog",
+        _LIVE_CATALOG,
+        "--data-root",
+        _LIVE_DATA_ROOT,
+        "--run",
+        run_id,
+        "--action",
+        action,
+        "--event",
+        event,
+    ]
+
+
+def _live_catalog_rows(evidence_root: Path, statement: str) -> list:
+    import sqlite3 as _sqlite3  # noqa: PLC0415
+
+    database = evidence_root / _LIVE_DATA_ROOT / _LIVE_CATALOG
+    with _sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        connection.row_factory = _sqlite3.Row
+        return connection.execute(statement).fetchall()
+
+
+def _live_orphans(evidence_root: Path) -> list[str]:
+    """Raw objects on disk that no committed row references."""
+    data_root = evidence_root / _LIVE_DATA_ROOT
+    recorded = {
+        row["relative_storage_path"]
+        for row in _live_catalog_rows(
+            evidence_root, "SELECT relative_storage_path FROM census_source_observations"
+        )
+    }
+    raw_root = data_root / "raw"
+    return [
+        str(path.relative_to(data_root))
+        for path in sorted(raw_root.rglob("*"))
+        if path.is_file()
+        and not path.name.endswith((".lineage.json", ".part", ".reason"))
+        and str(path.relative_to(data_root)) not in recorded
+    ]
+
+
+def _interrupt_method(
+    monkeypatch: pytest.MonkeyPatch, owner: type, name: str, *, call: int, after: bool = False
+) -> None:
+    """Raise ``KeyboardInterrupt`` on the ``call``-th invocation of ``owner.name``."""
+    original = getattr(owner, name)
+    seen = {"count": 0}
+
+    def _wrapper(self: object, *args: object, **kwargs: object) -> object:
+        seen["count"] += 1
+        fires = seen["count"] == call
+        if fires and not after:
+            raise KeyboardInterrupt
+        value = original(self, *args, **kwargs)
+        if fires and after:
+            raise KeyboardInterrupt
+        return value
+
+    monkeypatch.setattr(owner, name, _wrapper)
+
+
+#: The three governed interruption points, each with the durable state it must leave behind and
+#: the accepted recovery actions the scenario genuinely requires before a resume may be SAFE.
+_INTERRUPTION_SCENARIOS = {
+    "I1_before_raw_store_write": {
+        "owner": "snapshot_store",
+        "after": False,
+        "state": "before_raw_store_write",
+        "committed": 1,
+        "orphans": 0,
+        "adopt_orphan": False,
+        "remaining": 6,
+    },
+    "I2_after_raw_store_write_before_catalog_commit": {
+        "owner": "recorder",
+        "after": False,
+        "state": "after_raw_store_write_before_catalog_commit",
+        "committed": 1,
+        "orphans": 1,
+        "adopt_orphan": True,
+        "remaining": 5,
+    },
+    "I3_after_catalog_commit": {
+        "owner": "recorder",
+        "after": True,
+        "state": "after_catalog_commit",
+        "committed": 2,
+        "orphans": 0,
+        "adopt_orphan": False,
+        "remaining": 5,
+    },
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(_INTERRUPTION_SCENARIOS))
+def test_a_real_interruption_recovers_to_safe_and_resumes_through_the_real_cli(
+    repo_root: Path,
+    evidence_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    """The whole MAJOR-1 cycle, through the operator surfaces, for each interruption point.
+
+    A lawful ``m3 acquire --live`` is interrupted at a real durable boundary; the terminating
+    receipt records ``interrupted`` with the exact state; the accepted read-only inspection refuses
+    to call it SAFE until the bounded recovery actions the scenario genuinely requires have run;
+    and the real ``m3 acquire --live --resume-from`` then carries the consumed count forward,
+    registers a new run identity, re-requests nothing already satisfied, and finishes the window.
+    """
+    from disclosure_drift.cli import main  # noqa: PLC0415
+    from disclosure_drift.m3.acquisition import derive_logical_requests  # noqa: PLC0415
+    from disclosure_drift.sec.observation_catalog import ObservationRecorder  # noqa: PLC0415
+    from disclosure_drift.sec.snapshots import SnapshotStore  # noqa: PLC0415
+
+    expected = _INTERRUPTION_SCENARIOS[scenario]
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+    requests = derive_logical_requests(plan)  # type: ignore[arg-type]
+    bodies = [
+        _fixture_body(item.source_id, str(index).encode()) for index, item in enumerate(requests)
+    ]
+    script.responses = list(bodies)
+
+    owner = SnapshotStore if expected["owner"] == "snapshot_store" else ObservationRecorder
+    _interrupt_method(monkeypatch, owner, "record", call=2, after=bool(expected["after"]))
+
+    # ---- the interrupted invocation ---------------------------------------------------- #
+    assert main(
+        _acquire_argv(evidence_root, config, plan, receipt_out="receipts/interrupted.json")
+    ) == (EXIT_GATE_FAILURE), "a recorded interruption is a governed non-success, never exit 0"
+    monkeypatch.undo()
+    _install_live_seams(monkeypatch, script)
+
+    interrupted = json.loads(
+        (evidence_root / "receipts" / "interrupted.json").read_text(encoding="utf-8")
+    )
+    assert interrupted["completion_status"] == "interrupted"
+    assert interrupted["interruption_state"] == expected["state"]
+    assert interrupted["reason_code"] == "SEC_ACQUISITION_INTERRUPTED"
+    assert interrupted["invocation_mode"] == "live"
+    assert FIXTURE_PLACEHOLDER_IDENTITY not in json.dumps(interrupted)
+
+    # ---- the durable state the scenario must have left --------------------------------- #
+    committed = _live_catalog_rows(
+        evidence_root, "SELECT observation_id FROM census_source_observations"
+    )
+    assert len(committed) == expected["committed"]
+    assert len(_live_orphans(evidence_root)) == expected["orphans"]
+    jobs = _live_catalog_rows(evidence_root, "SELECT job_id, job_state FROM ops_ingestion_jobs")
+    assert [row["job_state"] for row in jobs] == ["stopped"]
+    first_run = jobs[0]["job_id"]
+
+    # ---- the accepted recovery path ---------------------------------------------------- #
+    assert main(_recovery_state_argv(evidence_root)) == EXIT_GATE_FAILURE, (
+        "an interrupted run is not SAFE until its bounded recovery actions have run"
+    )
+    assert (
+        main(
+            _recover_argv(
+                evidence_root,
+                config,
+                run_id=first_run,
+                action="rebuild-projection",
+                event=_PROJECTION_TARGET,
+            )
+        )
+        == EXIT_OK
+    )
+    if expected["adopt_orphan"]:
+        orphan = _live_orphans(evidence_root)[0]
+        assert (
+            main(
+                _recover_argv(
+                    evidence_root, config, run_id=first_run, action="adopt-orphan", event=orphan
+                )
+            )
+            == EXIT_OK
+        )
+        # Adoption commits a row, which makes the derived projection stale again.
+        assert (
+            main(
+                _recover_argv(
+                    evidence_root,
+                    config,
+                    run_id=first_run,
+                    action="rebuild-projection",
+                    event=_PROJECTION_TARGET,
+                )
+            )
+            == EXIT_OK
+        )
+        assert _live_orphans(evidence_root) == [], "the orphan is reconciled, never deleted"
+
+    assert main(_recovery_state_argv(evidence_root)) == EXIT_OK, "the inspection now reports SAFE"
+
+    # ---- the real resume ---------------------------------------------------------------- #
+    satisfied_before = {
+        row["relative_storage_path"]
+        for row in _live_catalog_rows(
+            evidence_root, "SELECT relative_storage_path FROM census_source_observations"
+        )
+    }
+    script.responses = bodies[len(satisfied_before) :]
+    sent_before = script.sent
+    assert (
+        main(
+            _acquire_argv(
+                evidence_root,
+                config,
+                plan,
+                receipt_out="receipts/resumed.json",
+                resume_from="receipts/interrupted.json",
+            )
+        )
+        == EXIT_OK
+    )
+
+    resumed = json.loads((evidence_root / "receipts" / "resumed.json").read_text(encoding="utf-8"))
+    assert resumed["completion_status"] == "complete"
+    assert resumed["recovery_predecessor_receipt_id"] == interrupted["receipt_id"]
+    # The predecessor's consumption is carried forward exactly, never reset to zero.
+    assert (
+        resumed["consumed_request_count_carried_forward"]
+        == (interrupted["actual_physical_attempt_count"])
+    )
+    # Only the remainder was placed: already-satisfied work is never re-requested.
+    assert resumed["actual_logical_request_count"] == expected["remaining"]
+    assert script.sent - sent_before == expected["remaining"]
+    assert script.responses == [], "the resume placed exactly the scripted remainder"
+    total = (
+        resumed["consumed_request_count_carried_forward"] + resumed["actual_physical_attempt_count"]
+    )
+    assert total <= resumed["approved_request_ceiling"]
+
+    # A run identifies one invocation: the resume registered its own, and did not adopt the first.
+    runs = [
+        row["job_id"]
+        for row in _live_catalog_rows(
+            evidence_root, "SELECT job_id FROM ops_ingestion_jobs ORDER BY rowid"
+        )
+    ]
+    assert len(runs) == 2
+    assert runs[0] == first_run
+    assert runs[1] != first_run
+    assert FIXTURE_PLACEHOLDER_IDENTITY not in json.dumps(resumed)
+
+
+def test_an_ambiguous_interruption_writes_no_receipt_and_advertises_no_resume(
+    repo_root: Path,
+    evidence_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interrupted *inside* the snapshot store, after promotion and before it returned.
+
+    The invocation cannot tell that apart from a promotion that never happened, so it refuses to
+    classify. No receipt is written at all — a receipt with no established interruption state
+    would fail the accepted inspection's condition 8.2 anyway, and writing one would advertise a
+    resume that cannot safely start. The evidence is preserved, not cleaned up.
+    """
+    from disclosure_drift.cli import main  # noqa: PLC0415
+    from disclosure_drift.m3.acquisition import derive_logical_requests  # noqa: PLC0415
+    from disclosure_drift.sec.snapshots import SnapshotStore  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+    script.responses = [
+        _fixture_body(item.source_id, str(index).encode())
+        for index, item in enumerate(derive_logical_requests(plan))  # type: ignore[arg-type]
+    ]
+    _interrupt_method(monkeypatch, SnapshotStore, "record", call=2, after=True)
+
+    assert main(_acquire_argv(evidence_root, config, plan, receipt_out="receipts/x.json")) == (
+        EXIT_GATE_FAILURE
+    )
+    monkeypatch.undo()
+
+    assert _receipt_files(evidence_root) == [], "no receipt is written for an unclassifiable stop"
+    assert len(_live_orphans(evidence_root)) == 1, "the promoted object is preserved untouched"
+    jobs = _live_catalog_rows(evidence_root, "SELECT job_state FROM ops_ingestion_jobs")
+    assert [row["job_state"] for row in jobs] == ["stopped"]
+
+
+def test_a_governed_failure_stays_failed_and_carries_no_interruption_state(
+    repo_root: Path,
+    evidence_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`interrupted` is not a catch-all: an ordinary terminal failure keeps its own status."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+    from disclosure_drift.m3.acquisition import derive_logical_requests  # noqa: PLC0415
+    from disclosure_drift.sec.transport import TransportResponse  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+    requests = derive_logical_requests(plan)  # type: ignore[arg-type]
+    refusal = TransportResponse(status=404, headers={}, final_url="", body=b"")
+    script.responses = [refusal] + [
+        _fixture_body(item.source_id, str(index).encode())
+        for index, item in enumerate(requests[1:], start=1)
+    ]
+
+    assert main(_acquire_argv(evidence_root, config, plan, receipt_out="receipts/failed.json")) == (
+        EXIT_GATE_FAILURE
+    )
+
+    document = json.loads((evidence_root / "receipts" / "failed.json").read_text(encoding="utf-8"))
+    assert document["completion_status"] == "failed"
+    assert "interruption_state" not in document
+
+
+# --------------------------------------------------------------------------- #
+# Pre-catalog refusal ordering (Decision 045 correction, MINOR-2)
+#
+# A refusal decidable without durable state must leave no durable state. Each case below runs
+# against an evidence root whose operational catalog does not exist, and proves it still does not
+# exist afterwards — together with the exit class, no transport construction, and no receipt.
+# --------------------------------------------------------------------------- #
+def _live_catalog_path(evidence_root: Path) -> Path:
+    return evidence_root / _LIVE_DATA_ROOT / _LIVE_CATALOG
+
+
+def _refusal_case(
+    name: str, evidence_root: Path, config: Path, plan: object
+) -> tuple[list[str], int]:
+    """One refusal invocation and the exit class it owes."""
+    if name == "wrong_window":
+        return (
+            _acquire_argv(evidence_root, config, plan, receipt_out="r.json", window="M3.2B"),
+            EXIT_GATE_FAILURE,
+        )
+    if name == "unaccepted_window":
+        return (
+            _acquire_argv(evidence_root, config, plan, receipt_out="r.json", window="M9.9Z"),
+            EXIT_GATE_FAILURE,
+        )
+    if name == "ceiling_below":
+        return (
+            _acquire_argv(
+                evidence_root,
+                config,
+                plan,
+                receipt_out="r.json",
+                ceiling=plan.hard_request_ceiling - 1,  # type: ignore[attr-defined]
+            ),
+            EXIT_GATE_FAILURE,
+        )
+    if name == "ceiling_above":
+        return (
+            _acquire_argv(
+                evidence_root,
+                config,
+                plan,
+                receipt_out="r.json",
+                ceiling=plan.hard_request_ceiling + 1,  # type: ignore[attr-defined]
+            ),
+            EXIT_GATE_FAILURE,
+        )
+    if name == "plan_hash_mismatch":
+        # The stored plan is bound by its own content hash, so an edited byte is a different
+        # plan. The operator still names the ceiling the *original* plan derived, which is what
+        # makes this a hash refusal rather than a ceiling one.
+        stored = evidence_root / "plans" / "approved.json"
+        document = json.loads(stored.read_text(encoding="utf-8"))
+        document["expected_cache_hits"] = int(document["expected_cache_hits"]) + 1
+        stored.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+        return (
+            _acquire_argv(evidence_root, config, plan, receipt_out="r.json"),
+            EXIT_GATE_FAILURE,
+        )
+    message = f"unknown refusal case {name!r}"
+    raise AssertionError(message)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["wrong_window", "unaccepted_window", "ceiling_below", "ceiling_above", "plan_hash_mismatch"],
+)
+def test_a_binding_refusal_creates_no_operational_catalog(
+    repo_root: Path,
+    evidence_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Every plan, window, and ceiling binding is proved before any durable state is created."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+    argv, expected_exit = _refusal_case(case, evidence_root, config, plan)
+    assert not _live_catalog_path(evidence_root).exists()
+
+    assert main(argv) == expected_exit
+    assert not _live_catalog_path(evidence_root).exists(), "a refusal left an operational catalog"
+    assert not (evidence_root / _LIVE_DATA_ROOT).exists(), "a refusal created a data root"
+    assert script.constructions == 0, "a refusal reached the transport-construction site"
+    assert _receipt_files(evidence_root) == []
+
+
+def test_a_disabled_live_gate_creates_no_operational_catalog(
+    repo_root: Path, evidence_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tracked switches refuse before anything durable exists."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=False, acquire=False)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+
+    assert main(_acquire_argv(evidence_root, config, plan, receipt_out="r.json")) == (
+        EXIT_STAGE_NOT_ENABLED
+    )
+    assert not _live_catalog_path(evidence_root).exists()
+    assert script.constructions == 0
+    assert _receipt_files(evidence_root) == []
+
+
+def test_an_unvalidated_identity_creates_no_operational_catalog(
+    repo_root: Path, evidence_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The canonical validator runs — unstubbed — before anything durable exists."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    monkeypatch.setenv("DISCLOSURE_DRIFT_SEC_USER_AGENT", FIXTURE_PLACEHOLDER_IDENTITY)
+    plan = _live_plan(evidence_root)
+
+    assert main(_acquire_argv(evidence_root, config, plan, receipt_out="r.json")) == (
+        EXIT_STAGE_NOT_ENABLED
+    )
+    assert not _live_catalog_path(evidence_root).exists()
+    assert _receipt_files(evidence_root) == []
+
+
+def test_a_missing_explicit_live_authorization_creates_no_operational_catalog(
+    repo_root: Path, evidence_root: Path, tmp_path: Path
+) -> None:
+    """No ``--live`` flag is a usage failure, and never a run that prepared anything."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    _live_plan(evidence_root)
+
+    assert (
+        main(
+            [
+                "m3",
+                "acquire",
+                "--config",
+                str(config),
+                "--evidence-root",
+                str(evidence_root),
+                "--plan",
+                "plans/approved.json",
+                "--window",
+                "M3.2A",
+                "--data-root",
+                _LIVE_DATA_ROOT,
+                "--catalog",
+                _LIVE_CATALOG,
+            ]
+        )
+        == EXIT_USAGE
+    )
+    assert not _live_catalog_path(evidence_root).exists()
+    assert _receipt_files(evidence_root) == []
+
+
+def test_positive_control_the_same_invocation_does_create_the_catalog_when_it_is_lawful(
+    repo_root: Path, evidence_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without this, every catalog-absence assertion above would pass against a broken command."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+    from disclosure_drift.m3.acquisition import derive_logical_requests  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+    script.responses = [
+        _fixture_body(item.source_id, str(index).encode())
+        for index, item in enumerate(derive_logical_requests(plan))  # type: ignore[arg-type]
+    ]
+
+    assert main(_acquire_argv(evidence_root, config, plan, receipt_out="receipts/ok.json")) == (
+        EXIT_OK
+    )
+    assert _live_catalog_path(evidence_root).is_file()
+    assert script.constructions == 1

@@ -45,13 +45,15 @@ inspection, and resume are stage T2.4 and are deliberately absent.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
+import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final, Literal
 
@@ -61,7 +63,11 @@ from disclosure_drift.errors import (
     RawObjectIntegrityError,
 )
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
-from disclosure_drift.m3.receipt import ReceiptValidationError, inspect_receipt
+from disclosure_drift.m3.receipt import (
+    RESPONSE_CLASSIFICATION_BUCKETS,
+    ReceiptValidationError,
+    inspect_receipt,
+)
 from disclosure_drift.m3.recovery import (
     RecoveryState,
     inspect_recovery_state,
@@ -69,14 +75,22 @@ from disclosure_drift.m3.recovery import (
 )
 from disclosure_drift.m3.request_plan import (
     M3_2A_BOOTSTRAP_ROUTES,
+    M3_2B_DEPENDENT_ROUTES,
     RequestPlan,
+    build_m3_2b_dependent_plan,
+    canonical_plan_bytes,
     derive_a_reachable,
     request_plan_from_document,
 )
 from disclosure_drift.paths import DataTree, PathPolicyError, relative_to_root
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.archive import ArchiveDefenceError, ArchiveMember, iter_members
-from disclosure_drift.sec.http_client import ProhibitedRetrievalError, SecClient
+from disclosure_drift.sec.http_client import (
+    FetchResult,
+    ProhibitedRetrievalError,
+    RetrievalPolicy,
+    SecClient,
+)
 from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
 from disclosure_drift.sec.observation_catalog import (
     ObservationRecorder,
@@ -89,6 +103,7 @@ from disclosure_drift.sec.observation_catalog import (
     resolve_recovery_state,
     validate_audit_projection,
 )
+from disclosure_drift.sec.rate_limit import AggregateRateLimiter
 from disclosure_drift.sec.raw_store import LINEAGE_SUFFIX, RawStore
 from disclosure_drift.sec.request_ceiling import (
     PhysicalAttemptCeiling,
@@ -101,19 +116,29 @@ from disclosure_drift.sec.source_registry import (
     filing_body_url_is_prohibited,
     require_registered,
 )
+from disclosure_drift.sec.transport import SecRequest, Transport, TransportResponse
 from disclosure_drift.sec.urls import request_identity
 from disclosure_drift.storage.catalog import CatalogWriter
 from disclosure_drift.storage.sqlite import applied_versions, integrity_report
 
 __all__ = [
+    "ACQUISITION_INTERRUPTED_REASON",
+    "ACQUISITION_INTERRUPTION_STATES",
+    "ACQUISITION_JOB_KIND",
+    "ACQUISITION_RUN_JOB_STATES",
     "ACQUISITION_WINDOWS",
+    "DEPENDENT_RECONCILIATION_SET_VERSION",
     "FINAL_MIGRATION_VERSION",
     "M3_2B_DEPENDENT_ROUTES",
+    "NO_HTTP_STATUS_SENTINEL",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
+    "PROGRESS_SINK_FAILURE_REASON",
     "RECOVERY_ACTIONS",
     "AcquisitionEngine",
     "AcquisitionError",
     "AcquisitionGateError",
+    "AcquisitionRunBinding",
+    "AcquisitionRunError",
     "CatalogPreparation",
     "CatalogPreparationError",
     "CatalogReconstruction",
@@ -121,22 +146,35 @@ __all__ = [
     "ContinuationProposal",
     "ContinuationRequest",
     "CumulativeAttemptAccounting",
+    "DependentPlanDerivation",
+    "DependentPlanError",
     "DriftListingEntry",
+    "LiveAcquisitionResult",
     "LiveOperationAuthorization",
+    "LiveOperatorGate",
     "LogicalRequest",
+    "PhysicalResponseLog",
     "ReconciliationItem",
+    "RecordingTransport",
     "RecoveryActionResult",
     "RecoveryObservation",
     "RepairRefusedError",
     "RequestOutcome",
     "RequestReconciliation",
+    "ResponseAccounting",
+    "RunScopedDrift",
     "StorageBinding",
     "StoragePreparationError",
     "StoreFinding",
     "WindowOutcome",
     "apply_recovery_action",
     "conditional_validators",
+    "default_live_transport_factory",
+    "default_run_id_factory",
+    "derive_dependent_plan",
     "derive_logical_requests",
+    "drift_for_run",
+    "execute_live_acquisition",
     "load_approved_plan",
     "observe_recovery_state",
     "prepare_operational_catalog",
@@ -144,9 +182,12 @@ __all__ = [
     "propose_continuation",
     "reconcile_requests",
     "reconstruct_catalog_state",
+    "register_acquisition_run",
     "resolve_within",
     "route_is_streamed",
+    "validate_acquisition_run",
     "verified_reusable_predecessor",
+    "verify_window_bindings",
 ]
 
 #: The operational catalog's path relative to the external evidence root (contract §16).
@@ -161,14 +202,19 @@ FINAL_MIGRATION_VERSION: Final = 13
 #: an unrecognized-but-harmless label.
 ACQUISITION_WINDOWS: Final[tuple[str, ...]] = ("M3.2A", "M3.2B")
 
-#: The two dependent route families of the M3.2B window (contract §6). Named here so window
-#: separation can be enforced in **both** directions: a dependent request in M3.2A and a bootstrap
-#: request in M3.2B are each contract §17 stop condition 5, and a guard that checks only one
-#: direction leaves the other silently permitted.
-M3_2B_DEPENDENT_ROUTES: Final[tuple[str, ...]] = (
-    "sec_submissions_entity",
-    "sec_submissions_historical",
-)
+#: The two dependent route families of the M3.2B window (contract §6), re-exported from the
+#: planner that owns them. Window separation is enforced in **both** directions: a dependent
+#: request in M3.2A and a bootstrap request in M3.2B are each contract §17 stop condition 5, and a
+#: guard that checks only one direction leaves the other silently permitted. Reading the tuple from
+#: `request_plan` rather than restating it keeps the planner and this driver from disagreeing about
+#: which routes belong to which window. It is used by :meth:`AcquisitionEngine._verify_routes` and
+#: re-exported here because the driver's window vocabulary is part of its public surface.
+
+#: The ``ops_ingestion_jobs.job_kind`` every M3.2 acquisition run registers under (Decision 045
+#: §6A.1). It is deliberately **not** the M2.2 census kind: an M3.2 acquisition run is a different
+#: kind of run, and `m3 show-drift --run` and `m3 recover --run` refuse any row that does not carry
+#: exactly this kind together with an accepted acquisition window as its stage.
+ACQUISITION_JOB_KIND: Final = "m3_2_acquisition"
 
 _INDEX_ROUTE: Final = "sec_full_index_company"
 _ANNOUNCEMENT_ROUTE: Final = "sec_edgar_calendar_announcement"
@@ -228,10 +274,54 @@ physical attempts before the window stopped, which ``not_attempted`` would misre
 CompletionStatus = Literal[
     "complete",
     "incomplete",
+    "interrupted",
     "stopped_at_ceiling",
     "stopped_by_gate",
     "failed",
 ]
+"""How one acquisition window ended.
+
+``interrupted`` is reserved for a **genuine external interruption of a lawful invocation** — the
+catchable ``KeyboardInterrupt`` a SIGINT delivers. It is never another name for an ordinary
+failure, a ceiling stop, a gate stop, schema drift, a response-policy failure, or generic engine
+incompleteness: each of those keeps its own status, and every one of them is reachable without a
+signal ever arriving.
+"""
+
+#: The interruption states an M3.2 acquisition window may record. A strict subset of the frozen
+#: receipt vocabulary: ``during_selection`` and ``during_manifest_write`` name phases of a
+#: *selection* run, and this driver acquires objects rather than selecting, so it can never
+#: truthfully be in either. Emitting one from here would assert a phase that did not happen.
+ACQUISITION_INTERRUPTION_STATES: Final[tuple[str, ...]] = (
+    "after_catalog_commit",
+    "after_raw_store_write_before_catalog_commit",
+    "before_raw_store_write",
+)
+
+#: The already-registered reason a genuine interruption records. No reason code is created,
+#: modified, or repurposed here: the registry defines this one as "acquisition was interrupted and
+#: no narrower registered reason applies", which is exactly this case.
+ACQUISITION_INTERRUPTED_REASON: Final = "SEC_ACQUISITION_INTERRUPTED"
+
+#: The ``ops_ingestion_jobs.job_state`` values one finished acquisition run may be closed into.
+#: Every one is a literal the migration ``0001`` CHECK constraint already admits; no state is
+#: invented and no migration is required. ``stopped`` is the truthful state of an invocation that
+#: was externally interrupted: it neither completed nor failed.
+ACQUISITION_RUN_JOB_STATES: Final[tuple[str, ...]] = ("completed", "failed", "stopped")
+
+#: What an interrupted window records as its detail. Fixed and structural: it names no path, no
+#: identity, and no operator-supplied text, and it is short enough for the receipt's bounded
+#: ``reason_detail`` to be derived beside it.
+_INTERRUPTION_DETAIL: Final = (
+    "the invocation was externally interrupted; acquisition stopped before the next logical "
+    "request began and no further physical request was placed"
+)
+
+#: Snapshot-store outcomes that promote a **new** immutable object for the retrieval that produced
+#: them. A reuse, a byte-identical duplicate, a failure, and a quarantine each leave no newly
+#: promoted object belonging to that retrieval, which is what separates ``before_raw_store_write``
+#: from ``after_raw_store_write_before_catalog_commit``.
+_PROMOTING_OUTCOMES: Final[frozenset[str]] = frozenset({"stored_new", "superseded"})
 
 
 class AcquisitionError(DisclosureDriftError):
@@ -259,6 +349,24 @@ class AcquisitionGateError(AcquisitionError):
 
     Distinct from the two preparation errors so a caller can map a gate refusal to the exit code
     the accepted command surface reserves for it, without string-matching a message.
+    """
+
+
+class AcquisitionRunError(AcquisitionError):
+    """Raised when an M3.2 acquisition-run identity cannot be registered or validated.
+
+    Distinct from :class:`AcquisitionGateError` because its consequence is stated separately by
+    Decision 045 §6A.2: a registration or verification failure means **no transport is constructed,
+    no physical request occurs, and no acquired object is attributed to the failed run**.
+    """
+
+
+class DependentPlanError(AcquisitionError):
+    """Raised when M3.2B dependent-plan derivation refuses.
+
+    Every refusal is fail-closed and pre-emptive: the derivation writes neither a plan nor a
+    success receipt unless every frozen object verified and the explicit reconciliation set agreed
+    with it exactly (Decision 045 §4.3, §13).
     """
 
 
@@ -880,6 +988,15 @@ class WindowOutcome:
     completion_status: CompletionStatus
     reason_codes: tuple[str, ...] = ()
     detail: str = ""
+    interruption_state: str | None = None
+    """Where a genuinely interrupted window stopped, established rather than guessed.
+
+    Present exactly when :attr:`completion_status` is ``interrupted``, and then always one of
+    :data:`ACQUISITION_INTERRUPTION_STATES`. The engine derives it from durable raw-store and
+    catalog evidence and refuses to produce a window at all when that evidence cannot establish it
+    exactly, so a value here is a proved fact rather than an inference from how far the code
+    happened to get.
+    """
     progress_failures: tuple[str, ...] = ()
     """Operator progress-sink failures observed during the run.
 
@@ -1017,6 +1134,178 @@ class WindowOutcome:
             totals[outcome.disposition] += 1
         return totals
 
+    def __post_init__(self) -> None:
+        """Refuse a window that claims an interruption it cannot state, or one it did not have.
+
+        Both directions, because both are ways a false resume could be advertised: an
+        ``interrupted`` window with no established state would leave the interruption point to be
+        guessed, and a non-interrupted window carrying one would assert a phase it never reached.
+        """
+        interrupted = self.completion_status == "interrupted"
+        if interrupted and self.interruption_state not in ACQUISITION_INTERRUPTION_STATES:
+            message = (
+                f"an interrupted window must record one of {ACQUISITION_INTERRUPTION_STATES} as "
+                f"its interruption state, not {self.interruption_state!r}; the interruption point "
+                "is established from durable evidence or the window is refused"
+            )
+            raise AcquisitionGateError(message)
+        if not interrupted and self.interruption_state is not None:
+            message = (
+                f"a window that ended {self.completion_status!r} carries interruption state "
+                f"{self.interruption_state!r}; only a genuinely interrupted window has one"
+            )
+            raise AcquisitionGateError(message)
+
+
+@dataclass(slots=True)
+class _InFlightRetrieval:
+    """What the engine durably knows about the one retrieval it was executing.
+
+    Deliberately not a phase enum. It records the two facts a later interruption must reconcile
+    against durable state — which planned request was in flight, and what the snapshot store
+    returned for it, if it returned at all — and leaves the *classification* to
+    :meth:`AcquisitionEngine._established_interruption_state`, which reads the raw store and the
+    catalog rather than trusting how far this object got.
+    """
+
+    request: LogicalRequest
+    observation: SourceObservation | None = None
+
+
+def verify_window_bindings(
+    *,
+    plan: RequestPlan,
+    window: str,
+    approved_ceiling: int,
+    authorization: LiveOperationAuthorization,
+) -> tuple[LogicalRequest, ...]:
+    """Prove every window binding, and return the logical requests the window may place.
+
+    The complete pre-transport bindings proof, extracted from
+    :meth:`AcquisitionEngine.preflight` so the operator layer can run it **before a transport
+    exists at all**. Decision 045 §6A.2 orders run registration before transport construction, and
+    the engine holds an already-constructed client — so a proof that only ran inside the engine
+    would necessarily run *after* the transport it is supposed to gate. This function is that
+    proof, in one place, with one implementation.
+
+    Checked, in order: the authorization's window; the window's membership of the accepted set;
+    the plan's own window; the exact approved plan hash; the operator ceiling equal to the
+    authorization exactly; the plan-derived ceiling equal to the authorization exactly; the plan's
+    own expansion arithmetic; and every route's registration, window membership, and constructed
+    URL against the filing-body prohibition.
+
+    Nothing here opens a socket, constructs a transport, reads configuration, or touches the
+    catalog. It returns the requests it proved rather than a boolean, so a caller cannot act on a
+    passing check without also taking the expansion it was checked against.
+
+    Raises:
+        AcquisitionGateError: any binding does not match.
+    """
+    if authorization.window != window:
+        message = (
+            f"the authorization names window {authorization.window!r} but this run executes "
+            f"{window!r}"
+        )
+        raise AcquisitionGateError(message)
+    if window not in ACQUISITION_WINDOWS:
+        message = f"window {window!r} is not an accepted acquisition window"
+        raise AcquisitionGateError(message)
+    if plan.acquisition_window != window:
+        message = (
+            f"the approved plan is for window {plan.acquisition_window!r}, not "
+            f"{window!r}; a plan is never executed against another window"
+        )
+        raise AcquisitionGateError(message)
+
+    if plan.request_plan_sha256 != authorization.plan_sha256:
+        message = (
+            "the approved plan hash does not match the authorization; the run consumes "
+            "exactly the plan the owner approved"
+        )
+        raise AcquisitionGateError(message)
+    if approved_ceiling != authorization.approved_ceiling:
+        message = (
+            f"the supplied ceiling gate is set to {approved_ceiling}, but the "
+            f"authorization approves {authorization.approved_ceiling}; the ceiling must equal "
+            "the approved integer exactly"
+        )
+        raise AcquisitionGateError(message)
+    if plan.hard_request_ceiling != authorization.approved_ceiling:
+        message = (
+            f"the approved plan derives a ceiling of {plan.hard_request_ceiling}, but "
+            f"the authorization approves {authorization.approved_ceiling}"
+        )
+        raise AcquisitionGateError(message)
+
+    requests = derive_logical_requests(plan)
+    if len(requests) != plan.planned_unique_logical_requests:
+        message = (
+            f"the plan totals {plan.planned_unique_logical_requests} logical requests "
+            f"but expands to {len(requests)}"
+        )
+        raise AcquisitionGateError(message)
+    _verify_routes(requests, window)
+    return requests
+
+
+def _restricted(
+    requests: Sequence[LogicalRequest],
+    identities: frozenset[str],
+) -> tuple[LogicalRequest, ...]:
+    """Narrow a proved expansion to exactly the identities a resume is still owed.
+
+    Narrowing, never widening: every identity must already be in the proved expansion, so a
+    restriction cannot introduce a request the window bindings did not verify. An empty
+    restriction and an unknown identity are both refused rather than silently ignored — the
+    first would execute nothing while reporting a lawful run, and the second would mean the
+    continuation proposal and the plan disagree about what the window contains.
+    """
+    available = {request.identity_label: request for request in requests}
+    unknown = sorted(identities - set(available))
+    if unknown:
+        message = (
+            f"the continuation remainder names planned identit(ies) {unknown} that the approved "
+            "plan does not expand to; the proposal and the plan disagree about this window"
+        )
+        raise AcquisitionGateError(message)
+    if not identities:
+        message = (
+            "the continuation remainder is empty, so this invocation has nothing lawful to place"
+        )
+        raise AcquisitionGateError(message)
+    return tuple(request for request in requests if request.identity_label in identities)
+
+
+def _verify_routes(requests: Sequence[LogicalRequest], window: str) -> None:
+    """Prove every planned route is registered, in-window, and not a filing body.
+
+    Window membership is enforced in **both** directions. Contract §17 stop condition 5 names
+    "a dependent request in M3.2A **or a bootstrap request in M3.2B**", so each window admits
+    only its own families and nothing else — an allowlist of every registered source would
+    enforce one half of that rule and silently permit the other.
+    """
+    allowed = (
+        frozenset(M3_2A_BOOTSTRAP_ROUTES)
+        if window == "M3.2A"
+        else frozenset(M3_2B_DEPENDENT_ROUTES)
+    )
+    for request in requests:
+        spec = require_registered(request.source_id)
+        if request.source_id not in allowed:
+            message = (
+                f"route {request.source_id!r} is not a {window} route; a dependent "
+                "request in the bootstrap window, or a bootstrap request in the dependent "
+                "window, is a stop condition"
+            )
+            raise AcquisitionGateError(message)
+        url = spec.url(**dict(request.parameters))
+        if filing_body_url_is_prohibited(url):
+            message = (
+                f"route {request.source_id!r} constructs a filing-body or accession URL; "
+                "Milestone 3.2 acquires metadata only"
+            )
+            raise AcquisitionGateError(message)
+
 
 # --------------------------------------------------------------------------- #
 # Subphase B.4 — the engine
@@ -1047,6 +1336,19 @@ class AcquisitionEngine:
         clock: Returns the UTC instant recorded on observations. Injected so a run is
             deterministic under test.
         progress: Optional per-request callback for operator output.
+        run_binding: The already-registered M3.2 acquisition-run identity this invocation
+            executes under (Decision 045 §6A). When supplied, every planned logical request this
+            window reaches a disposition for is durably attributed to that run through
+            ``census_plan_sources``. It is never minted here: the operator layer registers and
+            verifies it *before* a transport exists, and passes the proven binding in.
+        restrict_to_identities: The exact planned identities this invocation may place. Supplied
+            only by a resume, from the accepted continuation proposal's remaining set, so an
+            already-satisfied request is never re-requested and no substantive write is duplicated
+            (Decision 045 §14). ``None`` executes the plan's whole expansion, which is what a
+            fresh invocation does.
+        response_log: The ordered physical-response record a :class:`RecordingTransport` appends
+            to. When supplied, per-response accounting (Decision 045 §§9-11) is accumulated in
+            :attr:`accounting` as each logical request completes.
     """
 
     plan: RequestPlan
@@ -1057,18 +1359,25 @@ class AcquisitionEngine:
     recorder: ObservationRecorder
     clock: Callable[[], str] = _utc_now
     progress: Callable[[RequestOutcome], None] | None = None
+    run_binding: AcquisitionRunBinding | None = None
+    restrict_to_identities: frozenset[str] | None = None
+    response_log: PhysicalResponseLog | None = None
+    accounting: ResponseAccounting = field(default_factory=lambda: ResponseAccounting())
     progress_failures: tuple[str, ...] = field(default=(), init=False)
     _authorization: LiveOperationAuthorization | None = field(default=None, init=False)
     _requests: tuple[LogicalRequest, ...] = field(default=(), init=False)
+    _in_flight: _InFlightRetrieval | None = field(default=None, init=False)
+    _committed_any: bool = field(default=False, init=False)
 
     # -- preflight ---------------------------------------------------------- #
     def preflight(self, authorization: LiveOperationAuthorization) -> tuple[LogicalRequest, ...]:
         """Validate every binding, and return the logical requests this window will place.
 
-        Runs **before the first transport call** and refuses rather than continuing. The checks,
-        in order: the authorization's window; the plan's own window; the plan hash; the ceiling
-        equality; the ceiling's remaining headroom; every route's registration; and every route's
-        constructed URL against the filing-body prohibition.
+        Runs **before the first transport call** and refuses rather than continuing. Every check
+        lives in :func:`verify_window_bindings`, which the operator layer calls *before it builds a
+        transport at all* (Decision 045 §6, §6A.2). Restating them here is deliberate defence in
+        depth rather than duplication: the engine refuses the same bindings a second time, from the
+        one implementation, so no caller can reach :meth:`run` around them.
 
         Passing preflight authorizes nothing on its own — it records that the bindings this
         engine was given are mutually consistent. The operator layer remains responsible for the
@@ -1077,88 +1386,20 @@ class AcquisitionEngine:
         Raises:
             AcquisitionGateError: any binding does not match.
         """
-        if authorization.window != self.window:
-            message = (
-                f"the authorization names window {authorization.window!r} but this run executes "
-                f"{self.window!r}"
-            )
-            raise AcquisitionGateError(message)
-        if self.window not in ACQUISITION_WINDOWS:
-            message = f"window {self.window!r} is not an accepted acquisition window"
-            raise AcquisitionGateError(message)
-        if self.plan.acquisition_window != self.window:
-            message = (
-                f"the approved plan is for window {self.plan.acquisition_window!r}, not "
-                f"{self.window!r}; a plan is never executed against another window"
-            )
-            raise AcquisitionGateError(message)
-
-        actual_hash = self.plan.request_plan_sha256
-        if actual_hash != authorization.plan_sha256:
-            message = (
-                "the approved plan hash does not match the authorization; the run consumes "
-                "exactly the plan the owner approved"
-            )
-            raise AcquisitionGateError(message)
-        if self.ceiling.approved_ceiling != authorization.approved_ceiling:
-            message = (
-                f"the supplied ceiling gate is set to {self.ceiling.approved_ceiling}, but the "
-                f"authorization approves {authorization.approved_ceiling}; the ceiling must equal "
-                "the approved integer exactly"
-            )
-            raise AcquisitionGateError(message)
-        if self.plan.hard_request_ceiling != authorization.approved_ceiling:
-            message = (
-                f"the approved plan derives a ceiling of {self.plan.hard_request_ceiling}, but "
-                f"the authorization approves {authorization.approved_ceiling}"
-            )
-            raise AcquisitionGateError(message)
-
-        requests = derive_logical_requests(self.plan)
-        if len(requests) != self.plan.planned_unique_logical_requests:
-            message = (
-                f"the plan totals {self.plan.planned_unique_logical_requests} logical requests "
-                f"but expands to {len(requests)}"
-            )
-            raise AcquisitionGateError(message)
-        self._verify_routes(requests)
-
+        requests = verify_window_bindings(
+            plan=self.plan,
+            window=self.window,
+            approved_ceiling=self.ceiling.approved_ceiling,
+            authorization=authorization,
+        )
+        if self.restrict_to_identities is not None:
+            requests = _restricted(requests, self.restrict_to_identities)
         self._authorization = authorization
         self._requests = requests
         return requests
 
-    def _verify_routes(self, requests: Sequence[LogicalRequest]) -> None:
-        """Prove every planned route is registered, in-window, and not a filing body.
-
-        Window membership is enforced in **both** directions. Contract §17 stop condition 5 names
-        "a dependent request in M3.2A **or a bootstrap request in M3.2B**", so each window admits
-        only its own families and nothing else — an allowlist of every registered source would
-        enforce one half of that rule and silently permit the other.
-        """
-        allowed = (
-            frozenset(M3_2A_BOOTSTRAP_ROUTES)
-            if self.window == "M3.2A"
-            else frozenset(M3_2B_DEPENDENT_ROUTES)
-        )
-        for request in requests:
-            spec = require_registered(request.source_id)
-            if request.source_id not in allowed:
-                message = (
-                    f"route {request.source_id!r} is not a {self.window} route; a dependent "
-                    "request in the bootstrap window, or a bootstrap request in the dependent "
-                    "window, is a stop condition"
-                )
-                raise AcquisitionGateError(message)
-            url = spec.url(**dict(request.parameters))
-            if filing_body_url_is_prohibited(url):
-                message = (
-                    f"route {request.source_id!r} constructs a filing-body or accession URL; "
-                    "Milestone 3.2 acquires metadata only"
-                )
-                raise AcquisitionGateError(message)
-
     # -- execution ---------------------------------------------------------- #
-    def run(self) -> WindowOutcome:
+    def run(self) -> WindowOutcome:  # noqa: PLR0912 - one explicit termination ladder
         """Execute the window and return its outcome.
 
         The loop stops before, never after, the attempt that would exceed the ceiling: headroom
@@ -1167,8 +1408,17 @@ class AcquisitionEngine:
         past. Requests not reached are recorded as ``not_attempted`` rather than omitted, so the
         classification totals always sum to the planned count.
 
+        A genuine external interruption — the catchable ``KeyboardInterrupt`` a SIGINT delivers —
+        is caught here, at the narrowest layer that knows which planned request was in flight and
+        how many attempts it consumed. Catching it any deeper would lose the attempt accounting a
+        resume needs; catching it any shallower would lose which request it happened during. When
+        the interruption point cannot be **established exactly** from durable evidence the
+        interrupt is re-raised unchanged, so a falsely resumable window is never produced.
+
         Raises:
             AcquisitionGateError: :meth:`preflight` has not run.
+            KeyboardInterrupt: the invocation was interrupted and the exact interruption state
+                could not be established. Deliberately propagated rather than absorbed.
         """
         if self._authorization is None:
             message = (
@@ -1182,6 +1432,7 @@ class AcquisitionEngine:
         stopped: CompletionStatus | None = None
         stop_reasons: tuple[str, ...] = ()
         stop_detail = ""
+        interruption_state: str | None = None
 
         for index, request in enumerate(self._requests):
             if stopped is not None:
@@ -1200,6 +1451,28 @@ class AcquisitionEngine:
             before = self.ceiling.consumed
             try:
                 outcome = self._execute(request, closed_periods)
+            except KeyboardInterrupt:
+                # A genuine external interruption *during* this retrieval. The attempts it already
+                # consumed are real, so it is `stopped` rather than `not_attempted`, and the
+                # window carries the interruption state the durable evidence establishes. A state
+                # that cannot be established exactly re-raises: no receipt is better than a
+                # receipt that advertises a resume nothing can safely start from.
+                interruption_state = self._established_interruption_state()
+                if interruption_state is None:
+                    raise
+                stopped = "interrupted"
+                stop_reasons = (ACQUISITION_INTERRUPTED_REASON,)
+                stop_detail = _INTERRUPTION_DETAIL
+                outcomes.append(
+                    RequestOutcome(
+                        request=request,
+                        disposition="stopped",
+                        attempts=self.ceiling.consumed - before,
+                        reason_codes=stop_reasons,
+                        detail=stop_detail,
+                    )
+                )
+                continue
             except RequestCeilingExhaustedError as exc:
                 # The ceiling refused an attempt *inside* this request — during a retry, a redirect
                 # hop, or the controlled post-cooldown request. Attempts already consumed for it
@@ -1260,9 +1533,26 @@ class AcquisitionEngine:
                 continue
 
             outcomes.append(outcome)
-            self._report(outcome)
+            try:
+                self._report(outcome)
+            except KeyboardInterrupt:
+                # Interrupted *between* logical requests: this one is fully committed and already
+                # classified, and the next one has not begun. Nothing is in flight, so the state
+                # is read from what the catalog and raw store durably agree on.
+                interruption_state = self._established_interruption_state()
+                if interruption_state is None:
+                    raise
+                stopped = "interrupted"
+                stop_reasons = (ACQUISITION_INTERRUPTED_REASON,)
+                stop_detail = _INTERRUPTION_DETAIL
 
-        return self._finalize(tuple(outcomes), stopped, stop_reasons, stop_detail)
+        return self._finalize(
+            tuple(outcomes),
+            stopped,
+            stop_reasons,
+            stop_detail,
+            interruption_state=interruption_state,
+        )
 
     def _report(self, outcome: RequestOutcome) -> None:
         """Hand one outcome to the optional progress callback, defensively.
@@ -1271,24 +1561,26 @@ class AcquisitionEngine:
         A failing progress sink must not be able to discard a window whose objects are already
         promoted and whose rows are already committed, so its failure is contained here and
         recorded as an observable rather than propagated.
+
+        **Decision 045 §12.** The sink is operator-controlled code, so its exception message is
+        operator-controlled text: it can carry an absolute personal path, an email address, or a
+        credential, and this driver's own retained state feeds receipts, reconciliation reports,
+        and other written artifacts. So the raw text is emitted **only** to the local stderr
+        diagnostic channel and never retained. What is retained is bounded and structural: the
+        planned request's identity label, one fixed internal reason, and the exception's *class
+        name*, allowlist-sanitized and length-bounded so a class named to smuggle content still
+        cannot. Nothing here reads ``str(exc)`` into retained state, so exclusion does not depend
+        on the receipt's prohibited-content validator noticing afterwards.
         """
         if self.progress is None:
             return
         try:
             self.progress(outcome)
         except Exception as exc:  # noqa: BLE001 - an operator sink may fail any way it likes
-            # A sink that fails on a file or database carries the same private arguments the
-            # run loop refuses to publish, so those classes get the public description. A sink
-            # that raises deliberately keeps its own message: that message is the operator's
-            # own text and is the only thing that makes their output failure diagnosable.
-            detail = (
-                _operational_detail(exc)
-                if isinstance(exc, _OPERATIONAL_FAILURES)
-                else f"{type(exc).__name__}: {exc}"
-            )
+            _emit_progress_diagnostic(outcome.request.identity_label, exc)
             self.progress_failures = (
                 *self.progress_failures,
-                f"{outcome.request.identity_label}: {detail}",
+                sanitized_progress_failure(outcome.request.identity_label, exc),
             )
 
     def _execute(
@@ -1301,7 +1593,14 @@ class AcquisitionEngine:
         Streaming is chosen from the registered route specification, never fixed for every route:
         a bulk archive is streamed to its ``.part`` spool and promoted from there, while a bounded
         metadata document is buffered as before. See :func:`route_is_streamed`.
+
+        The in-flight marker is maintained across the two durable boundaries this method crosses —
+        raw-object promotion and catalog commit — so an interruption knows *which* request and
+        *which* observation to reconcile against durable state. It is a pointer to the evidence,
+        never the verdict: :meth:`_established_interruption_state` reads the raw store and the
+        catalog and can contradict it in either direction.
         """
+        self._in_flight = _InFlightRetrieval(request=request)
         spec = require_registered(request.source_id)
         period_is_closed = (
             closed_periods.get(request.instance_key) if request.instance_key else None
@@ -1312,13 +1611,136 @@ class AcquisitionEngine:
             parameters=dict(request.parameters) or None,
             stream=route_is_streamed(spec),
         ) as result:
+            # Response accounting is absorbed the moment the retrieval returns, before any
+            # storage or catalog work. A storage or catalog failure downstream is an
+            # `_OPERATIONAL_FAILURES` the run loop records as a terminated window, and the
+            # physical responses this request already produced are real either way — absorbing
+            # afterwards would drop them from the receipt totals exactly when the window most
+            # needs them accounted (Decision 045 §9.2).
+            self._absorb_response_events(result)
             observation = self.storage.snapshot_store.record(
                 result,
                 retrieved_at_utc=self.clock(),
                 period_is_closed=period_is_closed,
             )
+        self._in_flight = _InFlightRetrieval(request=request, observation=observation)
         observation = self._record_observation(spec, request, observation)
-        return self._classify(request, observation)
+        outcome = self._classify(request, observation)
+        self._in_flight = None
+        self._committed_any = True
+        return outcome
+
+    # -- interruption ------------------------------------------------------- #
+    def _established_interruption_state(self) -> str | None:
+        """The exact interruption state, or ``None`` when durable evidence cannot establish one.
+
+        **Decision 045 correction, MAJOR-1.** The rule is evidence-first. The in-flight marker says
+        which retrieval and which observation to look for; what decides is what the catalog and the
+        raw store durably hold:
+
+        * a **committed** source observation for the in-flight retrieval is
+          ``after_catalog_commit`` — the retrieval counts as completed and a later resume must not
+          request it again;
+        * a retrieval whose newly promoted object is present and still hashes as recorded, with no
+          committed observation, is ``after_raw_store_write_before_catalog_commit`` — the object
+          and its lineage survive as durable orphan evidence for the accepted recovery path, and
+          nothing here deletes them to make recovery simpler;
+        * a retrieval that promoted no new object of its own and committed nothing is
+          ``before_raw_store_write``, and stays eligible for a later SAFE resume.
+
+        Two things are deliberately **not** treated as promotions. A ``304`` reuse and a
+        byte-identical duplicate reuse a *predecessor's* object, which does not belong to this
+        retrieval; a failure or quarantine promotes nothing at all. All four are
+        ``before_raw_store_write``.
+
+        Every path that would otherwise have to assume something returns ``None`` instead: a
+        snapshot store interrupted before it returned, with an unaccounted object or a missing
+        referent anywhere in the raw store, cannot be told apart from a promotion that completed,
+        and a promoted object that no longer verifies is not evidence of anything. A catalog or
+        filesystem error while establishing this is likewise ``None``. The caller re-raises, so no
+        receipt is written at all — which is the whole point: an interruption that cannot be
+        classified exactly must not advertise a resume.
+        """
+        try:
+            return self._interruption_state_from_evidence()
+        except (DisclosureDriftError, sqlite3.Error, OSError):
+            return None
+
+    def _interruption_state_from_evidence(self) -> str | None:
+        """The evidence reading itself, with failures left to the caller to treat as inexact.
+
+        The state describes the **interrupted retrieval**, not the last successful one. So a
+        retrieval that was in flight decides the answer even when an earlier request committed
+        cleanly: reporting that earlier request's ``after_catalog_commit`` would state that the
+        interrupted retrieval had committed, which is exactly the false claim a resume must not be
+        handed. Only when nothing was in flight does the previous request's commit decide it.
+        """
+        in_flight = self._in_flight
+        if in_flight is not None and in_flight.observation is not None:
+            observation = in_flight.observation
+            if self._observation_is_committed(observation.observation_id):
+                return "after_catalog_commit"
+            if observation.outcome in _PROMOTING_OUTCOMES:
+                if not self._verified(observation):
+                    return None
+                return "after_raw_store_write_before_catalog_commit"
+            if self._unaccounted_raw_evidence():
+                return None
+            return "before_raw_store_write"
+
+        # Either no retrieval had begun, or the snapshot store was interrupted before it returned
+        # its observation. Both leave nothing durable for the retrieval itself, so both are
+        # `before_raw_store_write` — but only once the raw store agrees that nothing unaccounted
+        # was promoted, because an interrupted promotion is indistinguishable from a completed one
+        # from inside this frame.
+        if self._unaccounted_raw_evidence():
+            return None
+        if in_flight is not None:
+            return "before_raw_store_write"
+        return "after_catalog_commit" if self._committed_any else "before_raw_store_write"
+
+    def _observation_is_committed(self, observation_id: str) -> bool:
+        """Whether this observation is durably committed, read back rather than believed.
+
+        The recorder commits each observation in its own transaction, and that transaction rolls
+        back on any exception including a ``KeyboardInterrupt`` raised inside it. So a row visible
+        here is a row that committed, and its absence is not "maybe": it is the rolled-back case.
+        """
+        row = self.recorder.writer.connection.execute(
+            "SELECT 1 FROM census_source_observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+        return row is not None
+
+    def _unaccounted_raw_evidence(self) -> bool:
+        """Whether the raw store holds anything that contradicts "nothing was promoted".
+
+        An orphan object — present on disk, referenced by no committed row — is exactly a promotion
+        whose commit did not happen, so its existence means this invocation cannot claim it stopped
+        before raw-store promotion. A missing referent is the opposite direction and equally
+        disqualifying: a committed row whose object is gone leaves what persisted unknowable.
+
+        A ``.part`` spool is deliberately **not** disqualifying. A spool is by definition
+        unpromoted — the accepted store writes it under ``staging`` and promotes out of it — so an
+        interrupted stream leaving one behind is precisely the ``before_raw_store_write`` case, not
+        a contradiction of it.
+        """
+        observed = observe_recovery_state(
+            storage=self.storage,
+            observations=load_observations(self.recorder.writer.connection),
+            ceiling=self.ceiling,
+        )
+        return bool(observed.orphan_objects or observed.missing_referents)
+
+    def _absorb_response_events(self, result: FetchResult) -> None:
+        """Account every physical response this retrieval produced, exactly once.
+
+        A no-op when no :class:`RecordingTransport` is wired: an offline caller that injects a
+        transport directly still runs, and simply produces no response-event totals.
+        """
+        if self.response_log is None:
+            return
+        self.accounting.absorb(result, self.response_log.drain())
 
     def _record_observation(
         self,
@@ -1506,9 +1928,13 @@ class AcquisitionEngine:
         stopped: CompletionStatus | None,
         stop_reasons: tuple[str, ...],
         stop_detail: str,
+        *,
+        interruption_state: str | None = None,
     ) -> WindowOutcome:
         """Assemble the window outcome under the accepted completion semantics."""
         assert self._authorization is not None  # noqa: S101 - run() proves this first
+        self._attribute_to_run(outcomes)
+        self._refuse_unaccounted_responses()
         planned = len(self._requests)
         satisfied = sum(1 for outcome in outcomes if outcome.satisfies_requirement)
 
@@ -1539,7 +1965,65 @@ class AcquisitionEngine:
             completion_status=status,
             reason_codes=reasons,
             detail=detail,
+            interruption_state=interruption_state,
             progress_failures=self.progress_failures,
+        )
+
+    def _attribute_to_run(self, outcomes: Sequence[RequestOutcome]) -> None:
+        """Durably attribute every planned request of this invocation to its run.
+
+        Decision 045 §6A.4. The relation is the **existing** ``census_plan_sources``, whose
+        semantics `_plan_source_row` documents; nothing here creates a table, a column, a
+        migration, or a vocabulary. Every planned logical request gets one row — including the
+        ones left ``not_attempted`` or ``stopped`` — because a run's attribution is a statement
+        about the work it *owned*, and omitting the unreached requests would make an interrupted
+        run indistinguishable from a smaller one.
+
+        A no-op when no run binding was supplied, which is how the accepted offline and fixture
+        callers keep working unchanged.
+
+        Raises:
+            AcquisitionRunError: attribution could not be committed. Fail-closed and deliberately
+                not swallowed: a run whose observations are not durably attributable cannot be
+                scoped by ``show-drift --run``, so the operator layer refuses rather than writing
+                a receipt that would assert a run identity nothing is bound to.
+        """
+        if self.run_binding is None:
+            return
+        now = self.clock()
+        try:
+            with self.recorder.writer.batch():
+                for outcome in outcomes:
+                    self.recorder.writer.insert(
+                        "census_plan_sources",
+                        _plan_source_row(self.run_binding, outcome, recorded_at_utc=now),
+                    )
+        except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+            message = (
+                f"the acquisition run's observation attribution could not be committed "
+                f"({type(exc).__name__}); a run whose observations are not durably attributable "
+                "is refused rather than reported as a lawful run"
+            )
+            raise AcquisitionRunError(message) from exc
+
+    def _refuse_unaccounted_responses(self) -> None:
+        """Mark the accounting uncertain when a physical response reached no bucket.
+
+        Reachable only when a logical request abandons its retrieval without returning a result —
+        a mid-request ceiling refusal, or the accepted client's pre-transport policy refusal. Both
+        are unreachable on a lawful invocation: :func:`verify_window_bindings` proves every route
+        before the window starts, and a ceiling equal to the plan's own
+        ``Σ U × A_reachable`` always leaves each request its full worst case (a resume that does
+        not is refused by :func:`propose_continuation` before execution begins). This is therefore
+        a fail-closed backstop, and it refuses rather than infers: Decision 045 §9.5 requires the
+        accounting to be exact or to stop.
+        """
+        if self.response_log is None or not self.response_log.pending:
+            return
+        self.accounting.mark_undetermined(
+            f"{len(self.response_log.drain())} physical response(s) were observed by a logical "
+            "request that abandoned its retrieval without returning a result, so their "
+            "response-policy classification cannot be established"
         )
 
 
@@ -3431,3 +3915,1397 @@ def _resolve_write_ahead(
         )
     except (DisclosureDriftError, sqlite3.Error, OSError):
         return False
+
+
+# =========================================================================== #
+# Stage T2.5-T2.6 - operator surfaces and integrated implementation
+# (Decision 045. Everything below is offline: nothing here opens a socket
+#  except the one auditable transport-construction site in
+#  `default_live_transport_factory`, which no other surface may reach.)
+# =========================================================================== #
+
+# --------------------------------------------------------------------------- #
+# Progress-sink sanitization and exclusion (Decision 045 §12)
+# --------------------------------------------------------------------------- #
+#: The one fixed internal reason a progress-sink failure is retained under. It is a constant, not
+#: a rendering of the exception: an operator sink's message is operator-controlled text, and the
+#: retained value must be safe to serialize into a receipt, a reconciliation report, or any other
+#: written artifact without depending on a downstream scanner to notice that it was not.
+PROGRESS_SINK_FAILURE_REASON: Final = "operator progress sink raised"
+
+#: The longest sanitized exception-class name retained. A class name is already a Python
+#: identifier, but bounding it makes the retained field's size a property of this module rather
+#: than of the operator's code.
+_SANITIZED_CLASS_NAME_MAX_CHARS: Final = 64
+
+#: Characters permitted in a retained exception-class name. An allowlist, so a class named to
+#: carry a path separator, an ``@``, or whitespace contributes nothing rather than being filtered
+#: by a denylist that a new prohibited form could slip past.
+_CLASS_NAME_ALLOWED: Final = re.compile(r"[^A-Za-z0-9_]")
+
+
+def sanitized_progress_failure(identity_label: str, exc: BaseException) -> str:
+    """Return the bounded, structural record of one progress-sink failure.
+
+    Deliberately derived from the exception's *class* alone, exactly as
+    :func:`_operational_detail` is, and then allowlist-filtered on top. ``str(exc)``, the
+    exception's arguments, its ``filename``, and its ``__notes__`` are never read, so no absolute
+    path, email address, credential, or response body can reach retained state through this seam
+    regardless of what the operator's sink chose to raise.
+    """
+    name = _CLASS_NAME_ALLOWED.sub("", type(exc).__name__)[:_SANITIZED_CLASS_NAME_MAX_CHARS]
+    return f"{identity_label}: {PROGRESS_SINK_FAILURE_REASON} ({name or 'UnnamedException'})"
+
+
+def _emit_progress_diagnostic(identity_label: str, exc: BaseException) -> None:
+    """Write the raw sink failure to the local stderr diagnostic channel, and nowhere else.
+
+    Decision 045 §12 permits raw operator text on exactly this channel, because it is the only
+    thing that makes an operator's own output failure diagnosable and it is never persisted by
+    this project. It is deliberately not routed through the logger: file logging is configurable,
+    and a configured log file is a written artifact.
+    """
+    print(  # noqa: T201 - the authorized local stderr diagnostic channel
+        f"progress sink failed for {identity_label}: {type(exc).__name__}: {exc}",
+        file=sys.stderr,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Exhaustive response-event accounting (Decision 045 §§9-11)
+# --------------------------------------------------------------------------- #
+#: The receipt-local sentinel status key. Decision 045 §9.4 defines it as meaning exactly "no HTTP
+#: status - transport-level failure", and reserves it exclusively for that: a real HTTP response is
+#: never recorded under it. The frozen receipt schema is unchanged, because `status_code_totals`
+#: is a `count_map` whose keys are already unconstrained strings.
+NO_HTTP_STATUS_SENTINEL: Final = "0"
+
+#: Client action markers that each denote exactly one classified physical response. They are the
+#: frozen receipt buckets, read from the receipt module rather than restated, so the producer and
+#: the validator cannot disagree about the vocabulary.
+_CLASSIFIED_ACTIONS: Final[frozenset[str]] = frozenset(RESPONSE_CLASSIFICATION_BUCKETS)
+
+#: The accepted client's marker for a lawful `304`, which returns early and never reaches
+#: `classify_response`. Decision 045 §10 rules it one `proceed` bucket at status `304`, so that a
+#: `304` cannot silently disappear from the response-policy totals.
+_NOT_MODIFIED_ACTION: Final = "not_modified"
+
+#: Markers for a physical response the policy path refused at a boundary instead of classifying.
+#: Each is a terminal failure decision taken on a real physical response, so each contributes the
+#: already-frozen `fail` bucket - no bucket is invented for it (Decision 045 §9.4).
+_BOUNDARY_REFUSAL_ACTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "boundary_refused",
+        "redirect_refused",
+        "transport_redirect_history_refused",
+    }
+)
+
+#: Markers that accompany a response rather than denoting one. `request_ceiling_checked` precedes
+#: a send; `pre_request_boundary_refused` happens before any send at all and is therefore a
+#: pre-transport refusal, which §9.1 excludes from both totals; the three terminal markers annotate
+#: a response whose bucket was already appended by the classification step.
+_NON_RESPONSE_ACTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "post_cooldown_retry_refused",
+        "pre_request_boundary_refused",
+        "request_ceiling_checked",
+        "retry_budget_exhausted",
+        "second_cooldown_terminal",
+    }
+)
+
+
+@dataclass(slots=True)
+class PhysicalResponseLog:
+    """The ordered record of every physical transport send, appended by the recording transport.
+
+    One entry per send: the observed HTTP status, or ``None`` when the send produced no HTTP
+    response at all. Nothing else is retained - not a header, not a body, not a URL - because the
+    only thing receipt accounting owes is *what status each physical response carried*.
+    """
+
+    _sends: list[int | None] = field(default_factory=list)
+
+    def record(self, status: int | None) -> None:
+        """Append one physical send's observed status, or ``None`` for a transport failure."""
+        self._sends.append(status)
+
+    def drain(self) -> tuple[int | None, ...]:
+        """Return and clear the sends recorded since the last drain."""
+        drained = tuple(self._sends)
+        self._sends.clear()
+        return drained
+
+    @property
+    def pending(self) -> int:
+        """How many recorded sends have not yet been absorbed into accounting."""
+        return len(self._sends)
+
+
+@dataclass(slots=True)
+class RecordingTransport:
+    """A pure observer around the injected transport.
+
+    It exists because Decision 045 §9.2 requires **every** physical response to contribute its
+    actual status - including the intermediate responses of a retry sequence, which the accepted
+    :class:`FetchResult` deliberately does not carry - while §9.5 prohibits modifying
+    ``sec/http_client.py`` to make receipt accounting convenient. Observing at the transport seam
+    satisfies both: the accepted policy loop is untouched and unaware, and the observation is
+    exact rather than reconstructed.
+
+    It changes no behaviour. It forwards the request unchanged, returns the response object
+    unchanged, and reads only ``status`` and ``failure`` - neither of which consumes a streamed
+    body - so a payload reaches the accepted client exactly as the real transport produced it.
+    """
+
+    transport: Transport
+    log: PhysicalResponseLog
+
+    def send(self, request: SecRequest) -> TransportResponse:
+        """Forward one request and record the status of the response it produced."""
+        response = self.transport.send(request)
+        self.log.record(response.status if response.succeeded_at_transport_level else None)
+        return response
+
+    def close(self) -> None:
+        """Release the wrapped transport's resources."""
+        self.transport.close()
+
+
+@dataclass(slots=True)
+class ResponseAccounting:
+    """The exhaustive Decision 045 §9 response-event universe for one window.
+
+    Every response-policy event contributes **exactly one** classification bucket and **exactly
+    one** status entry, so the strong invariant holds by construction:
+
+    .. code-block:: text
+
+        sum(response_classification_totals.values()) == sum(status_code_totals.values())
+
+    It is verified rather than assumed: :meth:`absorb` reconciles the bucket stream derived from
+    the accepted client's own action log against the physical sends the recording transport
+    observed, and marks the accounting **undetermined** when they disagree. Decision 045 §9.5
+    requires exactness or a stop, so an undetermined accounting refuses the receipt rather than
+    rounding, inferring, or undercounting.
+    """
+
+    status_code_totals: dict[str, int] = field(default_factory=dict)
+    response_classification_totals: dict[str, int] = field(
+        default_factory=lambda: dict.fromkeys(RESPONSE_CLASSIFICATION_BUCKETS, 0)
+    )
+    redirect_hop_count: int = 0
+    undetermined_basis: str | None = None
+
+    @property
+    def cooldown_count(self) -> int:
+        """Decision 045 §11: exactly the physical responses classified into ``cooldown``.
+
+        Never a count of sleeps, retries, redirect hops, or elapsed cooldown seconds.
+        """
+        return self.response_classification_totals["cooldown"]
+
+    @property
+    def classified_event_count(self) -> int:
+        """Total response-policy buckets recorded."""
+        return sum(self.response_classification_totals.values())
+
+    @property
+    def status_event_count(self) -> int:
+        """Total status entries recorded, including the ``"0"`` sentinel."""
+        return sum(self.status_code_totals.values())
+
+    @property
+    def is_exact(self) -> bool:
+        """Whether every response event is accounted exactly once on both sides."""
+        return (
+            self.undetermined_basis is None
+            and self.classified_event_count == self.status_event_count
+        )
+
+    def mark_undetermined(self, basis: str) -> None:
+        """Record why the accounting cannot be proven exact. The first basis is kept."""
+        if self.undetermined_basis is None:
+            self.undetermined_basis = basis
+
+    def absorb(self, result: FetchResult, sends: Sequence[int | None]) -> None:
+        """Account one logical retrieval's physical responses, exactly once each.
+
+        ``sends`` is the ordered status record of the physical sends this retrieval performed.
+        The bucket stream is derived from the accepted client's action log, which appends exactly
+        one marker per classified response; a followed redirect appends **no** marker and is
+        counted from ``redirect_hops`` instead, which is why the two are reconciled against the
+        send count before anything is recorded.
+        """
+        buckets = _derived_response_buckets(result.actions)
+        hops = len(result.redirect_hops)
+        if buckets is None:
+            self.mark_undetermined(
+                "the accepted client reported a response-policy action outside the accounted "
+                "vocabulary, so its response bucket cannot be established"
+            )
+            return
+        if len(buckets) + hops != len(sends):
+            self.mark_undetermined(
+                f"{len(sends)} physical response(s) were observed but "
+                f"{len(buckets)} classification(s) and {hops} followed redirect(s) account for "
+                f"{len(buckets) + hops}; every response event must be accounted exactly once"
+            )
+            return
+        for status in sends:
+            if status == 0:
+                self.mark_undetermined(
+                    "a transport-level success reported HTTP status 0, which is reserved "
+                    "exclusively for the no-HTTP-status transport-failure sentinel"
+                )
+                return
+
+        self.redirect_hop_count += hops
+        # Decision 045 §9.3: a followed redirect contributes one `proceed` bucket, and its
+        # redirect-hop count is a *different* metric that also increments for the same physical
+        # response. Both are recorded; neither replaces the other.
+        for _ in range(hops):
+            self.response_classification_totals["proceed"] += 1
+        for bucket in buckets:
+            self.response_classification_totals[bucket] += 1
+        for status in sends:
+            key = NO_HTTP_STATUS_SENTINEL if status is None else str(status)
+            self.status_code_totals[key] = self.status_code_totals.get(key, 0) + 1
+
+    def as_receipt_totals(self) -> tuple[Mapping[str, int], Mapping[str, int]]:
+        """The two frozen receipt maps, in deterministic key order."""
+        return (
+            dict(sorted(self.response_classification_totals.items())),
+            dict(sorted(self.status_code_totals.items())),
+        )
+
+
+def _derived_response_buckets(actions: Sequence[str]) -> tuple[str, ...] | None:
+    """Derive one response bucket per classified physical response, or ``None`` if unknown.
+
+    Total over the accepted client's action vocabulary and fail-closed outside it: an unrecognized
+    marker returns ``None`` rather than being skipped, because skipping it would silently
+    undercount a real response event.
+    """
+    buckets: list[str] = []
+    for action in actions:
+        if action in _CLASSIFIED_ACTIONS:
+            buckets.append(action)
+        elif action == _NOT_MODIFIED_ACTION:
+            buckets.append("proceed")
+        elif action in _BOUNDARY_REFUSAL_ACTIONS:
+            buckets.append("fail")
+        elif action not in _NON_RESPONSE_ACTIONS:
+            return None
+    return tuple(buckets)
+
+
+# --------------------------------------------------------------------------- #
+# M3.2 acquisition-run identity: registration and attribution (Decision 045 §6A)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class AcquisitionRunBinding:
+    """One live invocation's registered, verified acquisition-run identity.
+
+    A run identifies **one live command invocation**, not a whole window (§6A.3). A resumed
+    invocation therefore carries a *new* binding, and its predecessor lineage travels separately
+    through ``--resume-from`` and the predecessor receipt identity.
+
+    Like :class:`LiveOperationAuthorization`, this is evidence that the registration happened, not
+    a grant: :func:`validate_acquisition_run` re-reads the durable row through a fresh read-only
+    connection, so a fabricated instance buys nothing.
+    """
+
+    census_run_id: str
+    window: str
+
+    def __post_init__(self) -> None:
+        """Refuse a binding that is not self-consistent."""
+        if not self.census_run_id.strip():
+            message = "an acquisition run binding requires a non-empty run identity"
+            raise AcquisitionRunError(message)
+        if self.window not in ACQUISITION_WINDOWS:
+            message = (
+                f"window {self.window!r} is not one of the accepted acquisition windows "
+                f"{ACQUISITION_WINDOWS}"
+            )
+            raise AcquisitionRunError(message)
+
+
+def default_run_id_factory() -> str:
+    """Allocate one opaque invocation run identity.
+
+    Injectable at every call site that needs one, so a test binds a deterministic identity and a
+    real invocation gets a fresh unique one. It is a bare identifier and carries no window, plan,
+    receipt, or operator information: a run identity is a key, never a claim.
+    """
+    return f"m3-2-acquisition-{uuid.uuid4().hex}"
+
+
+def register_acquisition_run(
+    *,
+    catalog_path: Path,
+    lock_directory: Path,
+    census_run_id: str,
+    window: str,
+    started_at_utc: str,
+    detail: str,
+) -> AcquisitionRunBinding:
+    """Register exactly one durable ``ops_ingestion_jobs`` row for this live invocation.
+
+    The Decision 045 §6A.1 responsibility, implemented here in the authorized M3 acquisition
+    driver. It writes **one** row with ``job_kind = 'm3_2_acquisition'`` and ``stage`` equal to
+    the governed acquisition window exactly. It deliberately does not reuse - and does not
+    call - the private M2.2 census registration, which hardcodes an M2.2 job kind and stage;
+    ``ops_ingestion_jobs`` carries no CHECK constraint on either column, so an M3.2 row is
+    schema-legal and no migration is required or authorized.
+
+    Raises:
+        AcquisitionRunError: the identity is malformed, already registered, or could not be
+            committed. Every one of those refuses **before** a transport is constructed.
+    """
+    binding = AcquisitionRunBinding(census_run_id=census_run_id, window=window)
+    if not started_at_utc.strip():
+        message = "an acquisition run registration requires an explicit UTC start instant"
+        raise AcquisitionRunError(message)
+    try:
+        with (
+            CatalogWriter(Path(catalog_path), Path(lock_directory)) as writer,
+            writer.batch() as connection,
+        ):
+            existing = connection.execute(
+                "SELECT 1 FROM ops_ingestion_jobs WHERE job_id = ?",
+                (binding.census_run_id,),
+            ).fetchone()
+            if existing is not None:
+                message = (
+                    f"census run {binding.census_run_id!r} is already registered; one live "
+                    "invocation registers exactly one run, and an existing identity is never "
+                    "adopted, reused, or overwritten"
+                )
+                raise AcquisitionRunError(message)
+            writer.insert(
+                "ops_ingestion_jobs",
+                {
+                    "job_id": binding.census_run_id,
+                    "job_kind": ACQUISITION_JOB_KIND,
+                    "job_state": "running",
+                    "stage": binding.window,
+                    "started_at_utc": started_at_utc,
+                    "detail": detail,
+                },
+            )
+    except AcquisitionRunError:
+        raise
+    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+        message = (
+            f"the M3.2 acquisition run could not be registered ({type(exc).__name__}); no "
+            "transport is constructed and no physical request occurs"
+        )
+        raise AcquisitionRunError(message) from exc
+    return binding
+
+
+def validate_acquisition_run(catalog_path: Path, census_run_id: str) -> str:
+    """Return the registered stage of one M3.2 acquisition run, or refuse.
+
+    Read through a genuinely fresh read-only connection, so what it proves is what is *durable*
+    rather than what some in-memory writer believed. The row must exist, carry exactly
+    ``job_kind = 'm3_2_acquisition'``, and carry an accepted acquisition window as its stage:
+    an unknown identity, an M2.2 census run, and a row with any other stage are each refused
+    (Decision 045 §4.6, §4.7).
+
+    Raises:
+        AcquisitionRunError: the run does not resolve to a lawful M3.2 acquisition run.
+    """
+    if not census_run_id or not census_run_id.strip():
+        message = (
+            "no census run identity was supplied; an M3.2 run-scoped surface requires an "
+            "already-registered ops_ingestion_jobs.job_id and never fabricates one"
+        )
+        raise AcquisitionRunError(message)
+    try:
+        with read_only_catalog(Path(catalog_path)) as connection:
+            row = connection.execute(
+                "SELECT job_kind, stage FROM ops_ingestion_jobs WHERE job_id = ?",
+                (census_run_id,),
+            ).fetchone()
+    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+        message = (
+            f"census run {census_run_id!r} could not be validated against the catalog "
+            f"({type(exc).__name__})"
+        )
+        raise AcquisitionRunError(message) from exc
+    if row is None:
+        message = (
+            f"census run {census_run_id!r} does not resolve to an existing governed "
+            "ops_ingestion_jobs row; an unknown run identity fails closed and is never created "
+            "or substituted here"
+        )
+        raise AcquisitionRunError(message)
+    job_kind = str(row["job_kind"])
+    stage = str(row["stage"])
+    if job_kind != ACQUISITION_JOB_KIND:
+        message = (
+            f"census run {census_run_id!r} carries job kind {job_kind!r}, not "
+            f"{ACQUISITION_JOB_KIND!r}; this surface scopes to M3.2 acquisition runs only"
+        )
+        raise AcquisitionRunError(message)
+    if stage not in ACQUISITION_WINDOWS:
+        message = (
+            f"census run {census_run_id!r} carries stage {stage!r}, which is not one of the "
+            f"accepted acquisition windows {ACQUISITION_WINDOWS}"
+        )
+        raise AcquisitionRunError(message)
+    return stage
+
+
+def finish_acquisition_run(
+    *,
+    catalog_path: Path,
+    lock_directory: Path,
+    census_run_id: str,
+    job_state: str,
+    finished_at_utc: str,
+    detail: str,
+) -> bool:
+    """Close the registered run row, reporting failure as ``False`` rather than raising.
+
+    Terminal bookkeeping only: the window's own evidence is its observations, its attribution, and
+    its receipt. A failure to close the row must not discard a window whose objects are promoted
+    and whose rows are committed, so it is reported and left to a later inspection.
+
+    ``job_state`` is stated by the caller rather than derived from a boolean, because an
+    invocation has three truthful terminal states and not two. A window that completed is
+    ``completed``; one that failed is ``failed``; one that was externally interrupted is
+    ``stopped`` — it neither completed nor failed, and reporting it as either would be a false
+    record of what the invocation did. All three are literals migration ``0001``'s CHECK
+    constraint already admits: nothing here adds a state, a column, or a migration, and
+    ``interrupted`` is deliberately **not** introduced as a database state — it is the receipt's
+    completion vocabulary, not this table's.
+
+    Raises:
+        AcquisitionRunError: ``job_state`` is not one of :data:`ACQUISITION_RUN_JOB_STATES`. A
+            caller error rather than an operational one, so it refuses instead of returning
+            ``False``.
+    """
+    if job_state not in ACQUISITION_RUN_JOB_STATES:
+        message = (
+            f"job state {job_state!r} is not one of the accepted terminal acquisition-run states "
+            f"{ACQUISITION_RUN_JOB_STATES}; a run row is never closed into an invented state"
+        )
+        raise AcquisitionRunError(message)
+    try:
+        with (
+            CatalogWriter(Path(catalog_path), Path(lock_directory)) as writer,
+            writer.batch() as (connection),
+        ):
+            connection.execute(
+                "UPDATE ops_ingestion_jobs SET job_state = ?, finished_at_utc = ?, detail = ? "
+                "WHERE job_id = ?",
+                (job_state, finished_at_utc, detail, census_run_id),
+            )
+    except (DisclosureDriftError, sqlite3.Error, OSError):
+        return False
+    return True
+
+
+def acquisition_run_job_state(outcome: WindowOutcome) -> str:
+    """The truthful terminal ``ops_ingestion_jobs.job_state`` for one finished window.
+
+    Three outcomes, three states, no collapsing. A genuine interruption is ``stopped`` rather than
+    ``completed``: an interrupted invocation did not complete its window, and recording it as
+    completed would make the run row contradict the interrupted receipt beside it.
+    """
+    if outcome.completion_status == "interrupted":
+        return "stopped"
+    return "completed" if outcome.completed_successfully else "failed"
+
+
+#: How a terminal request disposition maps onto the accepted ``census_plan_sources`` retrieval
+#: vocabulary. Every value is one the existing CHECK constraint already admits; none is invented.
+_PLAN_SOURCE_RETRIEVAL_STATES: Final[Mapping[str, str]] = {
+    "satisfied_new": "retrieved",
+    "satisfied_duplicate": "retrieved",
+    "satisfied_reused": "reused",
+    "absent": "unavailable",
+    "quarantined": "quarantined",
+    "failed": "failed",
+    "stopped": "unknown",
+    "not_attempted": "not_retrieved",
+}
+
+
+def _plan_source_row(
+    run: AcquisitionRunBinding,
+    outcome: RequestOutcome,
+    *,
+    recorded_at_utc: str,
+) -> Mapping[str, object]:
+    """Render one run-to-observation attribution row for ``census_plan_sources``.
+
+    **Why this relation, proven from the existing schema** (Decision 045 §6A.4 requires the
+    argument to be made before the relation is used, not after):
+
+    * it durably carries the **run** identity - ``census_run_id`` is
+      ``NOT NULL REFERENCES ops_ingestion_jobs(job_id)``, the very table §6A.1 registers the M3.2
+      run in, so the reference resolves to this invocation's own row;
+    * it durably carries the **observation** identity - ``observation_id REFERENCES
+      census_source_observations(observation_id)``, the same table the accepted
+      :class:`ObservationRecorder` writes, so an attributed observation is the one that was
+      actually committed;
+    * its **existing semantics are the semantics being recorded**. Migration `0004` states its
+      purpose as deriving a run's completion claim "from explicit per-instance terminal states",
+      keyed by ``(census_run_id, source_instance_id)``: for one run, one planned source instance,
+      what terminal state it reached and which observation it produced. That is exactly what an
+      M3.2 acquisition invocation owes - accepted contract §14 makes the identical distinction
+      between terminating and being satisfied - so this is the relation's own meaning rather than
+      a convenient column shape. ``census_source_observations_r3`` carries no run column
+      (migration `0008`), and the sibling run-scoped relations are narrower: ``census_recovery_
+      states`` records recovery scenarios rather than ordinary retrievals, and
+      ``census_index_instances`` covers only the quarterly index route.
+
+    The M3.2 driver's own vocabulary is *already* this family: Decision 041 has its accepted T2.4
+    recovery applier writing ``census_recovery_states`` under a ``census_run_id`` that is an
+    ``ops_ingestion_jobs.job_id``. Nothing here creates a table, a column, a migration, an index,
+    a reason code, or an event vocabulary.
+
+    Every value below is one the existing CHECK constraints already admit. ``parser_state`` is
+    ``not_started`` and is meant literally: Milestone 3.2 acquires metadata objects and parses
+    none of them, so claiming any other parser state would be a false record.
+    """
+    satisfied = outcome.satisfies_requirement
+    blocking = sorted(
+        code
+        for code in outcome.reason_codes
+        if code in REASON_CODES and REASON_CODES[code].blocks_release
+    )
+    if satisfied:
+        qa_state = "passed"
+    elif outcome.disposition in {"not_attempted", "stopped"}:
+        qa_state = "unknown"
+    else:
+        qa_state = "blocked"
+    return {
+        "census_run_id": run.census_run_id,
+        "source_instance_id": outcome.request.identity_label,
+        "source_id": outcome.request.source_id,
+        "request_identity": _planned_request_identity(outcome.request),
+        "required": 1,
+        "source_scope": (
+            "historical" if outcome.request.source_id == "sec_submissions_historical" else "base"
+        ),
+        "retrieval_state": _PLAN_SOURCE_RETRIEVAL_STATES[outcome.disposition],
+        "snapshot_state": "verified" if satisfied else "not_verified",
+        "parser_state": "not_started",
+        "catalog_state": "committed" if outcome.observation_id else "not_started",
+        "qa_state": qa_state,
+        "unresolved_blocking_reasons_json": json.dumps(blocking),
+        "observation_id": outcome.observation_id,
+        "successful_terminal": int(satisfied),
+        "updated_at_utc": recorded_at_utc,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Run-scoped drift inspection (Decision 045 §4.6)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class RunScopedDrift:
+    """Drift attributable through durable lineage to one exact M3.2 acquisition run."""
+
+    census_run_id: str
+    stage: str
+    attributed_observation_count: int
+    entries: tuple[DriftListingEntry, ...]
+
+    @property
+    def blocking(self) -> tuple[DriftListingEntry, ...]:
+        """Drift events whose registered reasons block release."""
+        return tuple(entry for entry in self.entries if entry.blocking)
+
+    @property
+    def nonblocking(self) -> tuple[DriftListingEntry, ...]:
+        """Drift events observed and retained without blocking."""
+        return tuple(entry for entry in self.entries if not entry.blocking)
+
+    @property
+    def has_blocking(self) -> bool:
+        """Whether any attributed drift event blocks."""
+        return bool(self.blocking)
+
+
+def drift_for_run(*, catalog_path: Path, census_run_id: str) -> RunScopedDrift:
+    """List the drift events attributable to exactly one M3.2 acquisition run.
+
+    **There is no global fallback.** The run is validated first
+    (:func:`validate_acquisition_run`), and the listing is then restricted to the observations
+    that run durably owns through ``census_plan_sources``. A run that owns no attribution at all
+    is *unattributable* rather than clean: drift could not be scoped to it, so it refuses rather
+    than silently reporting an empty listing that reads like a passing run (Decision 045 §4.6).
+
+    Read-only throughout: the connection is the accepted read-only inspector's, so a write is
+    impossible rather than merely unintended.
+
+    Raises:
+        AcquisitionRunError: the run is unknown, not an M3.2 acquisition run, carries a stage
+            outside the accepted windows, or owns no durable attribution.
+    """
+    stage = validate_acquisition_run(catalog_path, census_run_id)
+    try:
+        with read_only_catalog(Path(catalog_path)) as connection:
+            rows = connection.execute(
+                "SELECT observation_id FROM census_plan_sources WHERE census_run_id = ? "
+                "ORDER BY source_instance_id",
+                (census_run_id,),
+            ).fetchall()
+            observations = load_observations(connection)
+    except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
+        message = (
+            f"the drift listing for census run {census_run_id!r} could not be read "
+            f"({type(exc).__name__})"
+        )
+        raise AcquisitionRunError(message) from exc
+
+    if not rows:
+        message = (
+            f"census run {census_run_id!r} owns no durable observation attribution, so drift "
+            "cannot be scoped to it; an unattributable run fails closed rather than reporting "
+            "the unscoped global drift listing"
+        )
+        raise AcquisitionRunError(message)
+
+    attributed = {str(row["observation_id"]) for row in rows if row["observation_id"] is not None}
+    entries: list[DriftListingEntry] = []
+    for observation in observations:
+        if observation.observation_id not in attributed:
+            continue
+        family, blocking = _drift_flags(observation.reason_codes)
+        if family:
+            entries.append(
+                DriftListingEntry(
+                    observation_id=observation.observation_id,
+                    source_id=observation.source_id,
+                    request_identity=observation.identity,
+                    reason_codes=family,
+                    blocking=blocking,
+                )
+            )
+    entries.sort(key=lambda entry: entry.observation_id)
+    return RunScopedDrift(
+        census_run_id=census_run_id,
+        stage=stage,
+        attributed_observation_count=len(attributed),
+        entries=tuple(entries),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic M3.2B dependent-plan derivation (Decision 045 §4.3, §13)
+# --------------------------------------------------------------------------- #
+#: The schema of the explicit reconciliation set this derivation consumes. It is the reviewed
+#: operator artifact that states which frozen M3.2A objects the derivation must verify and which
+#: dependent instances it must produce. A set of another schema is refused rather than adapted.
+DEPENDENT_RECONCILIATION_SET_VERSION: Final = "m3-2b-reconciliation-set/1.0"
+
+#: The window a dependent derivation may derive *from*. Decision 045 §4.3 fixes it exactly.
+_DEPENDENT_SOURCE_WINDOW: Final = "M3.2A"
+
+
+@dataclass(frozen=True, slots=True)
+class DependentPlanDerivation:
+    """The result of one deterministic M3.2B dependent-plan derivation."""
+
+    plan: RequestPlan
+    plan_bytes: bytes
+    verified_object_count: int
+    entity_instance_count: int
+    historical_instance_count: int
+
+    @property
+    def dependent_instance_count(self) -> int:
+        """Total dependent logical requests the derived plan states."""
+        return self.entity_instance_count + self.historical_instance_count
+
+
+def derive_dependent_plan(
+    *,
+    from_window: str,
+    catalog_path: Path,
+    storage: StorageBinding,
+    reconciliation_set: Mapping[str, object],
+    requests_per_second: float,
+    transport_capable_configuration: bool,
+) -> DependentPlanDerivation:
+    """Derive the M3.2B dependent plan from frozen M3.2A objects. Zero network, always.
+
+    Structurally zero-network: this function constructs no transport, imports no client, and
+    accepts none - there is no seam through which one could reach it. It additionally **refuses**
+    when the invoking configuration is transport-capable at all, so a derivation can never be run
+    from a configuration that could have acquired something (Decision 045 §4.3).
+
+    The derivation is a pure function of durable evidence and one reviewed artifact:
+
+    1. the ``--from-window`` must be exactly ``M3.2A``;
+    2. every frozen object the reconciliation set declares must exist as a committed, usable
+       observation with that exact ``source_id`` and ``request_identity``, must carry complete
+       provenance, must declare the exact ``content_sha256`` the set names, and must still hash to
+       it on disk;
+    3. agreement is checked in **both** directions - a declared object the catalog does not hold
+       and a satisfying bootstrap object the set does not declare are each a refusal, because
+       either one means the set and the frozen evidence describe different windows;
+    4. only the two authorized dependent routes may be derived, each instance must construct a
+       lawful in-family URL, and no instance may address a filing body;
+    5. the instance counts come **entirely** from the reviewed set. Nothing here estimates,
+       rounds, or extrapolates the eventual exact M3.2B request count, and a set that states no
+       dependent instance is refused rather than written out as a zero-request plan.
+
+    Raises:
+        DependentPlanError: any of the above does not hold. No plan and no success receipt is
+            produced on any refusal.
+    """
+    if transport_capable_configuration:
+        message = (
+            "dependent-plan derivation refuses to run from a transport-capable configuration; "
+            "it is a zero-network derivation over frozen objects, and a configuration that "
+            "could acquire is never the one that derives"
+        )
+        raise DependentPlanError(message)
+    if from_window != _DEPENDENT_SOURCE_WINDOW:
+        message = (
+            f"dependent-plan derivation derives from {_DEPENDENT_SOURCE_WINDOW!r} only; "
+            f"received {from_window!r}"
+        )
+        raise DependentPlanError(message)
+
+    declared_version = reconciliation_set.get("reconciliation_set_schema_version")
+    if declared_version != DEPENDENT_RECONCILIATION_SET_VERSION:
+        message = (
+            f"the reconciliation set declares schema {declared_version!r}, not "
+            f"{DEPENDENT_RECONCILIATION_SET_VERSION!r}; a set of another schema is not this set"
+        )
+        raise DependentPlanError(message)
+    if reconciliation_set.get("from_window") != _DEPENDENT_SOURCE_WINDOW:
+        message = (
+            f"the reconciliation set names source window "
+            f"{reconciliation_set.get('from_window')!r}, not {_DEPENDENT_SOURCE_WINDOW!r}"
+        )
+        raise DependentPlanError(message)
+
+    inputs = _dependent_plan_inputs(reconciliation_set)
+    reconstruction = _dependent_reconstruction(catalog_path, storage)
+    verified = _verify_frozen_objects(reconciliation_set, reconstruction, storage)
+    entity, historical = _dependent_instance_counts(reconciliation_set)
+
+    plan = build_m3_2b_dependent_plan(
+        coverage_start=inputs.coverage_start,
+        coverage_end=inputs.coverage_end,
+        as_of_date=inputs.as_of_date,
+        include_open_quarter=inputs.include_open_quarter,
+        calendar_year=inputs.calendar_year,
+        calendar_evidence_entry_count=inputs.calendar_evidence_entry_count,
+        entity_instance_count=entity,
+        historical_instance_count=historical,
+        requests_per_second=requests_per_second,
+    )
+    return DependentPlanDerivation(
+        plan=plan,
+        plan_bytes=canonical_plan_bytes(plan),
+        verified_object_count=verified,
+        entity_instance_count=entity,
+        historical_instance_count=historical,
+    )
+
+
+def _dependent_reconstruction(
+    catalog_path: Path,
+    storage: StorageBinding,
+) -> CatalogReconstruction:
+    """Rebuild catalog-authoritative state for the derivation, refusing an absent catalog."""
+    try:
+        return reconstruct_catalog_state(catalog_path=catalog_path, storage=storage)
+    except AcquisitionGateError as exc:
+        message = f"the frozen M3.2A evidence cannot be read: {exc}"
+        raise DependentPlanError(message) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class _DependentPlanInputs:
+    """The explicit derivation inputs the reviewed reconciliation set states."""
+
+    coverage_start: date
+    coverage_end: date
+    as_of_date: date
+    include_open_quarter: bool
+    calendar_year: int
+    calendar_evidence_entry_count: int
+
+
+def _dependent_plan_inputs(reconciliation_set: Mapping[str, object]) -> _DependentPlanInputs:
+    """Read the explicit plan inputs the reviewed set carries, refusing anything missing.
+
+    These are carried through to the derived document as provenance rather than used as planning
+    inputs - no M3.2B route is a quarterly index or a calendar announcement - but the frozen
+    ``m3-request-plan/1.0`` shape requires them, so they are stated explicitly in the reviewed
+    artifact rather than defaulted, inferred, or read from the clock.
+    """
+    block = reconciliation_set.get("plan_inputs")
+    if not isinstance(block, Mapping):
+        message = (
+            "the reconciliation set carries no 'plan_inputs' object; the derived plan document's "
+            "inputs are stated explicitly in the reviewed set, never inferred or defaulted"
+        )
+        raise DependentPlanError(message)
+    try:
+        return _DependentPlanInputs(
+            coverage_start=date.fromisoformat(str(block["coverage_start"])),
+            coverage_end=date.fromisoformat(str(block["coverage_end"])),
+            as_of_date=date.fromisoformat(str(block["as_of_date"])),
+            include_open_quarter=bool(block["include_open_quarter"]),
+            calendar_year=int(str(block["calendar_year"])),
+            calendar_evidence_entry_count=int(str(block["calendar_evidence_entry_count"])),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        message = f"the reconciliation set's 'plan_inputs' are not complete and well-formed: {exc}"
+        raise DependentPlanError(message) from exc
+
+
+def _verify_frozen_objects(
+    reconciliation_set: Mapping[str, object],
+    reconstruction: CatalogReconstruction,
+    storage: StorageBinding,
+) -> int:
+    """Verify identity, hash, and provenance of every declared frozen object, both directions."""
+    declared = reconciliation_set.get("frozen_objects")
+    if not isinstance(declared, list) or not declared:
+        message = (
+            "the reconciliation set declares no 'frozen_objects'; a derivation that verifies "
+            "nothing is refused rather than treated as vacuously agreeing"
+        )
+        raise DependentPlanError(message)
+
+    satisfying = {
+        (observation.source_id, observation.identity)
+        for observation in reconstruction.observations
+        if observation.source_id in M3_2A_BOOTSTRAP_ROUTES
+        and verified_reusable_predecessor(
+            reconstruction, observation.source_id, observation.identity
+        )
+        is not None
+    }
+    seen: set[tuple[str, str]] = set()
+    for index, entry in enumerate(declared):
+        if not isinstance(entry, Mapping):
+            message = f"frozen object {index} is not an object"
+            raise DependentPlanError(message)
+        source_id = str(entry.get("source_id", ""))
+        identity = str(entry.get("request_identity", ""))
+        content_sha256 = str(entry.get("content_sha256", ""))
+        if source_id not in M3_2A_BOOTSTRAP_ROUTES:
+            message = (
+                f"frozen object {index} names route {source_id!r}, which is not an M3.2A "
+                "bootstrap route; a dependent derivation reads only frozen bootstrap evidence"
+            )
+            raise DependentPlanError(message)
+        if (source_id, identity) in seen:
+            message = f"frozen object {index} repeats identity {identity!r}"
+            raise DependentPlanError(message)
+        seen.add((source_id, identity))
+        _verify_one_frozen_object(
+            index, source_id, identity, content_sha256, reconstruction, storage
+        )
+
+    undeclared = sorted(satisfying - seen)
+    if undeclared:
+        message = (
+            f"{len(undeclared)} satisfying frozen M3.2A object(s) are not declared by the "
+            f"reconciliation set (first: {undeclared[0][0]!r}); the frozen evidence and the "
+            "reviewed set describe different windows, so the derivation refuses rather than "
+            "deriving from whichever one it happened to read"
+        )
+        raise DependentPlanError(message)
+    return len(seen)
+
+
+def _verify_one_frozen_object(
+    index: int,
+    source_id: str,
+    identity: str,
+    content_sha256: str,
+    reconstruction: CatalogReconstruction,
+    storage: StorageBinding,
+) -> None:
+    """Prove one declared frozen object present, hash-exact, and provenance-complete."""
+    predecessor = verified_reusable_predecessor(reconstruction, source_id, identity)
+    if predecessor is None or predecessor.observation_id is None:
+        message = (
+            f"frozen object {index} ({source_id}) does not resolve to a verified, reusable "
+            "committed observation; a dependent plan is derived only from frozen evidence that "
+            "verifies at the point of use"
+        )
+        raise DependentPlanError(message)
+    observation = reconstruction.by_id(predecessor.observation_id)
+    if observation is None:
+        message = f"frozen object {index} ({source_id}) names an observation the catalog lost"
+        raise DependentPlanError(message)
+    missing = [
+        name
+        for name in ("relative_storage_path", "retrieved_at_utc", "purpose", "requested_url")
+        if not getattr(observation, name, None)
+    ]
+    if missing:
+        message = (
+            f"frozen object {index} ({source_id}) is missing required provenance "
+            f"{sorted(missing)}; incomplete provenance is refused rather than derived from"
+        )
+        raise DependentPlanError(message)
+    if observation.content_sha256 != content_sha256 or not content_sha256:
+        message = (
+            f"frozen object {index} ({source_id}) declares content_sha256 "
+            f"{content_sha256[:12]!r}... but the committed observation carries a different "
+            "digest; the reviewed set and the frozen object disagree"
+        )
+        raise DependentPlanError(message)
+    try:
+        storage.snapshot_store.verify_payload(observation)
+    except (DisclosureDriftError, OSError) as exc:
+        message = (
+            f"frozen object {index} ({source_id}) does not still hash to its recorded digest "
+            f"on disk ({type(exc).__name__})"
+        )
+        raise DependentPlanError(message) from exc
+
+
+def _dependent_instance_counts(reconciliation_set: Mapping[str, object]) -> tuple[int, int]:
+    """Count the reviewed dependent instances per route, proving each one lawful."""
+    declared = reconciliation_set.get("dependent_instances")
+    if not isinstance(declared, list) or not declared:
+        message = (
+            "the reconciliation set states no 'dependent_instances'; the eventual exact M3.2B "
+            "request count comes from reviewed evidence alone, and a derivation never invents, "
+            "estimates, or writes out a zero-request dependent plan"
+        )
+        raise DependentPlanError(message)
+
+    counts = dict.fromkeys(M3_2B_DEPENDENT_ROUTES, 0)
+    seen: set[tuple[str, str]] = set()
+    for index, entry in enumerate(declared):
+        if not isinstance(entry, Mapping):
+            message = f"dependent instance {index} is not an object"
+            raise DependentPlanError(message)
+        source_id = str(entry.get("source_id", ""))
+        instance_key = str(entry.get("instance_key", ""))
+        parameters = entry.get("parameters")
+        if source_id not in M3_2B_DEPENDENT_ROUTES:
+            message = (
+                f"dependent instance {index} names route {source_id!r}; only "
+                f"{list(M3_2B_DEPENDENT_ROUTES)} may be derived"
+            )
+            raise DependentPlanError(message)
+        if not instance_key.strip():
+            message = f"dependent instance {index} carries no instance key"
+            raise DependentPlanError(message)
+        if not isinstance(parameters, Mapping):
+            message = f"dependent instance {index} carries no 'parameters' object"
+            raise DependentPlanError(message)
+        if (source_id, instance_key) in seen:
+            message = (
+                f"dependent instance {index} repeats identity {source_id}:{instance_key}; two "
+                "planned requests for one identity would retrieve one object and count twice"
+            )
+            raise DependentPlanError(message)
+        seen.add((source_id, instance_key))
+        _verify_dependent_instance_url(index, source_id, parameters)
+        counts[source_id] += 1
+    return counts["sec_submissions_entity"], counts["sec_submissions_historical"]
+
+
+def _verify_dependent_instance_url(
+    index: int,
+    source_id: str,
+    parameters: Mapping[str, object],
+) -> None:
+    """Prove one dependent instance constructs a lawful, non-filing-body registered URL."""
+    spec = require_registered(source_id)
+    try:
+        url = spec.url(**{str(key): str(value) for key, value in parameters.items()})
+    except DisclosureDriftError as exc:
+        message = f"dependent instance {index} ({source_id}) cannot construct its URL: {exc}"
+        raise DependentPlanError(message) from exc
+    if filing_body_url_is_prohibited(url):
+        message = (
+            f"dependent instance {index} ({source_id}) constructs a filing-body or accession "
+            "URL; Milestone 3.2 acquires metadata only"
+        )
+        raise DependentPlanError(message)
+
+
+# --------------------------------------------------------------------------- #
+# The live operator boundary and the single transport-construction site
+# (Decision 045 §4.2, §6, §6A.2, §14)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class LiveOperatorGate:
+    """The operator-boundary facts proved at the command surface, restated at the wire.
+
+    The accepted contract §8 gate ladder is evaluated where a configuration file, an explicit
+    ``--live`` flag, and the canonical SEC identity validator can be read - the operator command.
+    This type carries those results to the one place a transport is built, so the complete
+    Decision 045 §6 conjunction is asserted **adjacent to** the construction site rather than
+    trusted from a caller several frames away.
+
+    It is inert, exactly like :class:`LiveOperationAuthorization`: it grants nothing, and every
+    field is a fact the command surface derived from real configuration and a real validator. A
+    fabricated instance still cannot satisfy the plan-hash, window, ceiling, run-registration, or
+    later owner-gated conditions, each of which is proved separately from durable evidence.
+    """
+
+    explicit_live: bool
+    network_enabled: bool
+    m3_acquire_enabled: bool
+    sec_identity_validated: bool
+    stage_authority_reference: str
+
+    def __post_init__(self) -> None:
+        """Refuse a gate that does not carry every required operator-boundary fact.
+
+        Each element is checked **individually** and names itself in the refusal, so a control
+        that stops being enforced fails a test of its own rather than hiding inside a conjunction
+        that some other element still happens to satisfy.
+        """
+        if not self.explicit_live:
+            message = (
+                "live acquisition requires the explicit --live flag; there is no default, and no "
+                "configuration key or gate token stands in for it"
+            )
+            raise AcquisitionGateError(message)
+        if not self.network_enabled:
+            message = "live acquisition requires the accepted network.enabled prerequisite state"
+            raise AcquisitionGateError(message)
+        if not self.m3_acquire_enabled:
+            message = (
+                "live acquisition requires network.m3_acquire_enabled; the global network switch "
+                "never enables acquisition on its own"
+            )
+            raise AcquisitionGateError(message)
+        if not self.sec_identity_validated:
+            message = (
+                "live acquisition requires a contact identity accepted by the canonical SEC "
+                "identity validator"
+            )
+            raise AcquisitionGateError(message)
+        if not self.stage_authority_reference.strip():
+            message = (
+                "live acquisition must name the accepted contract and stage authority it runs "
+                "under; an unnamed authority is refused rather than treated as sufficient"
+            )
+            raise AcquisitionGateError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveAcquisitionResult:
+    """Everything one lawful live invocation produced, for receipt assembly."""
+
+    census_run_id: str
+    outcome: WindowOutcome
+    accounting: ResponseAccounting
+    started_at_utc: str
+    completed_at_utc: str
+    predecessor_receipt_id: str | None
+    carried_forward_consumed: int | None
+    run_closed: bool
+
+    @property
+    def resumed(self) -> bool:
+        """Whether this invocation continued an exact predecessor receipt."""
+        return self.predecessor_receipt_id is not None
+
+
+def default_live_transport_factory() -> Transport:
+    """Construct the real HTTP transport. **The only live construction site in the project.**
+
+    Decision 045 §4.2 permits exactly one operator surface to contain a live transport-construction
+    path, and §6 requires it to happen at one auditable site after every in-process precondition
+    and the §6A run registration have passed. This function is that site.
+
+    ``httpx`` is imported **inside** the function on purpose: importing this module, the CLI, or
+    any test therefore loads no HTTP library and opens no socket, and the no-network regression
+    keeps holding by construction rather than by discipline. Every test injects a scripted
+    transport in place of this factory, so nothing in the suite ever calls it.
+    """
+    from disclosure_drift.sec.httpx_transport import HttpxTransport  # noqa: PLC0415 - see docstring
+
+    return HttpxTransport()
+
+
+def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied explicitly
+    *,
+    plan: RequestPlan,
+    window: str,
+    approved_ceiling: int,
+    authorization: LiveOperationAuthorization,
+    gate: LiveOperatorGate,
+    catalog: CatalogPreparation,
+    storage: StorageBinding,
+    user_agent: str,
+    requests_per_second: float,
+    burst: int,
+    policy: RetrievalPolicy,
+    continuation: ContinuationProposal | None = None,
+    transport_factory: Callable[[], Transport] = default_live_transport_factory,
+    run_id_factory: Callable[[], str] = default_run_id_factory,
+    clock: Callable[[], str] = _utc_now,
+    progress: Callable[[RequestOutcome], None] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    rate_limiter: AggregateRateLimiter | None = None,
+) -> LiveAcquisitionResult:
+    """Execute one lawful live acquisition invocation, in the Decision 045 §6A.2 order.
+
+    The ordering is the whole point, and it is enforced by control flow rather than by comment:
+
+    1. the complete operator-boundary conjunction is re-asserted (:class:`LiveOperatorGate`);
+    2. every window binding is proved - plan hash, window identity, exact ceiling equality, route
+       registration and window membership, filing-body prohibition
+       (:func:`verify_window_bindings`);
+    3. the catalog and storage prerequisites are validated, and a resume's continuation proposal
+       must be permitted and ``SAFE`` with its original ceiling preserved;
+    4. exactly one invocation run identity is allocated through the injectable factory;
+    5. it is durably registered in ``ops_ingestion_jobs``;
+    6. the registration is verified through a genuinely fresh read-only connection;
+    7. **only then** is ``transport_factory`` called.
+
+    Every refusal above raises before step 7, so ``transport_factory`` is provably never invoked
+    on any refusal path - which is exactly what the mutation campaign and the high-risk tests
+    assert by counting its invocations.
+
+    A resumed invocation registers its **own new** run identity (§6A.3) and carries predecessor
+    lineage through the continuation proposal instead; it never adopts the predecessor's run ID.
+
+    Raises:
+        AcquisitionGateError: an operator-boundary, binding, or continuation condition refuses.
+        AcquisitionRunError: the run identity could not be allocated, registered, or verified.
+    """
+    _require_live_gate(gate)
+    requests = verify_window_bindings(
+        plan=plan,
+        window=window,
+        approved_ceiling=approved_ceiling,
+        authorization=authorization,
+    )
+    if not requests:
+        message = (
+            "the approved plan expands to no logical request, so there is no lawful work to "
+            "execute; a live invocation with nothing to acquire refuses before execution begins"
+        )
+        raise AcquisitionGateError(message)
+    if not catalog.chain_is_exact:
+        message = (
+            f"the operational catalog's migration chain ends at {catalog.migration_chain_head}, "
+            f"not the accepted {FINAL_MIGRATION_VERSION}; a live invocation runs only against "
+            "the accepted chain"
+        )
+        raise AcquisitionGateError(message)
+
+    carried_forward = _resume_consumption(continuation, approved_ceiling)
+    predecessor_receipt_id = continuation.predecessor_receipt_id if continuation else None
+
+    census_run_id = run_id_factory()
+    started_at_utc = clock()
+    run = register_acquisition_run(
+        catalog_path=catalog.database_path,
+        lock_directory=catalog.lock_directory,
+        census_run_id=census_run_id,
+        window=window,
+        started_at_utc=started_at_utc,
+        detail=(
+            "approved Milestone 3.2 metadata acquisition under the owner-approved request plan; "
+            "filing bodies and accession packages prohibited"
+        ),
+    )
+    registered_stage = validate_acquisition_run(catalog.database_path, run.census_run_id)
+    if registered_stage != window:
+        message = (
+            f"the registered acquisition run records stage {registered_stage!r} but this "
+            f"invocation executes {window!r}; the registration is not this invocation's"
+        )
+        raise AcquisitionRunError(message)
+
+    response_log = PhysicalResponseLog()
+    ceiling = PhysicalAttemptCeiling(approved_ceiling, consumed=carried_forward or 0)
+    accounting = ResponseAccounting()
+    transport: RecordingTransport | None = None
+    try:
+        # ---- the single auditable transport-construction site ----------------------------- #
+        transport = RecordingTransport(transport=transport_factory(), log=response_log)
+        # ----------------------------------------------------------------------------------- #
+
+        execution_storage = storage if continuation is None else _resumed_storage(catalog, storage)
+        restriction = (
+            None
+            if continuation is None
+            else frozenset(item.identity_label for item in continuation.remaining)
+        )
+        with CatalogWriter(catalog.database_path, catalog.lock_directory) as writer:
+            client = SecClient(
+                transport,
+                user_agent,
+                # The shared aggregate limiter, constructed from the operator's configured rate
+                # unless the caller supplies one. Injection exists so a test drives a
+                # deterministic clock rather than sleeping through real rate-limit spacing; the
+                # limiter is a collaborator like every other, and supplying one grants nothing.
+                rate_limiter or AggregateRateLimiter(requests_per_second, burst),
+                policy,
+                sleeper=sleeper,
+                ceiling=ceiling,
+            )
+            engine = AcquisitionEngine(
+                plan=plan,
+                window=window,
+                ceiling=ceiling,
+                client=client,
+                storage=execution_storage,
+                recorder=ObservationRecorder(writer=writer, tree=execution_storage.tree),
+                clock=clock,
+                progress=progress,
+                run_binding=run,
+                restrict_to_identities=restriction,
+                response_log=response_log,
+                accounting=accounting,
+            )
+            engine.preflight(authorization)
+            outcome = engine.run()
+    except KeyboardInterrupt:
+        # The invocation was interrupted and no window was produced — either the interrupt arrived
+        # before execution began at all, or the engine could not establish the interruption point
+        # exactly and refused to report one. Either way no receipt exists. The run row is still
+        # closed truthfully — it stopped, it did not complete — so a registered run is never left
+        # indefinitely `running`, and the interrupt propagates unchanged. Nothing durable is
+        # repaired, adopted, or deleted here: what the interruption left behind is preserved for
+        # the accepted read-only recovery inspection to rule on.
+        finish_acquisition_run(
+            catalog_path=catalog.database_path,
+            lock_directory=catalog.lock_directory,
+            census_run_id=run.census_run_id,
+            job_state="stopped",
+            finished_at_utc=clock(),
+            detail="interrupted before a window outcome was produced",
+        )
+        raise
+    finally:
+        if transport is not None:
+            transport.close()
+
+    completed_at_utc = clock()
+    run_closed = finish_acquisition_run(
+        catalog_path=catalog.database_path,
+        lock_directory=catalog.lock_directory,
+        census_run_id=run.census_run_id,
+        job_state=acquisition_run_job_state(outcome),
+        finished_at_utc=completed_at_utc,
+        detail=outcome.completion_status,
+    )
+    return LiveAcquisitionResult(
+        census_run_id=run.census_run_id,
+        outcome=outcome,
+        accounting=accounting,
+        started_at_utc=started_at_utc,
+        completed_at_utc=completed_at_utc,
+        predecessor_receipt_id=predecessor_receipt_id,
+        carried_forward_consumed=carried_forward,
+        run_closed=run_closed,
+    )
+
+
+def _resumed_storage(catalog: CatalogPreparation, storage: StorageBinding) -> StorageBinding:
+    """Bind the resumed invocation to catalog-authoritative snapshot state.
+
+    Decision 045 §14 requires a resume to wire the *already-accepted* continuation architecture,
+    and Decision 040's T2.4-A primitive is the piece that matters here: a fresh
+    :class:`SnapshotStore` that has adopted every durable observation, so an object this window
+    already preserved is recognized as a predecessor rather than treated as unseen. Without it a
+    resumed request could re-store what the predecessor invocation had already promoted.
+
+    A fresh invocation deliberately does not do this: it has no predecessor to adopt, and
+    reconstructing one would be reading state a first run has no business inheriting.
+    """
+    reconstruction = reconstruct_catalog_state(catalog_path=catalog.database_path, storage=storage)
+    return replace(storage, snapshot_store=reconstruction.store)
+
+
+def _require_live_gate(gate: LiveOperatorGate) -> None:
+    """Re-assert the operator-boundary conjunction where the transport is about to be built.
+
+    :class:`LiveOperatorGate` already refuses an incomplete gate at construction, so on every
+    caller that constructs its own gate this restatement is observationally a no-op — removing it
+    changes no outcome, and a mutation campaign will correctly report that. It is kept anyway, and
+    the reason is not that it changes behaviour today: it is that the conjunction is proved *on
+    this code path*, immediately before the construction site, rather than inherited from a caller
+    several frames away. A future caller that passes a gate it did not construct — a cached one, a
+    deserialized one, a mutated copy — is refused here instead of reaching the transport.
+    """
+    LiveOperatorGate(
+        explicit_live=gate.explicit_live,
+        network_enabled=gate.network_enabled,
+        m3_acquire_enabled=gate.m3_acquire_enabled,
+        sec_identity_validated=gate.sec_identity_validated,
+        stage_authority_reference=gate.stage_authority_reference,
+    )
+
+
+def _resume_consumption(
+    continuation: ContinuationProposal | None,
+    approved_ceiling: int,
+) -> int | None:
+    """Validate a resume's continuation proposal and return the consumption it carries forward.
+
+    Decision 045 §14. A resume starts from an exact predecessor receipt, reconstructs cumulative
+    consumption conservatively, and refuses on ``UNDETERMINED``, on an unsafe inspection, on
+    unresolved write-ahead state, and when the worst-case remainder does not fit - all of which
+    :func:`propose_continuation` has already decided. What this adds is the ceiling invariant the
+    resumed invocation must not be able to break: the proposal's approved ceiling is the operator
+    ceiling exactly, and the carried-forward consumption is never reset, lowered, or discarded.
+
+    Returns ``None`` for a fresh invocation, which starts at zero consumption.
+    """
+    if continuation is None:
+        return None
+    if not continuation.permitted:
+        message = "the continuation proposal refuses this resume: " + "; ".join(
+            continuation.refusal_reasons
+        )
+        raise AcquisitionGateError(message)
+    if continuation.determination != "SAFE":
+        message = (
+            f"the continuation determination is {continuation.determination!r}; a resume "
+            "proceeds only from a SAFE read-only inspection"
+        )
+        raise AcquisitionGateError(message)
+    if continuation.approved_ceiling != approved_ceiling:
+        message = (
+            f"the continuation proposal carries approved ceiling "
+            f"{continuation.approved_ceiling} but this invocation was given {approved_ceiling}; "
+            "the approved ceiling is never reset, raised, or replaced across a resume"
+        )
+        raise AcquisitionGateError(message)
+    if continuation.predecessor_receipt_id is None:
+        message = (
+            "a resume requires an exact predecessor receipt identity; it is never inferred from "
+            "ambient state"
+        )
+        raise AcquisitionGateError(message)
+    if not continuation.remaining:
+        message = (
+            "the continuation proposal leaves no remaining logical request, so this resume has "
+            "nothing lawful to acquire and refuses before execution begins rather than "
+            "re-requesting already-satisfied work"
+        )
+        raise AcquisitionGateError(message)
+    consumed = continuation.accounting.cumulative_consumed
+    if consumed > approved_ceiling:
+        message = (
+            f"cumulative consumption {consumed} already exceeds the approved ceiling "
+            f"{approved_ceiling}; no further physical request may occur"
+        )
+        raise AcquisitionGateError(message)
+    return consumed

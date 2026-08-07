@@ -19,6 +19,7 @@ These tests pin the properties that make it safe to approve against:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 
@@ -26,11 +27,13 @@ import pytest
 
 from disclosure_drift.m3.request_plan import (
     M3_2A_BOOTSTRAP_ROUTES,
+    M3_2B_DEPENDENT_ROUTES,
     MAX_COOLDOWN_CONTINUES,
     REQUEST_PLAN_SCHEMA_VERSION,
     RequestPlan,
     RequestPlanInputError,
     build_m3_2a_request_plan,
+    build_m3_2b_dependent_plan,
     canonical_plan_bytes,
     derive_a_reachable,
     derive_redirect_reachability,
@@ -440,3 +443,150 @@ def test_a_document_missing_a_required_section_is_refused(removed: str) -> None:
 def test_unreadable_bytes_are_refused_rather_than_guessed_at() -> None:
     with pytest.raises(RequestPlanInputError, match="JSON"):
         request_plan_from_document(b"not a plan at all\n")
+
+
+# --------------------------------------------------------------------------- #
+# The accepted M3.2A plan identity, and the M3.2B dependent plan (Decision 045 §13)
+# --------------------------------------------------------------------------- #
+#: The owner-approved M3.2A plan identity and its exact ceiling (Decision 031). Decision 045 §13
+#: requires it to remain byte-reproducible after any change to this module, which is why it is
+#: pinned in the planning suite that produces it as well as in the stage that consumes it.
+ACCEPTED_M3_2A_PLAN_SHA256 = "19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"
+ACCEPTED_M3_2A_CEILING = 801
+
+
+def _accepted_m3_2a_plan() -> RequestPlan:
+    """The exact owner-approved M3.2A window."""
+    return build_m3_2a_request_plan(
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+        include_open_quarter=False,
+        calendar_year=2026,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+
+
+def test_the_accepted_m3_2a_plan_hash_is_byte_reproducible() -> None:
+    """Decision 045 §13: adding the dependent builder may not move the accepted identity."""
+    plan = _accepted_m3_2a_plan()
+
+    assert plan.request_plan_sha256 == ACCEPTED_M3_2A_PLAN_SHA256
+    assert plan.hard_request_ceiling == ACCEPTED_M3_2A_CEILING
+    assert hashlib.sha256(canonical_plan_bytes(plan)).hexdigest() == ACCEPTED_M3_2A_PLAN_SHA256
+
+
+def test_the_accepted_plan_document_round_trips_to_the_same_identity() -> None:
+    """Positive control: the identity survives a store-and-reread, not just a rebuild."""
+    plan = _accepted_m3_2a_plan()
+
+    reread = request_plan_from_document(canonical_plan_bytes(plan))
+
+    assert reread.request_plan_sha256 == ACCEPTED_M3_2A_PLAN_SHA256
+    assert reread == plan
+
+
+def _dependent_plan(**overrides: object) -> RequestPlan:
+    arguments: dict[str, object] = {
+        "coverage_start": date(2009, 1, 1),
+        "coverage_end": date(2026, 6, 30),
+        "as_of_date": date(2026, 6, 30),
+        "include_open_quarter": False,
+        "calendar_year": 2026,
+        "calendar_evidence_entry_count": 0,
+        "entity_instance_count": 3,
+        "historical_instance_count": 1,
+        "requests_per_second": 4.0,
+    }
+    arguments.update(overrides)
+    return build_m3_2b_dependent_plan(**arguments)  # type: ignore[arg-type]
+
+
+def test_the_dependent_plan_names_only_the_two_authorized_routes() -> None:
+    plan = _dependent_plan()
+
+    assert plan.acquisition_window == "M3.2B"
+    assert tuple(route.source_id for route in plan.routes) == M3_2B_DEPENDENT_ROUTES
+    assert set(M3_2B_DEPENDENT_ROUTES).isdisjoint(M3_2A_BOOTSTRAP_ROUTES)
+
+
+def test_the_dependent_plan_takes_its_counts_from_its_explicit_inputs() -> None:
+    """Nothing is derived from the clock, the catalog, or a heuristic."""
+    plan = _dependent_plan(entity_instance_count=7, historical_instance_count=2)
+    counts = {route.source_id: route.planned_unique_logical_requests for route in plan.routes}
+
+    assert counts == {"sec_submissions_entity": 7, "sec_submissions_historical": 2}
+    assert plan.planned_unique_logical_requests == 9
+    assert plan.maximum_new_raw_objects == 9
+
+
+def test_the_dependent_ceiling_is_the_derived_worst_case_with_no_contingency() -> None:
+    plan = _dependent_plan()
+
+    assert plan.hard_request_ceiling == sum(
+        route.planned_unique_logical_requests * derive_a_reachable(SOURCES[route.source_id])
+        for route in plan.routes
+    )
+    assert plan.hard_request_ceiling == plan.maximum_physical_attempts
+
+
+def test_the_dependent_plan_plans_no_quarterly_index_instance() -> None:
+    """It excludes none and requires none, because it plans no index route at all."""
+    plan = _dependent_plan()
+
+    assert plan.required_index_keys == ()
+    assert plan.expected_cache_hits == 0
+
+
+def test_identical_dependent_inputs_reproduce_identical_bytes_and_hash() -> None:
+    first = _dependent_plan()
+    second = _dependent_plan()
+
+    assert canonical_plan_bytes(first) == canonical_plan_bytes(second)
+    assert first.request_plan_sha256 == second.request_plan_sha256
+
+
+def test_a_different_dependent_count_moves_the_hash() -> None:
+    """Positive control: the identity tracks the counts rather than being fixed."""
+    assert (
+        _dependent_plan(entity_instance_count=3).request_plan_sha256
+        != _dependent_plan(entity_instance_count=4).request_plan_sha256
+    )
+
+
+def test_the_dependent_plan_uses_the_unchanged_frozen_schema_version() -> None:
+    """A dependent plan is a plan of the same frozen schema, not a new one."""
+    payload = json.loads(canonical_plan_bytes(_dependent_plan()).decode("utf-8"))
+
+    assert payload["request_plan_schema_version"] == REQUEST_PLAN_SCHEMA_VERSION
+
+
+def test_a_stored_dependent_plan_reconstructs_to_itself_exactly() -> None:
+    plan = _dependent_plan()
+
+    assert request_plan_from_document(canonical_plan_bytes(plan)) == plan
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("entity_instance_count", -1),
+        ("historical_instance_count", -1),
+        ("calendar_evidence_entry_count", -1),
+        ("requests_per_second", 0.0),
+    ],
+)
+def test_an_incoherent_dependent_input_is_refused(field: str, value: object) -> None:
+    with pytest.raises(RequestPlanInputError):
+        _dependent_plan(**{field: value})
+
+
+def test_a_reversed_dependent_coverage_window_is_refused() -> None:
+    with pytest.raises(RequestPlanInputError):
+        _dependent_plan(coverage_start=date(2026, 1, 1), coverage_end=date(2025, 1, 1))
+
+
+def test_positive_control_the_same_dependent_inputs_build_when_coherent() -> None:
+    assert _dependent_plan().planned_unique_logical_requests == 4

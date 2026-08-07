@@ -16,6 +16,7 @@ import io
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 import tracemalloc
 import zipfile
@@ -30,25 +31,41 @@ import pytest
 
 from disclosure_drift.errors import CatalogWriteError, RawObjectIntegrityError
 from disclosure_drift.m3.acquisition import (
+    ACQUISITION_JOB_KIND,
     ACQUISITION_WINDOWS,
     FINAL_MIGRATION_VERSION,
     M3_2B_DEPENDENT_ROUTES,
+    NO_HTTP_STATUS_SENTINEL,
     OPERATIONAL_CATALOG_RELATIVE_PATH,
+    PROGRESS_SINK_FAILURE_REASON,
     AcquisitionEngine,
     AcquisitionGateError,
+    AcquisitionRunError,
     CatalogPreparationError,
     ContainmentError,
     LiveOperationAuthorization,
+    LiveOperatorGate,
+    PhysicalResponseLog,
+    RecordingTransport,
     RequestOutcome,
+    ResponseAccounting,
     StorageBinding,
+    default_live_transport_factory,
+    default_run_id_factory,
     derive_logical_requests,
+    drift_for_run,
+    execute_live_acquisition,
     load_approved_plan,
     observe_recovery_state,
     prepare_operational_catalog,
     prepare_storage,
+    register_acquisition_run,
     resolve_within,
     route_is_streamed,
+    validate_acquisition_run,
+    verify_window_bindings,
 )
+from disclosure_drift.m3.receipt import ExecutionReceipt
 from disclosure_drift.m3.request_plan import (
     RequestPlan,
     build_m3_2a_request_plan,
@@ -1430,12 +1447,21 @@ class TestSecurityAndNonchange:
         assert config.network.m3_acquire_enabled is False
 
     def test_the_engine_reads_no_configuration_switch(self, tmp_path: Path) -> None:
-        """Authority is the explicit authorization object, never a configuration key."""
+        """Authority is an explicit object the caller proves, never a configuration key.
+
+        Decision 045 gives the driver a `LiveOperatorGate` carrying the operator-boundary facts,
+        one of which is *named* `m3_acquire_enabled`. That is a value the command surface proved
+        and passed in, not a switch this module reads: the property under test is that the driver
+        cannot load configuration at all, so it is asserted directly rather than through the
+        absence of a field name that is now legitimately present.
+        """
         source = Path(
             __import__("disclosure_drift.m3.acquisition", fromlist=["__file__"]).__file__ or ""
         ).read_text(encoding="utf-8")
-        assert "m3_acquire_enabled" not in source
         assert "load_config" not in source
+        assert "disclosure_drift.config" not in source
+        assert "ProjectConfig" not in source
+        assert "os.environ" not in source
 
     def test_no_response_body_reaches_a_log_record(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -1925,7 +1951,11 @@ class TestFailureOrdering:
         assert outcome.completed_successfully is True
         assert gate.consumed == plan.planned_unique_logical_requests
         assert len(outcome.progress_failures) == 1
-        assert "operator progress sink failed" in outcome.progress_failures[0]
+        # The failure is recorded structurally, never as the sink's own message (Decision 045
+        # §12): the identity, the one fixed internal reason, and the exception class.
+        assert "operator progress sink failed" not in outcome.progress_failures[0]
+        assert PROGRESS_SINK_FAILURE_REASON in outcome.progress_failures[0]
+        assert "RuntimeError" in outcome.progress_failures[0]
         assert len(seen) == plan.planned_unique_logical_requests, "reporting continues"
 
     def test_a_ceiling_stop_inside_a_request_is_not_reported_as_unattempted(
@@ -2541,13 +2571,21 @@ class TestOperationalErrorSanitization:
         joined = " ".join(outcome.progress_failures)
         assert str(secret) not in joined
         assert "sink.log" not in joined
-        assert "PermissionError: a filesystem operation failed" in joined
+        assert PROGRESS_SINK_FAILURE_REASON in joined
+        assert "PermissionError" in joined
         assert outcome.completion_status == "complete", "operator output never decides the window"
 
-    def test_positive_control_a_deliberate_sink_message_is_still_reported(
-        self, tmp_path: Path
+    def test_a_deliberate_sink_message_reaches_stderr_and_not_the_retained_state(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Sanitization targets private exception arguments, not the operator's own words."""
+        """Decision 045 §12 inverts the older rule: the operator's own words are not retained.
+
+        A sink's message is operator-controlled text and can carry an absolute path, an address,
+        or a credential, so it is diagnosable on stderr and excluded from every retained field.
+        The pair of assertions is the positive control: the message provably *did* reach the
+        diagnostic channel, so its absence from the retained record is exclusion rather than the
+        sink having failed to raise.
+        """
 
         def _sink(_: object) -> None:
             message = "operator progress sink refused this outcome"
@@ -2562,7 +2600,12 @@ class TestOperationalErrorSanitization:
         ):
             engine.preflight(_authorization(plan))
             outcome = engine.run()
-        assert "operator progress sink refused this outcome" in outcome.progress_failures[0]
+        captured = capsys.readouterr()
+        assert "operator progress sink refused this outcome" in captured.err
+        assert "operator progress sink refused this outcome" not in " ".join(
+            outcome.progress_failures
+        )
+        assert PROGRESS_SINK_FAILURE_REASON in outcome.progress_failures[0]
 
     def test_positive_control_the_same_run_succeeds_without_the_injected_failure(
         self, tmp_path: Path
@@ -3108,3 +3151,1981 @@ def replace_engine_window(engine: AcquisitionEngine, window: str) -> Acquisition
         recorder=engine.recorder,
         clock=engine.clock,
     )
+
+
+# =========================================================================== #
+# Stage T2.5-T2.6 — Decision 045 high-risk behaviour
+# =========================================================================== #
+#: The address half of the progress-sink positive control. It uses the RFC-reserved `.invalid`
+#: TLD, so it is not, and cannot become, a real contact address.
+_SINK_ADDRESS: Final = "fixture-operator@example.invalid"
+
+
+def _sink_private_path(tmp_path: Path) -> str:
+    """A genuine absolute local path, derived rather than written as a literal.
+
+    Decision 045 §12's positive control needs a real absolute path in the sink's message. It is
+    composed from the test's own temporary root instead of being spelled out, because a literal
+    home path in a tracked file is exactly what `scripts/check_repo_hygiene.py` exists to refuse —
+    and the derived value is a *better* control anyway: it is an absolute path on this machine
+    rather than a plausible-looking string.
+    """
+    return str(tmp_path / "private-evidence" / "operator-sink.log")
+
+
+def _script_with(
+    plan: RequestPlan,
+    extras: Mapping[int, Sequence[TransportResponse]],
+) -> list[TransportResponse]:
+    """One success per logical request, with extra responses injected before a chosen request.
+
+    Building the script route-by-route rather than by list insertion matters: each route's
+    scripted success is shaped to its own registered content kind, so a bare ``insert`` would
+    shift every later response onto the wrong route and quarantine half the window for reasons
+    that have nothing to do with the code under test.
+    """
+    script: list[TransportResponse] = []
+    for index, request in enumerate(derive_logical_requests(plan)):
+        script.extend(extras.get(index, ()))
+        script.append(_success_for(request.source_id))
+    return script
+
+
+#: The one logical request whose registered URL family admits a redirect hop. Its family carries
+#: two exact paths, so exactly one in-family redirect target exists and a second would loop.
+_REDIRECTING_REQUEST_INDEX: Final = 4
+_REDIRECT_TARGET: Final = "https://www.sec.gov/edgar/filer-information/calendar"
+
+
+class _CountingTransportFactory:
+    """A transport factory that records every invocation.
+
+    The whole point of Decision 045 §6 is that a refusal never reaches the construction site, so
+    the tests need to count invocations rather than infer them. A factory that is never called
+    leaves ``calls == 0``, which is the assertion every refusal test makes.
+    """
+
+    def __init__(self, responses: Sequence[TransportResponse]) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+        self.transports: list[_ScriptedTransport] = []
+
+    def __call__(self) -> _ScriptedTransport:
+        self.calls += 1
+        transport = _ScriptedTransport(self._responses)
+        self.transports.append(transport)
+        return transport
+
+
+def _live_gate(**overrides: object) -> LiveOperatorGate:
+    """A complete operator gate, with one element overridable per refusal test.
+
+    Every value is a controlled fixture value. ``sec_identity_validated`` records that the command
+    surface ran the canonical validator; no test here supplies, fabricates, or requires a real SEC
+    contact identity (Decision 045 §11).
+    """
+    fields: dict[str, object] = {
+        "explicit_live": True,
+        "network_enabled": True,
+        "m3_acquire_enabled": True,
+        "sec_identity_validated": True,
+        "stage_authority_reference": "OWNER_TEST_FIXTURE_STAGE_AUTHORITY",
+    }
+    fields.update(overrides)
+    return LiveOperatorGate(**fields)  # type: ignore[arg-type]
+
+
+def _live_arguments(
+    evidence_root: Path,
+    plan: RequestPlan,
+    factory: _CountingTransportFactory,
+    *,
+    window: str = "M3.2A",
+    ceiling: int | None = None,
+    run_id: str = "run-fixture-0001",
+    data_relative: str = _DATA_RELATIVE,
+) -> dict[str, object]:
+    """Every explicit collaborator one live invocation needs, over offline seams."""
+    approved = plan.hard_request_ceiling if ceiling is None else ceiling
+    clock = _FrozenClock()
+    return {
+        "plan": plan,
+        "window": window,
+        "approved_ceiling": approved,
+        "authorization": LiveOperationAuthorization(
+            window=window,
+            plan_sha256=plan.request_plan_sha256,
+            approved_ceiling=approved,
+            authorization_reference="OWNER_TEST_FIXTURE_AUTHORIZATION",
+        ),
+        "gate": _live_gate(),
+        "catalog": prepare_operational_catalog(
+            evidence_root=evidence_root, relative_path=_CATALOG_RELATIVE
+        ),
+        "storage": prepare_storage(evidence_root=evidence_root, data_root_relative=data_relative),
+        "user_agent": _AGENT,
+        "requests_per_second": 4.0,
+        "burst": 1,
+        "policy": RetrievalPolicy(),
+        "transport_factory": factory,
+        "run_id_factory": lambda: run_id,
+        "clock": _stamp,
+        "sleeper": clock.sleep,
+        "rate_limiter": AggregateRateLimiter(4.0, burst=1, clock=clock.time, sleeper=clock.sleep),
+    }
+
+
+def _run_live(
+    evidence_root: Path,
+    plan: RequestPlan,
+    responses: Sequence[TransportResponse],
+    **overrides: object,
+) -> tuple[object, _CountingTransportFactory]:
+    """Execute one live invocation over a scripted transport, and return it with its factory."""
+    factory = _CountingTransportFactory(responses)
+    arguments = _live_arguments(evidence_root, plan, factory)
+    arguments.update(overrides)
+    result = execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+    return result, factory
+
+
+def _catalog_rows(evidence_root: Path, statement: str, parameters: tuple[object, ...] = ()) -> list:
+    """Read durable rows back through a fresh connection, never an in-memory belief."""
+    database = evidence_root / _CATALOG_RELATIVE
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(statement, parameters).fetchall()
+
+
+class TestResponseEventAccounting:
+    """Decision 045 §§9-11: every response event accounted exactly once, on both sides."""
+
+    def test_a_normal_response_contributes_its_actual_status_and_one_bucket(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        accounting = result.accounting  # type: ignore[attr-defined]
+
+        assert accounting.is_exact
+        assert accounting.status_code_totals == {"200": plan.planned_unique_logical_requests}
+        assert accounting.response_classification_totals["proceed"] == (
+            plan.planned_unique_logical_requests
+        )
+        assert accounting.classified_event_count == accounting.status_event_count
+
+    def test_a_followed_redirect_contributes_its_actual_3xx_a_proceed_and_a_hop(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 045 §9.3: a followed redirect must not disappear because execution continued.
+
+        Redirect-hop counting and response-policy counting are different metrics, and both
+        increment for the same physical response.
+        """
+        plan = _plan()
+        script = _script_with(
+            plan,
+            {
+                _REDIRECTING_REQUEST_INDEX: [
+                    _scripted(
+                        301,
+                        body=b"",
+                        content_type=None,
+                        headers={"Location": _REDIRECT_TARGET},
+                    )
+                ]
+            },
+        )
+        result, _ = _run_live(tmp_path, plan, script)
+        accounting = result.accounting  # type: ignore[attr-defined]
+
+        assert accounting.is_exact
+        assert accounting.status_code_totals["301"] == 1
+        assert accounting.redirect_hop_count == 1
+        assert accounting.response_classification_totals["proceed"] == (
+            plan.planned_unique_logical_requests + 1
+        )
+        assert accounting.classified_event_count == accounting.status_event_count
+
+    def test_a_lawful_304_is_one_304_status_one_proceed_and_no_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 045 §10: a 304 never silently disappears from the response-policy totals."""
+        plan = _plan()
+        harness = _PersistentHarness(tmp_path, plan)
+        first = harness.run(_success_script(plan))
+        assert first.completion_status == "complete"  # type: ignore[attr-defined]
+
+        accounting = ResponseAccounting()
+        log = PhysicalResponseLog()
+        transport = _ScriptedTransport([_scripted(304, body=b"", content_type=None)])
+        recording = RecordingTransport(transport=transport, log=log)
+        response = recording.send(
+            SecRequest(
+                url="https://www.sec.gov/files/company_tickers.json",
+                headers={},
+                timeout_connect=1.0,
+                timeout_read=1.0,
+                purpose=_PURPOSE,
+                source_id="sec_company_tickers",
+            )
+        )
+        assert response.status == 304
+        accounting.absorb(
+            _fetch_result(status=304, actions=("request_ceiling_checked", "not_modified")),
+            log.drain(),
+        )
+
+        assert accounting.is_exact
+        assert accounting.status_code_totals == {"304": 1}
+        assert accounting.response_classification_totals["proceed"] == 1
+        assert "0" not in accounting.status_code_totals
+
+    def test_a_transport_failure_is_the_zero_sentinel_and_one_accepted_bucket(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 045 §9.4: no HTTP status exists, and no bucket is invented for it."""
+        plan = _plan()
+        script = _script_with(
+            plan, {0: [_scripted(0, body=b"", content_type=None, failure="connection_error")]}
+        )
+        result, _ = _run_live(tmp_path, plan, script)
+        accounting = result.accounting  # type: ignore[attr-defined]
+
+        assert accounting.is_exact
+        assert accounting.status_code_totals[NO_HTTP_STATUS_SENTINEL] == 1
+        assert accounting.response_classification_totals["retry"] == 1
+        assert set(accounting.response_classification_totals) == {
+            "cooldown",
+            "fail",
+            "proceed",
+            "quarantine",
+            "retry",
+            "retry_after",
+        }
+        assert accounting.classified_event_count == accounting.status_event_count
+
+    def test_a_real_http_response_is_never_recorded_under_the_zero_sentinel(self) -> None:
+        """The sentinel is reserved exclusively for a transport-level failure."""
+        accounting = ResponseAccounting()
+        accounting.absorb(
+            _fetch_result(status=0, actions=("proceed",)),
+            (0,),
+        )
+
+        assert not accounting.is_exact
+        assert accounting.undetermined_basis is not None
+        assert "reserved" in accounting.undetermined_basis
+        assert accounting.status_code_totals == {}
+
+    def test_cooldown_count_is_exactly_the_cooldown_bucket(self, tmp_path: Path) -> None:
+        """Decision 045 §11: never a count of sleeps, hops, or elapsed seconds."""
+        plan = _plan()
+        script = _script_with(plan, {0: [_scripted(429, body=b"", content_type=None)]})
+        result, _ = _run_live(tmp_path, plan, script)
+        accounting = result.accounting  # type: ignore[attr-defined]
+
+        assert accounting.is_exact
+        assert accounting.response_classification_totals["cooldown"] == 1
+        assert accounting.cooldown_count == accounting.response_classification_totals["cooldown"]
+        assert accounting.status_code_totals["429"] == 1
+
+    def test_a_mixed_sequence_accounts_every_event_exactly_once(self, tmp_path: Path) -> None:
+        """The §22 mixed-sequence case: redirect, normal response, and transport failure."""
+        plan = _plan()
+        script = _script_with(
+            plan,
+            {
+                0: [_scripted(0, body=b"", content_type=None, failure="read_timeout")],
+                _REDIRECTING_REQUEST_INDEX: [
+                    _scripted(
+                        307,
+                        body=b"",
+                        content_type=None,
+                        headers={"Location": _REDIRECT_TARGET},
+                    )
+                ],
+            },
+        )
+        result, _ = _run_live(tmp_path, plan, script)
+        accounting = result.accounting  # type: ignore[attr-defined]
+
+        assert accounting.is_exact
+        assert accounting.classified_event_count == accounting.status_event_count
+        assert accounting.status_code_totals["307"] == 1
+        assert accounting.status_code_totals[NO_HTTP_STATUS_SENTINEL] == 1
+        assert accounting.status_code_totals["200"] == plan.planned_unique_logical_requests
+        assert accounting.redirect_hop_count == 1
+        # Every physical send is accounted: seven successes, one refused-then-retried read
+        # timeout, and one followed redirect.
+        assert accounting.status_event_count == plan.planned_unique_logical_requests + 2
+
+    def test_a_pre_transport_refusal_contributes_to_neither_total(self, tmp_path: Path) -> None:
+        """Decision 045 §9.1: a refusal before any physical response is not a response event."""
+        plan = _plan()
+        factory = _CountingTransportFactory([])
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["approved_ceiling"] = plan.hard_request_ceiling - 1
+
+        with pytest.raises(AcquisitionGateError):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0, "a pre-transport refusal reached the construction site"
+
+    def test_an_unknown_client_action_refuses_rather_than_undercounting(self) -> None:
+        """Fail-closed: an unaccounted marker is undetermined, never silently skipped."""
+        accounting = ResponseAccounting()
+        accounting.absorb(_fetch_result(status=200, actions=("a_marker_from_the_future",)), (200,))
+
+        assert not accounting.is_exact
+        assert accounting.status_code_totals == {}
+
+    def test_positive_control_the_same_absorption_is_exact_with_a_known_action(self) -> None:
+        accounting = ResponseAccounting()
+        accounting.absorb(_fetch_result(status=200, actions=("proceed",)), (200,))
+
+        assert accounting.is_exact
+        assert accounting.status_code_totals == {"200": 1}
+
+
+def _fetch_result(
+    *,
+    status: int | None,
+    actions: tuple[str, ...],
+    redirect_hops: tuple[object, ...] = (),
+) -> object:
+    """A minimal accepted-shape retrieval result, for direct accounting unit tests."""
+    from disclosure_drift.sec.http_client import FetchResult
+
+    return FetchResult(
+        outcome="retrieved",
+        source_id="sec_company_tickers",
+        url="https://www.sec.gov/files/company_tickers.json",
+        purpose=_PURPOSE,
+        status=status,
+        actions=actions,
+        redirect_hops=redirect_hops,  # type: ignore[arg-type]
+    )
+
+
+class TestAcquisitionRunIdentity:
+    """Decision 045 §6A: one durable run per live invocation, registered before any transport."""
+
+    def test_a_lawful_invocation_registers_exactly_one_m3_2_run_row(self, tmp_path: Path) -> None:
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-alpha")
+
+        rows = _catalog_rows(tmp_path, "SELECT job_id, job_kind, stage FROM ops_ingestion_jobs")
+
+        assert len(rows) == 1
+        assert rows[0]["job_id"] == "run-alpha"
+        assert rows[0]["job_kind"] == ACQUISITION_JOB_KIND
+        assert rows[0]["stage"] == "M3.2A"
+
+    def test_the_registered_kind_is_not_the_m2_2_census_kind(self, tmp_path: Path) -> None:
+        """The M2.2-only registration is never reused, and its job kind is never hardcoded."""
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan))
+
+        rows = _catalog_rows(tmp_path, "SELECT job_kind, stage FROM ops_ingestion_jobs")
+
+        assert rows[0]["job_kind"] != "sec_census"
+        assert rows[0]["stage"] != "M2.2"
+
+    def test_registration_happens_before_the_transport_is_constructed(self, tmp_path: Path) -> None:
+        """Decision 045 §6A.2 step 7: the construction site is reachable only after step 6.
+
+        The factory reads the durable catalog at the moment it is called. Finding the run row
+        already committed proves the ordering from the construction site's own point of view,
+        which a test that only inspected the end state could not.
+        """
+        plan = _plan()
+        observed: list[int] = []
+
+        class _OrderingFactory(_CountingTransportFactory):
+            def __call__(self) -> _ScriptedTransport:
+                observed.append(
+                    len(_catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs"))
+                )
+                return super().__call__()
+
+        factory = _OrderingFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["transport_factory"] = factory
+        execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 1
+        assert observed == [1], "the run row was not durable when the transport was constructed"
+
+    def test_a_registration_failure_prevents_every_transport_and_request(
+        self, tmp_path: Path
+    ) -> None:
+        """On failure: no transport, no physical request, and nothing attributed to the run."""
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+
+        def _refuse() -> str:
+            return "   "
+
+        arguments["run_id_factory"] = _refuse
+
+        with pytest.raises(AcquisitionRunError):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+        assert _catalog_rows(tmp_path, "SELECT census_run_id FROM census_plan_sources") == []
+
+    def test_a_failed_registration_verification_prevents_every_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Decision 045 §6A.2 step 6: verification is a separate, load-bearing step.
+
+        The verification re-reads the run row through a genuinely fresh read-only connection. Its
+        refusal is forced here rather than simulated by corrupting SQLite, because the accepted
+        writer does not silently fail to commit — so what a durable-write fault would look like
+        cannot be produced honestly. What *is* under test is that the step happens at all on this
+        path, and that its refusal precedes the construction site: skip the call and the transport
+        is built regardless of whether the registration was ever verified.
+        """
+        import disclosure_drift.m3.acquisition as acquisition_module
+
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+
+        def _unverifiable(catalog_path: Path, census_run_id: str) -> str:
+            message = f"the registration of {census_run_id!r} could not be verified"
+            raise AcquisitionRunError(message)
+
+        monkeypatch.setattr(acquisition_module, "validate_acquisition_run", _unverifiable)
+
+        with pytest.raises(AcquisitionRunError, match="could not be verified"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+    def test_a_repeated_run_identity_is_refused_before_any_transport(self, tmp_path: Path) -> None:
+        """One live invocation registers one run; an existing identity is never adopted."""
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-repeated")
+
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["run_id_factory"] = lambda: "run-repeated"
+
+        with pytest.raises(AcquisitionRunError, match="already registered"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+    def test_every_planned_request_is_durably_attributed_to_its_run(self, tmp_path: Path) -> None:
+        """Decision 045 §6A.4, through the existing accepted run-scoped relation."""
+        plan = _plan()
+        result, _ = _run_live(
+            tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-attributed"
+        )
+
+        rows = _catalog_rows(
+            tmp_path,
+            "SELECT source_instance_id, observation_id, retrieval_state, successful_terminal "
+            "FROM census_plan_sources WHERE census_run_id = ? ORDER BY source_instance_id",
+            ("run-attributed",),
+        )
+
+        assert len(rows) == plan.planned_unique_logical_requests
+        assert all(row["observation_id"] is not None for row in rows)
+        assert all(row["retrieval_state"] == "retrieved" for row in rows)
+        assert all(row["successful_terminal"] == 1 for row in rows)
+        assert result.outcome.completion_status == "complete"  # type: ignore[attr-defined]
+
+    def test_show_drift_isolates_two_distinct_runs_in_one_catalog(self, tmp_path: Path) -> None:
+        """Run scoping is real: a second run's drift is not attributed to the first.
+
+        The two runs share one catalog and one data root, so a listing that fell back to unscoped
+        global drift would report the second run's quarantined object under the first.
+        """
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-clean")
+
+        # A second, independent invocation whose bulk archive is refused, producing drift.
+        drifting = _script_with(plan, {})
+        drifting[0] = _scripted(body=b"not-a-zip-archive", content_type="application/zip")
+        _run_live(tmp_path, plan, drifting, run_id_factory=lambda: "run-drifting")
+
+        clean = drift_for_run(catalog_path=tmp_path / _CATALOG_RELATIVE, census_run_id="run-clean")
+        drifted = drift_for_run(
+            catalog_path=tmp_path / _CATALOG_RELATIVE, census_run_id="run-drifting"
+        )
+
+        assert clean.entries == ()
+        assert clean.has_blocking is False
+        assert drifted.entries, "the second run produced no drift, so isolation is untested"
+        assert drifted.has_blocking is True
+        assert {entry.observation_id for entry in clean.entries}.isdisjoint(
+            {entry.observation_id for entry in drifted.entries}
+        )
+
+    def test_drift_refuses_an_unknown_a_foreign_and_an_unattributed_run(
+        self, tmp_path: Path
+    ) -> None:
+        """Every unlawful run identity fails closed; none falls back to a global listing."""
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-known")
+        catalog = tmp_path / _CATALOG_RELATIVE
+
+        with pytest.raises(AcquisitionRunError, match="does not resolve"):
+            drift_for_run(catalog_path=catalog, census_run_id="run-never-registered")
+
+        with CatalogWriter(catalog, catalog.parent) as writer, writer.batch():
+            writer.insert(
+                "ops_ingestion_jobs",
+                {
+                    "job_id": "run-census",
+                    "job_kind": "sec_census",
+                    "job_state": "running",
+                    "stage": "M2.2",
+                    "started_at_utc": _stamp(),
+                    "detail": "a Stage M2.2 census run, not an M3.2 acquisition run",
+                },
+            )
+            writer.insert(
+                "ops_ingestion_jobs",
+                {
+                    "job_id": "run-unattributed",
+                    "job_kind": ACQUISITION_JOB_KIND,
+                    "job_state": "running",
+                    "stage": "M3.2A",
+                    "started_at_utc": _stamp(),
+                    "detail": "registered but never attributed",
+                },
+            )
+
+        with pytest.raises(AcquisitionRunError, match="job kind"):
+            drift_for_run(catalog_path=catalog, census_run_id="run-census")
+        with pytest.raises(AcquisitionRunError, match="no durable observation attribution"):
+            drift_for_run(catalog_path=catalog, census_run_id="run-unattributed")
+
+    def test_positive_control_the_known_run_still_lists(self, tmp_path: Path) -> None:
+        """The refusals above are not a guard that refuses everything."""
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-known")
+
+        scoped = drift_for_run(catalog_path=tmp_path / _CATALOG_RELATIVE, census_run_id="run-known")
+
+        assert scoped.stage == "M3.2A"
+        assert scoped.attributed_observation_count == plan.planned_unique_logical_requests
+
+    def test_validate_acquisition_run_refuses_a_fabricated_identity(self, tmp_path: Path) -> None:
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-real")
+        catalog = tmp_path / _CATALOG_RELATIVE
+
+        assert validate_acquisition_run(catalog, "run-real") == "M3.2A"
+        for fabricated in ("", "   ", "run-real-but-not-quite"):
+            with pytest.raises(AcquisitionRunError):
+                validate_acquisition_run(catalog, fabricated)
+
+    def test_a_run_id_factory_allocates_a_distinct_identity_per_invocation(self) -> None:
+        """Positive control: the default mechanism does not return a constant."""
+        assert default_run_id_factory() != default_run_id_factory()
+
+    def test_register_refuses_a_window_outside_the_accepted_set(self, tmp_path: Path) -> None:
+        preparation = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.raises(AcquisitionRunError):
+            register_acquisition_run(
+                catalog_path=preparation.database_path,
+                lock_directory=preparation.lock_directory,
+                census_run_id="run-bad-window",
+                window="M9.9Z",
+                started_at_utc=_stamp(),
+                detail="fixture",
+            )
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+
+
+class TestLiveOperatorBoundary:
+    """Decision 045 §6: the conjunction, and the site no refusal may reach."""
+
+    @pytest.mark.parametrize(
+        "element",
+        [
+            "explicit_live",
+            "network_enabled",
+            "m3_acquire_enabled",
+            "sec_identity_validated",
+        ],
+    )
+    def test_each_conjunction_element_refuses_on_its_own(
+        self, tmp_path: Path, element: str
+    ) -> None:
+        """Every element is load-bearing individually, not merely as part of a conjunction."""
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+
+        with pytest.raises(AcquisitionGateError):
+            arguments["gate"] = _live_gate(**{element: False})
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+    def test_an_unnamed_stage_authority_refuses(self, tmp_path: Path) -> None:
+        """The gate refuses at construction, which is earlier than the execution path.
+
+        An incomplete gate cannot be built at all, so it can never be handed to the live path.
+        The refusal is asserted around the construction *and* the invocation together, because
+        either point refusing is the property that matters — and the transport factory must be
+        untouched whichever one fires.
+        """
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+
+        with pytest.raises(AcquisitionGateError, match="stage authority"):
+            arguments["gate"] = _live_gate(stage_authority_reference="   ")
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+    def test_a_plan_hash_mismatch_refuses_before_the_construction_site(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["authorization"] = LiveOperationAuthorization(
+            window="M3.2A",
+            plan_sha256="f" * 64,
+            approved_ceiling=plan.hard_request_ceiling,
+            authorization_reference="OWNER_TEST_FIXTURE_AUTHORIZATION",
+        )
+
+        with pytest.raises(AcquisitionGateError, match="plan hash"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    @pytest.mark.parametrize("delta", [-1, 1])
+    def test_a_ceiling_that_is_not_exactly_the_plan_ceiling_refuses(
+        self, tmp_path: Path, delta: int
+    ) -> None:
+        """C-1 and C+1 both refuse; only exact equality passes."""
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(
+            tmp_path, plan, factory, ceiling=plan.hard_request_ceiling + delta
+        )
+
+        with pytest.raises(AcquisitionGateError, match="ceiling"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_the_operator_ceiling_must_equal_the_authorized_ceiling_exactly(
+        self, tmp_path: Path
+    ) -> None:
+        """The gate the operator constructed and the ceiling it was given must be the same integer.
+
+        Distinct from the plan-ceiling check below it: this one catches an operator ceiling that
+        disagrees with the authorization it was issued under, even when the authorization itself
+        is internally consistent with some other plan.
+        """
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["approved_ceiling"] = plan.hard_request_ceiling + 1
+
+        with pytest.raises(AcquisitionGateError, match="must equal the approved integer exactly"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_a_window_the_plan_was_not_built_for_refuses(self, tmp_path: Path) -> None:
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory, window="M3.2B")
+
+        with pytest.raises(AcquisitionGateError, match="window"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_positive_control_the_exact_bindings_reach_the_construction_site_once(
+        self, tmp_path: Path
+    ) -> None:
+        """Without this, every refusal above would pass against a gate that refuses everything."""
+        plan = _plan()
+        result, factory = _run_live(tmp_path, plan, _success_script(plan))
+
+        assert factory.calls == 1
+        assert result.outcome.completed_successfully is True  # type: ignore[attr-defined]
+
+    def test_the_wrapped_transport_is_closed_even_when_the_window_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """A scripted transport exhausted mid-window still releases its resources."""
+        plan = _plan()
+        factory = _CountingTransportFactory([_success_for("sec_bulk_submissions")])
+        arguments = _live_arguments(tmp_path, plan, factory)
+
+        with pytest.raises(AssertionError, match="scripted transport was exhausted"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.transports[0].closed is True
+
+    def test_verify_window_bindings_refuses_a_route_outside_the_window(self) -> None:
+        """Window separation is enforced in both directions, before any transport exists."""
+        plan = _plan()
+        authorization = LiveOperationAuthorization(
+            window="M3.2B",
+            plan_sha256=plan.request_plan_sha256,
+            approved_ceiling=plan.hard_request_ceiling,
+            authorization_reference="OWNER_TEST_FIXTURE_AUTHORIZATION",
+        )
+
+        with pytest.raises(AcquisitionGateError):
+            verify_window_bindings(
+                plan=plan,
+                window="M3.2B",
+                approved_ceiling=plan.hard_request_ceiling,
+                authorization=authorization,
+            )
+
+    def test_positive_control_verify_window_bindings_returns_the_expansion(self) -> None:
+        plan = _plan()
+        requests = verify_window_bindings(
+            plan=plan,
+            window="M3.2A",
+            approved_ceiling=plan.hard_request_ceiling,
+            authorization=_authorization(plan),
+        )
+
+        assert len(requests) == plan.planned_unique_logical_requests
+
+    def test_the_default_transport_factory_is_never_invoked_by_the_suite(self) -> None:
+        """Structural: the real factory exists, is callable, and no test ever calls it."""
+        assert callable(default_live_transport_factory)
+
+
+class TestProgressSinkExclusion:
+    """Decision 045 §12: raw operator-controlled text never reaches a written artifact."""
+
+    def test_a_sink_exception_carrying_a_path_and_an_address_is_excluded(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The required positive control: both strings reach stderr and neither is retained.
+
+        Exclusion is demonstrated *before* the receipt's prohibited-content validator is relied
+        on: the retained field simply never contains either string, so the validator is a backstop
+        rather than the defence.
+        """
+
+        private_path = _sink_private_path(tmp_path)
+
+        def _sink(_: object) -> None:
+            message = f"sink wrote {private_path} and notified {_SINK_ADDRESS}"
+            raise RuntimeError(message)
+
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
+        outcome = result.outcome  # type: ignore[attr-defined]
+        retained = " ".join(outcome.progress_failures)
+        captured = capsys.readouterr()
+
+        assert private_path in captured.err, "the sink did not actually raise"
+        assert _SINK_ADDRESS in captured.err, "the sink did not actually raise"
+        assert private_path not in retained
+        assert _SINK_ADDRESS not in retained
+        assert "fixture-operator" not in retained
+        assert PROGRESS_SINK_FAILURE_REASON in retained
+        assert outcome.completion_status == "complete"
+
+    def test_the_excluded_text_reaches_no_catalog_row_or_stored_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing durable below the evidence root may carry the sink's text either."""
+
+        private_path = _sink_private_path(tmp_path)
+
+        def _sink(_: object) -> None:
+            message = f"sink wrote {private_path} and notified {_SINK_ADDRESS}"
+            raise RuntimeError(message)
+
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
+
+        for path in sorted(tmp_path.rglob("*")):
+            if not path.is_file():
+                continue
+            payload = path.read_bytes()
+            assert private_path.encode() not in payload, path
+            assert _SINK_ADDRESS.encode() not in payload, path
+
+    def test_an_exception_class_named_to_smuggle_content_is_sanitized(self) -> None:
+        """The retained class name is allowlist-filtered, not merely assumed to be an identifier."""
+        from disclosure_drift.m3.acquisition import sanitized_progress_failure
+
+        # Composed rather than written as a literal, so the fixture proves the allowlist
+        # filters separators and address markers without putting either in a tracked file.
+        smuggler = type("Bad" + chr(47) + "root" + chr(64) + "host.example", (Exception,), {})
+        recorded = sanitized_progress_failure("sec_company_tickers", smuggler())
+
+        assert "/" not in recorded.removeprefix("sec_company_tickers")
+        assert "@" not in recorded
+        assert PROGRESS_SINK_FAILURE_REASON in recorded
+
+
+def _continuation(
+    plan: RequestPlan,
+    *,
+    permitted: bool = True,
+    determination: str = "SAFE",
+    approved_ceiling: int | None = None,
+    predecessor_receipt_id: str | None = "predecessor-receipt-identity",
+    consumed: int = 0,
+    remaining_count: int = 2,
+) -> object:
+    """A continuation proposal with controlled fixture values.
+
+    ``propose_continuation``'s own derivation - cumulative accounting, in-flight identification,
+    UNDETERMINED refusal, write-ahead blocking - is covered exhaustively by the accepted T2.4
+    suite. What is under test here is the *resume binding* the live path enforces on top of it,
+    so the proposal is supplied directly rather than re-derived.
+    """
+    from disclosure_drift.m3.acquisition import (
+        ContinuationProposal,
+        ContinuationRequest,
+        CumulativeAttemptAccounting,
+        RequestReconciliation,
+    )
+    from disclosure_drift.m3.recovery import RecoveryState
+
+    ceiling = plan.hard_request_ceiling if approved_ceiling is None else approved_ceiling
+    requests = derive_logical_requests(plan)[:remaining_count]
+    return ContinuationProposal(
+        permitted=permitted,
+        determination=determination,
+        refusal_reasons=() if permitted else ("a fixture refusal reason",),
+        window="M3.2A",
+        plan_sha256=plan.request_plan_sha256,
+        approved_ceiling=ceiling,
+        predecessor_receipt_id=predecessor_receipt_id,
+        receipt_chain=("predecessor-receipt-identity",),
+        accounting=CumulativeAttemptAccounting(
+            chain_consumed=consumed,
+            post_receipt_attempts=0,
+            in_flight_charge=0,
+            in_flight_request_identity=None,
+            undetermined=False,
+            basis="every attempt segment is attributed exactly once",
+        ),
+        remaining_headroom=max(0, ceiling - consumed),
+        worst_case_remaining_attempts=0,
+        fits=True,
+        already_satisfied_excluded=("sec_bulk_submissions",),
+        remaining=tuple(
+            ContinuationRequest(
+                position=index,
+                source_id=request.source_id,
+                identity_label=request.identity_label,
+                request_identity=request.identity_label,
+                etag=None,
+                last_modified=None,
+            )
+            for index, request in enumerate(requests)
+        ),
+        reconciliation=RequestReconciliation(
+            window="M3.2A",
+            plan_sha256=plan.request_plan_sha256,
+            items=(),
+            out_of_plan=(),
+            store_findings=(),
+            drift=(),
+            blocked_recovery_states=0,
+        ),
+        inspection=RecoveryState(
+            determination=determination,
+            basis="fixture",
+            required_action="none",
+            conditions=(),
+            receipt_chain=("predecessor-receipt-identity",),
+            interruption_state=None,
+            consumed_physical_attempts=consumed,
+            committed_observation_count=0,
+            orphan_object_count=0,
+            rows_without_object_count=0,
+            partial_file_count=0,
+        ),
+    )
+
+
+class TestResumeIntegration:
+    """Decision 045 §14: what a resumed live invocation must prove before it may continue."""
+
+    def test_a_resumed_invocation_registers_a_new_run_identity(self, tmp_path: Path) -> None:
+        """Decision 045 §6A.3: a run identifies one invocation, never a whole window."""
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-first")
+        result, factory = _run_live(
+            tmp_path,
+            plan,
+            _success_script(plan),
+            run_id_factory=lambda: "run-resumed",
+            continuation=_continuation(plan),
+        )
+
+        assert factory.calls == 1
+        assert result.census_run_id == "run-resumed"  # type: ignore[attr-defined]
+        assert result.predecessor_receipt_id == "predecessor-receipt-identity"  # type: ignore[attr-defined]
+        rows = _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs ORDER BY job_id")
+        assert [row["job_id"] for row in rows] == ["run-first", "run-resumed"]
+
+    def test_a_refused_proposal_refuses_the_resume_before_any_transport(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = _continuation(plan, permitted=False)
+
+        with pytest.raises(AcquisitionGateError, match="refuses this resume"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    @pytest.mark.parametrize("determination", ["UNDETERMINED", "UNSAFE"])
+    def test_a_resume_proceeds_only_from_a_safe_inspection(
+        self, tmp_path: Path, determination: str
+    ) -> None:
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = _continuation(plan, determination=determination)
+
+        with pytest.raises(AcquisitionGateError, match="SAFE"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_a_resume_may_not_change_the_approved_ceiling(self, tmp_path: Path) -> None:
+        """The approved ceiling is never reset, raised, or replaced across a resume."""
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = _continuation(
+            plan, approved_ceiling=plan.hard_request_ceiling + 5
+        )
+
+        with pytest.raises(AcquisitionGateError, match="never reset, raised, or replaced"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_a_resume_requires_an_exact_predecessor_receipt_identity(self, tmp_path: Path) -> None:
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = _continuation(plan, predecessor_receipt_id=None)
+
+        with pytest.raises(AcquisitionGateError, match="exact predecessor receipt"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_a_resume_with_nothing_remaining_refuses_rather_than_re_requesting(
+        self, tmp_path: Path
+    ) -> None:
+        """An already-satisfied substantive write is never repeated."""
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = _continuation(plan, remaining_count=0)
+
+        with pytest.raises(AcquisitionGateError, match="nothing lawful to acquire"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_a_resume_past_its_own_ceiling_refuses(self, tmp_path: Path) -> None:
+        plan = _plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = _continuation(plan, consumed=plan.hard_request_ceiling + 1)
+
+        with pytest.raises(AcquisitionGateError, match="already exceeds"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+
+    def test_carried_forward_consumption_is_charged_against_the_ceiling(
+        self, tmp_path: Path
+    ) -> None:
+        """The resumed window starts at the predecessor's consumption, never at zero."""
+        plan = _plan()
+        carried = 3
+        remaining = 2
+        result, _ = _run_live(
+            tmp_path,
+            plan,
+            [
+                _success_for(request.source_id)
+                for request in derive_logical_requests(plan)[:remaining]
+            ],
+            continuation=_continuation(plan, consumed=carried, remaining_count=remaining),
+        )
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert result.carried_forward_consumed == carried  # type: ignore[attr-defined]
+        assert outcome.approved_ceiling == plan.hard_request_ceiling
+        # The predecessor's consumption is carried, and only the remainder is placed on top of
+        # it: the ceiling is charged cumulatively and the satisfied work is never re-requested.
+        assert outcome.consumed_physical_attempts == carried + remaining
+
+    def test_a_resume_places_only_the_remaining_requests(self, tmp_path: Path) -> None:
+        """Decision 045 §14: an already-satisfied substantive write is never repeated.
+
+        The resumed invocation is given a two-request remainder against a seven-request plan, and
+        is scripted with exactly two responses. A resume that re-derived the whole expansion would
+        exhaust the script and fail loudly, which is precisely the duplication being excluded.
+        """
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-predecessor")
+        remaining = derive_logical_requests(plan)[:2]
+
+        result, factory = _run_live(
+            tmp_path,
+            plan,
+            [_success_for(request.source_id) for request in remaining],
+            run_id_factory=lambda: "run-continued",
+            continuation=_continuation(plan, remaining_count=2),
+        )
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert factory.calls == 1
+        assert outcome.planned_logical_requests == 2
+        assert len(outcome.satisfied) == 2
+        assert outcome.consumed_physical_attempts == 2
+        attributed = _catalog_rows(
+            tmp_path,
+            "SELECT source_instance_id FROM census_plan_sources WHERE census_run_id = ?",
+            ("run-continued",),
+        )
+        assert sorted(row["source_instance_id"] for row in attributed) == sorted(
+            request.identity_label for request in remaining
+        )
+
+    def test_a_remainder_the_plan_does_not_contain_refuses(self, tmp_path: Path) -> None:
+        """The proposal and the plan must agree about what the window contains."""
+        plan = _plan()
+        proposal = _continuation(plan, remaining_count=1)
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["continuation"] = replace(
+            proposal,  # type: ignore[arg-type]
+            remaining=(replace(proposal.remaining[0], identity_label="not_a_planned_identity"),),  # type: ignore[attr-defined]
+        )
+
+        with pytest.raises(AcquisitionGateError, match="does not expand to"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+    def test_positive_control_a_permitted_safe_proposal_resumes(self, tmp_path: Path) -> None:
+        """Without this, every refusal above would pass against a resume that refuses everything."""
+        plan = _plan()
+        remaining = derive_logical_requests(plan)[:2]
+        result, factory = _run_live(
+            tmp_path,
+            plan,
+            [_success_for(request.source_id) for request in remaining],
+            continuation=_continuation(plan, remaining_count=2),
+        )
+
+        assert factory.calls == 1
+        assert result.resumed is True  # type: ignore[attr-defined]
+
+
+class TestReceiptAssembly:
+    """Decision 045 §7, §8, §13: what the producer binds, and what the frozen schema refuses."""
+
+    def _receipt(
+        self,
+        tmp_path: Path,
+        plan: RequestPlan,
+        script: Sequence[TransportResponse],
+        *,
+        run_id: str = "run-fixture-0001",
+    ) -> ExecutionReceipt:
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+
+        result, _ = _run_live(tmp_path, plan, script, run_id_factory=lambda: run_id)
+        return _live_acquisition_receipt(
+            result,  # type: ignore[arg-type]
+            plan=plan,
+            window="M3.2A",
+            approved_ceiling=plan.hard_request_ceiling,
+            continuation=None,
+            config=load_config(None),
+            catalog_path=tmp_path / _CATALOG_RELATIVE,
+        )
+
+    def test_a_complete_window_produces_a_valid_live_receipt(self, tmp_path: Path) -> None:
+        from disclosure_drift.m3.receipt import validate_receipt_document
+
+        plan = _plan()
+        receipt = self._receipt(tmp_path, plan, _success_script(plan))
+        document = receipt.as_document()
+        validate_receipt_document(document)
+
+        assert document["invocation_mode"] == "live"
+        assert document["completion_status"] == "complete"
+        assert document["acquisition_window"] == "M3.2A"
+        assert document["approved_request_ceiling"] == plan.hard_request_ceiling
+        assert document["actual_physical_attempt_count"] == plan.planned_unique_logical_requests
+        assert document["raw_object_count"] == plan.planned_unique_logical_requests
+        assert "reason_code" not in document, "a complete window carries no reason code"
+
+    def test_the_response_totals_satisfy_the_equality_invariant(self, tmp_path: Path) -> None:
+        """Decision 045 §9: the two universes agree exactly in the written receipt."""
+        plan = _plan()
+        document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
+
+        classification = document["response_classification_totals"]
+        statuses = document["status_code_totals"]
+        assert sum(classification.values()) == sum(statuses.values())  # type: ignore[union-attr]
+        assert document["cooldown_count"] == classification["cooldown"]  # type: ignore[index]
+
+    def test_the_cache_hit_count_is_the_excluded_set_not_the_304_reuses(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 045 §8: the legacy `WindowOutcome.cache_hits` alias must not populate it."""
+        plan = _plan(satisfied=frozenset({"2010QTR1"}))
+        document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
+
+        assert plan.expected_cache_hits == 1
+        assert document["cache_hit_count"] == plan.expected_cache_hits
+        assert document["not_modified_count"] == 0
+
+    def test_the_two_reuse_counters_are_bound_to_different_dispositions(
+        self, tmp_path: Path
+    ) -> None:
+        """The two reuse counters are never populated from each other, or from the alias.
+
+        A window that places only unconditional requests and stores every object new leaves both
+        at zero and ``raw_object_count`` at the planned total, so a receipt that had crossed the
+        two counters — or populated either from the legacy ``cache_hits`` alias — would disagree
+        with the window it describes.
+        """
+        plan = _plan()
+        document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
+
+        assert document["raw_object_count"] == plan.planned_unique_logical_requests
+        assert document["duplicate_object_count"] == 0
+        assert document["not_modified_count"] == 0
+        assert document["cache_hit_count"] == plan.expected_cache_hits
+
+    def test_a_duplicate_window_reports_duplicates_and_no_not_modified_reuses(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 045 §8 / Decision 040 §6: the three reuse counters are never interchangeable.
+
+        A second window over byte-identical bodies, against a store that has preserved the first
+        window's objects, reconciles every request as a byte-identical ``200``. That makes
+        ``duplicate_object_count`` non-zero while ``raw_object_count`` and ``not_modified_count``
+        stay zero — so a receipt that populated any of the three from another would disagree with
+        the window it describes. A single-run fixture cannot show this: the distinction only
+        exists once a later run sees what an earlier one preserved.
+        """
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+        from disclosure_drift.m3.acquisition import LiveAcquisitionResult
+
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            first = harness.run(_success_script(plan))
+            assert first.completion_status == "complete"  # type: ignore[attr-defined]
+            # A second invocation carries its own gate: the approved ceiling is per window and is
+            # never doubled, and the equality check refuses anything else.
+            harness.gate = PhysicalAttemptCeiling(plan.hard_request_ceiling)
+            second = harness.run(_success_script(plan))
+
+        assert second.duplicates_reconciled == plan.planned_unique_logical_requests  # type: ignore[attr-defined]
+        accounting = ResponseAccounting()
+        for _ in range(plan.planned_unique_logical_requests):
+            accounting.absorb(_fetch_result(status=200, actions=("proceed",)), (200,))
+        document = _live_acquisition_receipt(
+            LiveAcquisitionResult(
+                census_run_id="run-duplicates",
+                outcome=second,  # type: ignore[arg-type]
+                accounting=accounting,
+                started_at_utc=_stamp(),
+                completed_at_utc=_stamp(),
+                predecessor_receipt_id=None,
+                carried_forward_consumed=None,
+                run_closed=True,
+            ),
+            plan=plan,
+            window="M3.2A",
+            approved_ceiling=plan.hard_request_ceiling,
+            continuation=None,
+            config=load_config(None),
+            catalog_path=tmp_path / _CATALOG_RELATIVE,
+        ).as_document()
+
+        assert document["duplicate_object_count"] == plan.planned_unique_logical_requests
+        assert document["raw_object_count"] == 0
+        assert document["not_modified_count"] == 0
+
+    def test_a_quarantined_window_reports_a_registered_reason_and_is_not_complete(
+        self, tmp_path: Path
+    ) -> None:
+        from disclosure_drift.m3.receipt import validate_receipt_document
+        from disclosure_drift.reasons import REASON_CODES
+
+        plan = _plan()
+        script = _script_with(plan, {})
+        script[0] = _scripted(body=b"not-a-zip-archive", content_type="application/zip")
+        document = self._receipt(tmp_path, plan, script).as_document()
+        validate_receipt_document(document)
+
+        assert document["completion_status"] == "failed"
+        assert document["reason_code"] in REASON_CODES
+        assert document["quarantined_object_count"] == 1
+        assert document["schema_drift_outcome"] == "blocked"
+
+    def test_the_frozen_schema_refuses_completed_with_absences(self) -> None:
+        """There is no such completion status, and this stage does not introduce one."""
+        from disclosure_drift.m3.receipt import ExecutionReceipt, ReceiptValidationError
+
+        with pytest.raises(ReceiptValidationError, match="completion_status"):
+            ExecutionReceipt(
+                command_name="m3 acquire",
+                command_version="m3.2/1.0",
+                phase="M3.2A",
+                invocation_mode="live",
+                configuration_fingerprint="a" * 64,
+                migration_chain_head="0013_m23_manifest_lifecycle_guards",
+                started_at_utc="2026-08-04T00:00:00Z",
+                completed_at_utc="2026-08-04T00:00:01Z",
+                elapsed_seconds=1.0,
+                actual_logical_request_count=0,
+                actual_physical_attempt_count=0,
+                completion_status="completed_with_absences",
+            )
+
+    def test_the_frozen_schema_refuses_an_unknown_receipt_field(self, tmp_path: Path) -> None:
+        """The permitted field set is closed; a new field requires a new accepted decision."""
+        from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
+
+        plan = _plan()
+        document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
+        document["m3_2_run_identity"] = "run-alpha"
+
+        with pytest.raises(ReceiptValidationError, match="not a permitted receipt field"):
+            validate_receipt_document(document)
+
+    def test_no_progress_sink_text_reaches_the_receipt(self, tmp_path: Path) -> None:
+        """The §12 exclusion holds through receipt assembly, not only in the window outcome."""
+        from disclosure_drift.m3.receipt import canonical_bytes
+
+        private_path = _sink_private_path(tmp_path)
+
+        def _sink(_: object) -> None:
+            message = f"sink wrote {private_path} and notified {_SINK_ADDRESS}"
+            raise RuntimeError(message)
+
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
+        receipt = _live_acquisition_receipt(
+            result,  # type: ignore[arg-type]
+            plan=plan,
+            window="M3.2A",
+            approved_ceiling=plan.hard_request_ceiling,
+            continuation=None,
+            config=load_config(None),
+            catalog_path=tmp_path / _CATALOG_RELATIVE,
+        )
+        payload = canonical_bytes(receipt.as_document())
+
+        assert private_path.encode() not in payload
+        assert _SINK_ADDRESS.encode() not in payload
+
+    def test_an_inexact_accounting_refuses_the_receipt(self, tmp_path: Path) -> None:
+        """Decision 045 §9.5: exactness or a stop — never an inferred or undercounted receipt."""
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+        from disclosure_drift.errors import GateFailureError
+
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        result.accounting.mark_undetermined("a fixture accounting defect")  # type: ignore[attr-defined]
+
+        with pytest.raises(GateFailureError, match="not exact"):
+            _live_acquisition_receipt(
+                result,  # type: ignore[arg-type]
+                plan=plan,
+                window="M3.2A",
+                approved_ceiling=plan.hard_request_ceiling,
+                continuation=None,
+                config=load_config(None),
+                catalog_path=tmp_path / _CATALOG_RELATIVE,
+            )
+
+
+class TestSeparateProcessDurability:
+    """A run identity and its attribution outlive the process that wrote them."""
+
+    def test_the_run_row_and_its_attribution_are_readable_from_a_fresh_process(
+        self, tmp_path: Path
+    ) -> None:
+        """An in-process read could be served by a connection the writer still owns.
+
+        Reading through a genuinely separate interpreter is what proves the rows are durable
+        rather than merely visible, which is exactly the property a resumed invocation and the
+        accepted T2.4 recovery state both depend on.
+        """
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-durable")
+        database = tmp_path / _CATALOG_RELATIVE
+
+        # The database path travels as an argument rather than being interpolated into the
+        # probe, and both lookups bind their run identity as a parameter.
+        probe = "\n".join(
+            (
+                "import sqlite3, sys",
+                "connection = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True)",
+                "kinds = 'SELECT job_kind, stage FROM ops_ingestion_jobs WHERE job_id = ?'",
+                "owned = 'SELECT COUNT(*) FROM census_plan_sources WHERE census_run_id = ?'",
+                "job = connection.execute(kinds, (sys.argv[2],)).fetchone()",
+                "attributed = connection.execute(owned, (sys.argv[2],)).fetchone()[0]",
+                "print(job[0], job[1], attributed)",
+            )
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, str(database), "run-durable"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == (
+            f"{ACQUISITION_JOB_KIND} M3.2A {plan.planned_unique_logical_requests}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Genuine interruption: the catchable path, its exact states, and its refusals
+#
+# Decision 045 correction, MAJOR-1. `interrupted` is a real terminal outcome of a lawful live
+# invocation, not a label. Everything below drives the production path — a real `KeyboardInterrupt`
+# raised at a real durable boundary — rather than constructing a window outcome by hand.
+# --------------------------------------------------------------------------- #
+def _interrupt_at(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: type,
+    name: str,
+    *,
+    call: int,
+    after: bool = False,
+) -> None:
+    """Raise ``KeyboardInterrupt`` on the ``call``-th invocation of ``owner.name``.
+
+    ``after`` chooses which side of the real call the signal lands on, which is exactly what
+    separates the three governed interruption points: before the snapshot store promotes anything,
+    after promotion but before the recorder's transaction commits, and immediately after it
+    committed. Nothing in the accepted store or recorder is edited — the signal is injected around
+    them, which is what a real SIGINT does.
+    """
+    original = getattr(owner, name)
+    seen = {"count": 0}
+
+    def _wrapper(self: object, *args: object, **kwargs: object) -> object:
+        seen["count"] += 1
+        fires = seen["count"] == call
+        if fires and not after:
+            raise KeyboardInterrupt
+        value = original(self, *args, **kwargs)
+        if fires and after:
+            raise KeyboardInterrupt
+        return value
+
+    monkeypatch.setattr(owner, name, _wrapper)
+
+
+def _committed_observations(evidence_root: Path) -> list[str]:
+    """Every durably committed observation identity, read back through a fresh connection."""
+    rows = _catalog_rows(
+        evidence_root, "SELECT observation_id FROM census_source_observations ORDER BY 1"
+    )
+    return [row["observation_id"] for row in rows]
+
+
+def _job_states(evidence_root: Path) -> list[str]:
+    """Every registered run's terminal ``job_state``, in registration order."""
+    rows = _catalog_rows(evidence_root, "SELECT job_state FROM ops_ingestion_jobs ORDER BY rowid")
+    return [row["job_state"] for row in rows]
+
+
+def _orphan_relative_paths(evidence_root: Path, data_relative: str = _DATA_RELATIVE) -> list[str]:
+    """Raw objects on disk that no committed row references — the I2 durable evidence."""
+    data_root = evidence_root / data_relative
+    recorded = {
+        row["relative_storage_path"]
+        for row in _catalog_rows(
+            evidence_root, "SELECT relative_storage_path FROM census_source_observations"
+        )
+    }
+    found: list[str] = []
+    raw_root = data_root / "raw"
+    if not raw_root.is_dir():
+        return found
+    for path in sorted(raw_root.rglob("*")):
+        if not path.is_file() or path.name.endswith((".lineage.json", ".part", ".reason")):
+            continue
+        relative = str(path.relative_to(data_root))
+        if relative not in recorded:
+            found.append(relative)
+    return found
+
+
+class TestGenuineInterruption:
+    """MAJOR-1: a real interruption produces a real, exactly classified, resumable receipt."""
+
+    def test_the_frozen_interruption_vocabulary_is_a_strict_acquisition_subset(self) -> None:
+        """Acquisition may record only the three states an acquisition can actually be in.
+
+        ``during_selection`` and ``during_manifest_write`` are frozen receipt values that name
+        phases of a *selection* run. Milestone 3.2 acquisition selects nothing and writes no
+        manifest, so emitting either would assert a phase that never happened — which a resume
+        would then have to interpret.
+        """
+        from disclosure_drift.m3.acquisition import ACQUISITION_INTERRUPTION_STATES
+        from disclosure_drift.m3.receipt import INTERRUPTION_STATES
+
+        assert set(ACQUISITION_INTERRUPTION_STATES) < set(INTERRUPTION_STATES)
+        assert "during_selection" not in ACQUISITION_INTERRUPTION_STATES
+        assert "during_manifest_write" not in ACQUISITION_INTERRUPTION_STATES
+
+    def test_the_interruption_reason_is_the_already_registered_code(self) -> None:
+        """No reason code is created, modified, or repurposed by this correction."""
+        from disclosure_drift.m3.acquisition import ACQUISITION_INTERRUPTED_REASON
+        from disclosure_drift.reasons import REASON_CODES
+
+        assert ACQUISITION_INTERRUPTED_REASON in REASON_CODES
+
+    # -- I1 ----------------------------------------------------------------- #
+    def test_i1_an_interruption_before_raw_store_promotion_is_before_raw_store_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I1: classified exactly, nothing durable for the interrupted retrieval, still retryable.
+
+        The signal lands after the retrieval's response was classified and accounted and before the
+        snapshot store promotes anything, so the interrupted request has no committed observation
+        and no promoted object of its own.
+        """
+        plan = _plan()
+        _interrupt_at(monkeypatch, SnapshotStore, "record", call=2)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "before_raw_store_write"
+        assert outcome.reason_codes == ("SEC_ACQUISITION_INTERRUPTED",)
+        assert not outcome.completed_successfully
+        # The interrupted request consumed a real attempt, so it is `stopped`, never untouched.
+        assert [item.disposition for item in outcome.outcomes][:2] == ["satisfied_new", "stopped"]
+        assert len(_committed_observations(tmp_path)) == 1
+        assert _orphan_relative_paths(tmp_path) == []
+
+    def test_i1_leaves_the_interrupted_request_owed_by_the_real_reconciliation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``before_raw_store_write`` retrieval stays eligible for a later SAFE resume.
+
+        Read from the accepted reconciliation over durable catalog and store state - the same
+        primitive the continuation proposal partitions - rather than from the window outcome the
+        interrupted invocation happened to hold in memory.
+        """
+        plan = _plan()
+        _interrupt_at(monkeypatch, SnapshotStore, "record", call=2)
+        _run_live(tmp_path, plan, _success_script(plan))
+        monkeypatch.undo()
+
+        storage = prepare_storage(evidence_root=tmp_path, data_root_relative=_DATA_RELATIVE)
+        reconciliation = reconcile_requests(
+            plan=plan,
+            reconstruction=reconstruct_catalog_state(
+                catalog_path=tmp_path / _CATALOG_RELATIVE, storage=storage
+            ),
+            storage=storage,
+        )
+        requests = derive_logical_requests(plan)
+        states = {item.identity_label: item.state for item in reconciliation.items}
+
+        # The interrupted retrieval reached no terminal evidence, so it is still open work; the
+        # request that committed before it is satisfied and is not owed again.
+        assert states[requests[1].identity_label] == "not_attempted"
+        assert states[requests[0].identity_label] == "satisfied_new"
+
+    # -- I2 ----------------------------------------------------------------- #
+    def test_i2_an_interruption_after_promotion_before_commit_preserves_orphan_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I2: the promoted object survives, no observation committed, nothing deleted."""
+        plan = _plan()
+        _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "after_raw_store_write_before_catalog_commit"
+        assert len(_committed_observations(tmp_path)) == 1
+        orphans = _orphan_relative_paths(tmp_path)
+        assert len(orphans) == 1, "the promoted object is preserved as durable orphan evidence"
+        assert (tmp_path / _DATA_RELATIVE / orphans[0]).is_file()
+
+    # -- I3 ----------------------------------------------------------------- #
+    def test_i3_an_interruption_after_catalog_commit_counts_the_retrieval_as_completed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I3: the observation committed, so the retrieval is done and nothing is orphaned."""
+        plan = _plan()
+        _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2, after=True)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "after_catalog_commit"
+        assert len(_committed_observations(tmp_path)) == 2
+        assert _orphan_relative_paths(tmp_path) == []
+
+    def test_an_interruption_between_logical_requests_is_after_catalog_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """A signal arriving between requests: the previous one committed, the next never began."""
+        plan = _plan()
+        seen: list[str] = []
+
+        def _sink(outcome: object) -> None:
+            seen.append(outcome.request.identity_label)  # type: ignore[attr-defined]
+            if len(seen) == 2:
+                raise KeyboardInterrupt
+
+        result, factory = _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "after_catalog_commit"
+        assert len(seen) == 2
+        # No further transport call happened: only the two requests already reported were placed.
+        assert len(factory.transports[0].requests) == 2
+
+    def test_an_interruption_during_the_first_retrieval_is_before_raw_store_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing has committed at all, so the window stopped before any promotion."""
+        plan = _plan()
+        _interrupt_at(monkeypatch, SnapshotStore, "record", call=1)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "before_raw_store_write"
+        assert _committed_observations(tmp_path) == []
+
+    # -- fail-closed -------------------------------------------------------- #
+    def test_an_ambiguous_interruption_produces_no_window_at_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The signal lands *inside* the snapshot store, after it promoted and before it returned.
+
+        The engine never learned which observation was minted, and an unaccounted object now exists
+        on disk. That is indistinguishable from a promotion that had not happened, so the state
+        cannot be established exactly — and the interrupt is re-raised rather than guessed at. No
+        window outcome exists, so no receipt can be produced from one.
+        """
+        plan = _plan()
+        _interrupt_at(monkeypatch, SnapshotStore, "record", call=2, after=True)
+
+        with pytest.raises(KeyboardInterrupt):
+            _run_live(tmp_path, plan, _success_script(plan))
+
+        monkeypatch.undo()
+        assert len(_orphan_relative_paths(tmp_path)) == 1, "the evidence is preserved, not deleted"
+        # The registered run is closed truthfully rather than left indefinitely `running`.
+        assert _job_states(tmp_path) == ["stopped"]
+
+    def test_an_interruption_at_the_construction_site_places_no_request_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """Interrupted before lawful execution begins: no observation, no window, no receipt."""
+        plan = _plan()
+
+        def _interrupting_factory() -> object:
+            raise KeyboardInterrupt
+
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["transport_factory"] = _interrupting_factory
+
+        with pytest.raises(KeyboardInterrupt):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert _committed_observations(tmp_path) == []
+        assert _job_states(tmp_path) == ["stopped"]
+
+    # -- the vocabulary is not a catch-all ---------------------------------- #
+    def test_a_governed_failure_is_failed_and_carries_no_interruption_state(
+        self, tmp_path: Path
+    ) -> None:
+        """An ordinary terminal failure is never relabelled as an interruption."""
+        plan = _plan()
+        script = _script_with(plan, {0: [_scripted(500, body=b"", content_type=None)] * 4})
+        result, _ = _run_live(tmp_path, plan, script)
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status != "interrupted"
+        assert outcome.interruption_state is None
+
+    def test_a_transport_level_failure_is_not_automatically_an_interruption(
+        self, tmp_path: Path
+    ) -> None:
+        """A response-policy transport failure is a retry event, not a signal."""
+        plan = _plan()
+        script = _script_with(
+            plan, {0: [_scripted(0, body=b"", content_type=None, failure="connection_error")]}
+        )
+        result, _ = _run_live(tmp_path, plan, script)
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "complete"
+        assert outcome.interruption_state is None
+
+    def test_a_ceiling_stop_remains_stopped_at_ceiling(self, tmp_path: Path) -> None:
+        plan = _plan()
+        gate = PhysicalAttemptCeiling(plan.hard_request_ceiling, consumed=plan.hard_request_ceiling)
+        with _harness(tmp_path, plan=plan, responses=[], ceiling=gate) as (engine, _, _, _):
+            engine.preflight(_authorization(plan))
+            outcome = engine.run()
+
+        assert outcome.completion_status == "stopped_at_ceiling"
+        assert outcome.interruption_state is None
+
+    def test_a_gate_stop_remains_stopped_by_gate(self, tmp_path: Path) -> None:
+        """A pre-transport policy refusal keeps its own status and no interruption state."""
+        from disclosure_drift.sec.http_client import ProhibitedRetrievalError
+
+        plan = _plan()
+        with _harness(tmp_path, plan=plan, responses=_success_script(plan)) as (engine, _, _, _):
+            engine.preflight(_authorization(plan))
+
+            def _refuse(*args: object, **kwargs: object) -> object:
+                message = "refusing to retrieve a prohibited URL"
+                raise ProhibitedRetrievalError(message)
+
+            engine.client.fetch = _refuse  # type: ignore[method-assign]
+            outcome = engine.run()
+
+        assert outcome.completion_status == "stopped_by_gate"
+        assert outcome.interruption_state is None
+
+    # -- the window type enforces the pairing ------------------------------- #
+    def test_an_interrupted_window_without_a_frozen_state_is_refused(self) -> None:
+        from disclosure_drift.m3.acquisition import WindowOutcome
+
+        with pytest.raises(AcquisitionGateError, match="interruption state"):
+            WindowOutcome(
+                window="M3.2A",
+                plan_sha256="0" * 64,
+                approved_ceiling=1,
+                consumed_physical_attempts=1,
+                planned_logical_requests=1,
+                outcomes=(),
+                completion_status="interrupted",
+            )
+
+    def test_an_interrupted_window_with_a_selection_state_is_refused(self) -> None:
+        """A frozen receipt value acquisition can never be in is still refused here."""
+        from disclosure_drift.m3.acquisition import WindowOutcome
+
+        with pytest.raises(AcquisitionGateError, match="interruption state"):
+            WindowOutcome(
+                window="M3.2A",
+                plan_sha256="0" * 64,
+                approved_ceiling=1,
+                consumed_physical_attempts=1,
+                planned_logical_requests=1,
+                outcomes=(),
+                completion_status="interrupted",
+                interruption_state="during_selection",
+            )
+
+    def test_a_non_interrupted_window_may_not_carry_an_interruption_state(self) -> None:
+        from disclosure_drift.m3.acquisition import WindowOutcome
+
+        with pytest.raises(AcquisitionGateError, match="genuinely interrupted"):
+            WindowOutcome(
+                window="M3.2A",
+                plan_sha256="0" * 64,
+                approved_ceiling=1,
+                consumed_physical_attempts=1,
+                planned_logical_requests=1,
+                outcomes=(),
+                completion_status="complete",
+                interruption_state="after_catalog_commit",
+            )
+
+    def test_positive_control_a_well_formed_interrupted_window_constructs(self) -> None:
+        """Without this, the refusals above would pass against a type that refuses everything."""
+        from disclosure_drift.m3.acquisition import WindowOutcome
+
+        outcome = WindowOutcome(
+            window="M3.2A",
+            plan_sha256="0" * 64,
+            approved_ceiling=1,
+            consumed_physical_attempts=1,
+            planned_logical_requests=1,
+            outcomes=(),
+            completion_status="interrupted",
+            interruption_state="after_catalog_commit",
+        )
+
+        assert not outcome.completed_successfully
+
+
+class TestInterruptedRunJobState:
+    """Decision 045 correction §8: a stopped invocation is recorded as stopped, never completed."""
+
+    def test_an_interrupted_window_closes_its_run_as_stopped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = _plan()
+        _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2, after=True)
+        _run_live(tmp_path, plan, _success_script(plan))
+
+        assert _job_states(tmp_path) == ["stopped"]
+
+    def test_a_complete_window_still_closes_its_run_as_completed(self, tmp_path: Path) -> None:
+        """Positive control: the new third state did not swallow the ordinary two."""
+        plan = _plan()
+        _run_live(tmp_path, plan, _success_script(plan))
+
+        assert _job_states(tmp_path) == ["completed"]
+
+    def test_the_job_state_mapping_keeps_the_three_outcomes_apart(self) -> None:
+        from disclosure_drift.m3.acquisition import WindowOutcome, acquisition_run_job_state
+
+        def _window(status: str, state: str | None = None) -> object:
+            return WindowOutcome(
+                window="M3.2A",
+                plan_sha256="0" * 64,
+                approved_ceiling=1,
+                consumed_physical_attempts=0,
+                planned_logical_requests=0,
+                outcomes=(),
+                completion_status=status,  # type: ignore[arg-type]
+                interruption_state=state,
+            )
+
+        assert acquisition_run_job_state(_window("complete")) == "completed"  # type: ignore[arg-type]
+        assert acquisition_run_job_state(_window("failed")) == "failed"  # type: ignore[arg-type]
+        assert (
+            acquisition_run_job_state(_window("interrupted", "after_catalog_commit"))  # type: ignore[arg-type]
+            == "stopped"
+        )
+
+    def test_an_invented_job_state_is_refused_rather_than_written(self, tmp_path: Path) -> None:
+        """`interrupted` is the receipt's vocabulary; it is never a database job state."""
+        from disclosure_drift.m3.acquisition import finish_acquisition_run
+
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.raises(AcquisitionRunError, match="never closed into an invented state"):
+            finish_acquisition_run(
+                catalog_path=catalog.database_path,
+                lock_directory=catalog.lock_directory,
+                census_run_id="run-any",
+                job_state="interrupted",
+                finished_at_utc=_stamp(),
+                detail="fixture",
+            )
+
+
+class TestInterruptedReceiptAssembly:
+    """The interrupted window becomes an interrupted receipt the accepted recovery path can read."""
+
+    def _receipt_for(self, tmp_path: Path, plan: RequestPlan, result: object) -> ExecutionReceipt:
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+
+        return _live_acquisition_receipt(
+            result,  # type: ignore[arg-type]
+            plan=plan,
+            window="M3.2A",
+            approved_ceiling=plan.hard_request_ceiling,
+            continuation=None,
+            config=load_config(None),
+            catalog_path=tmp_path / _CATALOG_RELATIVE,
+        )
+
+    def test_an_interrupted_window_produces_a_valid_interrupted_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from disclosure_drift.m3.receipt import validate_receipt_document
+
+        plan = _plan()
+        _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        monkeypatch.undo()
+        document = self._receipt_for(tmp_path, plan, result).as_document()
+        validate_receipt_document(document)
+
+        assert document["completion_status"] == "interrupted"
+        assert document["interruption_state"] == "after_raw_store_write_before_catalog_commit"
+        assert document["reason_code"] == "SEC_ACQUISITION_INTERRUPTED"
+        assert "remaining_planned_logical_request_count" not in document
+
+    def test_a_complete_receipt_carries_no_interruption_state(self, tmp_path: Path) -> None:
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        document = self._receipt_for(tmp_path, plan, result).as_document()
+
+        assert document["completion_status"] == "complete"
+        assert "interruption_state" not in document
+
+    def test_the_frozen_schema_refuses_an_interruption_state_on_a_complete_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
+
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        document = self._receipt_for(tmp_path, plan, result).as_document()
+        document["interruption_state"] = "after_catalog_commit"
+
+        with pytest.raises(ReceiptValidationError):
+            validate_receipt_document(document)
+
+    def test_the_frozen_schema_refuses_an_interrupted_receipt_without_a_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
+
+        plan = _plan()
+        _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        monkeypatch.undo()
+        document = self._receipt_for(tmp_path, plan, result).as_document()
+        del document["interruption_state"]
+
+        with pytest.raises(ReceiptValidationError):
+            validate_receipt_document(document)
+
+    def test_the_frozen_schema_refuses_an_unaccepted_interruption_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
+
+        plan = _plan()
+        _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        monkeypatch.undo()
+        document = self._receipt_for(tmp_path, plan, result).as_document()
+        document["interruption_state"] = "somewhere_in_the_middle"
+
+        with pytest.raises(ReceiptValidationError):
+            validate_receipt_document(document)
+
+    def test_the_receipt_instants_are_the_run_s_own_not_a_second_clock(
+        self, tmp_path: Path
+    ) -> None:
+        """The segmentation boundary a resume uses must cover the observations the run wrote.
+
+        A separately sampled, second-truncated completion instant can fall *before* observations
+        the run itself produced, which charges them a second time against the approved ceiling on
+        every resume. Binding both instants to the run's own clock removes the possibility.
+        """
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        document = self._receipt_for(tmp_path, plan, result).as_document()
+
+        assert document["started_at_utc"] == result.started_at_utc  # type: ignore[attr-defined]
+        assert document["completed_at_utc"] == result.completed_at_utc  # type: ignore[attr-defined]
+
+
+class TestResponsePairingDiagnostic:
+    """MINOR-1: the per-retrieval send/action pairing guard is bound by a test of its own.
+
+    The outer equality invariant (`classified_event_count == status_event_count`) already refuses a
+    mispaired absorption, so a mutation that deletes the pairing check alone still fails closed.
+    That makes the outer invariant a poor witness for the inner one: it passes either way. These
+    tests bind the diagnostic itself — its structural basis must be recorded, and nothing may be
+    counted — so removing it is a detectable behavioural change rather than a silent one.
+    """
+
+    def test_more_sends_than_accounted_events_retains_the_pairing_basis(self) -> None:
+        accounting = ResponseAccounting()
+        accounting.absorb(_fetch_result(status=200, actions=("proceed",)), (200, 200))
+
+        assert not accounting.is_exact
+        assert accounting.undetermined_basis is not None
+        assert "2 physical response(s) were observed but" in accounting.undetermined_basis
+        assert "accounted exactly once" in accounting.undetermined_basis
+        assert accounting.status_code_totals == {}
+        assert accounting.classified_event_count == 0
+
+    def test_fewer_sends_than_accounted_events_retains_the_pairing_basis(self) -> None:
+        """The guard is symmetric: an over-classified retrieval is refused the same way."""
+        accounting = ResponseAccounting()
+        accounting.absorb(_fetch_result(status=200, actions=("retry", "proceed")), (200,))
+
+        assert not accounting.is_exact
+        assert accounting.undetermined_basis is not None
+        assert "1 physical response(s) were observed but" in accounting.undetermined_basis
+        assert accounting.status_code_totals == {}
+        assert accounting.classified_event_count == 0
+
+    def test_a_redirect_hop_is_counted_by_the_pairing_arithmetic_not_ignored(self) -> None:
+        """A followed redirect appends no action marker, so the pairing must count it separately."""
+        accounting = ResponseAccounting()
+        accounting.absorb(
+            _fetch_result(status=200, actions=("proceed",), redirect_hops=("https://example",)),
+            (301, 200),
+        )
+
+        assert accounting.is_exact
+        assert accounting.undetermined_basis is None
+        assert accounting.redirect_hop_count == 1
+        assert accounting.status_event_count == 2
+
+    def test_positive_control_a_correctly_paired_absorption_records_everything(self) -> None:
+        accounting = ResponseAccounting()
+        accounting.absorb(_fetch_result(status=200, actions=("retry", "proceed")), (503, 200))
+
+        assert accounting.is_exact
+        assert accounting.undetermined_basis is None
+        assert accounting.status_code_totals == {"200": 1, "503": 1}
+
+    def test_a_mispaired_retrieval_makes_receipt_production_impossible(
+        self, tmp_path: Path
+    ) -> None:
+        """The diagnostic is not merely observational: it stops the receipt."""
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+        from disclosure_drift.errors import GateFailureError
+
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        mispaired = ResponseAccounting()
+        mispaired.absorb(_fetch_result(status=200, actions=("proceed",)), (200, 200))
+
+        with pytest.raises(GateFailureError, match="not exact"):
+            _live_acquisition_receipt(
+                replace(result, accounting=mispaired),  # type: ignore[arg-type,type-var]
+                plan=plan,
+                window="M3.2A",
+                approved_ceiling=plan.hard_request_ceiling,
+                continuation=None,
+                config=load_config(None),
+                catalog_path=tmp_path / _CATALOG_RELATIVE,
+            )

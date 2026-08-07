@@ -31,6 +31,27 @@ from disclosure_drift.cohorts import (
 from disclosure_drift.config import ConfigError, ProjectConfig, load_config
 from disclosure_drift.errors import DisclosureDriftError, GateFailureError, SecUserAgentError
 from disclosure_drift.logging_config import configure_logging, get_logger
+from disclosure_drift.m3.acquisition import (
+    ACQUISITION_WINDOWS,
+    RECOVERY_ACTIONS,
+    ContinuationProposal,
+    LiveAcquisitionResult,
+    LiveOperationAuthorization,
+    LiveOperatorGate,
+    RequestReconciliation,
+    WindowOutcome,
+    apply_recovery_action,
+    derive_dependent_plan,
+    drift_for_run,
+    execute_live_acquisition,
+    prepare_operational_catalog,
+    prepare_storage,
+    propose_continuation,
+    reconcile_requests,
+    reconstruct_catalog_state,
+    validate_acquisition_run,
+    verify_window_bindings,
+)
 from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
 from disclosure_drift.m3.receipt import (
     ExecutionReceipt,
@@ -42,6 +63,7 @@ from disclosure_drift.m3.recovery import inspect_recovery_state
 from disclosure_drift.m3.rehearsal import SCENARIO_IDS, RehearsalReport, run_rehearsal
 from disclosure_drift.m3.request_plan import (
     REQUEST_PLAN_SCHEMA_VERSION,
+    RequestPlan,
     build_m3_2a_request_plan,
     canonical_plan_bytes,
     derive_a_reachable,
@@ -49,12 +71,17 @@ from disclosure_drift.m3.request_plan import (
 )
 from disclosure_drift.paths import PathPolicyError
 from disclosure_drift.reasons import REASON_CODES, release_blocking_codes
+from disclosure_drift.sec.http_client import RetrievalPolicy
 from disclosure_drift.sec.index_plan import (
     INDEX_PLAN_POLICY_VERSION,
     CoverageWindow,
     plan_index_instances,
 )
-from disclosure_drift.sec.source_registry import M22_SOURCE_REGISTRY_VERSION, SOURCES
+from disclosure_drift.sec.source_registry import (
+    M22_SOURCE_REGISTRY_VERSION,
+    SOURCES,
+    require_registered,
+)
 from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
 
 __all__ = ["build_parser", "main", "run"]
@@ -66,19 +93,10 @@ EXIT_USAGE: Final = 2
 EXIT_STAGE_NOT_ENABLED: Final = 3
 EXIT_GATE_FAILURE: Final = 4
 
-#: The Milestone 3.2 surfaces are recognized but unimplemented. Each entry is the operator-facing
-#: reason the command refuses; the stage named is the one that implements it, and reaching a stage
-#: is never by itself authorization to run live (Decision 035; contract §8).
-_M3_2_UNAVAILABLE: Final[dict[str, str]] = {
-    "acquire": (
-        "controlled acquisition is implemented at a later stage, and live operation additionally "
-        "requires implementation acceptance and a separate per-window owner authorization"
-    ),
-    "derive-dependent-plan": "dependent-plan derivation is implemented at a later stage",
-    "reconcile-requests": "request reconciliation is implemented at a later stage",
-    "show-drift": "drift inspection is implemented at a later stage",
-    "recover": "recovery repair is implemented at a later stage",
-}
+#: The accepted contract and stage authority a live acquisition names when it asserts the operator
+#: conjunction. It records *which* authority the invocation runs under; naming it is necessary and
+#: never sufficient, and it grants nothing on its own (Decision 045 §6 item 7).
+_M3_2_STAGE_AUTHORITY: Final = "Milestones/contracts/m3_2.md; Decision 045 T2.5-T2.6"
 
 _STAGE_M2_2: Final = "Stage M2.2 (SEC client and metadata census)"
 _STAGE_M2_3: Final = "Stage M2.3 (deterministic pilot selection)"
@@ -372,58 +390,238 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
 
 
 def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Recognize the Milestone 3.2 command surfaces, none of which is implemented.
+    """Wire the six Milestone 3.2 operator surfaces (Decision 045 §4).
 
-    Stage T2.1 wires the parsers and the refusal boundary only. No argument here reaches a
-    transport, a catalog, a plan execution, or a receipt: every one of these commands refuses
-    in :func:`_m3_command` before any such work could begin. Arguments are deliberately
-    optional so an operator who types a runbook command reaches that refusal rather than an
-    argparse usage error, and so the refusal boundary itself is what the tests exercise.
+    Five of them are offline in every mode. Only ``m3 acquire --live`` has a live path at all, and
+    it is the only command whose handler can reach a transport-construction site.
+
+    ``acquire``'s mode-specific arguments are declared optional at the argparse level and required
+    per mode in the handler. That is deliberate: ``--show-scope`` and ``--live`` need different
+    argument sets, and argparse cannot express "required only in this mode" without two subcommands
+    the accepted interface does not have. The handler returns exit ``2`` for a missing or
+    contradictory argument, which is what the accepted exit-code boundary reserves for a usage
+    failure.
     """
     acquire = m3_subparsers.add_parser(
         "acquire",
-        help="Controlled metadata acquisition (Milestone 3.2). NOT IMPLEMENTED; always refuses.",
+        help="Controlled metadata-only acquisition, or its zero-request scope report.",
         description=(
-            "Planned controlled metadata-only acquisition. Not implemented at stage T2.1: this "
-            "command constructs no transport, places no request, creates no catalog, and emits "
-            "no receipt. Live operation additionally requires implementation acceptance and a "
-            "separate per-window owner authorization that do not exist yet."
+            "Controlled metadata-only acquisition of the approved request plan. --show-scope "
+            "reports the acquisition authority and places zero requests; it constructs no "
+            "transport. --live is the only mode that may reach the network, and it additionally "
+            "requires both tracked network switches, a valid SEC contact identity, the exact "
+            "approved plan hash, the exact window, and the exact approved ceiling."
         ),
     )
     _add_config_argument(acquire)
+    _add_evidence_root_argument(acquire)
     acquire.add_argument(
         "--live",
         action="store_true",
         help=(
-            "Explicitly request live operation. No default. Refused at stage T2.1 regardless of "
-            "configuration: the acquisition implementation and its owner authorizations do not "
-            "exist."
+            "Explicitly request live operation. No default: no configuration key, gate token, or "
+            "contract acceptance stands in for this flag."
         ),
     )
     acquire.add_argument(
         "--show-scope",
         action="store_true",
         help=(
-            "Print the current acquisition authority summary. Makes zero requests. The "
-            "operational scope report arrives with the planned acquisition surfaces."
+            "Report the acquisition authority for the requested window. Zero network, zero "
+            "transport, no catalog, no receipt, no artifact."
+        ),
+    )
+    acquire.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="The owner-approved request plan document, relative to --evidence-root.",
+    )
+    acquire.add_argument(
+        "--window",
+        default=None,
+        metavar="M3.2A|M3.2B",
+        help="The acquisition window this invocation addresses. Never inferred from the plan.",
+    )
+    acquire.add_argument(
+        "--ceiling",
+        type=int,
+        default=None,
+        metavar="INTEGER",
+        help=(
+            "The exact owner-approved physical-attempt ceiling. Must equal the plan's own derived "
+            "ceiling exactly; it is never rounded, defaulted, or raised."
+        ),
+    )
+    acquire.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="The operational catalog, relative to --data-root.",
+    )
+    acquire.add_argument(
+        "--data-root",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="The isolated Milestone 3.2 data root, relative to --evidence-root.",
+    )
+    acquire.add_argument(
+        "--receipt-out",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="Where to write this invocation's execution receipt, relative to --evidence-root.",
+    )
+    acquire.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help=(
+            "The exact predecessor receipt this invocation continues. Never inferred from ambient "
+            "state; a resume registers its own new run identity."
+        ),
+    )
+    acquire.add_argument(
+        "--receipt-chain-head",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help=(
+            "For --show-scope: the receipt chain whose consumed-count baseline is reconstructed. "
+            "Omitting it reports a fresh chain baseline of zero."
         ),
     )
 
-    for name, summary in (
-        ("derive-dependent-plan", "Derive the dependent request plan from frozen objects"),
-        ("reconcile-requests", "Reconcile planned versus actual requests"),
-        ("show-drift", "List schema-drift events for a run"),
-        ("recover", "Apply one deterministic recovery repair"),
+    dependent = m3_subparsers.add_parser(
+        "derive-dependent-plan",
+        help="Derive the M3.2B dependent request plan from frozen M3.2A objects. Zero network.",
+        description=(
+            "Deterministic, zero-network derivation of the M3.2B dependent plan from frozen "
+            "M3.2A objects and one explicit reviewed reconciliation set. It verifies object "
+            "identity, hash, and provenance, refuses disagreement in either direction, derives "
+            "only the two authorized dependent routes, and writes exactly one dry_run receipt on "
+            "success. Successful derivation approves neither the resulting count nor a ceiling."
+        ),
+    )
+    _add_config_argument(dependent)
+    _add_evidence_root_argument(dependent)
+    dependent.add_argument(
+        "--from-window",
+        required=True,
+        metavar="M3.2A",
+        help="The frozen source window. Must be exactly M3.2A for this dependent derivation.",
+    )
+    for name, help_text in (
+        ("--catalog", "The frozen operational catalog, relative to --data-root."),
+        ("--data-root", "The data root holding the frozen objects, relative to --evidence-root."),
+        ("--reconciliation-set", "The explicit reviewed reconciliation set."),
+        ("--plan-out", "Where to write the derived M3.2B plan."),
+        ("--receipt-out", "Where to write the mandatory dry_run receipt."),
     ):
-        parser = m3_subparsers.add_parser(
-            name,
-            help=f"{summary} (Milestone 3.2). NOT IMPLEMENTED; always refuses.",
-            description=(
-                f"Planned Milestone 3.2 surface: {summary.lower()}. Not implemented at stage "
-                "T2.1; this command refuses without reading or writing any artifact."
-            ),
+        dependent.add_argument(
+            name, type=Path, required=True, metavar="RELATIVE_PATH", help=help_text
         )
-        _add_config_argument(parser)
+
+    reconcile = m3_subparsers.add_parser(
+        "reconcile-requests",
+        help="Reconcile an approved plan against durable catalog and object state. Read-only.",
+        description=(
+            "Deterministic plan-to-catalog reconciliation. Exits 0 only when no blocking defect "
+            "exists, the required-absence enumeration is empty, and any remaining divergence is "
+            "plan-explained and nonblocking; otherwise exits 4 after completing the evaluation. "
+            "It emits no receipt and writes one private, deterministic report."
+        ),
+    )
+    _add_config_argument(reconcile)
+    _add_evidence_root_argument(reconcile)
+    for name, help_text in (
+        ("--plan", "The approved request plan to reconcile."),
+        ("--catalog", "The operational catalog, relative to --data-root."),
+        ("--data-root", "The data root whose object store is reconciled."),
+        ("--report-out", "Where to write the private deterministic reconciliation report."),
+    ):
+        reconcile.add_argument(
+            name, type=Path, required=True, metavar="RELATIVE_PATH", help=help_text
+        )
+
+    drift = m3_subparsers.add_parser(
+        "show-drift",
+        help="List the schema-drift events of exactly one M3.2 acquisition run. Read-only.",
+        description=(
+            "Lists and evaluates only the drift attributable through durable observation lineage "
+            "to the supplied M3.2 acquisition run. There is no global-drift fallback: an unknown, "
+            "non-M3.2, unattributable, or ambiguous run identity fails closed with exit 4, as "
+            "does any blocking drift. It emits no receipt."
+        ),
+    )
+    _add_config_argument(drift)
+    _add_evidence_root_argument(drift)
+    drift.add_argument(
+        "--catalog",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="The operational catalog to inspect, relative to --evidence-root.",
+    )
+    drift.add_argument(
+        "--run",
+        required=True,
+        metavar="CENSUS_RUN_ID",
+        help=(
+            "An existing ops_ingestion_jobs.job_id registered as an M3.2 acquisition run. Never "
+            "created, fabricated, or inferred by this command."
+        ),
+    )
+
+    recover = m3_subparsers.add_parser(
+        "recover",
+        help="Apply exactly one explicitly requested deterministic recovery action.",
+        description=(
+            "Exposes the accepted recovery applier unchanged. The run identity is mandatory and "
+            "must already be a registered M3.2 acquisition run: this command never fabricates, "
+            "substitutes, creates, or infers one. It emits no receipt; its durable evidence is "
+            "the accepted recovery-state and recovery-event catalog family."
+        ),
+    )
+    _add_config_argument(recover)
+    _add_evidence_root_argument(recover)
+    for name, help_text in (
+        ("--plan", "The request plan the interrupted run was executing."),
+        ("--receipt-chain-head", "The most recent receipt of the interrupted run."),
+        ("--catalog", "The operational catalog, relative to --data-root."),
+        ("--data-root", "The data root whose raw store is repaired, relative to --evidence-root."),
+    ):
+        recover.add_argument(
+            name, type=Path, required=True, metavar="RELATIVE_PATH", help=help_text
+        )
+    recover.add_argument(
+        "--run",
+        required=True,
+        metavar="CENSUS_RUN_ID",
+        help=(
+            "The already-registered M3.2 acquisition run this mutation is recorded under. "
+            "Mandatory, verified to exist, and never fabricated by this command."
+        ),
+    )
+    recover.add_argument(
+        "--action",
+        required=True,
+        choices=sorted(RECOVERY_ACTIONS),
+        help="The one deterministic recovery action class to apply.",
+    )
+    recover.add_argument(
+        "--event",
+        required=True,
+        metavar="TARGET",
+        help=(
+            "The exact target the action addresses, as the deterministic recovery recommendation "
+            "names it: a data-root-relative path, or the audit projection filename."
+        ),
+    )
 
 
 def _add_evidence_root_argument(parser: argparse.ArgumentParser) -> None:
@@ -978,6 +1176,8 @@ def run() -> None:
 _M3_COMMAND_VERSIONS: Final[Mapping[str, str]] = {
     "m3 rehearse": "m3.1a/1.0",
     "m3 plan-requests": "m3.1b/1.0",
+    "m3 acquire": "m3.2/1.0",
+    "m3 derive-dependent-plan": "m3.2b-plan/1.0",
 }
 
 
@@ -1098,16 +1298,11 @@ def _m3_command(
 ) -> int:
     """Dispatch one Milestone 3.1 command.
 
-    Every M3.1 command is offline. The evidence root is resolved and validated before any read or
-    write, and a refusal is a configuration error rather than a gate failure: a root inside the
-    checkout is a mistake in the invocation, not a finding about the run.
-
-    The Milestone 3.2 surfaces refuse *before* that resolution. They read nothing and write
-    nothing, so requiring an evidence root first would report the wrong problem.
+    Every M3.1 command is offline, and five of the six Milestone 3.2 surfaces are offline in every
+    mode. The evidence root is resolved and validated before any read or write, and a refusal is a
+    configuration error rather than a gate failure: a root inside the checkout is a mistake in the
+    invocation, not a finding about the run.
     """
-    if command in _M3_2_UNAVAILABLE:
-        return _m3_2_refusal(command, args, logger)
-
     try:
         evidence_root = require_external_evidence_root(args.evidence_root, _repository_root())
     except EvidenceRootError as exc:
@@ -1122,6 +1317,11 @@ def _m3_command(
         "show-budget": _m3_show_budget_command,
         "show-receipt": _m3_show_receipt_command,
         "recovery-state": _m3_recovery_state_command,
+        "acquire": _m3_acquire_command,
+        "derive-dependent-plan": _m3_derive_dependent_plan_command,
+        "reconcile-requests": _m3_reconcile_requests_command,
+        "show-drift": _m3_show_drift_command,
+        "recover": _m3_recover_command,
     }
     handler = handlers.get(command)
     if handler is None:  # pragma: no cover - argparse rejects earlier
@@ -1143,37 +1343,6 @@ def _m3_command(
         )
         logger.error("m3 %s failed on a filesystem error", command)
         return EXIT_GATE_FAILURE
-
-
-def _m3_2_refusal(command: str, args: argparse.Namespace, logger: Logger) -> int:
-    """Refuse one unimplemented Milestone 3.2 command, fail-closed and unconditionally.
-
-    The refusal never consults the network switches, so **no combination of configuration and
-    flags can pass it**: at this stage there is no acquisition implementation to reach, and the
-    later owner authorizations that would govern a live run do not exist. Nothing here
-    constructs a transport or a client, opens a socket, touches the evidence root, creates a
-    catalog or raw object, emits a receipt, or imports a later acquisition module.
-
-    ``--show-scope`` additionally prints the current authority summary, because that is
-    non-operational status rather than the planned scope report. It is still a refusal: the
-    exit status is never success while the command is unimplemented.
-    """
-    if command == "acquire" and getattr(args, "show_scope", False):
-        for line in (
-            "m3 acquire scope — implementation stage T2.1 only",
-            "  live acquisition      : unavailable (not implemented)",
-            "  network authorization : none",
-            "  transport             : never constructed at this stage",
-            "  operational catalog   : absent (not created at this stage)",
-            "  request plan          : not executed at this stage",
-            "  live operation        : not authorized",
-        ):
-            print(line)
-
-    detail = _M3_2_UNAVAILABLE[command]
-    print(f"m3 {command} is not available: {detail}.", file=sys.stderr)
-    logger.warning("refused m3 %s: not implemented at this stage", command)
-    return EXIT_STAGE_NOT_ENABLED
 
 
 def _repository_root() -> Path:
@@ -1874,3 +2043,930 @@ def _read_json_artifact(evidence_root: Path, relative: Path) -> dict[str, object
         message = f"artifact {path.name!r} is not a JSON object"
         raise GateFailureError(message)
     return document
+
+
+# --------------------------------------------------------------------------- #
+# Milestone 3.2 operator surfaces (Decision 045 §4)
+# --------------------------------------------------------------------------- #
+def _m3_catalog_path(evidence_root: Path, data_root: Path, catalog: Path) -> Path:
+    """Resolve the operational catalog, which is named relative to the data root.
+
+    Composed first and then contained, exactly as ``m3 recovery-state`` does: joining an operator
+    string straight onto a resolved root would let an absolute or ``..``-climbing value open a
+    database anywhere on the machine. Here it is refused by its bare name, never by an absolute
+    path.
+    """
+    return _m3_artifact_path(evidence_root, Path(data_root) / catalog)
+
+
+def _m3_migration_chain_head(catalog_path: Path) -> str:
+    """The operational catalog's applied chain head, for the receipt's provenance field.
+
+    Deliberately not :func:`_migration_chain_head`, which reads the *repository* data root: an
+    M3.2 receipt reports the chain of the catalog the window actually ran against.
+    """
+    if not catalog_path.is_file():
+        return "none"
+    try:
+        with read_only_connection(catalog_path) as connection:
+            row = connection.execute(
+                "SELECT name FROM ops_schema_migrations ORDER BY name DESC LIMIT 1"
+            ).fetchone()
+    except (sqlite3.Error, DisclosureDriftError):
+        return "none"
+    return "none" if row is None else str(row[0])
+
+
+def _usage_failure(message: str, logger: Logger, command: str) -> int:
+    """Report one operator usage failure. Exit 2, never 3 or 4."""
+    print(f"m3 {command}: {message}", file=sys.stderr)
+    logger.error("m3 %s: usage failure", command)
+    return EXIT_USAGE
+
+
+def _gate_unavailable(message: str, logger: Logger, command: str) -> int:
+    """Report one unavailable or disabled live operator gate. Exit 3, never 4."""
+    print(f"m3 {command}: {message}", file=sys.stderr)
+    logger.error("m3 %s: the live operator gate is unavailable", command)
+    return EXIT_STAGE_NOT_ENABLED
+
+
+def _m3_acquire_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Dispatch ``m3 acquire`` to exactly one of its two modes.
+
+    The modes are mutually exclusive by construction. ``--show-scope`` is structurally incapable
+    of reaching a transport: it never calls into the live path at all, so its zero-transport
+    property is a fact about the call graph rather than about a flag being checked.
+    """
+    live = bool(getattr(args, "live", False))
+    show_scope = bool(getattr(args, "show_scope", False))
+    if live and show_scope:
+        return _usage_failure(
+            "--live and --show-scope are mutually exclusive; a scope report never acquires",
+            logger,
+            "acquire",
+        )
+    if show_scope:
+        return _m3_acquire_show_scope(args, config, logger, evidence_root)
+    if not live:
+        return _usage_failure(
+            "one of --show-scope or --live is required; live acquisition has no default and is "
+            "never implied by configuration",
+            logger,
+            "acquire",
+        )
+    return _m3_acquire_live(args, config, logger, evidence_root)
+
+
+def _m3_acquire_show_scope(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Report the acquisition authority for one window. Zero network, zero transport, no artifact.
+
+    It reads the approved plan document and, when one is supplied, reconstructs the consumed-count
+    baseline from the receipt chain. It creates no catalog, writes no artifact, emits no receipt,
+    constructs no client, and never enters :func:`_m3_acquire_live` - the only function in this
+    module from which a transport-construction site is reachable.
+    """
+    missing = [name for name in ("plan", "window") if getattr(args, name, None) is None]
+    if missing:
+        return _usage_failure(
+            f"--show-scope requires {', '.join('--' + name.replace('_', '-') for name in missing)}",
+            logger,
+            "acquire",
+        )
+    window = str(args.window)
+    if window not in ACQUISITION_WINDOWS:
+        print(
+            f"window {window!r} is not one of the accepted acquisition windows "
+            f"{list(ACQUISITION_WINDOWS)}",
+            file=sys.stderr,
+        )
+        logger.error("m3 acquire --show-scope: unaccepted window")
+        return EXIT_GATE_FAILURE
+
+    plan = request_plan_from_document(_read_artifact_bytes(evidence_root, args.plan))
+    if plan.acquisition_window != window:
+        print(
+            f"the approved plan is for window {plan.acquisition_window!r}, not {window!r}; a plan "
+            "is never executed against another window",
+            file=sys.stderr,
+        )
+        logger.error("m3 acquire --show-scope: plan window mismatch")
+        return EXIT_GATE_FAILURE
+
+    consumed = 0
+    chain_length = 0
+    if args.receipt_chain_head is not None:
+        head_path = _m3_artifact_path(evidence_root, args.receipt_chain_head)
+        head = inspect_receipt(head_path)
+        chain_length = len(_resolve_receipt_chain(head_path, head))
+        # The head receipt already validated, so both counts are non-negative integers of the
+        # frozen schema. They are still narrowed rather than cast: the baseline reported here is
+        # what a later resume charges against the ceiling, so a value that is not a count must
+        # refuse rather than round to zero.
+        consumed = _receipt_count(head, "actual_physical_attempt_count") + _receipt_count(
+            head, "consumed_request_count_carried_forward"
+        )
+
+    hosts = sorted({route.host for route in plan.routes})
+    allowed = sorted(route.source_id for route in plan.routes)
+    prohibited = sorted(set(SOURCES) - set(allowed))
+    print(f"m3 acquire scope — window {window} (zero requests placed).")
+    print(f"  {'allowed hosts':<34}: {', '.join(hosts)}")
+    print(f"  {'method':<34}: GET")
+    print(f"  {'route allowlist':<34}: {', '.join(allowed)}")
+    print(f"  {'prohibited route/family set':<34}: {', '.join(prohibited)}")
+    print(f"  {'filing bodies and packages':<34}: prohibited in every window")
+    print(f"  {'approved plan sha256':<34}: {plan.request_plan_sha256}")
+    print(f"  {'approved request ceiling':<34}: {plan.hard_request_ceiling}")
+    print(f"  {'consumed-count baseline':<34}: {consumed}")
+    print(f"  {'receipt chain length':<34}: {chain_length}")
+    print(f"  {'transport':<34}: not constructed by this command")
+    print(f"  {'receipt':<34}: not emitted by this command")
+    logger.info("m3 acquire --show-scope: reported %s authority with zero requests", window)
+    return EXIT_OK
+
+
+def _receipt_count(document: Mapping[str, object], field_name: str) -> int:
+    """Read one non-negative integer count from a validated receipt, or refuse.
+
+    An absent field is ``0``, which is what an omitted conditional count means. A present value
+    that is not a non-negative integer is refused rather than coerced: the consumed-count baseline
+    this feeds is what a later resume charges against the approved ceiling.
+    """
+    value = document.get(field_name)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        message = f"receipt field {field_name} is not a non-negative integer count"
+        raise GateFailureError(message)
+    return value
+
+
+def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate ladder
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Execute one live acquisition invocation, or refuse before anything is constructed.
+
+    The gate ladder runs in the accepted order and each rung reports its own exit class: a missing
+    argument is a usage failure (``2``), a disabled or unavailable live gate is ``3``, and every
+    governed integrity, plan, window, ceiling, run, or accounting refusal is ``4``.
+
+    Nothing below constructs a transport. The single construction site lives in
+    :func:`~disclosure_drift.m3.acquisition.execute_live_acquisition`, which reaches it only after
+    the complete conjunction, the window bindings, the catalog and storage prerequisites, any
+    resume proposal, and the durable run registration and its fresh-connection verification have
+    all passed.
+
+    **Nothing durable is created before a refusal that does not need it.** Every condition
+    decidable from the operator's arguments, the configuration, and the approved plan alone - the
+    explicit ``--live`` flag, both network switches, the canonical identity validator, the accepted
+    window vocabulary, the exact plan hash, the exact window, the exact ceiling equality, route
+    registration and window membership, and the filing-body prohibition - is proved *before*
+    :func:`prepare_operational_catalog` runs. A refused invocation therefore leaves no operational
+    catalog, no data root, and no lock file behind, rather than an empty database an operator has
+    to recognize as debris. Only the genuinely catalog-dependent step, the resume's continuation
+    proposal, stays after catalog preparation, because it reads durable state to decide at all.
+    """
+    required = ("plan", "window", "ceiling", "catalog", "data_root", "receipt_out")
+    missing = [name for name in required if getattr(args, name, None) is None]
+    if missing:
+        return _usage_failure(
+            "--live requires " + ", ".join("--" + name.replace("_", "-") for name in missing),
+            logger,
+            "acquire",
+        )
+
+    if not config.network.enabled:
+        return _gate_unavailable(
+            "network.enabled is false; live acquisition requires the accepted network "
+            "prerequisite state and no flag overrides it",
+            logger,
+            "acquire",
+        )
+    if not config.network.m3_acquire_enabled:
+        return _gate_unavailable(
+            "network.m3_acquire_enabled is false; the global network switch never enables "
+            "acquisition on its own",
+            logger,
+            "acquire",
+        )
+    try:
+        user_agent = config.require_sec_user_agent()
+    except SecUserAgentError as exc:
+        return _gate_unavailable(
+            f"the SEC contact identity is not accepted by the canonical validator: {exc}",
+            logger,
+            "acquire",
+        )
+
+    window = str(args.window)
+    plan = request_plan_from_document(_read_artifact_bytes(evidence_root, args.plan))
+    ceiling = int(args.ceiling)
+    authorization = LiveOperationAuthorization(
+        window=window,
+        plan_sha256=plan.request_plan_sha256,
+        approved_ceiling=ceiling,
+        authorization_reference=_M3_2_STAGE_AUTHORITY,
+    )
+    gate = LiveOperatorGate(
+        explicit_live=True,
+        network_enabled=config.network.enabled,
+        m3_acquire_enabled=config.network.m3_acquire_enabled,
+        sec_identity_validated=bool(user_agent),
+        stage_authority_reference=_M3_2_STAGE_AUTHORITY,
+    )
+    # Every binding decidable without durable state, proved before any of it is created. This is
+    # the same one implementation `execute_live_acquisition` re-asserts adjacent to the
+    # construction site; running it here as well is what keeps a wrong window, a mismatched plan
+    # hash, or an unequal ceiling from leaving an empty operational catalog behind.
+    verify_window_bindings(
+        plan=plan,
+        window=window,
+        approved_ceiling=ceiling,
+        authorization=authorization,
+    )
+
+    catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
+    catalog = prepare_operational_catalog(
+        evidence_root=evidence_root,
+        relative_path=Path(args.data_root) / args.catalog,
+        repository_root=_repository_root(),
+    )
+    storage = prepare_storage(
+        evidence_root=evidence_root,
+        data_root_relative=args.data_root,
+        repository_root=_repository_root(),
+    )
+
+    continuation = None
+    if args.resume_from is not None:
+        continuation = propose_continuation(
+            plan=plan,
+            receipt_chain_head=_m3_artifact_path(evidence_root, args.resume_from),
+            catalog_path=catalog_path,
+            storage=storage,
+            window=window,
+            approved_ceiling=ceiling,
+        )
+
+    try:
+        result = execute_live_acquisition(
+            plan=plan,
+            window=window,
+            approved_ceiling=ceiling,
+            authorization=authorization,
+            gate=gate,
+            catalog=catalog,
+            storage=storage,
+            user_agent=user_agent,
+            requests_per_second=float(config.sec.requests_per_second),
+            burst=int(config.sec.burst),
+            policy=RetrievalPolicy(
+                connect_timeout_seconds=float(config.sec.connect_timeout_seconds),
+                read_timeout_seconds=float(config.sec.read_timeout_seconds),
+                bulk_read_timeout_seconds=float(config.sec.bulk_read_timeout_seconds),
+                max_transient_retries=int(config.sec.max_retries),
+                cooldown_seconds=float(config.sec.cooldown_seconds),
+            ),
+            continuation=continuation,
+        )
+    except KeyboardInterrupt:
+        # The invocation was interrupted and its interruption point could not be established
+        # exactly, so the driver refused to produce a window at all. No receipt is written: a
+        # receipt without an established interruption state would fail the accepted recovery
+        # inspection's condition 8.2 anyway, and writing one would advertise a resume that cannot
+        # safely start. What the interruption left on disk is preserved untouched for the
+        # read-only recovery inspection to rule on.
+        print(
+            "m3 acquire: the invocation was interrupted and its exact interruption state could "
+            "not be established, so no receipt was written; run m3 recovery-state before any "
+            "further acquisition",
+            file=sys.stderr,
+        )
+        logger.error("m3 acquire: interrupted without an establishable interruption state")
+        return EXIT_GATE_FAILURE
+
+    receipt = _live_acquisition_receipt(
+        result,
+        plan=plan,
+        window=window,
+        approved_ceiling=ceiling,
+        continuation=continuation,
+        config=config,
+        catalog_path=catalog_path,
+    )
+    written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
+
+    outcome = result.outcome
+    print(f"m3 acquire — window {window}.")
+    print(f"  {'census run id':<34}: {result.census_run_id}")
+    print(f"  {'completion status':<34}: {outcome.completion_status}")
+    if outcome.interruption_state is not None:
+        print(f"  {'interruption state':<34}: {outcome.interruption_state}")
+    print(f"  {'planned logical requests':<34}: {outcome.planned_logical_requests}")
+    print(f"  {'satisfied':<34}: {len(outcome.satisfied)}")
+    print(f"  {'consumed physical attempts':<34}: {outcome.consumed_physical_attempts}")
+    print(f"  {'approved request ceiling':<34}: {outcome.approved_ceiling}")
+    print(f"  {'receipt written':<34}: {args.receipt_out or written.name}")
+    print(f"  {'receipt_id':<34}: {receipt.receipt_id}")
+    for failure in outcome.progress_failures:
+        print(f"  {'progress sink':<34}: {failure}")
+
+    if not outcome.completed_successfully:
+        logger.error("m3 acquire: window %s did not complete successfully", window)
+        return EXIT_GATE_FAILURE
+    logger.info("m3 acquire: window %s completed successfully", window)
+    return EXIT_OK
+
+
+#: How an engine completion status maps onto the frozen receipt's closed status vocabulary. The
+#: engine's ``incomplete`` - every request terminated, but a required object is absent - has no
+#: frozen counterpart of its own, and deliberately does not get one: the receipt schema has no
+#: ``completed_with_absences`` value and a run that left a required object absent is not a
+#: successful window (accepted contract §14), so it is reported as ``failed``.
+#:
+#: ``interrupted`` maps to itself and to nothing else. It is the frozen vocabulary's own value for
+#: a genuine external interruption of a lawful invocation, and it is what the accepted recovery
+#: inspection's condition 8.2 reads to establish that the interruption point was recorded rather
+#: than guessed. Folding it into ``failed`` - or letting ``failed`` stand in for it - would make a
+#: real interrupted run unresumable through the accepted path, which is exactly the defect this
+#: correction repairs.
+_RECEIPT_COMPLETION_STATUS: Final[Mapping[str, str]] = {
+    "complete": "complete",
+    "incomplete": "failed",
+    "interrupted": "interrupted",
+    "stopped_at_ceiling": "stopped_at_ceiling",
+    "stopped_by_gate": "stopped_by_gate",
+    "failed": "failed",
+}
+
+#: The registered fallback reason a non-complete window reports when no narrower registered code
+#: is present on any of its outcomes. It is an existing registry entry whose description is
+#: exactly this case; no new reason code is introduced by this stage.
+_ACQUISITION_FALLBACK_REASON: Final = "SEC_ACQUISITION_INTERRUPTED"
+
+
+def _live_acquisition_receipt(  # noqa: PLR0913 - the frozen receipt binds many explicit facts
+    result: LiveAcquisitionResult,
+    *,
+    plan: RequestPlan,
+    window: str,
+    approved_ceiling: int,
+    continuation: ContinuationProposal | None,
+    config: ProjectConfig,
+    catalog_path: Path,
+) -> ExecutionReceipt:
+    """Assemble the one terminal receipt a lawful live invocation owes.
+
+    Every count is bound from the producer side, and the two response-event maps come from the
+    exhaustive accounting rather than from the request-disposition totals - Decision 045 §8 is
+    explicit that request dispositions and response-policy events are different universes, and
+    §9's equality invariant is checked here before anything is written.
+
+    The two instants are the **run's own**, taken from the one governed clock the engine stamps
+    its observations with, rather than sampled again here. That matters beyond tidiness: the
+    accepted continuation math segments committed observations around ``completed_at_utc`` to
+    decide which attempts a receipt already accounts for. A separately sampled, second-truncated
+    instant can fall *before* observations the run itself covered, which charges them a second
+    time against the approved ceiling on every resume. Reading both from the run removes the
+    possibility rather than narrowing it: ``completed_at_utc`` is stamped after the last
+    observation, by the same clock, at the same precision.
+
+    ``cache_hit_count`` is the count of requests **already satisfied and therefore never placed**,
+    which is the plan's own excluded set for a fresh window and the continuation proposal's
+    excluded set for a resume. The legacy ``WindowOutcome.cache_hits`` alias is deliberately not
+    used: it counts lawful ``304`` reuses, which belong in ``not_modified_count``.
+
+    Raises:
+        GateFailureError: the accounting cannot be proven exact. Decision 045 §9.5 requires
+            exactness or a stop, so an inexact receipt is refused rather than written.
+    """
+    outcome = result.outcome
+    accounting = result.accounting
+    started_at = result.started_at_utc
+    completed_at = result.completed_at_utc
+
+    carried = result.carried_forward_consumed
+    actual_physical = outcome.consumed_physical_attempts - (carried or 0)
+    attempted = tuple(item for item in outcome.outcomes if item.attempts > 0)
+    if sum(item.attempts for item in attempted) != actual_physical:
+        message = (
+            "the per-request attempt totals disagree with the window's consumed physical "
+            "attempts, so the receipt's execution accounting cannot be proven exact"
+        )
+        raise GateFailureError(message)
+    if not accounting.is_exact:
+        message = (
+            "the response-event accounting is not exact"
+            + (f": {accounting.undetermined_basis}" if accounting.undetermined_basis else "")
+            + "; an inexact receipt is refused rather than written"
+        )
+        raise GateFailureError(message)
+    if accounting.status_event_count != actual_physical:
+        message = (
+            f"{accounting.status_event_count} response event(s) were accounted against "
+            f"{actual_physical} physical attempt(s); every physical attempt produces exactly one "
+            "response event"
+        )
+        raise GateFailureError(message)
+
+    classification_totals, status_totals = accounting.as_receipt_totals()
+    completion = _RECEIPT_COMPLETION_STATUS[outcome.completion_status]
+    per_route: dict[str, dict[str, int]] = {}
+    for item in attempted:
+        entry = per_route.setdefault(
+            item.request.source_id, {"logical_request_count": 0, "physical_attempt_count": 0}
+        )
+        entry["logical_request_count"] += 1
+        entry["physical_attempt_count"] += item.attempts
+    if not per_route:
+        message = (
+            "the window placed no physical attempt, so no live execution accounting exists to "
+            "record; a receipt is refused rather than written with empty totals"
+        )
+        raise GateFailureError(message)
+
+    drift_outcome, drift_events = _window_schema_drift(outcome)
+    reason_code = None if completion == "complete" else _window_reason_code(outcome)
+    remaining = len(outcome.unattempted) if completion == "stopped_at_ceiling" else None
+
+    return ExecutionReceipt(
+        command_name="m3 acquire",
+        command_version=_M3_COMMAND_VERSIONS["m3 acquire"],
+        phase=window,
+        invocation_mode="live",
+        configuration_fingerprint=_configuration_fingerprint(config),
+        migration_chain_head=_m3_migration_chain_head(catalog_path),
+        started_at_utc=started_at,
+        completed_at_utc=completed_at,
+        elapsed_seconds=_elapsed_seconds(started_at, completed_at),
+        source_registry_version=M22_SOURCE_REGISTRY_VERSION,
+        index_plan_policy_version=INDEX_PLAN_POLICY_VERSION,
+        request_plan_schema_version=REQUEST_PLAN_SCHEMA_VERSION,
+        parser_versions=_route_parser_versions(plan),
+        acquisition_window=plan.acquisition_window,
+        request_plan_id=plan.request_plan_id,
+        request_plan_sha256=plan.request_plan_sha256,
+        approved_request_ceiling=approved_ceiling,
+        planned_logical_request_count=plan.planned_unique_logical_requests,
+        maximum_physical_attempt_count=plan.maximum_physical_attempts,
+        planned_per_route={
+            route.source_id: route.planned_unique_logical_requests for route in plan.routes
+        },
+        actual_logical_request_count=len(attempted),
+        actual_physical_attempt_count=actual_physical,
+        actual_per_route=per_route,
+        response_classification_totals=classification_totals,
+        status_code_totals=status_totals,
+        raw_object_count=outcome.new_raw_objects,
+        duplicate_object_count=outcome.byte_identical_duplicates,
+        cache_hit_count=_excluded_cache_hits(plan, continuation),
+        not_modified_count=outcome.not_modified_reuses,
+        quarantined_object_count=outcome.classification_totals["quarantined"],
+        redirect_hop_count=accounting.redirect_hop_count,
+        cooldown_count=accounting.cooldown_count,
+        remaining_planned_logical_request_count=remaining,
+        schema_drift_outcome=drift_outcome,
+        schema_drift_event_count=drift_events,
+        completion_status=completion,
+        reason_code=reason_code,
+        reason_detail=None if reason_code is None else _window_reason_detail(outcome),
+        interruption_state=outcome.interruption_state,
+        recovery_predecessor_receipt_id=result.predecessor_receipt_id,
+        consumed_request_count_carried_forward=carried,
+    )
+
+
+def _elapsed_seconds(started_at_utc: str, completed_at_utc: str) -> float:
+    """How long the invocation ran, from its own two recorded instants.
+
+    Derived from the same two strings the receipt records rather than from a separate clock
+    reading, so the elapsed figure and the timestamps beside it can never describe different
+    intervals. An unparseable instant is ``0.0``: the receipt schema has already validated both
+    against its timestamp pattern before this is reached, so this branch is unreachable in
+    practice and exists so a timing field can never raise.
+    """
+    started = _parse_instant(started_at_utc)
+    completed = _parse_instant(completed_at_utc)
+    if started is None or completed is None:  # pragma: no cover - both are schema-validated
+        return 0.0
+    return round((completed - started).total_seconds(), 3)
+
+
+def _parse_instant(value: str) -> datetime | None:
+    """Parse one RFC 3339 ``Z`` instant, or ``None`` when it is not one."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:  # pragma: no cover - schema-validated before it reaches here
+        return None
+
+
+def _excluded_cache_hits(plan: RequestPlan, continuation: ContinuationProposal | None) -> int:
+    """Requests already satisfied and therefore never placed (Decision 040 §6 ``cache_hit_count``).
+
+    A resume reports the continuation proposal's excluded set, which is a snapshot over the whole
+    durable history; a fresh window reports the plan's own ``expected_cache_hits``, the instances
+    excluded before the plan was formed. Neither is the lawful-``304`` count, which the receipt
+    keeps separately as ``not_modified_count``.
+    """
+    if continuation is not None:
+        return continuation.already_satisfied_excluded_count
+    return plan.expected_cache_hits
+
+
+def _route_parser_versions(plan: RequestPlan) -> Mapping[str, str]:
+    """The registered parser version of every route the window planned.
+
+    Milestone 3.2 acquires and parses nothing, so this records the parser-version *provenance* of
+    the objects it stored rather than claiming a parse happened. It is read from the source
+    registry, which derives each version from the parser implementation rather than storing a copy.
+    """
+    return {
+        require_registered(route.source_id).parser_id: require_registered(
+            route.source_id
+        ).parser_version
+        for route in plan.routes
+    }
+
+
+def _window_schema_drift(outcome: WindowOutcome) -> tuple[str, int]:
+    """The window's frozen ``schema_drift_outcome`` and event count.
+
+    ``blocked`` when any observed drift reason blocks release, ``unknown_fields_retained`` when
+    drift was observed and retained without blocking, and ``none`` otherwise. The three values are
+    the frozen vocabulary; no fourth is invented for a window that parsed nothing.
+    """
+    drift_codes = [
+        code
+        for item in outcome.outcomes
+        for code in item.reason_codes
+        if code in _DRIFT_RECEIPT_CODES
+    ]
+    if not drift_codes:
+        return "none", 0
+    blocking = any(REASON_CODES[code].blocks_release for code in drift_codes)
+    return ("blocked" if blocking else "unknown_fields_retained"), len(drift_codes)
+
+
+#: Registered reason codes whose presence on a committed observation is a schema-drift event for
+#: the receipt's drift fields. It is the same registered family the accepted T2.4 drift listing
+#: reads, restated here because the driver keeps its copy private.
+_DRIFT_RECEIPT_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "PARSER_SCHEMA_DRIFT_OBSERVED",
+        "RAW_ARCHIVE_INVALID",
+        "RAW_ARCHIVE_MEMBER_REFUSED",
+        "SEC_RESPONSE_MALFORMED",
+        "SOURCE_CONTENT_UPDATED",
+        "SOURCE_DATED_ARTIFACT_CHANGED",
+        "SOURCE_IMMUTABLE_IDENTITY_MUTATED",
+        "SOURCE_VALIDATOR_CONTRADICTION",
+    }
+)
+
+
+def _window_reason_code(outcome: WindowOutcome) -> str:
+    """One registered reason code for a non-complete window, chosen deterministically.
+
+    The window's own stop reason first, then the lowest-sorting registered blocking code any
+    outcome carries, then the registered fallback whose description is exactly "acquisition was
+    interrupted and no narrower registered reason applies". No code is invented: an unregistered
+    code would be refused by the receipt validator, and this stage introduces none.
+    """
+    for code in outcome.reason_codes:
+        if code in REASON_CODES:
+            return code
+    blocking = sorted(
+        {
+            code
+            for item in outcome.outcomes
+            for code in item.reason_codes
+            if code in REASON_CODES and REASON_CODES[code].blocks_release
+        }
+    )
+    return blocking[0] if blocking else _ACQUISITION_FALLBACK_REASON
+
+
+def _window_reason_detail(outcome: WindowOutcome) -> str:
+    """One short single-line non-secret sentence for the receipt's ``reason_detail``.
+
+    Built from counts and the frozen completion status only. The window's own ``detail`` string is
+    deliberately not copied: it is bounded here rather than at its many producers, and a receipt
+    field constrained to one short line must not depend on a caller having kept it short.
+    """
+    return (
+        f"window {outcome.window} ended {outcome.completion_status} with "
+        f"{len(outcome.satisfied)} of {outcome.planned_logical_requests} planned logical "
+        f"request(s) satisfied"
+    )
+
+
+def _m3_derive_dependent_plan_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Derive the M3.2B dependent plan from frozen M3.2A objects. Zero network, always.
+
+    Refuses before reading anything when the invoking configuration is transport-capable, writes
+    the deterministic plan document, and then writes **exactly one** ``dry_run`` receipt. Every
+    refusal path returns before either write, so a refused derivation leaves no plan and no
+    success receipt behind.
+    """
+    started = _utc_now()
+    catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
+    storage = prepare_storage(
+        evidence_root=evidence_root,
+        data_root_relative=args.data_root,
+        repository_root=_repository_root(),
+    )
+    derivation = derive_dependent_plan(
+        from_window=str(args.from_window),
+        catalog_path=catalog_path,
+        storage=storage,
+        reconciliation_set=_read_json_artifact(evidence_root, args.reconciliation_set),
+        requests_per_second=float(config.sec.requests_per_second),
+        transport_capable_configuration=(
+            config.network.enabled or config.network.m3_acquire_enabled
+        ),
+    )
+    plan = derivation.plan
+
+    _write_m3_artifact_once(
+        derivation.plan_bytes,
+        evidence_root=evidence_root,
+        relative=args.plan_out,
+        description="dependent request plan",
+    )
+
+    completed = _utc_now()
+    receipt = ExecutionReceipt(
+        command_name="m3 derive-dependent-plan",
+        command_version=_M3_COMMAND_VERSIONS["m3 derive-dependent-plan"],
+        phase="M3.2B",
+        invocation_mode="dry_run",
+        configuration_fingerprint=_configuration_fingerprint(config),
+        migration_chain_head=_m3_migration_chain_head(catalog_path),
+        started_at_utc=_rfc3339(started),
+        completed_at_utc=_rfc3339(completed),
+        elapsed_seconds=round((completed - started).total_seconds(), 3),
+        source_registry_version=M22_SOURCE_REGISTRY_VERSION,
+        index_plan_policy_version=INDEX_PLAN_POLICY_VERSION,
+        request_plan_schema_version=REQUEST_PLAN_SCHEMA_VERSION,
+        acquisition_window=plan.acquisition_window,
+        request_plan_id=plan.request_plan_id,
+        request_plan_sha256=plan.request_plan_sha256,
+        planned_logical_request_count=plan.planned_unique_logical_requests,
+        maximum_physical_attempt_count=plan.maximum_physical_attempts,
+        planned_per_route={
+            route.source_id: route.planned_unique_logical_requests for route in plan.routes
+        },
+        # A derivation places nothing. `dry_run` is a zero-network mode, and the receipt refuses
+        # any other value here rather than treating it as a reporting convention.
+        actual_logical_request_count=0,
+        actual_physical_attempt_count=0,
+        completion_status="complete",
+    )
+    written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
+
+    print("M3.2B dependent plan derived (zero requests placed).")
+    print(f"  {'frozen objects verified':<38}: {derivation.verified_object_count}")
+    print(f"  {'entity instances':<38}: {derivation.entity_instance_count}")
+    print(f"  {'historical instances':<38}: {derivation.historical_instance_count}")
+    print(f"  {'dependent logical requests':<38}: {derivation.dependent_instance_count}")
+    print(f"  {'derived hard request ceiling':<38}: {plan.hard_request_ceiling}")
+    print(f"  {'request plan sha256':<38}: {plan.request_plan_sha256}")
+    print(f"  {'plan written':<38}: {args.plan_out}")
+    print(f"  {'receipt written':<38}: {args.receipt_out or written.name}")
+    print(f"  {'receipt_id':<38}: {receipt.receipt_id}")
+    print(f"  {'approval status':<38}: this command approves no count and no ceiling")
+    logger.info("m3 derive-dependent-plan: derived the M3.2B plan with zero requests")
+    return EXIT_OK
+
+
+def _m3_reconcile_requests_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - reconciliation reads only the explicit inputs
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Reconcile an approved plan against durable state, and write one private report.
+
+    Exit ``0`` only when no blocking reconciliation defect exists, the required-absence
+    enumeration is empty, and every remaining divergence is plan-explained and nonblocking.
+    Otherwise exit ``4`` **after** the evaluation completed - a malformed input or an IO failure
+    raises instead and is reported by the ordinary failure class, so an ordinary failure can never
+    masquerade as a clean reconciliation.
+
+    The report is written on both exits, because the evidence that explains a ``4`` is as
+    load-bearing as the evidence that explains a ``0``. It emits no receipt.
+    """
+    plan = request_plan_from_document(_read_artifact_bytes(evidence_root, args.plan))
+    catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
+    storage = prepare_storage(
+        evidence_root=evidence_root,
+        data_root_relative=args.data_root,
+        repository_root=_repository_root(),
+    )
+    reconciliation = reconcile_requests(
+        plan=plan,
+        reconstruction=reconstruct_catalog_state(catalog_path=catalog_path, storage=storage),
+        storage=storage,
+    )
+
+    clean = _reconciliation_is_clean(reconciliation)
+    _write_m3_artifact_once(
+        _canonical_json_bytes(_reconciliation_report(reconciliation, clean=clean)),
+        evidence_root=evidence_root,
+        relative=args.report_out,
+        description="reconciliation report",
+    )
+
+    print(f"Request reconciliation — window {reconciliation.window} (read-only).")
+    for state, count in reconciliation.totals.items():
+        print(f"  {state:<38}: {count}")
+    for label, value in (
+        ("required absences", str(len(reconciliation.absences))),
+        (
+            "absences without terminal reason",
+            str(len(reconciliation.absences_without_terminal_reason)),
+        ),
+        ("out-of-plan observations", str(len(reconciliation.out_of_plan))),
+        ("store findings", str(len(reconciliation.store_findings))),
+        ("blocking drift events", str(len(reconciliation.blocking_drift))),
+        ("nonblocking drift events", str(len(reconciliation.nonblocking_drift))),
+        ("blocked recovery states", str(reconciliation.blocked_recovery_states)),
+        ("report written", str(args.report_out)),
+    ):
+        print(f"  {label:<38}: {value}")
+
+    if not clean:
+        logger.error("m3 reconcile-requests: a blocking defect or a required absence remains")
+        return EXIT_GATE_FAILURE
+    logger.info("m3 reconcile-requests: no blocking defect and no required absence")
+    return EXIT_OK
+
+
+def _reconciliation_is_clean(reconciliation: RequestReconciliation) -> bool:
+    """Whether the evaluated reconciliation permits exit ``0`` (Decision 045 §4.4).
+
+    Three conjuncts, stated exactly as the interface rules them: no blocking reconciliation
+    defect, an empty required-absence enumeration, and no remaining divergence that is not
+    plan-explained and nonblocking. Nonblocking drift is explicitly *not* a defect; an out-of-plan
+    observation and a store finding are, because neither is explained by the plan.
+    """
+    return (
+        not reconciliation.absences
+        and not reconciliation.blocking_drift
+        and not reconciliation.out_of_plan
+        and not reconciliation.store_findings
+        and reconciliation.blocked_recovery_states == 0
+    )
+
+
+def _reconciliation_report(
+    reconciliation: RequestReconciliation,
+    *,
+    clean: bool,
+) -> Mapping[str, object]:
+    """The private, deterministic reconciliation report document.
+
+    Identical inputs serialize byte-identically: every list is already in the accepted
+    reconciliation's own deterministic order, and the canonical writer sorts keys at every level.
+
+    It records the evaluated result, the absence enumeration, and the blocking and nonblocking
+    drift that explain the exit. It carries **no** raw progress-sink exception text: no field here
+    is derived from one, and the reconciliation it renders is built from durable catalog state
+    rather than from any in-memory run observable.
+    """
+    return {
+        "reconciliation_report_schema_version": "m3-2-reconciliation-report/1.0",
+        "window": reconciliation.window,
+        "plan_sha256": reconciliation.plan_sha256,
+        "exit_is_clean": clean,
+        "absence_enumeration": [item.as_record() for item in reconciliation.absences],
+        "absences_without_terminal_reason": [
+            item.identity_label for item in reconciliation.absences_without_terminal_reason
+        ],
+        "blocking_drift": [entry.as_record() for entry in reconciliation.blocking_drift],
+        "nonblocking_drift": [entry.as_record() for entry in reconciliation.nonblocking_drift],
+        "reconciliation": reconciliation.as_record(),
+    }
+
+
+def _canonical_json_bytes(document: Mapping[str, object]) -> bytes:
+    """Serialize one private artifact in the project's canonical JSON form.
+
+    The same discipline the plan and the receipt use - UTF-8, LF only, keys sorted at every level,
+    compact separators, non-finite numbers refused, one trailing newline - so a report is
+    byte-comparable across machines and across reruns.
+    """
+    rendered = json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    return f"{rendered}\n".encode()
+
+
+def _m3_show_drift_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - drift inspection reads only the explicit inputs
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """List the drift of exactly one M3.2 acquisition run. Read-only; emits no receipt.
+
+    There is no global-drift fallback and no unscoped listing: an unknown, non-M3.2,
+    unattributable, or ambiguous run identity raises out of :func:`drift_for_run` and is reported
+    as exit ``4``, exactly as blocking drift is.
+    """
+    scoped = drift_for_run(
+        catalog_path=_m3_artifact_path(evidence_root, args.catalog),
+        census_run_id=str(args.run),
+    )
+
+    print(f"Schema drift for census run {scoped.census_run_id} (stage {scoped.stage}).")
+    print(f"  {'attributed observations':<38}: {scoped.attributed_observation_count}")
+    print(f"  {'drift events':<38}: {len(scoped.entries)}")
+    print(f"  {'blocking drift events':<38}: {len(scoped.blocking)}")
+    print(f"  {'nonblocking drift events':<38}: {len(scoped.nonblocking)}")
+    for entry in scoped.entries:
+        marker = "BLOCKING" if entry.blocking else "retained"
+        print(f"  {marker:<8} {entry.source_id:<32} {', '.join(entry.reason_codes)}")
+
+    if scoped.has_blocking:
+        logger.error("m3 show-drift: blocking drift is attributed to run %s", scoped.census_run_id)
+        return EXIT_GATE_FAILURE
+    logger.info("m3 show-drift: no blocking drift for run %s", scoped.census_run_id)
+    return EXIT_OK
+
+
+def _m3_recover_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,  # noqa: ARG001 - the applier reads only the explicit inputs
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Apply exactly one explicitly requested recovery action under an existing run identity.
+
+    The run identity is validated **before** the applier is invoked, and validation is a read of
+    the durable ``ops_ingestion_jobs`` row: it must exist, be an M3.2 acquisition run, and carry
+    an accepted acquisition window. This command never creates, fabricates, substitutes, or infers
+    a run identity, and the accepted applier - which is passed the identity unchanged and likewise
+    never mints one - is exposed without broadening its semantics. It emits no receipt.
+
+    ``--event`` is the operator name for the exact target the action addresses, which is what the
+    accepted applier calls its ``target``.
+    """
+    catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
+    validate_acquisition_run(catalog_path, str(args.run))
+
+    plan = request_plan_from_document(_read_artifact_bytes(evidence_root, args.plan))
+    storage = prepare_storage(
+        evidence_root=evidence_root,
+        data_root_relative=args.data_root,
+        repository_root=_repository_root(),
+    )
+    result = apply_recovery_action(
+        action=str(args.action),
+        target=str(args.event),
+        plan=plan,
+        receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
+        catalog_path=catalog_path,
+        storage=storage,
+        census_run_id=str(args.run),
+    )
+
+    print("Recovery action applied (exactly one; a fresh inspection is required next).")
+    for label, value in (
+        ("census run id", result.census_run_id),
+        ("action", result.action),
+        ("target", result.target),
+        ("recovery state id", result.recovery_state_id),
+        ("action taken", result.action_taken),
+        ("event recorded", str(result.event_recorded)),
+        ("state resolved", str(result.state_resolved)),
+        ("post state undetermined", str(result.post_state_undetermined)),
+        ("continuation", "prohibited until a fresh inspection returns SAFE"),
+        ("detail", result.detail),
+    ):
+        print(f"  {label:<28}: {value}")
+
+    if result.post_state_undetermined:
+        logger.error("m3 recover: the post-action state is UNDETERMINED")
+        return EXIT_GATE_FAILURE
+    logger.info("m3 recover: applied %s and resolved its write-ahead state", result.action)
+    return EXIT_OK

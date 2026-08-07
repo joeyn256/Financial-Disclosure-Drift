@@ -7,9 +7,24 @@ Guarantees implemented here:
 * ``content_sha256`` covers decoded entity bytes and is the integrity anchor;
 * text-like payloads use deterministic gzip whose round trip must reproduce
   ``content_sha256``;
+* verification establishes the **stored representation**, not merely that the expected decoded
+  bytes can be recovered from it: stored digest and length, decoded digest and length, and — for a
+  gzip object — that the file is exactly one complete gzip member;
 * a later differing response becomes a **new observation**, never an overwrite;
 * damaged files are quarantined and preserved, never replaced or deleted;
-* crash recovery may only adopt a valid orphan or quarantine a partial file.
+* crash recovery may only adopt a valid orphan or quarantine a partial file;
+* **memory does not scale with the object.** Every payload is hashed, sized, compressed,
+  decompressed, and verified over bounded blocks, so storing a multi-gigabyte bulk archive costs
+  no more resident memory than storing a small one (accepted Decision 047 §6; limitation
+  **M3-L13**).
+
+The last guarantee is the reason this module never materializes a whole payload. The retrieval
+layer already spools a response to disk and yields it back in blocks precisely so the body need not
+be held at once; buffering it here would have thrown that away, and the one route in the M3.2A plan
+that retrieves a full bulk archive is exactly where that would have failed. What replaces the
+buffer is a streaming compressor whose output is **byte-identical** to
+:func:`compress_deterministically`, and a single bounded read pass that establishes the stored
+digest, the stored size, and the decompressed digest together.
 """
 
 from __future__ import annotations
@@ -19,6 +34,7 @@ import hashlib
 import json
 import os
 import uuid
+import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -42,6 +58,15 @@ __all__ = [
 ]
 
 GZIP_COMPRESSION_LEVEL: Final = 6
+#: The ``zlib`` window size that carries a gzip wrapper. ``gzip.compress(data, level, mtime=0)``
+#: reduces to ``zlib.compress(data, level=level, wbits=31)``, so a streaming compressor opened on
+#: the same window emits the same bytes for the same input regardless of how that input is chunked.
+#: That equality is what lets the frozen deterministic representation stay frozen while the object
+#: is compressed incrementally, and it is asserted directly by the tests rather than assumed.
+_GZIP_WBITS: Final = 16 + zlib.MAX_WBITS
+#: How much of a stored object is resident at once while it is hashed, sized, or verified. The same
+#: 1 MiB block the accepted snapshot spooler already reads with.
+_STREAM_BLOCK_BYTES: Final = 1024 * 1024
 _PART_SUFFIX: Final = ".part"
 _GZIP_SUFFIX: Final = ".gz"
 LINEAGE_SUFFIX: Final = ".lineage.json"
@@ -54,13 +79,137 @@ def sha256_of(data: bytes) -> str:
 
 
 def compress_deterministically(data: bytes) -> bytes:
-    """Compress with gzip in a reproducible way (level 6, mtime 0)."""
+    """Compress with gzip in a reproducible way (level 6, mtime 0).
+
+    This is the frozen definition of the stored representation. :meth:`RawStore.store` no longer
+    calls it — it cannot, without holding the whole payload — but the streaming compressor it uses
+    instead must reproduce these exact bytes, so this function remains the reference the tests
+    compare against.
+    """
     return gzip.compress(data, compresslevel=GZIP_COMPRESSION_LEVEL, mtime=0)
 
 
 def decompress(data: bytes) -> bytes:
     """Decompress gzip bytes."""
     return gzip.decompress(data)
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredFileMeasurement:
+    """What one bounded read pass establishes about bytes already on disk."""
+
+    stored_sha256: str
+    stored_size_bytes: int
+    #: Digest of the decompressed stream, present only when the file was read as gzip.
+    decompressed_sha256: str | None
+    #: Length of the decompressed stream, present only when the file was read as gzip. Counted as
+    #: the stream is drained, so it costs nothing beyond the pass that was happening anyway.
+    decompressed_size_bytes: int | None
+
+
+def _require_one_complete_gzip_member(path: Path, inflater: zlib._Decompress) -> None:
+    """Refuse gzip bytes that are not exactly one complete member.
+
+    The decoded payload agreeing with ``content_sha256`` is necessary but *not* sufficient: three
+    structurally invalid files decode to the right bytes and would otherwise pass unnoticed.
+
+    * A **truncated trailer** removes the CRC-32 and length footer. Every deflate block is still
+      present, so the full payload decodes and only ``eof`` — which stays ``False`` because zlib
+      never saw the footer it validates against — reveals that the object is short.
+    * **Trailing garbage** after a complete member decodes correctly and leaves the extra bytes in
+      ``unused_data``.
+    * A **concatenated second member** is the same signal. ``gzip`` would silently join the members
+      into one logical payload; a raw object is one exact immutable stored representation, so a
+      second member is a different object, not more of this one.
+
+    ``unconsumed_tail`` is checked for completeness: the read loop drains it, so anything left is
+    input the inflater neither consumed nor disowned.
+    """
+    if not inflater.eof:
+        message = f"stored object {path.name} ends before its gzip stream is complete"
+        raise RawObjectIntegrityError(message)
+    if inflater.unconsumed_tail:
+        message = (
+            f"stored object {path.name} leaves {len(inflater.unconsumed_tail)} undecoded byte(s) "
+            "in its gzip stream"
+        )
+        raise RawObjectIntegrityError(message)
+    if inflater.unused_data:
+        message = (
+            f"stored object {path.name} carries {len(inflater.unused_data)} byte(s) after the end "
+            "of its gzip stream"
+        )
+        raise RawObjectIntegrityError(message)
+
+
+def _measure_stored_file(path: Path, *, decompressing: bool) -> _StoredFileMeasurement:
+    """Hash and size a stored object in bounded blocks, decompressing as it reads if asked.
+
+    One pass establishes everything the store needs to know about bytes that are already written:
+    their digest, their exact length, and — for a gzip object — the digest of what they decompress
+    back to. Reading the file whole would make storage memory scale with the object, which is the
+    defect this exists to avoid.
+
+    The decompressed digest is taken from the **file**, not from the compressor's own output, so
+    the deterministic round trip still verifies what actually landed on disk rather than what was
+    intended to. For the same reason the pass also establishes that the file *is* one complete
+    gzip member — decoding the expected bytes says nothing about what surrounds them.
+
+    Raises:
+        RawObjectIntegrityError: the bytes do not form a readable, complete, single-member gzip
+            stream. A corrupt stored representation is an integrity fact about a raw object, so it
+            is raised as one rather than surfacing a driver-level ``zlib`` error a caller would
+            have to string-match.
+    """
+    stored = hashlib.sha256()
+    decompressed = hashlib.sha256() if decompressing else None
+    inflater = zlib.decompressobj(_GZIP_WBITS) if decompressing else None
+
+    size = 0
+    decompressed_size = 0
+    with path.open("rb") as handle:
+        while block := handle.read(_STREAM_BLOCK_BYTES):
+            stored.update(block)
+            size += len(block)
+            if inflater is None or decompressed is None:
+                continue
+            # `max_length` matters as much as the read size does. A block of a compressible object
+            # expands enormously, so an unbounded `decompress` would rebuild the whole payload in
+            # one object and reintroduce the defect on the verification path -- and would make a
+            # decompression bomb a memory fault rather than an integrity finding. Draining
+            # `unconsumed_tail` keeps every intermediate piece bounded instead.
+            #
+            # Feeding blocks that follow the end of the member is safe and deliberate: zlib
+            # accumulates them into `unused_data` instead of decoding them, so trailing bytes
+            # remain visible however far into the file they begin, and the loop still reads every
+            # block -- which it must, because the stored digest covers the whole file.
+            pending = block
+            while pending:
+                try:
+                    piece = inflater.decompress(pending, _STREAM_BLOCK_BYTES)
+                except zlib.error as exc:
+                    message = f"stored object {path.name} is not a readable gzip stream: {exc}"
+                    raise RawObjectIntegrityError(message) from exc
+                decompressed.update(piece)
+                decompressed_size += len(piece)
+                pending = inflater.unconsumed_tail
+
+    if inflater is not None and decompressed is not None:
+        try:
+            remainder = inflater.flush()
+        except zlib.error as exc:
+            message = f"stored object {path.name} ends mid-gzip-stream: {exc}"
+            raise RawObjectIntegrityError(message) from exc
+        decompressed.update(remainder)
+        decompressed_size += len(remainder)
+        _require_one_complete_gzip_member(path, inflater)
+
+    return _StoredFileMeasurement(
+        stored_sha256=stored.hexdigest(),
+        stored_size_bytes=size,
+        decompressed_sha256=None if decompressed is None else decompressed.hexdigest(),
+        decompressed_size_bytes=None if decompressed is None else decompressed_size,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +308,14 @@ class RawStore:
 
         digest = hashlib.sha256()
         content_size = 0
-        buffer = bytearray()
+        # A streaming compressor rather than a whole-object one. Its output is byte-identical to
+        # `compress_deterministically` for the same input, so the frozen stored representation is
+        # unchanged; what changes is that no step here is proportional to the object's size.
+        compressor = (
+            zlib.compressobj(GZIP_COMPRESSION_LEVEL, zlib.DEFLATED, _GZIP_WBITS)
+            if compress
+            else None
+        )
         # Any failure below leaves the .part file in place: it is preserved for
         # reconciliation and never deleted here.
         with part_path.open("wb") as handle:
@@ -168,19 +324,22 @@ class RawStore:
                     raise_during_stream()
                 digest.update(chunk)
                 content_size += len(chunk)
-                buffer.extend(chunk)
-                if not compress:
+                if compressor is None:
                     handle.write(chunk)
-            if compress:
-                handle.write(compress_deterministically(bytes(buffer)))
+                else:
+                    handle.write(compressor.compress(chunk))
+            if compressor is not None:
+                handle.write(compressor.flush())
             handle.flush()
             os.fsync(handle.fileno())
 
         content_sha256 = digest.hexdigest()
-        stored_bytes = part_path.read_bytes()
-        stored_sha256 = sha256_of(stored_bytes)
+        # One bounded pass over what was just written establishes the stored digest, the exact
+        # stored size, and — for a gzip object — the digest of what it decompresses back to.
+        measured = _measure_stored_file(part_path, decompressing=compress)
+        stored_sha256 = measured.stored_sha256
 
-        if compress and sha256_of(decompress(stored_bytes)) != content_sha256:
+        if compress and measured.decompressed_sha256 != content_sha256:
             message = "deterministic gzip round trip did not reproduce content_sha256"
             raise RawObjectIntegrityError(message)
 
@@ -191,7 +350,11 @@ class RawStore:
         try:
             os.link(part_path, destination)
         except FileExistsError:
-            existing_hash = sha256_of(destination.read_bytes()) if destination.is_file() else None
+            existing_hash = (
+                _measure_stored_file(destination, decompressing=False).stored_sha256
+                if destination.is_file()
+                else None
+            )
             if existing_hash != stored_sha256:
                 message = (
                     f"refusing to overwrite existing raw object {destination}: its stored "
@@ -210,7 +373,7 @@ class RawStore:
                     "manifest_version": "raw-object-lineage/1.0",
                     "relative_storage_path": relative_to_root(destination, self._tree.data_root),
                     "stored_sha256": stored_sha256,
-                    "stored_size_bytes": len(stored_bytes),
+                    "stored_size_bytes": measured.stored_size_bytes,
                     "content_sha256": content_sha256,
                     "logical_sha256": content_sha256,
                     "content_size_bytes": content_size,
@@ -234,7 +397,7 @@ class RawStore:
             content_sha256=content_sha256,
             stored_sha256=stored_sha256,
             content_size_bytes=content_size,
-            stored_size_bytes=len(stored_bytes),
+            stored_size_bytes=measured.stored_size_bytes,
             compression="gzip" if compress else "none",
             retrieved_at_utc=retrieved_at_utc,
             retrieval_attempt_id=retrieval_attempt_id,
@@ -275,13 +438,49 @@ class RawStore:
 
     # -- verification and quarantine ---------------------------------------- #
     def verify(self, record: RawObjectRecord) -> bool:
-        """Return whether the stored bytes still match the recorded content hash."""
+        """Return whether the file on disk is still exactly the object ``record`` describes.
+
+        Read in bounded blocks, so verifying a bulk archive costs no more memory than verifying a
+        small object.
+
+        A raw object is **one exact immutable stored representation**, so recovering the expected
+        decoded bytes is not on its own a passing answer — bytes that decode correctly can still
+        be the wrong stored object. Every identity the record carries is therefore checked:
+
+        * the stored bytes' digest and length match ``stored_sha256`` and ``stored_size_bytes``;
+        * the decoded bytes' digest and length match ``content_sha256`` and ``content_size_bytes``;
+        * a gzip object is one complete gzip member and nothing else
+          (:func:`_require_one_complete_gzip_member`).
+
+        Damage fails closed as ``False``, whatever kind it is: a short read, a corrupted byte, a
+        truncated trailer, appended bytes, a concatenated second member, or bytes that are not a
+        gzip stream at all. Distinguishing those is diagnosis, not verification, and this method
+        was asked a yes-or-no question. Genuine filesystem and OS failures are *not* caught — an
+        unreadable disk is not an answer of "no", and it still propagates.
+        """
         path = self._tree.data_root / record.relative_storage_path
         if not path.is_file():
             return False
-        stored = path.read_bytes()
-        decoded = decompress(stored) if record.compression == "gzip" else stored
-        return sha256_of(decoded) == record.content_sha256
+        try:
+            measured = _measure_stored_file(path, decompressing=record.compression == "gzip")
+        except RawObjectIntegrityError:
+            return False
+        decoded_sha256 = (
+            measured.stored_sha256
+            if measured.decompressed_sha256 is None
+            else measured.decompressed_sha256
+        )
+        decoded_size_bytes = (
+            measured.stored_size_bytes
+            if measured.decompressed_size_bytes is None
+            else measured.decompressed_size_bytes
+        )
+        return (
+            measured.stored_sha256 == record.stored_sha256
+            and measured.stored_size_bytes == record.stored_size_bytes
+            and decoded_sha256 == record.content_sha256
+            and decoded_size_bytes == record.content_size_bytes
+        )
 
     def quarantine(self, path: Path, reason_code: str, detail: str) -> Path:
         """Durably move a damaged or partial file into quarantine, preserving it."""

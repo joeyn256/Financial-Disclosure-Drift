@@ -419,11 +419,43 @@ closed-delta wording, to register one code, `OFFLINE_REHEARSAL_SCENARIO_MISMATCH
 `U(route)` never waives the independent `A_reachable` witness**, requires **one realizable full-path
 witness per route** in place of three separately measured terms, requires the M3.1A token to gate on
 all four of `passed`, `complete`, `a_reachable_agrees`, and `a_reachable_fully_tested`, and records
-that **no durable §17 review artifact exists and none covers the current tree**. It changes no
-receipt schema field or digest preimage, creates no migration, and grants no network authority. The
-Decision 029 §11 code remediation is implemented and the disposable-clone validation run on the
-corrected tree is complete; the next action is a frozen commit and the **first durable §17 review**,
-which reproduces and records that validation.
+— **as the state at the time it was written** — that no durable §17 review artifact existed. It
+changes no receipt schema field or digest preimage, creates no migration, and grants no network
+authority. That §17 review has since been produced and passed, and M3.1 is owner-accepted by
+Decision 031; **`Milestones/STATUS.md` carries the live state**, and this index never does.
+
+## Decisions 030–042 — M3.1 acceptance, the M3.2 contract, and staged T2 implementation
+
+Brought current under [Decision 043](Decisions/decision_043_m3_2_g1_navigation_workflow_repair_authorization.md)
+§§5 and 7, which is the explicit path authorization this file previously lacked. The rows are
+**pointers only** — each states one decision's narrow topic and its formal outcome, and nothing
+here approves, narrows, or amends anything. For existence and approval status use
+[`Docs/Decisions/decision_registry.md`](Decisions/decision_registry.md); for current workflow state
+use [`Milestones/STATUS.md`](../Milestones/STATUS.md).
+
+| Decision | Date | Narrow topic | Formal outcome |
+|---|---|---|---|
+| [030](Decisions/decision_030_gate_f_step_12_owner_rulings_and_hygiene_remediation.md) | 2026-08-03 | Gate F step-12 owner rulings; the one hygiene blocker resolved by a proven non-substantive redaction, leaving the §17 review verdict unchanged | `GATE_F_STEP_12_OWNER_RULINGS_AND_HYGIENE_REMEDIATION_ACCEPTED` |
+| [031](Decisions/decision_031_m3_1_acceptance.md) | 2026-08-03 | **Milestone 3.1 acceptance** — the frozen M3.1 implementation, the step-14 independent review, and the evidence bindings including the owner-approved hard request ceiling **801** | `M3_1_ACCEPTED_AND_COMPLETE` |
+| [032](Decisions/decision_032_m3_2_contract_corrections.md) | 2026-08-04 | Adopts the independent M3.2 contract review's findings F1–F7, authorizes the bounded contract correction, and requires a fresh no-subagent rereview before acceptance | `M3_2_CONTRACT_CORRECTIONS_RECORDED` |
+| [033](Decisions/decision_033_m3_2_correction_pass_adjudication.md) | 2026-08-04 | Adjudicates that correction pass; restores `Docs/decision_index.md` to its pre-edit bytes as out-of-envelope and records the resulting navigation staleness as an open item needing its own path authorization (**Decision 043 §5 is that authorization**) | `M3_2_CORRECTION_PASS_ADJUDICATED_AND_CLEANED_UP` |
+| [034](Decisions/decision_034_m3_2_contract_acceptance.md) | 2026-08-04 | **Accepts the corrected M3.2 contract unchanged at T1.** T1 grants no later gate | `M3_2_CONTRACT_ACCEPTED_AT_T1` |
+| [035](Decisions/decision_035_m3_2_t2_staged_implementation_authorization.md) | 2026-08-04 | **Staged T2 implementation authority, stage T2.1 only**; accepts the T2 packet (revision v2) as the controlling implementation plan; fixes the fifteen-path maximum T2 envelope and amends contract §22 to the T2.1–T2.6 cadence | `M3_2_T2_STAGED_IMPLEMENTATION_AUTHORIZED` |
+| [036](Decisions/decision_036_m3_2_t2_1_stage_completion.md) | 2026-08-04 | Accepts and publishes **stage T2.1** — the configuration and fail-closed command-authority layer | `M3_2_T2_1_ACCEPTED_AND_PUBLISHED` |
+| [037](Decisions/decision_037_m3_2_remaining_stage_combination.md) | 2026-08-04 | Consolidates the remaining work into **combined T2.2–T2.3, separate T2.4, and combined T2.5–T2.6**, and makes the T2.5–T2.6 commit the implementation-freeze candidate for the independent T3 review | `M3_2_REMAINING_STAGES_COMBINED` |
+| [038](Decisions/decision_038_m3_2_t2_2_t2_3_path_envelope_amendment.md) | 2026-08-05 | Narrow path-envelope amendment **for combined T2.2–T2.3 only**, adding exactly `sec/observation_catalog.py` and `tests/unit/test_observation_catalog.py`, bound to that candidate tree; carries into no later stage | `M3_2_T2_2_T2_3_PATH_ENVELOPE_AMENDMENT_RECORDED` |
+| [039](Decisions/decision_039_m3_2_t2_2_t2_3_stage_acceptance.md) | 2026-08-06 | Accepts and publishes **combined stage T2.2–T2.3** — catalog, immutable storage, and the acquisition engine | `M3_2_T2_2_T2_3_ACCEPTED_AND_COMPLETE` |
+| [040](Decisions/decision_040_m3_2_t2_4_implementation_authorization.md) | 2026-08-06 | Authorizes **stage T2.4** (recovery, reconciliation, resume boundaries, drift control) in four subphases; approves exactly one new reason code `SOURCE_REQUIRED_OBJECT_UNAVAILABLE`; fixes `NO_NEW_MIGRATION_REQUIRED` and `NO_RECEIPT_SCHEMA_CHANGE_REQUIRED` | `M3_2_T2_4_IMPLEMENTATION_AUTHORIZED` |
+| [041](Decisions/decision_041_m3_2_t2_4_recovery_state_primitive_authority.md) | 2026-08-06 | T2.4 correction authority: amends that envelope from eight paths to exactly ten, authorizes the two additive primitives `open_recovery_state` and `resolve_recovery_state`, and fixes the write-ahead sequence and failure outcomes | `M3_2_T2_4_RECOVERY_STATE_PRIMITIVE_AUTHORITY_RECORDED` |
+| [042](Decisions/decision_042_m3_2_t2_4_acceptance_and_publication.md) | 2026-08-06 | Accepts and publishes **stage T2.4**. Discloses that no T2.4 rereview artifact file exists and expressly creates, reconstructs, and back-dates none | `M3_2_T2_4_ACCEPTED_AND_PUBLISHED` |
+
+**Which record controls what, at a glance.** For the M3.2 contract's meaning read the accepted
+contract itself, [`Milestones/contracts/m3_2.md`](../Milestones/contracts/m3_2.md), with Decision
+034 for its acceptance. For *what a stage was allowed to touch* read the authorizing decision
+(035 for T2.1; 035 as amended by 038 for T2.2–T2.3; 040 as amended by 041 for T2.4) — never the
+acceptance decision, which records the outcome rather than the envelope. **Stage acceptance is not
+overall M3.2 T3 implementation acceptance**, which has not occurred; combined T2.5–T2.6 remains
+owner-gated and not begun.
 
 ## Deviation register — where deviations are recorded
 

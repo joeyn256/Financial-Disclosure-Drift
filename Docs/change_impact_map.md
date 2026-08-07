@@ -584,6 +584,55 @@ review** by a session that wrote none of the M3.1 work, which reproduces and rec
 No durable review artifact exists today and none covers the current tree; a fix commit never converts
 a prior `FAIL` into a `PASS`.
 
+## Milestone 3.2 stage T2 impact paths (accepted stages T2.1, T2.2–T2.3, and T2.4)
+
+Added under [Decision 043](Decisions/decision_043_m3_2_g1_navigation_workflow_repair_authorization.md)
+§7. **This section is navigation, not authority, and it authorizes no edit.** Every path below sits
+inside a stage whose grant is exhausted; changing any of them needs its own owner authorization and
+its own stage envelope. What a stage was allowed to touch is stated by its authorizing decision
+(035 for T2.1; 035 as amended by [038](Decisions/decision_038_m3_2_t2_2_t2_3_path_envelope_amendment.md)
+for T2.2–T2.3; [040](Decisions/decision_040_m3_2_t2_4_implementation_authorization.md) as amended by
+[041](Decisions/decision_041_m3_2_t2_4_recovery_state_primitive_authority.md) for T2.4), never by
+this map.
+
+Two constraints hold across the whole stage family and should be read before planning any change to
+it. **The migration chain is fixed at `0001`–`0013`** — Decisions 040 and 041 both record
+`NO_NEW_MIGRATION_REQUIRED`, so a change here that appears to need a migration is a stop condition,
+not a migration. **The execution receipt is frozen at `m3-execution-receipt/2.0`**
+(`NO_RECEIPT_SCHEMA_CHANGE_REQUIRED`), and receipt assembly and operator wiring belong to the
+unauthorized combined stage T2.5–T2.6, so no accepted T2 stage emits a receipt.
+
+| Path | Stage that delivered it | Nearest tests | Principal validation / gate surface | Architectural role |
+|---|---|---|---|---|
+| `configs/project.yaml` (`network.m3_acquire_enabled`), `src/disclosure_drift/config.py` | T2.1 (Decision 036) | `tests/unit/test_config.py` | ruff, ruff format, mypy; `make validate`; **both tracked switches must stay `false`** and `make context` now reports them | The command-scoped acquisition switch, independent of `network.enabled` in both directions, under strict unknown-field rejection with no environment fallback |
+| `src/disclosure_drift/cli.py` (the six M3.2 command surfaces) | T2.1 (Decision 036) | `tests/integration/test_m3_cli.py` | ruff, ruff format, mypy; `tests/integration/test_no_network.py` for the standing no-network boundary | Parser and dispatch for `m3 acquire`, `recover`, `reconcile-requests`, `show-drift`, `show-budget`, and `derive-dependent-plan` — every one fail-closed at exit 3, with no transport constructible from this layer |
+| `src/disclosure_drift/m3/acquisition.py` | T2.2–T2.3 (Decision 039), extended by T2.4 (Decision 042) | `tests/unit/test_m3_acquisition.py`, `tests/unit/test_m3_recover.py`; `tests/integration/test_m3_cli.py` | ruff, ruff format, mypy; full suite before handoff — this is the largest single production surface in M3.2 | Driver-side integration only. Catalog preparation and containment, immutable storage binding, logical-request derivation, the injected-transport acquisition engine, plus the T2.4 catalog-authoritative reconstruction, deterministic reconciliation and drift listing, continuation proposal, and the explicit recovery-action library (no CLI exposure) |
+| `src/disclosure_drift/sec/observation_catalog.py` | T2.2–T2.3 (Decision 038/039) and T2.4 (Decision 041) | `tests/unit/test_observation_catalog.py`, `tests/unit/test_observation_lineage.py` | ruff, ruff format, mypy; **yes — SQLite/migration integrity gate**: `test_migration_provenance.py` and `make sqlite-check` | Durable observation persistence and reconciliation. T2.2–T2.3 widened `ObservationRecorder.record`'s members boundary to a single-pass iterable; T2.4 added exactly the two recovery-state primitives `open_recovery_state` and `resolve_recovery_state`. Every other accepted semantic is unchanged |
+| `src/disclosure_drift/reasons.py` | T2.4 (Decision 040) | `tests/unit/test_reasons.py` (plus the registry's existing coverage in the main table above) | ruff, ruff format, mypy; **yes** — reason codes are FK targets of `reference_reason_codes`: `test_migration_provenance.py` and `make sqlite-check` | Exactly one registered code added, `SOURCE_REQUIRED_OBJECT_UNAVAILABLE`. A condition with no registered code is a stop condition under T2, never a code invented in the stage |
+| `src/disclosure_drift/m3/__init__.py` | T2.1, T2.2–T2.3, and T2.4 | covered through the tests of what it re-exports | ruff, ruff format, mypy | Public export surface for the M3 package. It adds no behaviour; a name appearing here is the accepted way to reach it |
+
+**Accepted M3 surfaces that T2 governs but has not modified.** Each is consumed unchanged by
+`acquisition.py`, which is exactly why it stays a prohibited path — a change here is not a T2 change
+and needs its own authorization.
+
+| Path | Nearest tests | Why it is listed |
+|---|---|---|
+| `src/disclosure_drift/m3/recovery.py` | `tests/unit/test_m3_recovery.py` | The **read-only** interrupted-run inspector (M3.1). It was inside the Decision 041 ten-path T2.4 maximum and was deliberately left unedited, which the maximum-not-requirement rule permits |
+| `src/disclosure_drift/m3/request_plan.py` | `tests/unit/test_m3_request_plan.py` | The deterministic zero-request plan. Its accepted plan hash `19be7bdc…` and the owner-approved ceiling **801** are bound to it; any change must reproduce them |
+| `src/disclosure_drift/m3/receipt.py` | `tests/unit/test_m3_receipt.py` | `m3-execution-receipt/2.0`, frozen for all of T2. Receipt assembly is T2.5–T2.6 work |
+| `src/disclosure_drift/sec/request_ceiling.py` | `tests/unit/test_request_ceiling.py` | The cumulative physical-attempt gate the engine consumes. Ceiling semantics are outside G1 and outside every accepted T2 stage |
+| `src/disclosure_drift/m3/rehearsal.py`, `src/disclosure_drift/m3/evidence_paths.py` | `tests/unit/test_m3_rehearsal.py`, `tests/unit/test_m3_evidence_paths.py` | Accepted M3.1 surfaces (A1–A12 rehearsal; the evidence-root boundary). No T2 stage touches either |
+
+**Declined and prohibited for the whole of T2:** `src/disclosure_drift/sec/census_orchestrator.py`
+and `src/disclosure_drift/sec/index_retrieval.py`. The accepted T2 packet declined both, and no
+later decision has released either — their rows earlier in this map describe them as Milestone 2
+surfaces, which is the only capacity in which they may be changed.
+
+**What no accepted T2 stage has produced:** no real operational catalog, no raw object, no receipt,
+no evidence artifact, no request, no attempt, no SEC contact. Both tracked network switches are
+`false`, ceiling 801 is unused, and no Gate H has passed. A validation run that appears to need any
+of those is a stop condition.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

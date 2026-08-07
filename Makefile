@@ -5,7 +5,7 @@ BIN := $(VENV)/bin
 .DEFAULT_GOAL := help
 .PHONY: help venv install lint lint-changed format format-check typecheck typecheck-fast \
 	typecheck-stop test test-parallel test-cov validate cohorts \
-	secrets hygiene sqlite-check sec-validate sec-help check fast context clean
+	secrets hygiene sqlite-check sec-validate sec-help check fast context stage-gate clean
 
 # Extra arguments for the pytest targets, e.g.
 #   make test PYTEST_ARGS="tests/unit/test_cohorts.py -k frozen"
@@ -90,6 +90,19 @@ check: lint format-check typecheck test secrets hygiene validate cohorts sec-hel
 
 context: ## Print a fast, read-only repository/state snapshot (branch, HEAD, stage, blocker)
 	./scripts/context_snapshot.sh
+
+stage-gate: ## Stage-boundary validation, in order: check, then sqlite-check, then context
+	@# Convenience only. The accepted contract and decision records remain the authority
+	@# on what a stage boundary requires; if this target ever diverges from them, they
+	@# control. It weakens nothing: each gate is the existing target, unmodified.
+	@#
+	@# Recursive sub-makes rather than prerequisites. Prerequisites may be satisfied
+	@# concurrently under `make -j`, which would destroy the required order; recipe lines
+	@# run one at a time, in the order written, and a failing line stops the recipe before
+	@# the next gate starts. `make -n stage-gate` shows that sequence.
+	$(MAKE) check
+	$(MAKE) sqlite-check
+	$(MAKE) context
 
 clean: ## Remove caches and build artifacts
 	-$(BIN)/dmypy stop 2>/dev/null || true

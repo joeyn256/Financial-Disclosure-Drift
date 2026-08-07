@@ -2,9 +2,14 @@
 # Read-only repository context snapshot for Disclosure Drift.
 #
 # Prints the volatile facts that documentation must never hardcode: baseline
-# commit, branch, checkpoint tags, migration head, decision head, the active
-# stage contract, and the next authorized action. Documentation states policy;
-# this script states current state.
+# commit, tree, parent, branch, divergence from the recorded remote ref,
+# checkpoint tags, migration head, decision head, the tracked network switches,
+# the active stage contract, and the next authorized action. Documentation
+# states policy; this script states current state.
+#
+# It reports state and is not an authority. It carries no frozen contract hash,
+# packet digest, receipt version, or input manifest — accepted decisions, the
+# accepted contract, and Milestones/STATUS.md carry those.
 #
 # Guarantees relied upon by CLAUDE.md and Milestones/STATUS.md:
 #   * no remote access of any kind — remote-tracking refs are read exactly as
@@ -52,8 +57,17 @@ print_list() {
 	fi
 }
 
-# Read a "KEY: value" marker line out of a Markdown ledger. Returns the empty
-# string when the file or the key is absent.
+# Read a "KEY: value" marker out of a Markdown ledger, returning the whole
+# value. Returns the empty string when the file or the key is absent, which the
+# callers below render as an explicit "not found" rather than as a blank value.
+#
+# A marker value may legitimately continue onto indented lines — the accepted
+# stage contracts wrap theirs that way — so the continuation is joined with
+# single spaces. The loop deliberately stops at the *first* line that is not a
+# continuation, so a marker never absorbs the paragraph, fence, or marker that
+# follows it. A continuation line must be indented and non-blank, must not be a
+# fence, and must not itself be a `KEY:` marker; anything else ends the value.
+# Single-line markers therefore behave exactly as they did before.
 marker() {
 	local file="$1"
 	local key="$2"
@@ -61,8 +75,54 @@ marker() {
 		printf ''
 		return 0
 	fi
-	grep -m1 -E "^[[:space:]]*${key}:" "$file" 2>/dev/null |
-		sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" || true
+	awk -v key="$key" '
+		found == 0 {
+			if ($0 ~ "^[ \t]*" key ":") {
+				value = $0
+				sub("^[ \t]*" key ":[ \t]*", "", value)
+				sub(/[ \t]+$/, "", value)
+				found = 1
+			}
+			next
+		}
+		{
+			if ($0 !~ /^[ \t]+[^ \t]/) exit
+			if ($0 ~ /^[ \t]*```/) exit
+			if ($0 ~ /^[ \t]*[A-Z][A-Z0-9_]*:/) exit
+			line = $0
+			sub(/^[ \t]+/, "", line)
+			sub(/[ \t]+$/, "", line)
+			if (line != "") {
+				value = (value == "") ? line : value " " line
+			}
+		}
+		END { if (found) printf "%s", value }
+	' "$file"
+}
+
+# Read `key: value` from inside one named top-level block of the tracked YAML
+# configuration. This reports what the tracked file says; it neither loads nor
+# validates configuration — `make validate` does that.
+yaml_block_value() {
+	local file="$1"
+	local block="$2"
+	local key="$3"
+	if [ ! -f "$file" ]; then
+		printf ''
+		return 0
+	fi
+	awk -v block="$block" -v key="$key" '
+		$0 ~ "^" block ":[ \t]*$" { inblock = 1; next }
+		inblock && /^[^ \t#]/ { exit }
+		inblock && $0 ~ "^[ \t]+" key ":" {
+			line = $0
+			sub("^[ \t]+" key ":[ \t]*", "", line)
+			sub(/[ \t]*#.*$/, "", line)
+			sub(/[ \t]+$/, "", line)
+			printf "%s", line
+			exit
+		}
+	' "$file"
 }
 
 # Newest entry matching a glob in a directory, by name order.
@@ -101,6 +161,7 @@ count_named() {
 STATUS_FILE="$ROOT/Milestones/STATUS.md"
 MIGRATIONS_DIR="$ROOT/src/disclosure_drift/storage/migrations"
 DECISIONS_DIR="$ROOT/Docs/Decisions"
+CONFIG_FILE="$ROOT/configs/project.yaml"
 
 printf '=== Disclosure Drift context snapshot (read-only; no remote access) ===\n'
 
@@ -121,6 +182,12 @@ fi
 
 HEAD_SHORT="$(git_ro rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 HEAD_FULL="$(git_ro rev-parse HEAD 2>/dev/null || printf 'unknown')"
+HEAD_TREE="$(git_ro rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null || printf '')"
+
+# All parents, not `HEAD^`, so a merge reports both and a root commit reports
+# none instead of failing.
+HEAD_PARENTS="$(git_ro rev-list --parents -n 1 HEAD 2>/dev/null |
+	awk '{ for (i = 2; i <= NF; i++) printf "%s%s", (i > 2 ? " " : ""), $i }' || printf '')"
 
 # `--verify --quiet` against the full ref path is required. A bare
 # `rev-parse origin/main` echoes its own argument to stdout when the ref does
@@ -133,6 +200,8 @@ ORIGIN_MAIN="$(git_ro rev-parse --verify --quiet refs/remotes/origin/main 2>/dev
 field 'Branch' "$BRANCH"
 field 'HEAD (short)' "$HEAD_SHORT"
 field 'HEAD (full)' "$HEAD_FULL"
+field 'HEAD tree' "${HEAD_TREE:-unknown}"
+field 'HEAD parent(s)' "${HEAD_PARENTS:-(none — root commit)}"
 
 if [ -n "$ORIGIN_MAIN" ]; then
 	field 'origin/main' "$ORIGIN_MAIN"
@@ -141,9 +210,19 @@ if [ -n "$ORIGIN_MAIN" ]; then
 	else
 		field 'HEAD == origin/main' 'no — local branch and recorded remote ref differ'
 	fi
+	# left = commits reachable from origin/main only (behind); right = commits
+	# reachable from HEAD only (ahead). Purely local: no remote is contacted, so
+	# this is divergence from the *recorded* ref, not from the live remote.
+	DIVERGENCE="$(git_ro rev-list --left-right --count refs/remotes/origin/main...HEAD 2>/dev/null || printf '')"
+	if [ -n "$DIVERGENCE" ]; then
+		field 'ahead / behind' "$(printf '%s' "$DIVERGENCE" | awk '{ printf "ahead %s, behind %s", $2, $1 }')"
+	else
+		field 'ahead / behind' 'unknown — could not compare with the recorded remote ref'
+	fi
 else
 	field 'origin/main' 'unavailable locally — no refs/remotes/origin/main reference'
 	field 'HEAD == origin/main' 'unknown — cannot compare without that reference; this script performs no remote lookup'
+	field 'ahead / behind' 'unknown — no recorded remote ref to compare against'
 fi
 
 section 'Working tree'
@@ -183,6 +262,14 @@ field 'Latest migration' "${LATEST_MIGRATION:-(none found)}"
 field 'Migration count' "$MIGRATION_COUNT"
 field 'Latest decision record' "${LATEST_DECISION:-(none found)}"
 
+section 'Network switches (tracked configs/project.yaml)'
+NETWORK_ENABLED="$(yaml_block_value "$CONFIG_FILE" 'network' 'enabled')"
+NETWORK_M3_ACQUIRE="$(yaml_block_value "$CONFIG_FILE" 'network' 'm3_acquire_enabled')"
+field 'network.enabled' "${NETWORK_ENABLED:-(key not found)}"
+field 'network.m3_acquire_enabled' "${NETWORK_M3_ACQUIRE:-(key not found)}"
+printf 'Tracked values only. Each is independent, and neither is authorization:\n'
+printf 'live operation additionally requires its own accepted owner authorization.\n'
+
 section 'Stage state (from Milestones/STATUS.md)'
 if [ -f "$STATUS_FILE" ]; then
 	CURRENT_STAGE="$(marker "$STATUS_FILE" 'CURRENT_STAGE')"
@@ -215,6 +302,7 @@ fi
 section 'Validation commands'
 field 'Fast loop' 'make fast'
 field 'Full acceptance gate' 'make check'
+field 'Stage boundary' 'make stage-gate'
 field 'This snapshot' 'make context'
 printf '\nNeither loop is selected by this script. Choose the test set with\n'
 printf 'Docs/change_impact_map.md, then run it via: make test PYTEST_ARGS="<paths>"\n'

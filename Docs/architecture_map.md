@@ -23,7 +23,7 @@ invents none for a future milestone.
 | **Milestone 0** | The research and governance foundation: research question and framing, the novelty review and its prohibited-claims boundary, the approved preregistration, the frozen cohorts and outcome cutoffs, bootstrap seed `20260725`, the leakage register, the deviation register and D001, and Decisions 001–006. It owns no source module; the frozen definitions it fixed are executed by `cohorts.py` in §1 below | **Formally closed** (Decision 026 §6). Its frozen research definitions remain frozen — closure does not unfreeze one, and changing any still requires an approved decision record plus a reviewed code change (CLAUDE.md rule 3) |
 | **Milestone 1** | Foundational configuration, frozen cohort definitions, CLI and exit-code boundary, logging, packaging, and the offline safety baseline — §§1 and 9 below | **Formally closed** (Decision 026 §7). Implemented, accepted, and in production use since Milestone 1 |
 | **Milestone 2** | SEC source policy and the offline census (§2); raw-object, inventory, and catalog layers (§3); the candidate/selection/manifest schema (§4); entity selection (§5); joint accession selection (§6); reserve packages (§7); and pilot-manifest construction, terminal result identity, lifecycle enforcement, verification, and atomicity (§8) | **Formally closed** (Decision 026 §§8–10) — the deterministic **offline** SEC, storage, selection, replay, and manifest architecture through accepted Stage M2.3 S6, checkpointed at `m2.3-s6-complete`. **No live SEC pilot has been executed**: S6 creates only a `proposed` manifest, over fixtures |
-| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** acquisition-path rehearsal and Gate F; **M3.2** controlled metadata-only SEC acquisition in **two sequential windows** and Gate H; **M3.3** the candidate-snapshot builder and execution rehearsal, then the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** the accepted approval entry point, then explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **Master planning complete; Decisions 028 and 029 accepted after independent PASS; bounded M3.1 contract accepted and implementation-authorized** (Decision 024 §5.1; [Decision 027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md); accepted [Decision 028](Decisions/decision_028_m3_1_readiness_corrections.md); accepted [Decision 029](Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md); [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md)). **The M3.1 acquisition-rehearsal and Gate-F planning implementation exists in the tree under `src/disclosure_drift/m3/`, `sec/request_ceiling.py`, and the `m3` CLI subcommands, and is NOT accepted.** No Milestone 3 migration, table, network allowlist, real snapshot, real manifest, approved root, or publication path exists, and no later phase is implemented or authorized |
+| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** acquisition-path rehearsal and Gate F; **M3.2** controlled metadata-only SEC acquisition in **two sequential windows** and Gate H; **M3.3** the candidate-snapshot builder and execution rehearsal, then the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** the accepted approval entry point, then explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **M3.1 is owner-accepted and complete** ([Decision 031](Decisions/decision_031_m3_1_acceptance.md), `M3_1_ACCEPTED_AND_COMPLETE`), frozen at `970e050d…` and checkpointed `m3.1-complete`; Gate F readiness is recorded and **Gate F execution has not begun**. **The M3.2 contract is accepted at T1** ([Decision 034](Decisions/decision_034_m3_2_contract_acceptance.md); [`Milestones/contracts/m3_2.md`](../Milestones/contracts/m3_2.md)) and its implementation proceeds **stage by stage** under [Decision 035](Decisions/decision_035_m3_2_t2_staged_implementation_authorization.md): **T2.1, combined T2.2–T2.3, and T2.4 are accepted and published** (Decisions 036, 039, 042) and each grant is exhausted; **combined T2.5–T2.6 is owner-gated, unauthorized, and not begun**, and overall **T3 implementation acceptance has not occurred**. See §10. No Milestone 3 migration or table exists — the chain is still `0001`–`0013` — and no network allowlist, real operational catalog, receipt, real snapshot, real manifest, approved root, or publication path exists. Both tracked network switches are `false`, no live SEC access has occurred, and no later phase is implemented or authorized |
 
 **Assignment to Milestone 3 is not authorization to begin it** (Decision 024 §8), and **planning a
 phase is not authorization to begin it either** (Decision 027 §20). Every Milestone 3 phase
@@ -31,13 +31,11 @@ additionally requires a separate accepted governance record where applicable, a 
 implementation contract, explicit owner authorization, exact path authorization, and satisfaction of
 its inherited prerequisite gates. **Closeout satisfied only the precondition** that Milestone 1 and
 Milestone 2 closeout must precede any Milestone 3 implementation — **it granted no implementation
-authority**, and implementation authorization remains `NO` for every phase (Decision 026 §21;
-Decision 027 §20). `INDEPENDENT_M3_1_CONTRACT_REVIEW` is discharged: `Milestones/contracts/m3_1.md`
-is accepted with `IMPLEMENTATION_AUTHORIZATION: YES`, and the M3.1 implementation exists in the tree
-without being accepted. The **Decision 029 §11 code remediation** is implemented and the
-disposable-clone validation run on the corrected tree is complete; a frozen commit and the **first
-durable §17 review** by a non-author session remain — the review reproduces and records that
-validation.
+authority** (Decision 026 §21; Decision 027 §20). Authorization since then has been granted one
+bounded step at a time and never wholesale: M3.1 by its own accepted contract and
+[Decision 031](Decisions/decision_031_m3_1_acceptance.md), and M3.2 implementation only stage by
+stage under Decision 035 and each stage's own decision. **An accepted stage exhausts its own
+grant** — it authorizes no further edit to its paths and no later stage.
 
 ### Milestone 3 planning artifacts — documentation only, naming no runtime path
 
@@ -49,7 +47,9 @@ None is a module, a migration, a table, a CLI command, or a runtime path, and no
 | Artifact | What it fixes |
 |---|---|
 | [`Docs/Decisions/decision_028_m3_1_readiness_corrections.md`](Decisions/decision_028_m3_1_readiness_corrections.md) | The accepted bounded planner-v2, A1–A12, reason-code, receipt-v2, budget, ceiling, recovery, and M3-L11 owner rulings. **Authorizes no implementation** |
-| [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md) | Exact-path bounded M3.1 contract. **Accepted; `IMPLEMENTATION_AUTHORIZATION: YES`; the M3.1 implementation exists in the tree and is not accepted** |
+| [`Milestones/contracts/m3_1.md`](../Milestones/contracts/m3_1.md) | Exact-path bounded M3.1 contract. **Accepted and complete** — the M3.1 implementation it authorized is owner-accepted (Decision 031) and the contract authorizes nothing further |
+| [`Milestones/contracts/m3_2.md`](../Milestones/contracts/m3_2.md) | **The active stage contract.** Exact-path bounded M3.2 contract, accepted at T1 (Decision 034). Its §22 cadence was amended by Decisions 035 and 037; **stage progress is recorded in the ledger, never in the contract** |
+| [`Docs/m3/m3_2_t2_implementation_authorization_packet.md`](m3/m3_2_t2_implementation_authorization_packet.md) | The accepted T2 implementation plan (revision v2), preserved byte-identical. It proposes the fifteen-path maximum T2 envelope and declines `sec/census_orchestrator.py` and `sec/index_retrieval.py`. **A packet is mechanics; the decision that cites it is the authority** |
 | [`Milestones/milestone_03_master_plan.md`](../Milestones/milestone_03_master_plan.md) | The five phases, each with 36 specified fields, and their frozen internal subdivisions; the request-volume policy; the two-layer evidence model; the mandatory contents of every future phase contract |
 | [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled `AVAILABLE NOW` or `PLANNED — NOT YET IMPLEMENTED` |
 | [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **A1–A12 is implemented but has not been run to a passing operational token; E1–E8 remains unimplemented and belongs to M3.3A** |
@@ -69,13 +69,14 @@ persisted substantive rows alone (Decision 027 §§17–18), and carries exactly
 canonical serialization reproduces the **same** `root_manifest_sha256`; re-deriving it changes
 nothing, and only a **differing** root implies changed governed state (Decision 027 §10.2).
 
-**One inherited defect touches §2.** Decision 013 §1 requires coverage through the **closed 2026
-Q2** quarter; the planner in `index_plan.py` checks “containing quarter” before
-`quarter_end <= as_of_date` and misclassifies the exact quarter end as provisional. Proposed
+**One inherited defect touched §2, and is closed.** Decision 013 §1 requires coverage through the
+**closed 2026 Q2** quarter; the planner in `index_plan.py` checked “containing quarter” before
+`quarter_end <= as_of_date` and misclassified the exact quarter end as provisional. Accepted
 Decision 028 preserves Decision 013 and records the required total order and
-`quarterly-index-instances/2.0`. **M3-L12 remains active and Gate F remains blocked until that
-correction is implemented, tested, independently accepted, and checkpointed.** M3-L11 likewise
-remains active until the reserved-path ignore, hygiene, and resolved-path CLI protections land.
+`quarterly-index-instances/2.0`. **M3-L11 and M3-L12 were both closed on 2026-08-03** on their
+complete closure-evidence lists, and Gate F readiness is recorded — Gate F *execution* has still
+not begun and is not authorized. `Docs/m3/limitations_register.md` remains the register of record
+for every entry's live state; this map never is.
 
 **Closing a milestone does not close its accepted limitations.** Decision 020 §19.1, Decision 021
 §19, Decision 022's applicability boundary, and Decision 023 §7's **O1**–**O4** all remain active and
@@ -371,6 +372,107 @@ already used for non-pilot releases, and (b) the pilot-specific manifest Stage S
   [`Docs/change_impact_map.md`](change_impact_map.md) for the full test-selection map.
 - **Status:** accepted; both CI jobs green at the accepted baseline commit.
 
+## 10. Milestone 3 operational surfaces — M3.1 accepted, M3.2 stages T2.1–T2.4 accepted
+
+Added under [Decision 043](Decisions/decision_043_m3_2_g1_navigation_workflow_repair_authorization.md)
+§7, at navigation-level granularity. **This section redesigns nothing and refactors nothing**; it
+names where accepted M3 code lives and which record governs it. Sections 1–8 above are the pipeline
+these modules operate; this section sits after them because it consumes them rather than extending
+them.
+
+**The whole package is offline.** Nothing here opens a socket, resolves a host, or constructs a
+transport at import or construction time. `m3 acquire` takes an injected transport and refuses
+without an explicit per-window live-operation authorization that no configuration key, contract
+acceptance, or gate token can synthesize. Both tracked switches in `configs/project.yaml`
+(`network.enabled`, `network.m3_acquire_enabled`) are `false`, are independent in both directions,
+and neither is itself authorization.
+
+### 10.1 M3.1 — acquisition-path rehearsal, request planning, receipts, and recovery inspection
+
+- **Source:** [`m3/rehearsal.py`](../src/disclosure_drift/m3/rehearsal.py) (the A1–A12 offline
+  rehearsal and its scripted transport), [`m3/request_plan.py`](../src/disclosure_drift/m3/request_plan.py)
+  (the deterministic zero-request plan and the derived `A_reachable`),
+  [`m3/receipt.py`](../src/disclosure_drift/m3/receipt.py) (`m3-execution-receipt/2.0`),
+  [`m3/recovery.py`](../src/disclosure_drift/m3/recovery.py) (**read-only** interrupted-run
+  inspection — it imports no writer and opens the catalog `PRAGMA query_only`),
+  [`m3/evidence_paths.py`](../src/disclosure_drift/m3/evidence_paths.py) (the evidence-root
+  containment boundary), [`sec/request_ceiling.py`](../src/disclosure_drift/sec/request_ceiling.py)
+  (the cumulative physical-attempt gate, refusing *before* the attempt that would exceed the
+  ceiling).
+- **Interactions:** the rehearsal drives the real `sec/` response-policy state machine through a
+  scripted transport, so the code rehearsed is the code a live run executes; `request_plan`
+  composes the real policy constants rather than asserting a bound; `receipt` is consumed by both
+  and enters **no** governed identity (see §0's rule one).
+- **Decisions:** [027](Decisions/decision_027_m3_master_plan_and_operational_readiness.md) v0.2,
+  [028](Decisions/decision_028_m3_1_readiness_corrections.md),
+  [029](Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md),
+  [030](Decisions/decision_030_gate_f_step_12_owner_rulings_and_hygiene_remediation.md),
+  [031](Decisions/decision_031_m3_1_acceptance.md) (acceptance).
+- **Persistence:** none new. Receipts and rehearsal artifacts are private operational evidence
+  outside the checkout; the migration chain is unchanged at `0013`.
+- **Tests:** `test_m3_rehearsal.py`, `test_m3_request_plan.py`, `test_m3_receipt.py`,
+  `test_m3_recovery.py`, `test_m3_evidence_paths.py`, `test_request_ceiling.py`.
+- **Status:** **owner-accepted and complete** (Decision 031), frozen at `970e050d…`, checkpointed
+  `m3.1-complete`. Gate F readiness is recorded; **Gate F execution has not begun.**
+
+### 10.2 M3.2 stage T2.1 — configuration and the fail-closed command-authority layer
+
+- **Source:** `configs/project.yaml` (`network.m3_acquire_enabled`, tracked default `false`),
+  [`config.py`](../src/disclosure_drift/config.py) (one `NetworkSection` field, strict parsing, no
+  environment fallback), [`cli.py`](../src/disclosure_drift/cli.py) (parser and dispatch for the six
+  M3.2 surfaces: `m3 acquire`, `recover`, `reconcile-requests`, `show-drift`, `show-budget`,
+  `derive-dependent-plan`).
+- **Interactions:** every one of the six surfaces is recognized and **refuses at exit 3 without a
+  traceback**; no switch combination reaches or constructs transport, and existing Stage M2.2
+  commands remain governed only by `network.enabled`.
+- **Decisions:** [035](Decisions/decision_035_m3_2_t2_staged_implementation_authorization.md)
+  (authorization), [036](Decisions/decision_036_m3_2_t2_1_stage_completion.md) (acceptance).
+- **Tests:** `tests/unit/test_config.py`, `tests/integration/test_m3_cli.py`.
+- **Status:** accepted and published; the grant is exhausted.
+
+### 10.3 M3.2 stages T2.2–T2.3 and T2.4 — the acquisition engine, reconciliation, and recovery
+
+- **Source:** [`m3/acquisition.py`](../src/disclosure_drift/m3/acquisition.py) — the single M3.2
+  production module, and **driver-side integration only**. T2.2–T2.3 delivered operational-catalog
+  preparation and path containment, immutable storage binding, logical-request derivation from an
+  approved plan, and the transport-agnostic `AcquisitionEngine`; T2.4 added, in the same module,
+  catalog-authoritative reconstruction (`reconstruct_catalog_state`), deterministic read-only
+  reconciliation and drift listing (`reconcile_requests`), continuation proposal and conditional
+  reuse (`propose_continuation`, `verified_reusable_predecessor`), and the explicit recovery-action
+  library (`RECOVERY_ACTIONS`, `apply_recovery_action`) — **with no CLI exposure**.
+- **Dependencies, all consumed unchanged:** `storage/catalog.py` (the single logical writer),
+  `sec/raw_store.py`, `sec/observation_catalog.py`, `sec/snapshots.py`, `sec/http_client.py`,
+  `sec/request_ceiling.py`, `sec/source_registry.py`. Each is a **prohibited path** for these
+  stages, which is precisely why the integration lives in `acquisition.py`.
+- **The two changed supporting surfaces.**
+  [`sec/observation_catalog.py`](../src/disclosure_drift/sec/observation_catalog.py) — §3's
+  observation recorder — took a widened single-pass iterable `members` boundary at T2.2–T2.3
+  (Decision 038) and exactly two additive recovery-state primitives, `open_recovery_state` and
+  `resolve_recovery_state`, at T2.4 (Decision 041); no existing resolver, reconciliation function,
+  recorder, or projection behaviour was rewritten.
+  [`reasons.py`](../src/disclosure_drift/reasons.py) gained exactly one registered code,
+  `SOURCE_REQUIRED_OBJECT_UNAVAILABLE` (Decision 040).
+  [`m3/__init__.py`](../src/disclosure_drift/m3/__init__.py) re-exports the public surface and adds
+  no behaviour.
+- **Decisions:** [037](Decisions/decision_037_m3_2_remaining_stage_combination.md) (stage
+  combination), [038](Decisions/decision_038_m3_2_t2_2_t2_3_path_envelope_amendment.md) and
+  [039](Decisions/decision_039_m3_2_t2_2_t2_3_stage_acceptance.md) (T2.2–T2.3),
+  [040](Decisions/decision_040_m3_2_t2_4_implementation_authorization.md),
+  [041](Decisions/decision_041_m3_2_t2_4_recovery_state_primitive_authority.md), and
+  [042](Decisions/decision_042_m3_2_t2_4_acceptance_and_publication.md) (T2.4).
+- **Persistence:** **no new migration** — `NO_NEW_MIGRATION_REQUIRED`, chain still `0001`–`0013` —
+  and **no receipt-schema change**, `m3-execution-receipt/2.0` frozen. Recovery state uses the
+  existing `census_recovery_states` / `census_recovery_events` families; the run identity is a
+  caller-supplied, already-registered `ops_ingestion_jobs.job_id`, never minted here.
+- **Tests:** `tests/unit/test_m3_acquisition.py`, `tests/unit/test_m3_recover.py`,
+  `tests/unit/test_observation_catalog.py`, `tests/unit/test_reasons.py`;
+  `tests/integration/test_m3_cli.py`.
+- **Status:** both stages accepted and published (Decisions 039 and 042); both grants exhausted.
+  **Combined T2.5–T2.6 — operator surfaces and the integrated implementation candidate — is
+  owner-gated, unauthorized, and not begun**, and its commit is the implementation-freeze candidate
+  for the independent T3 review. **No real operational catalog, raw object, receipt, request,
+  attempt, or SEC contact exists or has occurred**, ceiling 801 is unused, and no Gate H has passed.
+
 ## Lifecycle notes: S4 drafts, the planned S5 joint run, and the S6 manifest boundary
 
 This section states lifecycle semantics as defined by Decision 016 §5, Decision 018 §6/§27, and the
@@ -417,8 +519,8 @@ S4 implementation; it does not introduce any new state or transition.
   the required independent review of v0.1** and likewise changed no module, table, migration, or
   runtime path. Decision 028 is accepted after independent PASS, and **Decision 029 is accepted**
   (2026-08-02) as the bounded M3.1 remediation record — it likewise creates no module, table,
-  migration, or runtime path, and grants no network authority. The M3.1 contract is accepted with
-  `IMPLEMENTATION_AUTHORIZATION: YES` and the M3.1 implementation exists in the tree without being
-  accepted; the Decision 029 §11 code remediation is implemented and the disposable-clone validation
-  run on the corrected tree is complete, so a frozen commit and the **first durable §17 review** —
-  which reproduces and records that validation — remain.
+  migration, or runtime path, and grants no network authority. **M3.1 is now owner-accepted and
+  complete** (Decision 031), and **M3.2 implementation has begun under its own accepted contract**,
+  stage by stage — see §10. None of that reopened Milestone 2: no S4, S5, or S6 module, table,
+  migration, identity, or runtime path described above has changed, and the M3.2 surfaces in §10
+  consume the Milestone 2 storage and observation layers rather than extending them.

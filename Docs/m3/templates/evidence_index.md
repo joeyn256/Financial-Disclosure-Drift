@@ -93,7 +93,20 @@ stop-and-report condition — completed evidence is immutable.
 
 `request_budget` · `gate_f_checklist` · `gate_h_checklist` · `schema_drift_incident` ·
 `interrupted_run_recovery` · `real_snapshot_evidence_packet` · `root_hash_approval_packet` ·
-`execution_receipt` · `rehearsal_evidence_report` · `request_plan` · `recovery_state_report`
+`execution_receipt` · `rehearsal_evidence_report` · `request_plan` · `recovery_state_report` ·
+`frozen_object_identity_set` · `derived_reference_set` · `reconciliation_report`
+
+**The last three were added by accepted
+[Decision 047](../../Decisions/decision_047_m3_2_t4_operational_preflight_authorization.md) §4**,
+discharging the **F4** gate that accepted Decision 032 §6.4 opened and that Decisions 034, 035, 039,
+040, 042, 045, and 046 each carried forward to "no later than T4". They name, in order: the frozen
+M3.2A bootstrap raw-object identity set produced at the between-windows freeze; the dependent
+reference set derived from those frozen objects, which is distinct from the M3.2B `request_plan` it
+feeds; and the private deterministic plan-to-catalog reconciliation report, including its
+required-absence enumeration. **No fourth type was added**, and no
+`operational_preflight_attestation` type exists: T4 preflight evidence stays private and is bound by
+SHA-256 through the governance ledger and the owner decision rather than indexed here — the same
+treatment the Gate F readiness token received (see the timing note in §8).
 
 **Phases:** `M3.1A` · `M3.1B` · `M3.2A` · `M3.2B` · `M3.3A` · `M3.3B` · `M3.4A` · `M3.4B` · `M3.5`
 
@@ -108,8 +121,8 @@ missing entry for a completed phase is an M3.5 stop condition.
 |---|---|
 | **M3.1A** | `rehearsal_evidence_report` (A1–A12); one `execution_receipt` per rehearsal command |
 | **M3.1B** | two `request_plan` entries with identical plan hashes; `request_budget` (M3.2A window); `gate_f_checklist`; one `execution_receipt` per dry run |
-| **M3.2A** | one `execution_receipt` per live command; `interrupted_run_recovery` and `schema_drift_incident` if either occurred |
-| **M3.2B** | `request_budget` (M3.2B window, derived and separately approved); `request_plan`; one `execution_receipt` per live command; `gate_h_checklist` integrating both windows |
+| **M3.2A** | one `execution_receipt` per live command; `reconciliation_report`; `frozen_object_identity_set` (the between-windows freeze); `interrupted_run_recovery` and `schema_drift_incident` if either occurred; `recovery_state_report` if a recovery inspection was recorded |
+| **M3.2B** | `derived_reference_set` (derived from the frozen M3.2A objects); `request_budget` (M3.2B window, derived and separately approved); `request_plan`; one `execution_receipt` per live command; `gate_h_checklist` integrating both windows |
 | **M3.3A** | `rehearsal_evidence_report` (E1–E8); one `execution_receipt` per rehearsal command |
 | **M3.3B** | `real_snapshot_evidence_packet`; one `execution_receipt` per command |
 | **M3.4A** | the entry point's synthetic-catalog validation record |

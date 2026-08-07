@@ -54,8 +54,8 @@ Every Milestone 3 phase:
 | Decision 023 §7 — S6 acceptance | 4 | 3 `ACTIVE`, **O1** `ACTIVE — OWNER RULING PENDING` |
 | Decision 024 — boundary consequences | 2 | all `ACTIVE` |
 | Decision 026 — standing obligations | 3 | all `ACTIVE` |
-| Milestone 3 — new at planning | 12 | 10 `ACTIVE`; **M3-L11** and **M3-L12** **`CLOSED` 2026-08-03** (owner step-17 closure authorization; Decision 031; verified `m3.1-complete` checkpoint, tag object `638a02b7…`, peeled `4cd2c72…`) |
-| **Total** | **35 open (all `ACTIVE`), 3 closed** | |
+| Milestone 3 — new at planning, and **M3-L13** new at the T4 preflight | 13 | 11 `ACTIVE`; **M3-L11** and **M3-L12** **`CLOSED` 2026-08-03** (owner step-17 closure authorization; Decision 031; verified `m3.1-complete` checkpoint, tag object `638a02b7…`, peeled `4cd2c72…`) |
+| **Total** | **36 open (all `ACTIVE`), 3 closed** | |
 
 ---
 
@@ -806,6 +806,25 @@ Every Milestone 3 phase:
 | **Required owner action** | Accept the bounded M3.1 contract after independent review, then authorize implementation. **Decision 013 remains byte-for-byte unchanged** |
 | **Closure evidence** | Planner v2 implementation; exact-quarter-end, interior-date, future-quarter, open-quarter, and version-mismatch tests; full validation; independent M3.1 acceptance; committed checkpoint; and a Gate F plan whose required-quarter set matches accepted authority |
 | **Closable before M3.5** | **yes — and it must close before Gate F passes** |
+
+## M3-L13 — `RawStore.store()` buffered the whole object in memory
+
+| Field | Value |
+|---|---|
+| **Origin** | Accepted [Decision 039](../Decisions/decision_039_m3_2_t2_2_t2_3_stage_acceptance.md) §6.4, which recorded the `RawStore` resource limitation as an accepted deferral and carried it to T4; restated by accepted [Decision 040](../Decisions/decision_040_m3_2_t2_4_implementation_authorization.md) §19 and accepted [Decision 042](../Decisions/decision_042_m3_2_t2_4_acceptance_and_publication.md) §1; located exactly and dispositioned by accepted [Decision 047](../Decisions/decision_047_m3_2_t4_operational_preflight_authorization.md) §§3 (ruling 047-B), 5, 6 |
+| **Description** | `src/disclosure_drift/sec/raw_store.py`, `RawStore.store()`, accumulated the **complete decoded object body** in one Python `bytearray` (`buffer.extend(chunk)`) on **every** call — including `compress=False`, where the buffer was never read — and then read the **entire promoted file back** with `Path.read_bytes()` to compute `stored_sha256` and `stored_size_bytes`. On the `compress=True` path it additionally materialized a `bytes(buffer)` copy, the whole compressed output, and a whole decompressed copy for the round-trip check. The upstream retrieval already streams to a spool file deliberately (`SnapshotStore._spool_stream` / `_file_chunks`, "yield a spooled response without reading it all into memory"); the store layer negated that intent immediately downstream. Measured directly on an 8 MiB payload in 512 KiB chunks with `tracemalloc`: **peak traced allocation 2.12× object size for `compress=False` and 3.80× for `compress=True`**. `RawStore.verify()` and the existing-object deduplication branch performed the same whole-file reads |
+| **Affected M3 phase** | **M3.2A**, and every later phase that stores or verifies a raw object |
+| **Status** | **`ACTIVE`** — the correction authorized by accepted Decision 047 §6 is implemented across its exact two-path envelope, but the limitation is **not closed**: closure requires the fresh independent review and the separate owner acceptance that Decision 047 §§3 (ruling 047-J), 8 require, neither of which has occurred |
+| **Methodology impact** | **None.** No research definition, identity, hash preimage, or stored byte changes. `content_sha256`, `stored_sha256`, the deterministic-gzip output, and every content-addressed identity are byte-identical before and after |
+| **Reproducibility impact** | **None** — and this is load-bearing. The correction is only sound because streaming deterministic gzip is byte-identical to the frozen one-shot `compress_deterministically`; that equality is asserted directly by the accepted tests rather than assumed |
+| **Security impact** | None. No identity, credential, path, or payload reaches an artifact by either implementation |
+| **Operational impact** | **Material, and the reason this was a T4 concern.** The M3.2A plan's `sec_bulk_submissions` route retrieves a full EDGAR bulk archive whose size is **not recorded in any repository evidence** and cannot be established without a live request. Under the pre-correction implementation a machine unable to hold roughly twice that archive resident would fail with `MemoryError`, swap thrash, or an OS kill **mid-window, on the single largest retrieval** — an interruption inside a live window, with attempts already consumed, recovery required before any resume, and a possible `.part` or orphan. Data integrity was never at risk: the atomic protocol preserves evidence and overwrites nothing. **Availability was.** Decision 047 ruling 047-H separately imposes a conservative `FREE DISK >= 50 GiB` T5 entry floor, which the correction does not replace |
+| **Publication impact** | None |
+| **Mitigation** | The Decision 047 §6 substage makes hashing, sizing, compression, decompression, and verification incremental over bounded blocks in `store()`, `verify()`, and the deduplication branch, so storage memory no longer scales with object size. Every accepted durability semantic is preserved: `.part` staging, content-addressed identity, no-overwrite atomic create-once hard-link promotion, file and directory `fsync`, evidence preservation after failure, exact deduplication, and unchanged fail-closed failure handling. **The public `RawStore` API is unchanged.** A non-vacuous instrumentation-based positive control and a threshold-free incremental-write control both fail against the pre-correction implementation |
+| **Stop condition** | Any evidence that the streaming compressor does not reproduce `compress_deterministically` byte-for-byte; any stored-object hash, size, or round-trip verification becoming inexact; any previously fail-closed condition becoming acceptance; or an out-of-memory or resource failure during a live window notwithstanding the correction |
+| **Required owner action** | **Accept or refuse the Decision 047 §6 substage** after its fresh independent review. Until that acceptance, this entry stays `ACTIVE` and the substage remains local and unpublished |
+| **Closure evidence** | The accepted two-path correction; its non-vacuous streaming and memory positive controls; byte-identical deterministic-gzip, `content_sha256`, `stored_sha256`, and stored-size proofs across both compression modes; the preserved durability, deduplication, quarantine, reconciliation, and failure-preservation tests; full validation green; a fresh independent implementation review by a non-author session; and the owner's separate acceptance recorded in a Decision and this register |
+| **Closable before M3.5** | **yes — and it should close before T5 opens a live window** |
 
 ## What this register does not do
 

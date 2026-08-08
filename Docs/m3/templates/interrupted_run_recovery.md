@@ -1,8 +1,10 @@
 # TEMPLATE — Interrupted-Run Recovery Checklist
 
-**This file is a blank template. No run has been interrupted, because no run has occurred.**
-Copy it, fill every field, and retain the completed copy as evidence. Do not edit this template in
-place.
+**This file is a blank template.** Copy it, fill every field, and retain the completed copy as
+private evidence. Do not edit this template in place. Accepted
+[Decision 051](../../Decisions/decision_051_m3_2_post_t5_remediation_governance.md) records the
+first interrupted M3.2A T5 invocation and permits a future explicit receiptless-first-invocation
+inspection mode; it creates no receipt and authorizes no mutation or resume.
 
 **Purpose:** to establish, before anything is resumed, exactly where a run stopped, what committed,
 what did not, and whether resuming is provably safe — and to prove that resuming will not duplicate a
@@ -14,6 +16,9 @@ as narrowly corrected by proposed
 [Decision 009](../../Decisions/decision_009_raw_data_governance.md);
 [Decision 021](../../Decisions/decision_021_m23_s6_manifest_construction.md) §15.5 (the append-once
 and identity guarantee);
+[Decision 051](../../Decisions/decision_051_m3_2_post_t5_remediation_governance.md) (exact durable
+attempt evidence, pre-send reservation, explicit receiptless inspection, and the permanent
+no-resume ruling for the interrupted initial T5 invocation);
 [`milestone_2_3_pilot_selection_plan.md`](../../../Milestones/milestone_2_3_pilot_selection_plan.md)
 §12 (rollback);
 [`milestone_03_master_plan.md`](../../../Milestones/milestone_03_master_plan.md) §11.
@@ -32,6 +37,12 @@ and identity guarantee);
 - **`UNDETERMINED` is a stop condition, not a judgement call.**
 - **Inspection is read-only.** `m3 recovery-state` reports state and never adopts, quarantines,
   rebuilds, reconciles, resumes, or calls `observation_catalog.reconcile()`.
+- **Receiptless mode is explicit, never inferred.** It requires the first-invocation receiptless
+  selector and the exact interrupted `census_run_id`; it is mutually exclusive with a receipt
+  head. A missing or mistyped ordinary receipt path remains an error.
+- **Receiptless inspection never authorizes continuation.** It may establish facts and consumed
+  count, but it cannot return `SAFE`, create a predecessor, enable `--resume-from`, or invoke a
+  recovery mutation.
 
 ## 1. Identification
 
@@ -53,6 +64,8 @@ and identity guarantee);
 
 | Field | Value |
 |---|---|
+| Inspection mode | `receipt_chain` / `receiptless_first_invocation` |
+| Interrupted `census_run_id` | `_______` |
 | **Last successful `receipt_id`** | `_______` |
 | Its `command_name` and `command_version` | `_______` |
 | Its `completion_status` | `_______` |
@@ -64,7 +77,9 @@ and identity guarantee);
 | Its `recovery_predecessor_receipt_id`, if any | `_______` |
 | **Is the full receipt chain resolvable back to the first attempt?** | `YES` / `NO` |
 
-**A broken chain means `UNDETERMINED`.** Do not reconstruct a missing receipt from memory.
+**A broken ordinary chain means `UNDETERMINED`.** Do not reconstruct a missing receipt from
+memory. In explicit `receiptless_first_invocation` mode, record `N/A — no receipt was emitted`
+rather than inventing a receipt identity. That mode is forensic only and is never resume-eligible.
 
 ## 3. Interruption point
 
@@ -129,6 +144,10 @@ and identity guarantee);
 
 | Field | Value |
 |---|---:|
+| Count evidence source(s) | `ops_retrieval_attempts` / receipt chain / committed observation / accepted raw lineage / `_______` |
+| Committed `started` attempt reservations | `____` |
+| Exact accepted historical baseline, if separately owner-adjudicated | `____` |
+| Full-`A_reachable` fallback charge, if exact count is genuinely unavailable | `____` |
 | Physical attempts consumed before the interruption | `____` |
 | Approved hard ceiling **for this window** | `____` |
 | **Remaining ceiling headroom** | `____` |
@@ -140,6 +159,12 @@ and identity guarantee);
 **If `NO`, resume is not authorized under the old plan.** A ceiling is never increased during a
 running window. Stop, close the interrupted attempt, produce a new zero-request plan, and obtain a
 fresh exact owner approval before any later command.
+
+**Decision 051 accounting rule:** use exact accepted durable evidence first; reconcile surfaces
+without double counting; charge full per-route `A_reachable` only when the exact count for at most
+one identifiable in-flight request is genuinely unrecorded or ambiguous; otherwise classify
+`UNDETERMINED`. Every future committed pre-send `started` row counts as consumed, including a
+row stranded before the transport call.
 
 ## 8. Safe-resume determination
 
@@ -162,11 +187,16 @@ fresh exact owner approval before any later command.
 | **Determination** | `SAFE` / `UNSAFE` / `UNDETERMINED` |
 | Basis | `_______` |
 
-- **`SAFE`** — every condition `MET`. Resume is authorized under §10.
+- **`SAFE`** — every condition `MET` in ordinary receipt-chain mode. Resume still requires the
+  separate owner authority in §10.
 - **`UNSAFE`** — a condition is `NOT MET` and the cause is known. A separately authorized M3.2
   repair may correct it; then re-run the read-only inspection. Inspection itself never repairs.
 - **`UNDETERMINED`** — it cannot be established whether a write committed. **Stop. Do not resume.
   Refer for an owner ruling.**
+
+**Explicit receiptless-first-invocation mode can never produce `SAFE` or a continuation
+proposal.** Even an exact consumed count does not substitute for the predecessor receipt Decision
+050 requires. The interrupted initial T5 invocation governed by Decision 051 is never resumed.
 
 ## 9. Duplicate-prevention proof
 
@@ -184,6 +214,9 @@ Complete **before** resuming. A resume without this proof is not authorized.
 | 9.8 | The final state after resume equals the state an uninterrupted run would have produced | `PROVEN` / `NOT PROVEN` | rehearsal A11(d) |
 
 ## 10. Resume authorization and execution
+
+**Not applicable to receiptless-first-invocation inspection.** If no predecessor receipt exists,
+leave this section `N/A — continuation prohibited`; do not create or reconstruct one.
 
 | Field | Value |
 |---|---|

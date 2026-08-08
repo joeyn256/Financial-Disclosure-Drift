@@ -1,15 +1,19 @@
 # SEC and Pilot Data Dictionary
 
-**Version:** 0.3 (through migration `0013`, Stage M2.3-S6)
+**Version:** 0.4 (through migration `0013`; Decision 051 M3.2 attempt-accounting semantics)
 **Status:** current for the operational SQLite catalog as of migration
 `0013_m23_manifest_lifecycle_guards.sql`.
 **Governing records:** Decisions 007–012 (sections 1–8, the SEC ingestion and census schema);
-Decisions 013, 014, 016, 017, 018, 019, 020, 021, 022, 023 (sections 9–14, the M2.3 pilot schema).
+Decisions 013, 014, 016, 017, 018, 019, 020, 021, 022, 023 (sections 9–14, the M2.3 pilot schema);
+accepted [Decision 051](Decisions/decision_051_m3_2_post_t5_remediation_governance.md) (section 5A,
+the M3.2 physical-attempt consumed-count semantics).
 **Scope:** the complete operational SQLite catalog created by migrations `0001`–`0013`, and the
 frozen Parquet release tables. Sections 1–8 cover the SEC ingestion and census layers
 (migrations `0001`–`0008`). **Sections 9–14 cover the M2.3 pilot layer** (migrations
 `0009`–`0013`), added at version 0.3 to close the coverage gap the final integrated Milestones 1–2
 audit recorded ([Decision 025](Decisions/decision_025_integrated_audit_documentation_corrections.md)).
+Decision 051 changes no schema and creates no migration; it assigns accepted runtime meaning to the
+existing `ops_retrieval_attempts` table.
 
 **Migrations are the schema ground truth; accepted decisions govern methodology and semantics.**
 This dictionary describes what the migrations create and what the accepted decisions say about it.
@@ -17,8 +21,11 @@ It defines nothing of its own, and where it and a migration or decision disagree
 decision controls (CLAUDE.md authority rules). Every statement in sections 9–14 was verified against
 `sqlite_master` on a scratch catalog built by the accepted `0001`–`0013` chain.
 
-**No real pilot data exists.** No production catalog, candidate-snapshot builder, or real pilot
-sample has been created; Milestone 3 has not begun and is not authorized (Decision 024).
+**No real pilot sample or release exists.** Exactly one initial M3.2A T5 invocation occurred and
+ended non-successfully after one physical retrieval attempt. Decision 051 preserves its immutable
+raw object and lineage, accepts one consumed attempt of 801, leaves the interrupted operational state
+untouched, and authorizes no new live operation, T6, M3.2B, Gate H, snapshot, selection, manifest, or
+publication.
 
 Conventions used throughout:
 
@@ -187,6 +194,44 @@ rules.
 | `event_kind`, `event_payload_json` | TEXT | no | Audit tables; payloads never contain the SEC contact value |
 | `parser_run_id`, `parser_version`, `failure_reason_code` | TEXT | no | `audit_parser_runs`, `audit_parser_failures`; failures are recorded, never discarded |
 | `schema_drift_kind` | TEXT | no | `unknown_field_retained`, `required_field_missing`, `type_changed`, `unexpected_null`, `malformed_nested_array`, `new_historical_file_reference` |
+
+### 5A. M3.2 physical-attempt accounting (Decision 051)
+
+`ops_retrieval_attempts` is the accepted future primary durable consumed-count surface. Its rows
+represent **durably reserved physical-attempt slots**, not merely completed HTTP responses.
+
+| Field | Type | Null | Accepted semantics |
+|---|---|---|---|
+| `retrieval_attempt_id` | TEXT | no | Opaque primary key for one reservation |
+| `job_id` | TEXT | yes | Governed acquisition-run identity when available; never a receipt substitute |
+| `source_url_canonical` | TEXT | no | Canonical request URL; contains no contact identity or credential |
+| `logical_role` | TEXT | no | Registered logical request role |
+| `attempt_number` | INTEGER | no | Positive ordinal; every retry and redirect send receives its own row |
+| `attempt_state` | TEXT | no | `started`, `succeeded`, `failed`, `quarantined`, or `abandoned` |
+| `started_at_utc` | TEXT | no | Written and committed before the physical transport send |
+| `finished_at_utc` | TEXT | yes | Set only when terminal disposition is deterministically known |
+| `action_taken` | TEXT | yes | Sanitized operational action; no headers, body, identity, credential, or private path |
+| `reason_code` | TEXT | yes | Registered reason when applicable |
+
+Counting and reconciliation rules:
+
+1. One `started` row commits before each physical send. A failed commit prevents the send.
+2. Every committed `started` row counts as consumed, including a row stranded before the transport
+   call. This is the accepted one-attempt conservative reservation.
+3. A stranded `started` row remains consumed; later deterministic evidence may update its state but
+   never erase its consumption.
+4. Receipts, committed observations, raw lineage, and response accounting reconcile with this table.
+   No segment is counted twice.
+5. An irreconcilable mismatch is `UNDETERMINED` and prohibits continuation and live entry.
+6. Full per-route `A_reachable` is charged only when the exact count for at most one identifiable
+   in-flight request is genuinely unrecorded, unattributable, or ambiguous. An unknown route bound
+   or multiple possible in-flight requests is `UNDETERMINED`.
+7. The approved ceiling is never increased, reset, shadowed, or reinterpreted.
+
+The interrupted initial T5 invocation predates this runtime writer. Its real table remains empty and
+is not backfilled. Decision 051 accepts **1 of 801** for that one historical invocation from the
+verified immutable raw lineage and sequential call-path proof. That incident-specific evidence does
+not make raw lineage the future primary attempt ledger.
 
 ## 6. Release fields
 

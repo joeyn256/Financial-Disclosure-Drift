@@ -90,14 +90,30 @@ repository **byte-identical** and **enabled nothing**: `FREE_DISK_50_GIB_GATE: P
 **17/17** at the destination and **17/17** on scratch restore, and the disposable offline catalog
 passed with migrations contiguous `0001`–`0013` and the corrected expectation
 **`reference_policy_versions = 25`** now frozen (21 migration keys + 4 `seed_reference_data()` keys,
-zero overlap — resolving the stale packet value of 6). **T5 is NOT AUTHORIZED and NOT BEGUN, and T6 is
-NOT AUTHORIZED**; network stays disabled, live SEC acquisition stays unauthorized, no operational
-catalog exists — **Decision 047 ruling 047-A fixes that the catalog is first created inside the first
-lawfully authorized M3.2A live invocation under a later T5 instrument** — and ceiling **801** remains
-unused at **0**.** **The next authorized action is
-`CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_PACKET`** — T4 acceptance is **not**
-combined with T5 authorization; nothing yet authorizes T5 or T6 work, network enablement, SEC
-contact, or any live operation. The earlier bounded
+zero overlap — resolving the stale packet value of 6). **Exactly one initial M3.2A live invocation is
+now AUTHORIZED — and NOT YET EXECUTED** — by accepted
+[Decision 050](../Docs/Decisions/decision_050_m3_2_t5_initial_live_invocation_authorization.md)
+(2026-08-07, outcome `M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_RECORDED_AND_PUBLISHED`,
+authority classification **`T5_INITIAL_LIVE_INVOCATION_AUTHORIZED_FOR_SEPARATE_EXECUTION_PACKET`**).
+That grant is **`ONE_INITIAL_M3_2A_LIVE_INVOCATION` and nothing more**, frozen to window **M3.2A**,
+plan `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`, **75** logical requests,
+**70** quarterly indexes, ceiling **801**, consumed **0**, **GET**-only, a **200.0-second** spacing
+floor, the accepted **seven** bootstrap route families, and hosts `www.sec.gov` and `data.sec.gov`.
+**Decision 050 did not execute it**: the live execution remains deferred until the ChatGPT owner
+issues the separate T5 execution packet. **There is no resume, retry, or recovery authority** — on any
+interrupted, failed, ceiling-stop, gate-stop, uncertain, or non-successfully-completed termination,
+**`DO NOT RESUME AUTOMATICALLY`**, and continuation requires network disabled, a read-only recovery
+inspection, a **SAFE** classification (**UNSAFE ⇒ no continuation**, **UNDETERMINED ⇒ STOP**), the
+predecessor receipt identified, the consumed count carried forward under the same binding ceiling 801,
+a new run ID, and a **separate explicit owner ruling**. **M3.2B, T6, and Gate H remain NOT
+AUTHORIZED**; tracked network configuration stays **false / false** and CompanyFacts **false** —
+window-local `true / true` may exist **only** during the separately authorized invocation and is
+withdrawn immediately after it — no operational catalog exists, **Decision 047 ruling 047-A and
+Decision 050 §11 fix that `catalogs/m3_2a_operational.sqlite3` is first created only inside the first
+lawfully authorized M3.2A live invocation**, and ceiling **801** remains unused at **0**.** **The next
+authorized action is `CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_EXECUTION_PACKET`** — the
+authorization exists, but nothing yet executes it, and no session may read Decision 050 as permission
+to enable the network, contact the SEC, or begin T5. The earlier bounded
 **non-production** stage
 **M3.2 G1 — Navigation and Workflow Repair**, authorized on a seven-path ceiling by accepted
 [Decision 043](../Docs/Decisions/decision_043_m3_2_g1_navigation_workflow_repair_authorization.md)
@@ -969,13 +985,58 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**`CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_PACKET`**
-— control returns to the ChatGPT owner for the **separate exact T5 initial-live-invocation
-authorization packet**. **T4 is COMPLETE AND ACCEPTED** (accepted
-[Decision 049](../Docs/Decisions/decision_049_m3_2_t4_operational_preflight_acceptance.md)), but
-**T4 acceptance is not T5 authorization**. Nothing currently authorizes **T5 or T6 work, network
-enablement, SEC contact, operational-catalog creation, or any live operation**, and no session may
-read this marker as any of those.
+**`CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_EXECUTION_PACKET`**
+— control returns to the ChatGPT owner for the **separate exact T5 initial-live-invocation execution
+packet**. **T4 is COMPLETE AND ACCEPTED** (accepted
+[Decision 049](../Docs/Decisions/decision_049_m3_2_t4_operational_preflight_acceptance.md)), and
+**exactly one initial M3.2A live invocation is AUTHORIZED but NOT YET EXECUTED** (accepted
+[Decision 050](../Docs/Decisions/decision_050_m3_2_t5_initial_live_invocation_authorization.md)).
+**Authorization is not execution.** Nothing currently executes T5, and nothing authorizes **M3.2B,
+T6, Gate H, network enablement, SEC contact, operational-catalog creation, or any live operation**
+outside that separate packet — no session may read this marker as any of those.
+
+**Exactly one initial M3.2A live invocation is AUTHORIZED, and NOT YET EXECUTED** (accepted
+[Decision 050](../Docs/Decisions/decision_050_m3_2_t5_initial_live_invocation_authorization.md),
+2026-08-07, outcome `M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_RECORDED_AND_PUBLISHED`, authority
+classification **`T5_INITIAL_LIVE_INVOCATION_AUTHORIZED_FOR_SEPARATE_EXECUTION_PACKET`** — the
+governance authority exists, but **the recorder must not execute it**). The grant is
+**`ONE_INITIAL_M3_2A_LIVE_INVOCATION` and nothing more**.
+
+**Frozen M3.2A live scope** (Decision 050 §5): window **M3.2A**; plan SHA-256
+`19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`; **75** planned unique logical
+requests; **70** quarterly index instances; hard physical-attempt ceiling **801**; consumed before
+initial T5 **0**; method **GET**; request spacing floor **200.0 seconds**; the accepted **seven**
+bootstrap route families only (`sec_bulk_submissions`, `sec_company_tickers`,
+`sec_company_tickers_exchange`, `sec_edgar_calendar_announcement`, `sec_edgar_filing_calendar`,
+`sec_full_index_company`, `sec_sic_code_list`), with `sec_submissions_entity` and
+`sec_submissions_historical` prohibited; hosts limited to `www.sec.gov` and `data.sec.gov`, the
+zero-request compound calendar/announcement host representation accepted as **nonblocking**. **No**
+contingency requests, ceiling increase, plan substitution, alternate plan hash, or stale-plan
+fallback. **CompanyFacts and Frames remain prohibited and unreachable; filing-body and
+accession-content acquisition remain prohibited in every window; M3.2B remains prohibited.**
+
+**No resume authority.** If the authorized invocation ends interrupted, failed, ceiling-stopped,
+gate-stopped, uncertain, or otherwise not successfully completed: **`DO NOT RESUME AUTOMATICALLY`**.
+Before any subsequent invocation — network disabled; read-only recovery inspection; recovery state
+classified; continuation only if **SAFE**; **UNSAFE ⇒ no continuation**; **UNDETERMINED ⇒ STOP**;
+predecessor receipt identified; consumed attempt count carried forward; the same ceiling **801** still
+binding; a **new run ID**; and a **separate explicit ChatGPT-owner resume or new-run ruling**. **No
+wording in Decision 050 or here pre-authorizes that continuation.**
+
+**Network authority model** (Decision 050 §10): tracked `configs/project.yaml` remains
+**`network.enabled: false`** and **`network.m3_acquire_enabled: false`**, and CompanyFacts remains
+**false**. A **private window-local** configuration setting both `true` may be created **only** by the
+later execution packet, **only** for the authorized M3.2A invocation, and is **withdrawn immediately
+after termination**, with the safe false/false state verified afterwards. The live gate remains a
+**conjunction** — owner T5 execution authority, explicit `--live`, window M3.2A, the accepted plan and
+plan hash, ceiling 801, a valid undisclosed SEC identity, the accepted contract and implementation,
+accepted T4, Decision 050, and every implementation-level live gate. **Decision 050 itself leaves the
+network false / false.**
+
+**Operational-catalog boundary:** `T4_DOES_NOT_CREATE_THE_OPERATIONAL_CATALOG` is preserved, and the
+real governed catalog `catalogs/m3_2a_operational.sqlite3` may first be created **only during the
+separately authorized lawful T5 live invocation**. Its **absence is required** before that invocation
+and is verified absent now.
 
 **The T4 operational preflight is EXECUTED, ACCEPTED, AND PUBLISHED** (accepted
 [Decision 049](../Docs/Decisions/decision_049_m3_2_t4_operational_preflight_acceptance.md),
@@ -2295,13 +2356,13 @@ DECISION_026_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome MILESTONES_
 DECISION_027_STATUS: v0.2; ACCEPTED — OWNER APPROVED 2026-07-31; outcome M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED; controls the accepted Milestone 3 master plan as narrowly corrected by accepted Decision 028; grants no implementation authority
 DECISION_029_STATUS: ACCEPTED — OWNER APPROVED 2026-08-02; outcome M3_1_REHEARSAL_COMPLETENESS_AND_REASON_SEMANTICS_ACCEPTED; narrowly supersedes two Decision 028 clauses only; controls the per-route full-path A_reachable witness (a zero U never waives it), the rehearsal-only manifest-resolution fixture, the single code OFFLINE_REHEARSAL_SCENARIO_MISMATCH (integrity, blocks_release true, requires_manual_review false by owner ruling), the four-predicate M3.1A token gate, and the first durable section 17 review artifact; changes no receipt schema field or digest preimage; creates no migration; grants no network authority and no tag
 DECISION_028_STATUS: ACCEPTED — OWNER APPROVED 2026-08-01; outcome M3_1_READINESS_CORRECTIONS_ACCEPTED; independent rereview PASS; records planner-v2, corrected A1-A12, two future reason codes, receipt-v2, budget, ceiling, recovery-ownership, and M3-L11 rulings; grants no implementation or network authority
-CURRENT_STAGE: M3.2 T3 ACCEPTED AND PUBLISHED (DECISION 046); DECISION 047 ACCEPTED AND PUBLISHED; PRE-T4 RAWSTORE STREAMING SUBSTAGE AND ITS INDEPENDENT PASS REREVIEW ACCEPTED AND PUBLISHED (DECISION 048); T4 OPERATIONAL PREFLIGHT EXECUTED, ACCEPTED, AND PUBLISHED (DECISION 049) — T4 COMPLETE_AND_ACCEPTED WITH BLOCKER 0 / MAJOR 0 / MINOR 0 / OPTIMIZATION 0, FREE_DISK_50_GIB_GATE PASS, OFF-DEVICE BACKUP VERIFIED 17/17 AND RESTORE 17/17, REFERENCE_POLICY_VERSIONS FROZEN AT 25; M3-L13 CLOSED; F4 COMPLETE; PROGRESS SINK DISCHARGED; D023-O1 LATENT AND NOT TRIGGERED; T5 AND T6 NOT AUTHORIZED AND NOT BEGUN; NETWORK DISABLED; COMPANYFACTS DISABLED; REAL OPERATIONAL CATALOG ABSENT; NO LIVE M3.2 RUN; NO LIVE RECEIPT; NO RAW LIVE SEC OBJECT; CEILING 801 CONSUMED 0
-ACTIVE_BLOCKER: M3.2 BLOCKS ON THE SEPARATE EXACT CHATGPT-OWNER T5 INITIAL-LIVE-INVOCATION AUTHORIZATION PACKET; T4 IS COMPLETE AND ACCEPTED BY DECISION 049 BUT T4 ACCEPTANCE IS NOT T5 AUTHORIZATION, AND T5 AND T6 REMAIN UNAUTHORIZED AND NOT BEGUN
+CURRENT_STAGE: M3.2 T3 ACCEPTED AND PUBLISHED (DECISION 046); DECISION 047 ACCEPTED AND PUBLISHED; PRE-T4 RAWSTORE STREAMING SUBSTAGE AND ITS INDEPENDENT PASS REREVIEW ACCEPTED AND PUBLISHED (DECISION 048); T4 OPERATIONAL PREFLIGHT EXECUTED, ACCEPTED, AND PUBLISHED (DECISION 049) — T4 COMPLETE_AND_ACCEPTED WITH BLOCKER 0 / MAJOR 0 / MINOR 0 / OPTIMIZATION 0, FREE_DISK_50_GIB_GATE PASS, OFF-DEVICE BACKUP VERIFIED 17/17 AND RESTORE 17/17, REFERENCE_POLICY_VERSIONS FROZEN AT 25; EXACTLY ONE INITIAL M3.2A LIVE INVOCATION AUTHORIZED AND PUBLISHED BUT NOT YET EXECUTED (DECISION 050) — T5_INITIAL_LIVE_INVOCATION_AUTHORIZED_FOR_SEPARATE_EXECUTION_PACKET, WINDOW M3.2A, PLAN 19be7bdc, 75 LOGICAL REQUESTS, 70 QUARTERLY INDEXES, CEILING 801, CONSUMED 0, GET-ONLY, 200.0-SECOND SPACING FLOOR, SEVEN ROUTE FAMILIES, NO RESUME OR RETRY OR RECOVERY AUTHORITY; M3-L13 CLOSED; F4 COMPLETE; PROGRESS SINK DISCHARGED; D023-O1 LATENT AND NOT TRIGGERED; M3.2B, T6, AND GATE H NOT AUTHORIZED; TRACKED NETWORK FALSE/FALSE; COMPANYFACTS DISABLED; REAL OPERATIONAL CATALOG ABSENT; NO LIVE M3.2 RUN; NO LIVE RECEIPT; NO RAW LIVE SEC OBJECT; CEILING 801 CONSUMED 0
+ACTIVE_BLOCKER: M3.2 BLOCKS ON THE SEPARATE EXACT CHATGPT-OWNER T5 INITIAL-LIVE-INVOCATION EXECUTION PACKET; DECISION 050 AUTHORIZES EXACTLY ONE INITIAL M3.2A LIVE INVOCATION BUT AUTHORIZATION IS NOT EXECUTION AND THE INVOCATION HAS NOT OCCURRED; M3.2B, T6, AND GATE H REMAIN UNAUTHORIZED AND NOT BEGUN
 DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controls crosswalk item 46 reserve-rank applicability only
 DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; controls S6 acceptance, delivered-path ratification, limitations O1-O4, and checkpoint authorization
 DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED; controls the M2 to M3 phase boundary and five entry conditions; grants no implementation authority
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED
-IMPLEMENTATION_AUTHORIZATION: NONE — DECISION 047'S TWO-PATH PRE-T4 RAWSTORE STREAMING SUBSTAGE (src/disclosure_drift/sec/raw_store.py, tests/unit/test_raw_store.py) IS EXHAUSTED AND ACCEPTED AND PUBLISHED BY DECISION 048; DECISION 047'S T4 AUTHORIZATION IS EXHAUSTED AND T4 IS ACCEPTED AND PUBLISHED BY DECISION 049; EVERY T2.1-T2.6 AND G1 GRANT REMAINS EXHAUSTED; T5 AND T6 ARE NOT AUTHORIZED; NO NETWORK, LIVE-SEC, OPERATIONAL-CATALOG, CEILING-801, MIGRATION, RECEIPT-SCHEMA, REASON-CODE, CONFIGURATION-SCHEMA, EXECUTABLE, TEST, OR TAG WORK IS AUTHORIZED
+IMPLEMENTATION_AUTHORIZATION: NONE — DECISION 047'S TWO-PATH PRE-T4 RAWSTORE STREAMING SUBSTAGE (src/disclosure_drift/sec/raw_store.py, tests/unit/test_raw_store.py) IS EXHAUSTED AND ACCEPTED AND PUBLISHED BY DECISION 048; DECISION 047'S T4 AUTHORIZATION IS EXHAUSTED AND T4 IS ACCEPTED AND PUBLISHED BY DECISION 049; EVERY T2.1-T2.6 AND G1 GRANT REMAINS EXHAUSTED; DECISION 050 GRANTS OPERATIONAL AUTHORITY FOR EXACTLY ONE INITIAL M3.2A LIVE INVOCATION TO BE PERFORMED ONLY UNDER A SEPARATE OWNER EXECUTION PACKET, AND GRANTS NO IMPLEMENTATION AUTHORITY WHATEVER; M3.2B, T6, AND GATE H ARE NOT AUTHORIZED; NO MIGRATION, RECEIPT-SCHEMA, REASON-CODE, CONFIGURATION-SCHEMA, EXECUTABLE, TEST, OR TAG WORK IS AUTHORIZED
 ACTIVE_STAGE_CONTRACT: Milestones/contracts/m3_2.md
-NEXT_AUTHORIZED_ACTION: CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_PACKET
+NEXT_AUTHORIZED_ACTION: CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_EXECUTION_PACKET
 ```

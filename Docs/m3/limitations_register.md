@@ -54,8 +54,8 @@ Every Milestone 3 phase:
 | Decision 023 §7 — S6 acceptance | 4 | 3 `ACTIVE`, **O1** `ACTIVE — OWNER RULING PENDING` |
 | Decision 024 — boundary consequences | 2 | all `ACTIVE` |
 | Decision 026 — standing obligations | 3 | all `ACTIVE` |
-| Milestone 3 — new at planning, and **M3-L13** new at the T4 preflight | 13 | 10 `ACTIVE`; **M3-L11** and **M3-L12** **`CLOSED` 2026-08-03** (owner step-17 closure authorization; Decision 031; verified `m3.1-complete` checkpoint, tag object `638a02b7…`, peeled `4cd2c72…`); **M3-L13** **`CLOSED` — DECISION 048** (2026-08-07; accepted corrected candidate `833a192…` at tree `c2d95bad…`; independent PASS artifact SHA-256 `7bd5a544…` at review commit `9406afb…`) |
-| **Total** | **35 open (all `ACTIVE`), 4 closed** | |
+| Milestone 3 — new at planning, **M3-L13** new at the T4 preflight, and **M3-L14**–**M3-L16** new at the post-T5 remediation acceptance | 16 | 13 `ACTIVE`; **M3-L11** and **M3-L12** **`CLOSED` 2026-08-03** (owner step-17 closure authorization; Decision 031; verified `m3.1-complete` checkpoint, tag object `638a02b7…`, peeled `4cd2c72…`); **M3-L13** **`CLOSED` — DECISION 048** (2026-08-07; accepted corrected candidate `833a192…` at tree `c2d95bad…`; independent PASS artifact SHA-256 `7bd5a544…` at review commit `9406afb…`) |
+| **Total** | **38 open (all `ACTIVE`), 4 closed** | |
 
 ---
 
@@ -826,6 +826,63 @@ Every Milestone 3 phase:
 | **Closure evidence** | The accepted two-path correction; its non-vacuous streaming and memory positive controls; byte-identical deterministic-gzip, `content_sha256`, `stored_sha256`, and stored-size proofs across both compression modes; the preserved durability, deduplication, quarantine, reconciliation, and failure-preservation tests; full validation green; a fresh independent implementation review by a non-author session; and the owner's separate acceptance recorded in a Decision and this register |
 | **Closable before M3.5** | **yes — and it should close before T5 opens a live window** |
 
+## M3-L14 — Receiptless ledger-coverage cardinality is evaluated per manifest
+
+| Field | Value |
+|---|---|
+| **Origin** | Post-T5 remediation independent rereview finding **F1**, accepted as a nonblocking limitation by accepted [Decision 052](../Decisions/decision_052_m3_2_post_t5_remediation_acceptance_and_publication.md) §7 (ruling 052-E) |
+| **Description** | In the explicit receiptless first-invocation inspection, ledger coverage is decided **independently for each raw-lineage manifest**. Reservations are not consumed across manifests, so one `ops_retrieval_attempts` reservation can satisfy the coverage test for more than one owned same-URL segment. Measured directly by the independent reviewer: **1 reservation + 2 owned segments** reports a consumed count of **1** with determination `UNSAFE`, where the durable floor is **2** and the correct fail-closed outcome is `UNDETERMINED` |
+| **Affected M3 phase** | M3.2 — any future receiptless inspection performed over a **non-empty** attempt ledger |
+| **Status** | `ACTIVE` |
+| **Methodology impact** | None. No research definition, cohort rule, outcome, identity, or hash preimage is involved |
+| **Reproducibility impact** | None — the behaviour is deterministic. The defect is that the deterministic answer can under-report a durable floor, not that it varies |
+| **Security impact** | None |
+| **Operational impact** | **Bounded, and absent from the real incident.** The interrupted initial T5 invocation's `ops_retrieval_attempts` table is **empty**, so no reservation exists to over-apply and the accepted count of **1 of 801** is unaffected. The condition is unreachable on the governed reserve-before-send path as currently constructed, which commits one reservation per physical send before that send occurs. It **cannot authorize continuation** under any value, because receiptless mode never returns `SAFE` (Decision 051 §8) |
+| **Publication impact** | Disclose the per-manifest cardinality rule with any consumed-count figure derived from receiptless inspection over a non-empty ledger |
+| **Mitigation** | Recorded and owner-accepted as nonblocking under the bounded review protocol rather than corrected in a third correction loop (Decision 052 §7). Receiptless mode's structural inability to return `SAFE` is the load-bearing containment |
+| **Stop condition** | Any reliance on receiptless accounting over a **non-empty** ledger as an owner baseline before this entry's closure evidence exists; or any observed consumed count that disagrees with the durable reservation-plus-lineage floor |
+| **Required owner action** | **A hard standing condition.** Before receiptless accounting with a non-empty ledger is ever relied on as an owner baseline, the owner must authorize **either** correcting reservation consumption to one-reservation-per-segment, **or** failing such unmatched cardinality to `UNDETERMINED` |
+| **Closure evidence** | An accepted decision choosing one of the two corrections, a reviewed implementation of it inside a new authorized envelope, a non-vacuous test that fails against the current per-manifest behaviour, and full validation green |
+| **Closable before M3.5** | yes, under a later separately authorized packet |
+
+## M3-L15 — Second-SIGTERM suppression has no regression test
+
+| Field | Value |
+|---|---|
+| **Origin** | Post-T5 remediation independent rereview finding **F2**, accepted as a deferred one-test gap by accepted [Decision 052](../Decisions/decision_052_m3_2_post_t5_remediation_acceptance_and_publication.md) §8 (ruling 052-F) |
+| **Description** | The `delivered` latch that suppresses a **second** SIGTERM during live-acquisition cleanup — so cleanup and any single terminating-receipt attempt are never duplicated — is implemented and was **directly verified** by the independent reviewer through process-level fault injection. **No committed test guards it**, so a future edit could remove the latch without failing the suite |
+| **Affected M3 phase** | M3.2, and every later phase that runs the governed live-acquisition lifecycle |
+| **Status** | `ACTIVE` |
+| **Methodology impact** | None |
+| **Reproducibility impact** | None — the production behaviour is correct today and was independently confirmed |
+| **Security impact** | None |
+| **Operational impact** | **A test-strength gap, not a production defect.** A regression would only surface under a second SIGTERM delivered during cleanup of a live acquisition |
+| **Publication impact** | None |
+| **Mitigation** | The behaviour was directly verified once by fault injection at rereview. Decision 052 §8 expressly **does not reopen** the accepted stage to add the test |
+| **Stop condition** | Any edit to the scoped SIGTERM handling that is not accompanied by a test covering second-signal suppression |
+| **Required owner action** | none unless the stop condition occurs; the gap may be discharged by a later separately authorized packet |
+| **Closure evidence** | A committed regression test that fails when the `delivered` latch is removed, inside a later authorized envelope, with full validation green |
+| **Closable before M3.5** | yes, under a later separately authorized packet |
+
+## M3-L16 — No clean-run carry-in interface for the consumed baseline of 1
+
+| Field | Value |
+|---|---|
+| **Origin** | Post-T5 remediation independent rereview observation **O1**, recorded as a mandatory live-readiness obligation by accepted [Decision 052](../Decisions/decision_052_m3_2_post_t5_remediation_acceptance_and_publication.md) §9 (ruling 052-G) |
+| **Description** | Accepted [Decision 051](../Decisions/decision_051_m3_2_post_t5_remediation_governance.md) §§5, 12 fix that cumulative consumption starts at **1**, with **5** bulk-route and **800** total attempts remaining, and that no future run may reset the count. The accepted remediation candidate provides **no non-resume mechanism for carrying that historical baseline of 1 into a clean new run**. The gap is **outside** Decision 051's four-change scope and is correctly absent from the accepted candidate — it is not a defect in that candidate |
+| **Affected M3 phase** | **M3.2A** — any future clean new invocation; and every later phase that depends on one |
+| **Status** | **`ACTIVE — BLOCKS LATER LIVE AUTHORIZATION`** |
+| **Methodology impact** | None directly; but a run that silently restarted the count at zero would breach the accepted ceiling accounting |
+| **Reproducibility impact** | None |
+| **Security impact** | None |
+| **Operational impact** | **Material and blocking.** **No clean new run may be authorized until an exact owner-approved carry-in mechanism is available and validated.** Until then the project is **not** ready for live operation, and no record, status marker, or session may claim live readiness |
+| **Publication impact** | Any statement of remaining request headroom must rest on the accepted baseline of 1 of 801, never on a fresh run's internal counter |
+| **Mitigation** | Recorded explicitly rather than left implicit. Decision 052 §9 states the obligation, and Decision 052 §1 item 8 and §17 both record `LIVE_READINESS: NOT_CLAIMED` |
+| **Stop condition** | **Any proposed clean new run, live authorization, or live-readiness claim while this entry is open.** Also: any run observed starting its consumed count at zero |
+| **Required owner action** | **Approve an exact carry-in mechanism, then have it implemented and validated, before authorizing any clean new run.** This is a precondition, not a parallel task |
+| **Closure evidence** | An accepted decision fixing the exact carry-in mechanism; a reviewed implementation inside a new authorized envelope; tests proving the baseline of 1 is carried in and never reset; full validation green; and a fresh independent review |
+| **Closable before M3.5** | **yes — and it must close before any clean new M3.2A run is authorized** |
+
 ## What this register does not do
 
 It closes nothing. It changes no accepted decision, methodology, identity, or limitation. It adds no
@@ -851,3 +908,10 @@ Decision 047 authorization (`bc3d170…`), the accepted corrected implementation
 **BLOCKER 0 · MAJOR 0**) at review commit `9406afb…`, and the owner's separate acceptance in
 Decision 048. Its two accepted nonblocking observations (Decision 048 §§6.1–6.2) are carried on that
 entry and **create no register entry of their own**. The historical description is preserved.
+**M3-L14, M3-L15, and M3-L16 are new and `ACTIVE`** at the post-T5 remediation acceptance (accepted
+[Decision 052](../Decisions/decision_052_m3_2_post_t5_remediation_acceptance_and_publication.md),
+2026-08-08), carrying rereview findings **F1** and **F2** and observation **O1**. They are owner-
+accepted as nonblocking **for that accepted stage only**; none is discharged, and **M3-L16 blocks any
+later clean-run or live authorization until it closes**. Decision 052's remaining nonblocking
+observations **O2**, **O3**, and **O4** are recorded at Decision 052 §10 and **create no register
+entry of their own**.

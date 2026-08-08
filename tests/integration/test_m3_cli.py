@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -1360,7 +1363,9 @@ def test_recovery_state_writes_nothing_it_inspected(repo_root: Path, evidence_ro
 
 
 def test_recovery_state_takes_no_run_or_repair_flag(repo_root: Path, evidence_root: Path) -> None:
-    """§9: "There is no `--run` shortcut and no repair flag"."""
+    """Ordinary receipt-chain mode rejects `--run` (it belongs only to receiptless mode, Decision
+    051 §7.4) and there is no repair flag at all: the mode is never inferred or mixed.
+    """
     for flag in ("--run", "--repair"):
         result = _run(
             [
@@ -1383,6 +1388,112 @@ def test_recovery_state_takes_no_run_or_repair_flag(repo_root: Path, evidence_ro
 
         assert result.returncode == EXIT_USAGE
         assert flag in result.stderr
+
+
+def _register_recovery_run(evidence_root: Path, run_id: str = "incident-run-01") -> None:
+    """Register one acquisition run in the synthetic recovery catalog."""
+    from disclosure_drift.m3.acquisition import register_acquisition_run
+    from disclosure_drift.paths import DataTree
+
+    tree = DataTree.from_root(evidence_root / "tree")
+    register_acquisition_run(
+        catalog_path=tree.catalog_database,
+        lock_directory=tree.locks,
+        census_run_id=run_id,
+        window="M3.2A",
+        started_at_utc="2026-08-01T12:00:00Z",
+        detail="interrupted first invocation",
+    )
+
+
+def _receiptless_state(
+    repo_root: Path,
+    evidence_root: Path,
+    *,
+    run: str | None = "incident-run-01",
+    receipt_head: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    argv = [
+        "m3",
+        "recovery-state",
+        "--evidence-root",
+        str(evidence_root),
+        "--plan",
+        "plans/interrupted.json",
+        "--catalog",
+        "catalog/sec_ingestion.sqlite3",
+        "--data-root",
+        "tree",
+        "--receiptless-first-invocation",
+    ]
+    if run is not None:
+        argv += ["--run", run]
+    if receipt_head is not None:
+        argv += ["--receipt-chain-head", receipt_head]
+    return _run(argv, repo_root)
+
+
+def test_recovery_state_receiptless_requires_run(repo_root: Path, evidence_root: Path) -> None:
+    _recovery_inputs(repo_root, evidence_root)
+    result = _receiptless_state(repo_root, evidence_root, run=None)
+    assert result.returncode == EXIT_USAGE
+    assert "--run" in result.stderr
+
+
+def test_recovery_state_receiptless_conflicts_with_a_receipt_head(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _recovery_inputs(repo_root, evidence_root)
+    result = _receiptless_state(repo_root, evidence_root, receipt_head="receipts/plan.json")
+    assert result.returncode == EXIT_USAGE  # argparse refuses the mutually exclusive combination
+
+
+def test_recovery_state_requires_an_explicit_mode(repo_root: Path, evidence_root: Path) -> None:
+    _recovery_inputs(repo_root, evidence_root)
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+    assert result.returncode == EXIT_USAGE  # neither --receipt-chain-head nor receiptless was given
+
+
+def test_recovery_state_receiptless_reports_a_non_safe_determination(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _recovery_inputs(repo_root, evidence_root)
+    _register_recovery_run(evidence_root)
+    result = _receiptless_state(repo_root, evidence_root)
+
+    determination = next(
+        line.split(":", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("determination")
+    )
+    # A receiptless first invocation is forensic only — never SAFE, never resume-eligible.
+    assert determination in {"UNSAFE", "UNDETERMINED"}
+    assert result.returncode == EXIT_GATE_FAILURE
+    normalized = " ".join(result.stdout.split())
+    assert "receipt chain length : 0" in normalized  # no chain was walked
+
+
+def test_recovery_state_receiptless_refuses_an_unregistered_run(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    _recovery_inputs(repo_root, evidence_root)  # migrated catalog, but no run registered
+    result = _receiptless_state(repo_root, evidence_root, run="never-registered")
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "does not resolve" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -3673,3 +3784,186 @@ def test_positive_control_the_same_invocation_does_create_the_catalog_when_it_is
     )
     assert _live_catalog_path(evidence_root).is_file()
     assert script.constructions == 1
+
+
+# --------------------------------------------------------------------------- #
+# Scoped SIGTERM handling (Decision 051 §7.3)
+# --------------------------------------------------------------------------- #
+class TestScopedSigterm:
+    """`_scoped_sigterm_interruption` routes SIGTERM through the SIGINT lifecycle, in process."""
+
+    def test_first_sigterm_raises_keyboard_interrupt_and_restores_prior_handler(self) -> None:
+        from disclosure_drift.cli import _scoped_sigterm_interruption  # noqa: PLC0415
+
+        def _prior(_signum: int, _frame: object) -> None:  # a distinctive prior disposition
+            pass
+
+        original = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _prior)
+        try:
+            raised = False
+            try:
+                with _scoped_sigterm_interruption():
+                    # Our handler is installed for the duration of the scope, not the prior one.
+                    assert signal.getsignal(signal.SIGTERM) is not _prior
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    # A pending signal is handled between bytecodes; force a few to run.
+                    for _ in range(10000):
+                        pass
+            except KeyboardInterrupt:
+                raised = True
+            assert raised  # the first SIGTERM became a KeyboardInterrupt
+            assert signal.getsignal(signal.SIGTERM) is _prior  # the prior handler is restored
+        finally:
+            signal.signal(signal.SIGTERM, original)
+
+    def test_sigint_disposition_is_left_untouched(self) -> None:
+        from disclosure_drift.cli import _scoped_sigterm_interruption  # noqa: PLC0415
+
+        before = signal.getsignal(signal.SIGINT)
+        with _scoped_sigterm_interruption():
+            assert signal.getsignal(signal.SIGINT) is before  # SIGINT is never replaced
+        assert signal.getsignal(signal.SIGINT) is before
+
+    def test_scope_off_the_main_thread_is_a_noop_and_never_raises(self) -> None:
+        import threading  # noqa: PLC0415
+
+        from disclosure_drift.cli import _scoped_sigterm_interruption  # noqa: PLC0415
+
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                with _scoped_sigterm_interruption():
+                    pass  # signal.signal off the main thread would raise; the guard must skip it
+            except BaseException as exc:  # noqa: BLE001 - the test records any failure at all
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker)
+        worker.start()
+        worker.join()
+        assert errors == []
+
+
+# A disposable in-child driver: register a run, reserve one physical attempt through the ledger at
+# the transport seam, signal readiness, and then block "mid-send" under the scoped SIGTERM. The
+# reservation is committed *before* the blocking send begins, so when the parent delivers SIGTERM
+# the durable `started` row already exists and no receipt is (or can be) written.
+_SIGTERM_DRIVER = """
+import sys, time
+from pathlib import Path
+from disclosure_drift.m3.acquisition import (
+    OPERATIONAL_CATALOG_RELATIVE_PATH,
+    PhysicalResponseLog,
+    PreSendAttemptLedger,
+    RecordingTransport,
+    prepare_operational_catalog,
+    register_acquisition_run,
+)
+from disclosure_drift.cli import _scoped_sigterm_interruption
+from disclosure_drift.storage.catalog import CatalogWriter
+from disclosure_drift.sec.transport import SecRequest
+
+evidence_root = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+
+
+def _clock():
+    return "2026-08-04T00:00:00Z"
+
+
+prep = prepare_operational_catalog(
+    evidence_root=evidence_root, relative_path=OPERATIONAL_CATALOG_RELATIVE_PATH
+)
+register_acquisition_run(
+    catalog_path=prep.database_path,
+    lock_directory=prep.lock_directory,
+    census_run_id="proc-run",
+    window="M3.2A",
+    started_at_utc=_clock(),
+    detail="sigterm fault injection",
+)
+
+
+class _Blocking:
+    def send(self, request):
+        ready.write_text("sent")  # the reservation is already committed before this runs
+        time.sleep(60)  # block until the parent delivers SIGTERM
+        raise SystemExit(0)  # never reached
+
+    def close(self):
+        pass
+
+
+request = SecRequest(
+    url="https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip",
+    headers={},
+    timeout_connect=1.0,
+    timeout_read=1.0,
+    purpose="acquire an approved Milestone 3.2 metadata object for an offline fixture",
+    source_id="sec_bulk_submissions",
+)
+with CatalogWriter(prep.database_path, prep.lock_directory) as writer:
+    ledger = PreSendAttemptLedger(writer=writer, job_id="proc-run", clock=_clock)
+    recording = RecordingTransport(transport=_Blocking(), log=PhysicalResponseLog(), ledger=ledger)
+    with _scoped_sigterm_interruption():
+        recording.send(request)
+"""
+
+
+def test_sigterm_mid_send_leaves_a_durable_started_reservation(tmp_path: Path) -> None:
+    """Process-level fault injection: a SIGTERM mid-send preserves the write-ahead reservation.
+
+    This is the case a receipt cannot cover — the process is told to terminate while a physical send
+    is in flight — so the durable `started` reservation is the protection. The child is killed with
+    a real SIGTERM; the scoped handler turns it into the interruption lifecycle, and the reservation
+    committed before the send survives.
+    """
+    evidence_root = tmp_path / "private-evidence"
+    evidence_root.mkdir()
+    ready = tmp_path / "ready"
+    driver = tmp_path / "driver.py"
+    driver.write_text(_SIGTERM_DRIVER, encoding="utf-8")
+
+    child = subprocess.Popen(  # noqa: S603 - a trusted, in-repo driver script
+        [sys.executable, str(driver), str(evidence_root), str(ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30.0
+        while not ready.exists() and time.monotonic() < deadline:
+            if child.poll() is not None:
+                stderr = (child.stderr.read() if child.stderr else "") or ""
+                message = f"child exited before reserving; stderr:\n{stderr}"
+                raise AssertionError(message)
+            time.sleep(0.02)
+        assert ready.exists(), "the child never reached the blocking send"
+
+        child.send_signal(signal.SIGTERM)
+        # If SIGTERM were not routed to the interruption lifecycle, the child would sleep 60s; the
+        # tight wait budget is itself the proof that the interrupt was delivered and caught.
+        returncode = child.wait(timeout=15)
+    finally:
+        if child.poll() is None:  # never leave a runaway child behind
+            child.kill()
+            child.wait(timeout=5)
+
+    assert returncode != 0  # interrupted, not a clean completion of the 60s sleep
+
+    catalog = evidence_root / "catalogs" / "m3_2a_operational.sqlite3"
+    with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT job_id, attempt_number, attempt_state, finished_at_utc "
+            "FROM ops_retrieval_attempts ORDER BY attempt_number"
+        ).fetchall()
+
+    # Exactly one durable reservation: the reserve committed it, and the signal handler — which
+    # performs no writes — added nothing.
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == "proc-run"
+    assert rows[0]["attempt_number"] == 1
+    assert rows[0]["attempt_state"] == "started"  # stranded but consumed; no fabricated receipt
+    assert rows[0]["finished_at_utc"] is None

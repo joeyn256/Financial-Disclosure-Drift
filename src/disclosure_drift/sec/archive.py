@@ -205,6 +205,22 @@ def _portable_member_key(canonical: str) -> str:
     return "/".join(components)
 
 
+def _strict_ancestor_prefixes(portable: str) -> tuple[str, ...]:
+    """Return every strict ancestor prefix of a portable member key.
+
+    For ``a/b/c`` this is ``("a", "a/b")`` — never ``a/b/c`` itself, and empty for a
+    single-component key. Maintaining the union of these prefixes across admitted members
+    turns the reverse-order file-versus-directory collision check — *does any admitted path
+    lie beneath this file?* — into a constant-time membership test. ``portable`` is already in
+    portable form (NFC-normalized, case-folded, ``/``-joined), so each prefix is too, and
+    ``portable in ancestors`` is exactly ``any(existing.startswith(portable + "/"))`` over the
+    admitted set: the string boundary that ``+ "/"`` enforced is the same one a path-component
+    split enforces, so ``a`` never matches a sibling ``ab/…``.
+    """
+    components = portable.split("/")
+    return tuple("/".join(components[:depth]) for depth in range(1, len(components)))
+
+
 def safe_member_name(name: str) -> str:
     """Return the canonical name of a **file** member, refusing a directory entry.
 
@@ -260,6 +276,13 @@ def iter_members(
             files: dict[str, tuple[str, zipfile.ZipInfo]] = {}
             directories: set[str] = set()
             all_paths: set[str] = set()
+            # The union of every admitted path's strict ancestor prefixes. It answers the
+            # reverse-order collision — is some already-admitted path a descendant of this file? —
+            # in constant time. The prior implementation rescanned the whole growing admitted set
+            # per member, which is quadratic in the member count and was the accidental ~46-minute
+            # stall on the 985,480-entry submissions archive (Decision 051 §4.1). The membership
+            # test is semantically identical: see :func:`_strict_ancestor_prefixes`.
+            strict_ancestors: set[str] = set()
             for info in entries:
                 _refuse_special_member(info)
                 canonical = canonical_member_name(info.filename)
@@ -284,8 +307,9 @@ def iter_members(
                 if info.is_dir():
                     directories.add(portable)
                     all_paths.add(portable)
+                    strict_ancestors.update(_strict_ancestor_prefixes(portable))
                     continue
-                if any(existing.startswith(portable + "/") for existing in all_paths):
+                if portable in strict_ancestors:
                     message = (
                         f"refusing archive member {info.filename!r}: file and directory "
                         "paths collide after portable canonicalization"
@@ -293,6 +317,7 @@ def iter_members(
                     raise ArchiveDefenceError(message)
                 files[portable] = (canonical, info)
                 all_paths.add(portable)
+                strict_ancestors.update(_strict_ancestor_prefixes(portable))
 
             expanded = 0
             index = 0

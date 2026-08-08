@@ -32,6 +32,7 @@ downgraded.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -53,6 +54,7 @@ __all__ = [
     "ConditionResult",
     "RecoveryInspectionError",
     "RecoveryState",
+    "inspect_receiptless_first_invocation",
     "inspect_recovery_state",
     "read_only_catalog",
 ]
@@ -65,6 +67,10 @@ _PROJECTION_FILENAME: Final = "census_source_observations.jsonl"
 #: The suffix a not-yet-promoted transfer carries. A `.part` file existing is ordinary; a committed
 #: row *pointing at* one would mean a partial was treated as complete, which is the real condition.
 _PART_SUFFIX: Final = ".part"
+
+#: The suffix of a raw object's durable recovery-intent manifest. Read here — never written — so the
+#: forensic receiptless mode can derive the pre-ledger consumed baseline from durable evidence.
+_LINEAGE_SUFFIX: Final = ".lineage.json"
 
 _MET: Final = "MET"
 _NOT_MET: Final = "NOT MET"
@@ -609,4 +615,301 @@ def _determine(
             "duplicate-prevention proof is complete, carrying the consumed count forward under the "
             "same approved ceiling."
         ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Explicit receiptless first-invocation inspection (Decision 051 §7.4, §8; §5A)
+# --------------------------------------------------------------------------- #
+def _registered_run_or_refuse(connection: sqlite3.Connection, census_run_id: str) -> None:
+    """Refuse unless ``census_run_id`` resolves to exactly one registered acquisition job.
+
+    Receiptless mode is bound to the exact interrupted run identity (Decision 051 §7.4). A run id
+    that does not resolve is a caller error, reported the same way a missing head receipt is, so a
+    mistyped id can never read as a genuine recovery finding.
+    """
+    row = connection.execute(
+        "SELECT 1 FROM ops_ingestion_jobs WHERE job_id = ?",
+        (census_run_id,),
+    ).fetchone()
+    if row is None:
+        message = (
+            f"census run {census_run_id!r} does not resolve to a registered acquisition run; "
+            "receiptless inspection is bound to the exact interrupted run identity and never "
+            "invents one"
+        )
+        raise RecoveryInspectionError(message)
+
+
+def _ledger_reservation_count(connection: sqlite3.Connection, census_run_id: str) -> int:
+    """Count the durable pre-send reservations this run committed (Decision 051 §6).
+
+    Every committed ``started`` row counts as one consumed physical attempt, including a row
+    stranded before its transport call; a terminal state never erases the consumption.
+    """
+    row = connection.execute(
+        "SELECT COUNT(*) FROM ops_retrieval_attempts WHERE job_id = ?",
+        (census_run_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def _raw_lineage_attempts(tree: DataTree) -> int:
+    """Sum the physical-attempt counts recorded in the raw store's durable lineage manifests.
+
+    This is the pre-ledger, incident-specific consumed evidence Decision 051 §5 accepts for the
+    interrupted initial T5 invocation, whose lineage durably records ``attempts = 1``. Per data
+    dictionary §5A this incident evidence is deliberately **not** the future primary attempt
+    ledger — ``ops_retrieval_attempts`` is — so it is read only in this forensic receiptless mode,
+    and it is disjoint from the ledger for a genuine first invocation, which predates the runtime
+    writer. A manifest that cannot be read, or whose ``attempts`` is not a non-negative integer,
+    contributes nothing rather than an inferred value.
+    """
+    total = 0
+    raw_root = tree.data_root / "raw"
+    if not raw_root.is_dir():
+        return 0
+    for path in sorted(raw_root.rglob("*")):
+        if not path.is_file() or not path.name.endswith(_LINEAGE_SUFFIX):
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        attempts = document.get("attempts")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            continue
+        total += attempts
+    return total
+
+
+def inspect_receiptless_first_invocation(
+    *,
+    plan: RequestPlan,
+    census_run_id: str,
+    catalog_path: Path,
+    data_root: Path,
+) -> RecoveryState:
+    """Forensically inspect an interrupted first invocation that emitted no receipt. Writes nothing.
+
+    This is the explicit, read-only mode Decision 051 §7.4 permits and §8 bounds. It is selected
+    explicitly — never by a missing receipt — and is bound to the exact interrupted
+    ``census_run_id``. It may establish facts and the consumed count, but it can return only
+    ``UNSAFE`` or ``UNDETERMINED``: it never returns ``SAFE``, never proposes continuation, and
+    never enables ``--resume-from``. The predecessor-receipt requirement of Decision 050 §8 remains
+    binding for every resume, and this mode supplies none.
+
+    The consumed count is derived from durable evidence: the pre-ledger, incident-specific
+    raw-lineage attempts (Decision 051 §5) plus every committed ``ops_retrieval_attempts``
+    reservation bound to the run (§6). The two surfaces are disjoint for a genuine first invocation,
+    so they sum without double counting; the approved ceiling is read from the plan and never
+    reinterpreted.
+
+    Args:
+        plan: the approved request plan the interrupted run was executing.
+        census_run_id: the exact interrupted run identity; must resolve to a registered run.
+        catalog_path: the SQLite catalog to inspect read-only.
+        data_root: the data root whose raw store is inspected.
+
+    Raises:
+        RecoveryInspectionError: the catalog is absent, or the run id does not resolve.
+    """
+    if not Path(catalog_path).is_file():
+        message = (
+            f"catalog {Path(catalog_path).name!r} does not exist; receiptless inspection needs the "
+            f"catalog the interrupted run was writing to"
+        )
+        raise RecoveryInspectionError(message)
+
+    tree = DataTree.from_root(data_root)
+
+    with read_only_catalog(Path(catalog_path)) as connection:
+        _registered_run_or_refuse(connection, census_run_id)
+        integrity = integrity_report(connection)
+        store = _inspect_store(connection, tree)
+        projection = validate_audit_projection(connection, tree.audit / _PROJECTION_FILENAME)
+        unresolved_states = _unresolved_recovery_states(connection)
+        selection_runs = _in_flight_selection_runs(connection)
+        ledger_reservations = _ledger_reservation_count(connection, census_run_id)
+
+    lineage_attempts = _raw_lineage_attempts(tree)
+    consumed = lineage_attempts + ledger_reservations
+
+    # The headroom check reuses the same per-route decomposition the receipt-chain mode uses; only
+    # the consumed count's provenance differs. No receipt is walked, so a synthetic unresolved walk
+    # carries the durably derived consumed count into it.
+    walk = _ChainWalk(
+        receipt_ids=(),
+        consumed_physical_attempts=consumed,
+        interruption_state=None,
+        resolved=False,
+        detail="receiptless first-invocation inspection: no receipt chain was walked",
+        request_plan_sha256=None,
+    )
+    headroom_fits, headroom_detail = _headroom(plan, walk, store)
+
+    conditions = (
+        ConditionResult(
+            "8.1",
+            "The receipt chain resolves completely",
+            _NOT_MET,
+            "no receipt was emitted for this first invocation; receiptless inspection is forensic "
+            "and is never resume-eligible",
+        ),
+        ConditionResult(
+            "8.2",
+            "The interruption state is established, not guessed",
+            _NOT_MET,
+            "no receipt records an interruption state, so a receiptless first invocation "
+            "establishes none",
+        ),
+        ConditionResult(
+            "8.3",
+            "The catalog passes quick, integrity, and foreign-key checks",
+            _MET if integrity.passed else _NOT_MET,
+            (
+                f"quick_check={integrity.quick_check}, "
+                f"integrity_check={integrity.integrity_check}, "
+                f"foreign_key_violations={integrity.foreign_key_violations}"
+            ),
+        ),
+        ConditionResult(
+            "8.4",
+            "No row exists without its object",
+            _MET if not store.rows_without_object else _NOT_MET,
+            f"{len(store.rows_without_object)} committed row(s) have no stored object",
+        ),
+        ConditionResult(
+            "8.5",
+            "Every orphan is adopted or quarantined",
+            _MET if store.orphan_object_count == 0 else _NOT_MET,
+            f"{store.orphan_object_count} object(s) on disk have no committed row",
+        ),
+        ConditionResult(
+            "8.6",
+            "No `.part` file was treated as complete",
+            _MET if not store.rows_pointing_at_partials else _NOT_MET,
+            (
+                f"{len(store.rows_pointing_at_partials)} committed row(s) point at a partial file; "
+                f"{store.partial_file_count} partial file(s) are present and unpromoted, which is "
+                f"ordinary"
+            ),
+        ),
+        ConditionResult(
+            "8.7",
+            "The audit projection is consistent or has been rebuilt from SQLite",
+            _MET if projection.is_valid else _NOT_MET,
+            (
+                "the projection agrees with SQLite"
+                if projection.is_valid
+                else "the projection disagrees with SQLite and must be rebuilt from it"
+            ),
+        ),
+        ConditionResult(
+            "8.8",
+            "The remainder fits inside the remaining ceiling headroom",
+            _MET if headroom_fits else _NOT_MET,
+            headroom_detail,
+        ),
+        ConditionResult(
+            "8.9",
+            "No unresolved schema-drift incident is open",
+            _MET if unresolved_states == 0 else _NOT_MET,
+            f"{unresolved_states} recovery state(s) remain blocked and await a ruling",
+        ),
+        ConditionResult(
+            "8.10",
+            "The plan hash is unchanged",
+            _NOT_MET,
+            "no receipt records a request_plan_sha256, so it cannot be established that the plan "
+            "is unchanged; a receiptless first invocation carries no such evidence",
+        ),
+        ConditionResult(
+            "8.11",
+            "For a selection: the accepted lifecycle guards leave exactly one lawful next state",
+            _NOT_APPLICABLE if selection_runs == 0 else _NOT_MET,
+            (
+                "no selection run was in flight"
+                if selection_runs == 0
+                else f"{selection_runs} selection run(s) were in flight; Milestone 3.2 owns the "
+                f"selection lifecycle and this phase does not rule on it"
+            ),
+        ),
+    )
+
+    determination, basis, action = _determine_receiptless(
+        store,
+        consumed=consumed,
+        ledger_reservations=ledger_reservations,
+        lineage_attempts=lineage_attempts,
+    )
+    return RecoveryState(
+        determination=determination,
+        basis=basis,
+        required_action=action,
+        conditions=conditions,
+        receipt_chain=(),
+        interruption_state=None,
+        consumed_physical_attempts=consumed,
+        committed_observation_count=store.committed_observation_count,
+        orphan_object_count=store.orphan_object_count,
+        rows_without_object_count=len(store.rows_without_object),
+        partial_file_count=store.partial_file_count,
+    )
+
+
+def _determine_receiptless(
+    store: _StoreState,
+    *,
+    consumed: int,
+    ledger_reservations: int,
+    lineage_attempts: int,
+) -> tuple[str, str, str]:
+    """Classify a receiptless first invocation into `UNSAFE` or `UNDETERMINED` — never `SAFE`.
+
+    The two `UNDETERMINED` triggers are the same ones the governing prose names, read for a run with
+    no receipt to reconcile against: a committed row whose object is missing, and raw evidence the
+    catalog does not account for (an orphan) — in receiptless mode the latter means the raw-store
+    and catalog surfaces disagree with no receipt to settle them, which is exactly the interrupted
+    initial T5 invocation's condition (Decision 051 §3.12). Every other state is `UNSAFE`: a
+    receiptless first invocation is never resume-eligible, because Decision 050 §8's predecessor
+    receipt does not exist. `SAFE` is unreachable by construction.
+    """
+    consumed_detail = (
+        f"the accepted consumed count is {consumed} "
+        f"({lineage_attempts} from durable raw lineage plus {ledger_reservations} committed "
+        f"reservation(s))"
+    )
+    if store.rows_without_object:
+        return (
+            "UNDETERMINED",
+            (
+                f"{len(store.rows_without_object)} committed row(s) have no stored object, so it "
+                f"cannot be established what was persisted; {consumed_detail}"
+            ),
+            "Stop. Do not resume. Refer for an owner ruling; a receiptless first invocation is "
+            "never resume-eligible and no receipt is ever reconstructed.",
+        )
+    if store.orphan_object_count > 0:
+        return (
+            "UNDETERMINED",
+            (
+                f"{store.orphan_object_count} raw object(s) are present with no committed catalog "
+                f"row and no receipt to reconcile them, so the raw-store and catalog surfaces "
+                f"disagree and it cannot be established what committed; {consumed_detail}"
+            ),
+            "Stop. Do not resume. Refer for an owner ruling; never reconstruct a missing receipt, "
+            "adopt the orphan, or mark the run here.",
+        )
+    return (
+        "UNSAFE",
+        (
+            f"no predecessor receipt exists for this first invocation, so continuation is not "
+            f"authorized (Decision 050 §8); {consumed_detail}"
+        ),
+        "Stop. A receiptless first invocation is forensic only: it can never return SAFE, propose "
+        "continuation, or enable --resume-from. Any later resume requires a separate owner ruling "
+        "and a valid predecessor receipt.",
     )

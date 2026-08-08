@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tracemalloc
 import zipfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
@@ -46,6 +46,7 @@ from disclosure_drift.m3.acquisition import (
     LiveOperationAuthorization,
     LiveOperatorGate,
     PhysicalResponseLog,
+    PreSendAttemptLedger,
     RecordingTransport,
     RequestOutcome,
     ResponseAccounting,
@@ -5129,3 +5130,281 @@ class TestResponsePairingDiagnostic:
                 config=load_config(None),
                 catalog_path=tmp_path / _CATALOG_RELATIVE,
             )
+
+
+# --------------------------------------------------------------------------- #
+# Pre-send durable attempt ledger (Decision 051 §6, §7.2; data dictionary §5A)
+# --------------------------------------------------------------------------- #
+def _id_sequence() -> Callable[[], str]:
+    """A deterministic, collision-safe id factory: attempt-001, attempt-002, ..."""
+    state = {"n": 0}
+
+    def factory() -> str:
+        state["n"] += 1
+        return f"attempt-{state['n']:03d}"
+
+    return factory
+
+
+def _ledger_request(
+    *,
+    source_id: str = "sec_bulk_submissions",
+    url: str = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip",
+    identity: str = "Example Research contact@example.invalid",
+) -> SecRequest:
+    return SecRequest(
+        url=url,
+        headers={"User-Agent": identity},
+        timeout_connect=1.0,
+        timeout_read=1.0,
+        purpose=_PURPOSE,
+        source_id=source_id,
+    )
+
+
+class _RaisingTransport:
+    """A transport whose send raises after being reached. Opens no socket."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def send(self, request: SecRequest) -> TransportResponse:  # noqa: ARG002 - never returns
+        self.calls += 1
+        message = "simulated transport-level failure mid-send"
+        raise ConnectionResetError(message)
+
+    def close(self) -> None:
+        pass
+
+
+def _register_ledger_run(tmp_path: Path, job_id: str):  # noqa: ANN202 - returns a CatalogPreparation
+    """Prepare a catalog and register one acquisition run under ``job_id``."""
+    preparation = prepare_operational_catalog(
+        evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+    )
+    register_acquisition_run(
+        catalog_path=preparation.database_path,
+        lock_directory=preparation.lock_directory,
+        census_run_id=job_id,
+        window="M3.2A",
+        started_at_utc=_stamp(),
+        detail="pre-send attempt ledger fixture run",
+    )
+    return preparation
+
+
+class TestPreSendAttemptLedger:
+    """The write-ahead physical-attempt reservation at the accepted transport seam."""
+
+    def test_reserve_commits_a_durable_started_row_bound_to_job_url_role_and_ordinal(
+        self, tmp_path: Path
+    ) -> None:
+        preparation = _register_ledger_run(tmp_path, "run-ledger-01")
+        transport = _ScriptedTransport(
+            [_scripted(200, body=_zip_bytes(), content_type="application/zip")]
+        )
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="run-ledger-01", clock=_stamp, id_factory=_id_sequence()
+            )
+            recording = RecordingTransport(
+                transport=transport, log=PhysicalResponseLog(), ledger=ledger
+            )
+            response = recording.send(_ledger_request())
+
+        assert response.status == 200
+        assert len(transport.requests) == 1  # the physical send happened, exactly once
+        rows = _catalog_rows(
+            tmp_path, "SELECT * FROM ops_retrieval_attempts ORDER BY attempt_number"
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["retrieval_attempt_id"] == "attempt-001"
+        assert row["job_id"] == "run-ledger-01"
+        assert row["source_url_canonical"] == (
+            "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        )
+        assert row["logical_role"] == "bulk_archive"
+        assert row["attempt_number"] == 1
+        # Settled to its deterministic transport-level terminal state after the send returned.
+        assert row["attempt_state"] == "succeeded"
+        assert row["started_at_utc"] == _stamp()
+        assert row["finished_at_utc"] == _stamp()
+
+    def test_each_retry_or_redirect_send_receives_its_own_ordinal_row(self, tmp_path: Path) -> None:
+        preparation = _register_ledger_run(tmp_path, "run-ledger-02")
+        transport = _ScriptedTransport(
+            [
+                _scripted(503, body=b"", content_type=None),
+                _scripted(301, body=b"", content_type=None, headers={"Location": "x"}),
+                _scripted(200, body=_zip_bytes(), content_type="application/zip"),
+            ]
+        )
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="run-ledger-02", clock=_stamp, id_factory=_id_sequence()
+            )
+            recording = RecordingTransport(
+                transport=transport, log=PhysicalResponseLog(), ledger=ledger
+            )
+            for _ in range(3):
+                recording.send(_ledger_request())
+
+        ordinals = [
+            row["attempt_number"]
+            for row in _catalog_rows(
+                tmp_path,
+                "SELECT attempt_number FROM ops_retrieval_attempts ORDER BY attempt_number",
+            )
+        ]
+        assert ordinals == [1, 2, 3]  # one row per physical send; the ordinal never resets
+
+    def test_a_failed_pre_send_commit_prevents_the_physical_send(self, tmp_path: Path) -> None:
+        # No run is registered under this job id, so the foreign key from ops_retrieval_attempts to
+        # ops_ingestion_jobs refuses the reservation. The reservation must raise *before* the send.
+        preparation = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+        transport = _ScriptedTransport(
+            [_scripted(200, body=_zip_bytes(), content_type="application/zip")]
+        )
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="never-registered", clock=_stamp, id_factory=_id_sequence()
+            )
+            recording = RecordingTransport(
+                transport=transport, log=PhysicalResponseLog(), ledger=ledger
+            )
+            with pytest.raises(sqlite3.Error):
+                recording.send(_ledger_request())
+
+        assert transport.requests == []  # zero physical sends occurred
+        assert _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts") == []
+
+    def test_a_stranded_started_reservation_remains_consumed_when_the_send_raises(
+        self, tmp_path: Path
+    ) -> None:
+        preparation = _register_ledger_run(tmp_path, "run-ledger-03")
+        transport = _RaisingTransport()
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="run-ledger-03", clock=_stamp, id_factory=_id_sequence()
+            )
+            recording = RecordingTransport(
+                transport=transport, log=PhysicalResponseLog(), ledger=ledger
+            )
+            with pytest.raises(ConnectionResetError):
+                recording.send(_ledger_request())
+
+        assert transport.calls == 1  # the send was reached, then failed
+        rows = _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts")
+        assert len(rows) == 1  # durable and consumed even though no receipt exists
+        assert rows[0]["attempt_state"] == "started"  # left stranded, never erased
+        assert rows[0]["finished_at_utc"] is None
+
+    def test_settle_records_failed_for_a_transport_level_failure(self, tmp_path: Path) -> None:
+        preparation = _register_ledger_run(tmp_path, "run-ledger-04")
+        transport = _ScriptedTransport(
+            [_scripted(0, body=b"", content_type=None, failure="connection_error")]
+        )
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="run-ledger-04", clock=_stamp, id_factory=_id_sequence()
+            )
+            recording = RecordingTransport(
+                transport=transport, log=PhysicalResponseLog(), ledger=ledger
+            )
+            recording.send(_ledger_request())
+
+        rows = _catalog_rows(tmp_path, "SELECT attempt_state FROM ops_retrieval_attempts")
+        assert [row["attempt_state"] for row in rows] == ["failed"]
+
+    def test_a_reservation_records_no_contact_identity_or_secret(self, tmp_path: Path) -> None:
+        identity = "Very Secret Researcher secret-contact@example.invalid"
+        preparation = _register_ledger_run(tmp_path, "run-ledger-05")
+        transport = _ScriptedTransport(
+            [_scripted(200, body=_zip_bytes(), content_type="application/zip")]
+        )
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="run-ledger-05", clock=_stamp, id_factory=_id_sequence()
+            )
+            recording = RecordingTransport(
+                transport=transport, log=PhysicalResponseLog(), ledger=ledger
+            )
+            recording.send(_ledger_request(identity=identity))
+
+        rows = _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts")
+        assert rows[0]["action_taken"] is None
+        assert rows[0]["reason_code"] is None
+        serialized = " ".join(str(value) for value in tuple(rows[0]))
+        assert "secret-contact@example.invalid" not in serialized
+        assert "Very Secret Researcher" not in serialized
+
+    def test_without_a_ledger_recording_transport_writes_no_attempt_rows(
+        self, tmp_path: Path
+    ) -> None:
+        preparation = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+        transport = _ScriptedTransport(
+            [_scripted(200, body=_zip_bytes(), content_type="application/zip")]
+        )
+        recording = RecordingTransport(transport=transport, log=PhysicalResponseLog())
+        recording.send(_ledger_request())
+        # The catalog exists but nothing wrote it, so no reader lease contends here.
+        _ = preparation
+        assert len(transport.requests) == 1  # the observer still forwards the request unchanged
+        assert _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts") == []
+
+    def test_execute_live_acquisition_wires_the_ledger_and_reconciles_with_consumed(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        rows = _catalog_rows(
+            tmp_path,
+            "SELECT job_id, attempt_number, attempt_state, source_url_canonical, logical_role "
+            "FROM ops_retrieval_attempts ORDER BY attempt_number",
+        )
+        assert rows  # the run committed a reservation for each of its physical sends
+        assert all(row["job_id"] == result.census_run_id for row in rows)  # type: ignore[attr-defined]
+        # One row per physical send, a contiguous positive ordinal sequence, no reset.
+        assert [row["attempt_number"] for row in rows] == list(range(1, len(rows) + 1))
+        assert all(row["attempt_state"] in {"succeeded", "failed"} for row in rows)
+        # The ledger reconciles exactly with the ceiling's consumed count — no segment counted
+        # twice, none dropped.
+        assert len(rows) == result.outcome.consumed_physical_attempts  # type: ignore[attr-defined]
+        for row in rows:
+            assert row["logical_role"]
+            assert str(row["source_url_canonical"]).startswith("https://")
+
+    def test_a_later_reservation_after_a_stranded_one_does_not_reset_the_ordinal(
+        self, tmp_path: Path
+    ) -> None:
+        preparation = _register_ledger_run(tmp_path, "run-ledger-06")
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(
+                writer=writer, job_id="run-ledger-06", clock=_stamp, id_factory=_id_sequence()
+            )
+            stranded = _RaisingTransport()
+            with pytest.raises(ConnectionResetError):
+                RecordingTransport(
+                    transport=stranded, log=PhysicalResponseLog(), ledger=ledger
+                ).send(_ledger_request())
+            second = _ScriptedTransport(
+                [_scripted(200, body=_zip_bytes(), content_type="application/zip")]
+            )
+            RecordingTransport(transport=second, log=PhysicalResponseLog(), ledger=ledger).send(
+                _ledger_request()
+            )
+
+        rows = _catalog_rows(
+            tmp_path,
+            "SELECT attempt_number, attempt_state FROM ops_retrieval_attempts "
+            "ORDER BY attempt_number",
+        )
+        assert [(row["attempt_number"], row["attempt_state"]) for row in rows] == [
+            (1, "started"),  # the stranded reservation, still consumed
+            (2, "succeeded"),  # the next reservation continues the ordinal — no reset, no reuse
+        ]

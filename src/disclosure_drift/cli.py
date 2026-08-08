@@ -12,9 +12,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import signal
 import sqlite3
 import sys
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from logging import Logger
 from pathlib import Path
@@ -59,7 +62,10 @@ from disclosure_drift.m3.receipt import (
     inspect_receipt,
     write_receipt,
 )
-from disclosure_drift.m3.recovery import inspect_recovery_state
+from disclosure_drift.m3.recovery import (
+    inspect_receiptless_first_invocation,
+    inspect_recovery_state,
+)
 from disclosure_drift.m3.rehearsal import SCENARIO_IDS, RehearsalReport, run_rehearsal
 from disclosure_drift.m3.request_plan import (
     REQUEST_PLAN_SCHEMA_VERSION,
@@ -364,13 +370,39 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         ),
     )
     _add_evidence_root_argument(recovery_state)
-    for name, help_text in (
-        ("--plan", "The request plan the interrupted run was executing."),
-        ("--receipt-chain-head", "The most recent receipt of the interrupted run."),
-    ):
-        recovery_state.add_argument(
-            name, type=Path, required=True, metavar="RELATIVE_PATH", help=help_text
-        )
+    recovery_state.add_argument(
+        "--plan",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="The request plan the interrupted run was executing.",
+    )
+    # Exactly one mode, chosen explicitly. A missing or mistyped receipt path is an error in
+    # ordinary mode and never silently selects receiptless inspection (Decision 051 §7.4, §8).
+    mode = recovery_state.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--receipt-chain-head",
+        type=Path,
+        metavar="RELATIVE_PATH",
+        help="The most recent receipt of the interrupted run (ordinary receipt-chain mode).",
+    )
+    mode.add_argument(
+        "--receiptless-first-invocation",
+        action="store_true",
+        help=(
+            "Forensic, read-only inspection of an interrupted first invocation that emitted no "
+            "receipt. Never resume-eligible and never SAFE; requires --run."
+        ),
+    )
+    recovery_state.add_argument(
+        "--run",
+        type=str,
+        metavar="CENSUS_RUN_ID",
+        help=(
+            "The exact interrupted census run id. Required with --receiptless-first-invocation; "
+            "rejected in ordinary receipt-chain mode so the mode is never inferred or mixed."
+        ),
+    )
     recovery_state.add_argument(
         "--catalog",
         type=Path,
@@ -1731,12 +1763,39 @@ def _m3_recovery_state_command(
     # directly would let an absolute or `..`-climbing value open a database anywhere on the
     # machine; here it is refused by its bare name, never by an absolute path.
     catalog_path = _m3_artifact_path(evidence_root, Path(args.data_root) / args.catalog)
-    state = inspect_recovery_state(
-        plan=plan,
-        receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
-        catalog_path=catalog_path,
-        data_root=data_root,
-    )
+
+    if args.receiptless_first_invocation:
+        # Receiptless mode is explicit and bound to the exact interrupted run identity. `--run` is
+        # mandatory here; the argparse mutually-exclusive group already guarantees no
+        # `--receipt-chain-head` was given (Decision 051 §7.4, §8).
+        if args.run is None:
+            return _usage_failure(
+                "--receiptless-first-invocation requires --run CENSUS_RUN_ID",
+                logger,
+                "recovery-state",
+            )
+        state = inspect_receiptless_first_invocation(
+            plan=plan,
+            census_run_id=args.run,
+            catalog_path=catalog_path,
+            data_root=data_root,
+        )
+    else:
+        # Ordinary receipt-chain mode. `--run` belongs only to receiptless mode, so accepting it
+        # here would let the mode be inferred or mixed; it is refused instead.
+        if args.run is not None:
+            return _usage_failure(
+                "--run is only valid with --receiptless-first-invocation, not in ordinary "
+                "receipt-chain mode",
+                logger,
+                "recovery-state",
+            )
+        state = inspect_recovery_state(
+            plan=plan,
+            receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
+            catalog_path=catalog_path,
+            data_root=data_root,
+        )
 
     print("Safe-resume determination (read-only; nothing was repaired).")
     for condition in state.conditions:
@@ -2212,6 +2271,49 @@ def _receipt_count(document: Mapping[str, object], field_name: str) -> int:
     return value
 
 
+@contextmanager
+def _scoped_sigterm_interruption() -> Iterator[None]:
+    """Route the first SIGTERM through the same interruption path a SIGINT takes.
+
+    A live acquisition owns durable state — an open writer lease, an in-flight retrieval, a
+    registered run row, a write-ahead attempt reservation — and the accepted lifecycle only
+    reconciles that state when it observes the catchable ``KeyboardInterrupt`` a SIGINT delivers.
+    SIGTERM otherwise terminates the process outright, so a graceful ``kill`` would skip the
+    truthful run closure entirely. Installed **only** around the governed live-acquisition
+    lifecycle, only on the main thread (``signal.signal`` refuses any other), and always restored in
+    ``finally``, this raises ``KeyboardInterrupt`` on the first SIGTERM so the existing SIGINT
+    handling reconciles the run through one code path (Decision 051 §7.3).
+
+    The handler performs no SQLite, file, receipt, or catalog write — it only re-raises, exactly as
+    the default SIGINT handler does; durable protection when a receipt cannot be emitted is the
+    pre-send attempt reservation, not anything done here. A second SIGTERM during cleanup is ignored
+    rather than raising again, so cleanup and any single terminating-receipt attempt are never
+    duplicated. SIGINT is left untouched, so its existing behaviour is preserved. Nothing here
+    claims to survive SIGKILL, a power loss, an OOM kill, or a kernel termination — none of those
+    deliver a catchable signal.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        # Only the main thread may install a signal handler; a non-main caller keeps the default
+        # SIGTERM disposition rather than pretending to have scoped it.
+        yield
+        return
+
+    delivered = False
+
+    def _handle_sigterm(_signum: int, _frame: object) -> None:
+        nonlocal delivered
+        if delivered:
+            return  # the first SIGTERM already began the accepted interruption; never double it
+        delivered = True
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, _handle_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate ladder
     args: argparse.Namespace,
     config: ProjectConfig,
@@ -2322,34 +2424,39 @@ def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate lad
             approved_ceiling=ceiling,
         )
 
+    # SIGTERM is scoped here, after every live gate has passed, so a graceful `kill` of a running
+    # acquisition is reconciled through the same interruption lifecycle a SIGINT uses rather than
+    # terminating the process before the run row is truthfully closed (Decision 051 §7.3). The
+    # prior handler is always restored on exit.
     try:
-        result = execute_live_acquisition(
-            plan=plan,
-            window=window,
-            approved_ceiling=ceiling,
-            authorization=authorization,
-            gate=gate,
-            catalog=catalog,
-            storage=storage,
-            user_agent=user_agent,
-            requests_per_second=float(config.sec.requests_per_second),
-            burst=int(config.sec.burst),
-            policy=RetrievalPolicy(
-                connect_timeout_seconds=float(config.sec.connect_timeout_seconds),
-                read_timeout_seconds=float(config.sec.read_timeout_seconds),
-                bulk_read_timeout_seconds=float(config.sec.bulk_read_timeout_seconds),
-                max_transient_retries=int(config.sec.max_retries),
-                cooldown_seconds=float(config.sec.cooldown_seconds),
-            ),
-            continuation=continuation,
-        )
+        with _scoped_sigterm_interruption():
+            result = execute_live_acquisition(
+                plan=plan,
+                window=window,
+                approved_ceiling=ceiling,
+                authorization=authorization,
+                gate=gate,
+                catalog=catalog,
+                storage=storage,
+                user_agent=user_agent,
+                requests_per_second=float(config.sec.requests_per_second),
+                burst=int(config.sec.burst),
+                policy=RetrievalPolicy(
+                    connect_timeout_seconds=float(config.sec.connect_timeout_seconds),
+                    read_timeout_seconds=float(config.sec.read_timeout_seconds),
+                    bulk_read_timeout_seconds=float(config.sec.bulk_read_timeout_seconds),
+                    max_transient_retries=int(config.sec.max_retries),
+                    cooldown_seconds=float(config.sec.cooldown_seconds),
+                ),
+                continuation=continuation,
+            )
     except KeyboardInterrupt:
-        # The invocation was interrupted and its interruption point could not be established
-        # exactly, so the driver refused to produce a window at all. No receipt is written: a
-        # receipt without an established interruption state would fail the accepted recovery
-        # inspection's condition 8.2 anyway, and writing one would advertise a resume that cannot
-        # safely start. What the interruption left on disk is preserved untouched for the
-        # read-only recovery inspection to rule on.
+        # The invocation was interrupted (SIGINT, or a SIGTERM routed through the same path) and its
+        # interruption point could not be established exactly, so the driver refused to produce a
+        # window at all. No receipt is written: a receipt without an established interruption state
+        # would fail the accepted recovery inspection's condition 8.2 anyway, and writing one would
+        # advertise a resume that cannot safely start. What the interruption left on disk is
+        # preserved untouched for the read-only recovery inspection to rule on.
         print(
             "m3 acquire: the invocation was interrupted and its exact interruption state could "
             "not be established, so no receipt was written; run m3 recovery-state before any "

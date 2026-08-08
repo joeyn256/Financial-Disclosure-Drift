@@ -23,11 +23,13 @@ from pathlib import Path
 import pytest
 
 from disclosure_drift.m3 import recovery as recovery_module
+from disclosure_drift.m3.acquisition import register_acquisition_run
 from disclosure_drift.m3.receipt import ExecutionReceipt, write_receipt
 from disclosure_drift.m3.recovery import (
     RECOVERY_DETERMINATIONS,
     RecoveryInspectionError,
     RecoveryState,
+    inspect_receiptless_first_invocation,
     inspect_recovery_state,
 )
 from disclosure_drift.m3.request_plan import RequestPlan, build_m3_2a_request_plan
@@ -596,3 +598,144 @@ def test_a_missing_head_receipt_is_refused(tmp_path: Path) -> None:
             catalog_path=tree.catalog_database,
             data_root=tree.data_root,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Explicit receiptless first-invocation inspection (Decision 051 §7.4, §8; §5A)
+# --------------------------------------------------------------------------- #
+_RUN_ID = "incident-run-01"
+
+
+def _register(tree: DataTree, run_id: str = _RUN_ID) -> None:
+    register_acquisition_run(
+        catalog_path=tree.catalog_database,
+        lock_directory=tree.locks,
+        census_run_id=run_id,
+        window="M3.2A",
+        started_at_utc="2026-08-01T12:00:00Z",
+        detail="interrupted initial invocation fixture",
+    )
+
+
+def _reserve(tree: DataTree, run_id: str, *, attempt_id: str, ordinal: int) -> None:
+    """Commit one durable `started` reservation, exactly as the pre-send ledger would."""
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.insert(
+            "ops_retrieval_attempts",
+            {
+                "retrieval_attempt_id": attempt_id,
+                "job_id": run_id,
+                "source_url_canonical": (
+                    "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+                ),
+                "logical_role": "bulk_archive",
+                "attempt_number": ordinal,
+                "attempt_state": "started",
+                "started_at_utc": "2026-08-04T00:00:00Z",
+            },
+        )
+
+
+def _receiptless(tree: DataTree, run_id: str = _RUN_ID) -> RecoveryState:
+    return inspect_receiptless_first_invocation(
+        plan=plan(),
+        census_run_id=run_id,
+        catalog_path=tree.catalog_database,
+        data_root=tree.data_root,
+    )
+
+
+def _row_counts(tree: DataTree) -> tuple[int, int]:
+    with sqlite3.connect(f"file:{tree.catalog_database}?mode=ro", uri=True) as connection:
+        return (
+            connection.execute("SELECT COUNT(*) FROM ops_retrieval_attempts").fetchone()[0],
+            connection.execute("SELECT COUNT(*) FROM ops_ingestion_jobs").fetchone()[0],
+        )
+
+
+def test_receiptless_refuses_an_unregistered_run(tmp_path: Path) -> None:
+    tree = build_catalog(tmp_path, with_observation=False)
+    with pytest.raises(RecoveryInspectionError, match="does not resolve"):
+        _receiptless(tree, "no-such-run")
+
+
+def test_receiptless_refuses_a_missing_catalog(tmp_path: Path) -> None:
+    with pytest.raises(RecoveryInspectionError, match="does not exist"):
+        inspect_receiptless_first_invocation(
+            plan=plan(),
+            census_run_id=_RUN_ID,
+            catalog_path=tmp_path / "data" / "absent.sqlite3",
+            data_root=tmp_path / "data",
+        )
+
+
+def test_receiptless_never_returns_safe_for_a_clean_catalog(tmp_path: Path) -> None:
+    tree = build_catalog(tmp_path, with_observation=True)  # committed, matched, no orphan
+    _register(tree)
+    state = _receiptless(tree)
+    assert state.determination == "UNSAFE"  # never resume-eligible, but not ambiguous
+    assert not state.resume_authorized
+    assert state.receipt_chain == ()  # no receipt was walked
+    assert state.interruption_state is None
+    # The receipt-based conditions can never be met in this mode, which is what keeps SAFE
+    # unreachable by construction.
+    receipt_conditions = {c.number: c.status for c in state.conditions}
+    assert receipt_conditions["8.1"] == "NOT MET"
+    assert receipt_conditions["8.2"] == "NOT MET"
+    assert receipt_conditions["8.10"] == "NOT MET"
+
+
+def test_receiptless_incident_orphan_is_undetermined_with_consumed_one(tmp_path: Path) -> None:
+    # The interrupted initial T5 invocation: a preserved raw object with lineage attempts=1, no
+    # committed observation, and no receipt — the surfaces disagree (Decision 051 §3.12, §15).
+    tree = build_catalog(tmp_path, with_observation=False)
+    observation(tree)  # writes the raw object and its lineage, but commits no catalog row
+    _register(tree)
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 1  # derived from durable raw lineage, not a literal
+    assert state.orphan_object_count >= 1
+    assert not state.resume_authorized
+
+
+def test_receiptless_consumed_is_incident_baseline_plus_reservations(tmp_path: Path) -> None:
+    tree = build_catalog(tmp_path, with_observation=False)
+    observation(tree)  # the incident baseline: raw lineage records attempts=1
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)  # one subsequent reservation
+    state = _receiptless(tree)
+    # 1 baseline + 1 reservation = 2. Never reset to 0, never double-counted to 3.
+    assert state.consumed_physical_attempts == 2
+    assert state.determination == "UNDETERMINED"
+
+
+def test_receiptless_reservation_alone_is_counted_without_a_baseline(tmp_path: Path) -> None:
+    # No raw object exists, so the baseline is 0; a single reservation is the whole consumed count.
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    state = _receiptless(tree)
+    assert state.consumed_physical_attempts == 1
+    assert state.determination in {"UNSAFE", "UNDETERMINED"}
+
+
+def test_receiptless_determination_is_only_unsafe_or_undetermined(tmp_path: Path) -> None:
+    tree = build_catalog(tmp_path, with_observation=False)
+    observation(tree)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    state = _receiptless(tree)
+    assert state.determination in {"UNSAFE", "UNDETERMINED"}
+    assert state.determination != "SAFE"
+    assert not state.resume_authorized
+
+
+def test_receiptless_inspection_writes_nothing(tmp_path: Path) -> None:
+    tree = build_catalog(tmp_path, with_observation=False)
+    observation(tree)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    before = _row_counts(tree)
+    _receiptless(tree)
+    _receiptless(tree)  # repeatable and inert
+    assert _row_counts(tree) == before  # no row added, removed, or mutated

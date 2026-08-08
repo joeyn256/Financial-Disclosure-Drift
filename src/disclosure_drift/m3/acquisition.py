@@ -154,6 +154,7 @@ __all__ = [
     "LiveOperatorGate",
     "LogicalRequest",
     "PhysicalResponseLog",
+    "PreSendAttemptLedger",
     "ReconciliationItem",
     "RecordingTransport",
     "RecoveryActionResult",
@@ -4043,9 +4044,98 @@ class PhysicalResponseLog:
         return len(self._sends)
 
 
+#: The opaque-id prefix a pre-send physical-attempt reservation carries. It is deliberately
+#: distinct from the snapshot store's own observation-scoped ``attempt-…`` identifier: the two are
+#: separate surfaces (Decision 051 §5A; data dictionary §5A), and a reservation is never a receipt
+#: or an observation substitute.
+_ATTEMPT_ID_PREFIX: Final = "m3a-attempt-"
+
+
+def _default_attempt_id() -> str:
+    """Return a collision-safe opaque identifier for one physical-attempt reservation."""
+    return f"{_ATTEMPT_ID_PREFIX}{uuid.uuid4().hex}"
+
+
+def _attempt_logical_role(source_id: str) -> str:
+    """The registered logical role a reservation records, matching the snapshot store's role.
+
+    Read from the registered route specification — never fixed per call site — so the ledger's
+    ``logical_role`` cannot drift from the role the observation records for the same route.
+    """
+    spec = require_registered(source_id)
+    if spec.retrieval_method == "bulk_archive":
+        return "bulk_archive"
+    return f"census_{spec.category}"
+
+
+@dataclass(slots=True)
+class PreSendAttemptLedger:
+    """Write-ahead durable ledger of physical SEC retrieval attempts (Decision 051 §6; §5A).
+
+    Immediately before each physical transport send, :meth:`reserve` commits one
+    ``ops_retrieval_attempts`` row in state ``started`` through the accepted single-writer catalog
+    boundary. The operational connection is autocommit with ``synchronous = FULL``
+    (``storage/sqlite.py``), so the row is durable the instant :meth:`reserve` returns: a process
+    that dies between the reservation and the wire still leaves exactly one consumed attempt on
+    record, which is the whole point of a write-ahead reservation. If the commit raises, the caller
+    must not send — :class:`RecordingTransport` enforces that by reserving *before* it delegates.
+
+    Every retry and redirect send receives its own row with the next positive ordinal. It writes
+    only non-secret, schema-valid fields — the canonical request URL (a public SEC URL, never a
+    contact identity, credential, header, cookie, body, or private path), the registered logical
+    role, a positive per-run ordinal, and an opaque id — and binds each row to the exact
+    acquisition job. It never backfills a historical row and never resets its ordinal.
+
+    It uses the already-open writer the recorder holds; it neither opens a connection nor takes a
+    second lease, and it constructs no transport, reads no configuration, and opens no socket.
+    """
+
+    writer: CatalogWriter
+    job_id: str
+    clock: Callable[[], str] = _utc_now
+    id_factory: Callable[[], str] = _default_attempt_id
+    _ordinal: int = field(default=0, init=False)
+
+    def reserve(self, request: SecRequest) -> str:
+        """Commit one ``started`` reservation before a physical send, and return its opaque id.
+
+        Raises:
+            CatalogWriteError | sqlite3.Error: the reservation could not be committed. Propagated
+                unchanged so the caller aborts the physical send it has not yet made.
+        """
+        self._ordinal += 1
+        attempt_id = self.id_factory()
+        self.writer.insert(
+            "ops_retrieval_attempts",
+            {
+                "retrieval_attempt_id": attempt_id,
+                "job_id": self.job_id,
+                "source_url_canonical": request.url,
+                "logical_role": _attempt_logical_role(request.source_id),
+                "attempt_number": self._ordinal,
+                "attempt_state": "started",
+                "started_at_utc": self.clock(),
+            },
+        )
+        return attempt_id
+
+    def settle(self, attempt_id: str, *, succeeded: bool) -> None:
+        """Record a deterministic terminal state for a reservation, without erasing consumption.
+
+        Called only after the physical send returns, when the transport-level outcome is known. A
+        reservation whose send raised, or whose process died first, is deliberately left
+        ``started``: a stranded reservation remains consumed (Decision 051 §6.5).
+        """
+        self.writer.connection.execute(
+            "UPDATE ops_retrieval_attempts SET attempt_state = ?, finished_at_utc = ? "
+            "WHERE retrieval_attempt_id = ?",
+            ("succeeded" if succeeded else "failed", self.clock(), attempt_id),
+        )
+
+
 @dataclass(slots=True)
 class RecordingTransport:
-    """A pure observer around the injected transport.
+    """A pure observer around the injected transport, with an optional pre-send attempt ledger.
 
     It exists because Decision 045 §9.2 requires **every** physical response to contribute its
     actual status - including the intermediate responses of a retry sequence, which the accepted
@@ -4054,18 +4144,33 @@ class RecordingTransport:
     satisfies both: the accepted policy loop is untouched and unaware, and the observation is
     exact rather than reconstructed.
 
-    It changes no behaviour. It forwards the request unchanged, returns the response object
-    unchanged, and reads only ``status`` and ``failure`` - neither of which consumes a streamed
-    body - so a payload reaches the accepted client exactly as the real transport produced it.
+    Without a ledger it changes no behaviour: it forwards the request unchanged, returns the
+    response object unchanged, and reads only ``status`` and ``failure`` - neither of which consumes
+    a streamed body - so a payload reaches the accepted client exactly as the real transport
+    produced it. When a :class:`PreSendAttemptLedger` is bound (the governed live path), one durable
+    ``started`` reservation commits at this same seam **before** each physical send, so every retry
+    and redirect send is counted, and a reservation that cannot be committed aborts the send it
+    precedes rather than letting an uncounted attempt reach the wire (Decision 051 §6, §7.2).
     """
 
     transport: Transport
     log: PhysicalResponseLog
+    ledger: PreSendAttemptLedger | None = None
 
     def send(self, request: SecRequest) -> TransportResponse:
-        """Forward one request and record the status of the response it produced."""
+        """Forward one request and record the status of the response it produced.
+
+        A bound ledger reserves one durable ``started`` attempt *before* the physical send; if the
+        reservation raises, ``transport.send`` is never reached and no physical send occurs. A send
+        that raises after a successful reservation leaves that reservation stranded and still
+        consumed; a send that returns settles the reservation to its transport-level terminal
+        state.
+        """
+        reservation = self.ledger.reserve(request) if self.ledger is not None else None
         response = self.transport.send(request)
         self.log.record(response.status if response.succeeded_at_transport_level else None)
+        if self.ledger is not None and reservation is not None:
+            self.ledger.settle(reservation, succeeded=response.succeeded_at_transport_level)
         return response
 
     def close(self) -> None:
@@ -5147,6 +5252,15 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
             else frozenset(item.identity_label for item in continuation.remaining)
         )
         with CatalogWriter(catalog.database_path, catalog.lock_directory) as writer:
+            # Bind the write-ahead attempt ledger to the same open single-writer the recorder uses,
+            # so every physical send this run makes first commits a durable `started` reservation
+            # at the transport seam (Decision 051 §6, §7.2). It is bound here, after the writer is
+            # open and before any request is placed, and is scoped to this invocation's job.
+            transport.ledger = PreSendAttemptLedger(
+                writer=writer,
+                job_id=run.census_run_id,
+                clock=clock,
+            )
             client = SecClient(
                 transport,
                 user_agent,

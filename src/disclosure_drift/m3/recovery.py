@@ -37,6 +37,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -621,15 +622,41 @@ def _determine(
 # --------------------------------------------------------------------------- #
 # Explicit receiptless first-invocation inspection (Decision 051 §7.4, §8; §5A)
 # --------------------------------------------------------------------------- #
-def _registered_run_or_refuse(connection: sqlite3.Connection, census_run_id: str) -> None:
-    """Refuse unless ``census_run_id`` resolves to exactly one registered acquisition job.
+@dataclass(frozen=True, slots=True)
+class _SelectedRun:
+    """The selected governed run's durable boundary instants, as recorded — never inferred.
 
-    Receiptless mode is bound to the exact interrupted run identity (Decision 051 §7.4). A run id
-    that does not resolve is a caller error, reported the same way a missing head receipt is, so a
-    mistyped id can never read as a genuine recovery finding.
+    These two fields are the run-identity half of the Decision 051 §6 / contract §12 evidence: the
+    raw-lineage fallback is scoped to what provably happened *inside* this run, and the recorded
+    start (and finish, where one exists) is the durable evidence that scoping stands on.
     """
+
+    started_at_raw: str
+    finished_at_raw: str | None
+
+
+def _registered_run_or_refuse(
+    connection: sqlite3.Connection, census_run_id: str, *, expected_window: str
+) -> _SelectedRun:
+    """Resolve ``census_run_id`` to the governed interrupted acquisition run, or refuse.
+
+    Receiptless mode is bound to the exact interrupted run identity (Decision 051 §7.4). It is not
+    enough that *some* ``ops_ingestion_jobs`` row exists: the row must be a governed M3.2
+    acquisition run (``job_kind = 'm3_2_acquisition'``) whose ``stage`` is the window the inspected
+    plan describes, so a mistyped id, a non-acquisition job that happens to share an id, or a run
+    for a different window can never read as a genuine recovery finding (Decision 051 §6.6, §8; data
+    dictionary §5A). A run that does not resolve this way is a caller error, reported the same way a
+    missing head receipt is. The resolved row's recorded start and finish instants are returned
+    because they are the durable boundaries the raw-evidence attribution is scoped with.
+    """
+    # Local import: `acquisition` imports this module (for `RecoveryState` and friends), so
+    # importing its acquisition-job-kind constant at module scope would be a cycle. By call time
+    # both modules are fully initialised, and the constant is the single source of the kind.
+    from disclosure_drift.m3.acquisition import ACQUISITION_JOB_KIND
+
     row = connection.execute(
-        "SELECT 1 FROM ops_ingestion_jobs WHERE job_id = ?",
+        "SELECT job_kind, stage, started_at_utc, finished_at_utc FROM ops_ingestion_jobs "
+        "WHERE job_id = ?",
         (census_run_id,),
     ).fetchone()
     if row is None:
@@ -639,50 +666,336 @@ def _registered_run_or_refuse(connection: sqlite3.Connection, census_run_id: str
             "invents one"
         )
         raise RecoveryInspectionError(message)
+    job_kind = str(row[0])
+    stage = str(row[1])
+    if job_kind != ACQUISITION_JOB_KIND:
+        message = (
+            f"census run {census_run_id!r} carries job kind {job_kind!r}, not a governed M3.2 "
+            "acquisition run; receiptless inspection scopes to the interrupted acquisition run, "
+            "not to any ingestion job that happens to share an id"
+        )
+        raise RecoveryInspectionError(message)
+    if stage != expected_window:
+        message = (
+            f"census run {census_run_id!r} records stage {stage!r}, but the inspected plan is for "
+            f"window {expected_window!r}; the run identity and the plan must name the same window"
+        )
+        raise RecoveryInspectionError(message)
+    return _SelectedRun(
+        started_at_raw=str(row[2]),
+        finished_at_raw=None if row[3] is None else str(row[3]),
+    )
 
 
-def _ledger_reservation_count(connection: sqlite3.Connection, census_run_id: str) -> int:
-    """Count the durable pre-send reservations this run committed (Decision 051 §6).
+def _other_acquisition_run_starts(
+    connection: sqlite3.Connection, census_run_id: str
+) -> tuple[str, ...]:
+    """The recorded start instants of every governed M3.2 acquisition run except the selected one.
 
-    Every committed ``started`` row counts as one consumed physical attempt, including a row
-    stranded before its transport call; a terminal state never erases the consumption.
+    A later governed run's start bounds the selected run's raw-evidence window from above: an
+    in-scope lineage segment retrieved after another governed acquisition run began belongs to that
+    run's accounting, never the selected run's. Earlier runs' starts prove nothing about the
+    selected window and are ignored by :func:`_run_window`. Non-acquisition jobs are excluded here
+    for the same reason the run resolution refuses them: they are not governed acquisition
+    boundaries (Decision 051 §6.6).
     """
-    row = connection.execute(
-        "SELECT COUNT(*) FROM ops_retrieval_attempts WHERE job_id = ?",
+    # Local import for the same cycle reason documented in `_registered_run_or_refuse`.
+    from disclosure_drift.m3.acquisition import ACQUISITION_JOB_KIND
+
+    rows = connection.execute(
+        "SELECT started_at_utc FROM ops_ingestion_jobs WHERE job_kind = ? AND job_id != ?",
+        (ACQUISITION_JOB_KIND, census_run_id),
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows)
+
+
+def _parse_utc_instant(value: object) -> datetime | None:
+    """Parse one strict RFC 3339 UTC instant, or ``None`` when it cannot anchor an ordering.
+
+    Ordering evidence must be exact: a non-string, an empty string, a malformed string, or a naive
+    instant proves no order, and every caller treats ``None`` as non-provable evidence rather than
+    guessing a position for it (Decision 051 §6.9; contract §12 item 5). The current wall clock is
+    never consulted anywhere in this accounting.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _LedgerReservation:
+    """One durable pre-send reservation: its request-URL identity and its commit instant.
+
+    Both fields matter to reconciliation. URL identity alone cannot prove event identity — the
+    same URL is lawfully requested more than once across a run's lifetime — so coverage decisions
+    additionally require the recorded commit order (`started_at_utc` is written before the physical
+    send, §5A) to prove *which* retrieval segment a reservation accounts for.
+    """
+
+    source_url_canonical: str
+    started_at_raw: str
+
+
+@dataclass(frozen=True, slots=True)
+class _LedgerReservations:
+    """The durable pre-send reservations bound to one run (Decision 051 §6; §5A)."""
+
+    count: int
+    rows: tuple[_LedgerReservation, ...]
+
+
+def _ledger_reservations(connection: sqlite3.Connection, census_run_id: str) -> _LedgerReservations:
+    """Read the durable ``ops_retrieval_attempts`` reservations bound to this run.
+
+    ``count`` is the primary consumed-count surface: every committed ``started`` row is one
+    consumed physical attempt regardless of its lineage, response, or terminal state — including a
+    row stranded before its transport call — and a terminal state never erases the consumption
+    (§5A rules 1-3). ``rows`` carries each reservation's canonical request URL *and* its pre-send
+    commit instant, so a post-ledger segment's raw lineage is recognised by durable event order —
+    not URL equality alone — and never counted a second time (§5A rule 4).
+    """
+    rows = connection.execute(
+        "SELECT source_url_canonical, started_at_utc FROM ops_retrieval_attempts WHERE job_id = ?",
         (census_run_id,),
-    ).fetchone()
-    return int(row[0])
+    ).fetchall()
+    return _LedgerReservations(
+        count=len(rows),
+        rows=tuple(
+            _LedgerReservation(
+                source_url_canonical=str(row[0]),
+                started_at_raw=str(row[1]),
+            )
+            for row in rows
+        ),
+    )
 
 
-def _raw_lineage_attempts(tree: DataTree) -> int:
-    """Sum the physical-attempt counts recorded in the raw store's durable lineage manifests.
+@dataclass(frozen=True, slots=True)
+class _LineageAccounting:
+    """The pre-ledger raw-lineage contribution to the consumed count, and any ambiguity found."""
 
-    This is the pre-ledger, incident-specific consumed evidence Decision 051 §5 accepts for the
-    interrupted initial T5 invocation, whose lineage durably records ``attempts = 1``. Per data
-    dictionary §5A this incident evidence is deliberately **not** the future primary attempt
-    ledger — ``ops_retrieval_attempts`` is — so it is read only in this forensic receiptless mode,
-    and it is disjoint from the ledger for a genuine first invocation, which predates the runtime
-    writer. A manifest that cannot be read, or whose ``attempts`` is not a non-negative integer,
-    contributes nothing rather than an inferred value.
+    pre_ledger_attempts: int
+    undetermined_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RunWindow:
+    """The selected run's provable raw-evidence window, built from durable instants only.
+
+    ``started`` is the selected run's recorded start (``None`` when it cannot be parsed).
+    ``upper_bound`` is the earliest provable end of the selected run's accounting window: its own
+    recorded finish, or the earliest later governed acquisition run's start, whichever is earlier —
+    ``None`` when no such bound exists (the interrupted run's ordinary condition). The two flags
+    record boundary evidence that *exists but proves no order*: another governed run starting at
+    the selected run's exact start instant, or a boundary instant that cannot be parsed. Either
+    makes in-window attribution non-provable rather than merely imprecise (Decision 051 §6.9).
+    """
+
+    started: datetime | None
+    upper_bound: datetime | None
+    boundary_ambiguous: bool
+    boundary_unparseable: bool
+
+
+def _run_window(selected: _SelectedRun, other_starts_raw: tuple[str, ...]) -> _RunWindow:
+    """Build the selected run's provable window from the recorded run-boundary instants."""
+    started = _parse_utc_instant(selected.started_at_raw)
+    boundary_ambiguous = False
+    boundary_unparseable = False
+    upper_bound: datetime | None = None
+    if selected.finished_at_raw is not None:
+        finished = _parse_utc_instant(selected.finished_at_raw)
+        if finished is None:
+            boundary_unparseable = True
+        else:
+            upper_bound = finished
+    for raw in other_starts_raw:
+        parsed = _parse_utc_instant(raw)
+        if parsed is None:
+            boundary_unparseable = True
+        elif started is not None and parsed == started:
+            boundary_ambiguous = True
+        elif (
+            started is not None
+            and parsed > started
+            and (upper_bound is None or parsed < upper_bound)
+        ):
+            upper_bound = parsed
+    return _RunWindow(
+        started=started,
+        upper_bound=upper_bound,
+        boundary_ambiguous=boundary_ambiguous,
+        boundary_unparseable=boundary_unparseable,
+    )
+
+
+def _selected_run_lineage_contribution(
+    document: Mapping[str, object],
+    *,
+    window: _RunWindow,
+    ledger: _LedgerReservations,
+) -> tuple[int, str | None]:
+    """Attribute one in-scope lineage manifest by durable event identity and order.
+
+    Returns ``(attempts_to_add, undetermined_reason)``. ``(0, None)`` means the manifest is
+    provably excluded or provably ledger-covered; a non-``None`` reason means the evidence exists
+    but cannot be reconciled exactly, which the caller reports as ``UNDETERMINED`` rather than an
+    invented count. The decisions, in order:
+
+    * a manifest retrieved strictly before the selected run's recorded start predates the run and
+      is proven to belong elsewhere — excluded (Decision 051 §6.4's boundary discipline);
+    * one retrieved strictly after the window's provable upper bound (the run's recorded finish or
+      a later governed acquisition run's start) postdates the run — excluded the same way;
+    * one whose retrieval instant *equals* a boundary instant proves no order, so ownership of the
+      segment is not provable — ``UNDETERMINED``, never a guess;
+    * an owned segment is **ledger-covered** only when selected-run reservation rows whose commit
+      instants strictly precede the retrieval fully account for its recorded ``attempts`` — those
+      sends are already counted once by the ledger, so the lineage adds nothing (§5A rule 4). A
+      reservation committed strictly *after* the retrieval is a distinct later event: it is itself
+      counted once by the ledger and can never erase or absorb the earlier lineage attempt;
+    * an owned segment with **no** preceding or order-ambiguous matching reservation is genuine
+      pre-ledger evidence and adds exactly its recorded ``attempts`` (Decision 051 §5);
+    * anything between — reservations that only partially account for the segment's attempts, or
+      whose order against the retrieval is unparseable or exactly simultaneous — is partially
+      matched evidence, which is ``UNDETERMINED`` by rule, not a rounding choice.
+    """
+    retrieved = _parse_utc_instant(document.get("retrieved_at_utc"))
+    if retrieved is None:
+        return 0, (
+            "an in-scope raw-lineage manifest records no parseable UTC retrieval instant, so it "
+            "cannot be ordered against the run boundaries"
+        )
+    if window.started is None:
+        return 0, (
+            "the selected run's recorded start instant cannot be parsed, so no in-scope lineage "
+            "can be attributed to or excluded from the run"
+        )
+    if retrieved < window.started:
+        return 0, None  # proven to predate the selected run: recorded elsewhere, never added here
+    if retrieved == window.started:
+        return 0, (
+            "an in-scope retrieval instant equals the selected run's recorded start, so which "
+            "run owns the segment is not provable"
+        )
+    if window.upper_bound is not None:
+        if retrieved > window.upper_bound:
+            return 0, None  # proven to postdate the selected run's window: a later run's segment
+        if retrieved == window.upper_bound:
+            return 0, (
+                "an in-scope retrieval instant equals a governed run boundary, so which run owns "
+                "the segment is not provable"
+            )
+    if window.boundary_ambiguous:
+        return 0, (
+            "another governed acquisition run records the selected run's exact start instant, so "
+            "in-window lineage cannot be attributed between them"
+        )
+    if window.boundary_unparseable:
+        return 0, (
+            "a governed run-boundary instant cannot be parsed, so in-window lineage cannot be "
+            "proven to belong to the selected run"
+        )
+    attempts = document.get("attempts")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        return 0, "an in-scope raw-lineage manifest records no usable attempt count"
+    segment_urls = set()
+    for key in ("requested_url", "final_url"):
+        url = document.get(key)
+        if isinstance(url, str) and url:
+            segment_urls.add(url)
+    if not segment_urls and ledger.rows:
+        return 0, (
+            "an in-scope raw-lineage manifest records no request URL identity, so ledger "
+            "coverage of its segment is not provable"
+        )
+    preceding = 0
+    order_ambiguous = 0
+    for reservation in ledger.rows:
+        if reservation.source_url_canonical not in segment_urls:
+            continue
+        reserved_at = _parse_utc_instant(reservation.started_at_raw)
+        if reserved_at is None or reserved_at == retrieved:
+            order_ambiguous += 1
+        elif reserved_at < retrieved:
+            preceding += 1
+        # A strictly later reservation is its own consumed event, already counted once by the
+        # ledger; it neither covers nor erases this earlier retrieval segment.
+    if preceding >= attempts:
+        return 0, None  # ledger-covered: the preceding reservations already count these sends
+    if preceding == 0 and order_ambiguous == 0:
+        return attempts, None  # genuine pre-ledger evidence, counted exactly once
+    return 0, (
+        "selected-run reservations only partially or order-ambiguously account for an in-scope "
+        "retrieval segment, so exact ledger coverage is not provable"
+    )
+
+
+def _pre_ledger_lineage_attempts(
+    tree: DataTree,
+    *,
+    in_scope_source_ids: frozenset[str],
+    ledger: _LedgerReservations,
+    window: _RunWindow,
+) -> _LineageAccounting:
+    """Sum the physical attempts provably attributable to the selected run and *only* to it.
+
+    Raw lineage is **not** a second consumed-count authority beside ``ops_retrieval_attempts``; it
+    is the incident-specific pre-ledger evidence Decision 051 §5 accepts for the interrupted initial
+    T5 invocation, whose ledger table is empty and is never backfilled (§5A). URL equality alone
+    proves nothing here — the same URL lawfully recurs across runs and across a single run's
+    lifetime — so every inclusion and exclusion rests on durable run and event identity:
+
+    * a manifest whose ``source_id`` is not a route of the interrupted run's plan is provably
+      unrelated lineage outside this accounting scope, and never changes the count
+      (Decision 051 §6.6);
+    * an in-scope manifest is attributed by :func:`_selected_run_lineage_contribution`, which
+      excludes segments the run boundaries prove belong elsewhere, adds pre-ledger segments the
+      selected run provably owns, and adds nothing for segments the ledger's strictly-preceding
+      reservations already account for — the same segment is never counted twice, and no segment
+      the run owns is ever silently dropped.
+
+    Evidence that cannot be reconciled is never silently treated as zero. A manifest that cannot
+    be read, is not a JSON object, records no source identity, or fails exact attribution sets an
+    ``UNDETERMINED`` reason, and the total then stands as a durable floor rather than a proven
+    exact count (Decision 051 §6.5, §6.9; §5A rule 5). Provably unrelated manifests are excluded
+    before any attribution field is inspected, so they never raise a spurious ambiguity.
     """
     total = 0
+    undetermined: str | None = None
     raw_root = tree.data_root / "raw"
     if not raw_root.is_dir():
-        return 0
+        return _LineageAccounting(0, None)
     for path in sorted(raw_root.rglob("*")):
         if not path.is_file() or not path.name.endswith(_LINEAGE_SUFFIX):
             continue
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            undetermined = undetermined or "a raw-lineage manifest could not be read"
             continue
         if not isinstance(document, dict):
+            undetermined = undetermined or "a raw-lineage manifest is not a JSON object"
             continue
-        attempts = document.get("attempts")
-        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        source_id = document.get("source_id")
+        if not isinstance(source_id, str) or not source_id:
+            undetermined = undetermined or "a raw-lineage manifest records no source identity"
             continue
-        total += attempts
-    return total
+        if source_id not in in_scope_source_ids:
+            continue  # provably unrelated lineage: outside this run's plan scope, never counted
+        contribution, reason = _selected_run_lineage_contribution(
+            document, window=window, ledger=ledger
+        )
+        if reason is not None:
+            undetermined = undetermined or reason
+            continue
+        total += contribution
+    return _LineageAccounting(pre_ledger_attempts=total, undetermined_reason=undetermined)
 
 
 def inspect_receiptless_first_invocation(
@@ -701,11 +1014,18 @@ def inspect_receiptless_first_invocation(
     never enables ``--resume-from``. The predecessor-receipt requirement of Decision 050 §8 remains
     binding for every resume, and this mode supplies none.
 
-    The consumed count is derived from durable evidence: the pre-ledger, incident-specific
-    raw-lineage attempts (Decision 051 §5) plus every committed ``ops_retrieval_attempts``
-    reservation bound to the run (§6). The two surfaces are disjoint for a genuine first invocation,
-    so they sum without double counting; the approved ceiling is read from the plan and never
-    reinterpreted.
+    The consumed count is derived from durable evidence with ``ops_retrieval_attempts`` as the
+    primary surface (Decision 051 §6; §5A). Every reservation bound to the run is counted exactly
+    once, and raw lineage adds **only** the pre-ledger, incident-specific attempts
+    (Decision 051 §5) the selected run provably owns. Attribution rests on durable run and event
+    identity — the run's recorded boundary instants, later governed runs' starts, and the pre-send
+    commit order of matching reservations — never on URL equality alone: a segment the ledger's
+    strictly-preceding reservations account for is never counted twice, a strictly later same-URL
+    reservation never erases an earlier lineage attempt, and lineage the boundaries prove belongs
+    to another run, or that falls outside the interrupted run's plan scope, never changes the
+    count. Evidence that cannot be reconciled exactly fails closed as ``UNDETERMINED`` with the
+    provable count standing as a durable floor, never an invented exact value. The approved
+    ceiling is read from the plan and never reinterpreted.
 
     Args:
         plan: the approved request plan the interrupted run was executing.
@@ -724,18 +1044,30 @@ def inspect_receiptless_first_invocation(
         raise RecoveryInspectionError(message)
 
     tree = DataTree.from_root(data_root)
+    in_scope_source_ids = frozenset(route.source_id for route in plan.routes)
 
     with read_only_catalog(Path(catalog_path)) as connection:
-        _registered_run_or_refuse(connection, census_run_id)
+        selected = _registered_run_or_refuse(
+            connection, census_run_id, expected_window=plan.acquisition_window
+        )
         integrity = integrity_report(connection)
         store = _inspect_store(connection, tree)
         projection = validate_audit_projection(connection, tree.audit / _PROJECTION_FILENAME)
         unresolved_states = _unresolved_recovery_states(connection)
         selection_runs = _in_flight_selection_runs(connection)
-        ledger_reservations = _ledger_reservation_count(connection, census_run_id)
+        ledger = _ledger_reservations(connection, census_run_id)
+        other_starts = _other_acquisition_run_starts(connection, census_run_id)
 
-    lineage_attempts = _raw_lineage_attempts(tree)
-    consumed = lineage_attempts + ledger_reservations
+    lineage = _pre_ledger_lineage_attempts(
+        tree,
+        in_scope_source_ids=in_scope_source_ids,
+        ledger=ledger,
+        window=_run_window(selected, other_starts),
+    )
+    # ops_retrieval_attempts is the primary consumed-count surface; pre-ledger raw lineage adds only
+    # the incident attempts the ledger does not already hold (§5A rule 4). No segment is counted
+    # twice, and the approved ceiling is read from the plan and never reinterpreted.
+    consumed = lineage.pre_ledger_attempts + ledger.count
 
     # The headroom check reuses the same per-route decomposition the receipt-chain mode uses; only
     # the consumed count's provenance differs. No receipt is walked, so a synthetic unresolved walk
@@ -842,8 +1174,9 @@ def inspect_receiptless_first_invocation(
     determination, basis, action = _determine_receiptless(
         store,
         consumed=consumed,
-        ledger_reservations=ledger_reservations,
-        lineage_attempts=lineage_attempts,
+        ledger_reservations=ledger.count,
+        lineage_attempts=lineage.pre_ledger_attempts,
+        undetermined_reason=lineage.undetermined_reason,
     )
     return RecoveryState(
         determination=determination,
@@ -866,22 +1199,36 @@ def _determine_receiptless(
     consumed: int,
     ledger_reservations: int,
     lineage_attempts: int,
+    undetermined_reason: str | None,
 ) -> tuple[str, str, str]:
     """Classify a receiptless first invocation into `UNSAFE` or `UNDETERMINED` — never `SAFE`.
 
-    The two `UNDETERMINED` triggers are the same ones the governing prose names, read for a run with
-    no receipt to reconcile against: a committed row whose object is missing, and raw evidence the
-    catalog does not account for (an orphan) — in receiptless mode the latter means the raw-store
-    and catalog surfaces disagree with no receipt to settle them, which is exactly the interrupted
-    initial T5 invocation's condition (Decision 051 §3.12). Every other state is `UNSAFE`: a
-    receiptless first invocation is never resume-eligible, because Decision 050 §8's predecessor
-    receipt does not exist. `SAFE` is unreachable by construction.
+    `UNDETERMINED` is returned when the physical-attempt evidence cannot be reconciled exactly
+    (malformed, unattributable, or ambiguous raw lineage — Decision 051 §6.5; §5A rule 5), and for
+    the two triggers the governing prose names for a run with no receipt to reconcile against: a
+    committed row whose object is missing, and raw evidence the catalog does not account for (an
+    orphan) — in receiptless mode the latter means the raw-store and catalog surfaces disagree with
+    no receipt to settle them, which is exactly the interrupted initial T5 invocation's condition
+    (Decision 051 §3.12). Every other state is `UNSAFE`: a receiptless first invocation is never
+    resume-eligible, because Decision 050 §8's predecessor receipt does not exist. `SAFE` is
+    unreachable by construction.
     """
     consumed_detail = (
         f"the accepted consumed count is {consumed} "
-        f"({lineage_attempts} from durable raw lineage plus {ledger_reservations} committed "
+        f"({lineage_attempts} from pre-ledger raw lineage plus {ledger_reservations} durable "
         f"reservation(s))"
     )
+    if undetermined_reason is not None:
+        return (
+            "UNDETERMINED",
+            (
+                f"the physical-attempt evidence cannot be reconciled exactly: "
+                f"{undetermined_reason}; {consumed_detail} from the evidence that could be read, "
+                f"which is a durable floor, not a proven exact total"
+            ),
+            "Stop. Do not resume. Refer for an owner ruling; malformed, unattributable, or "
+            "ambiguous attempt evidence is never silently counted as an exact value or as zero.",
+        )
     if store.rows_without_object:
         return (
             "UNDETERMINED",

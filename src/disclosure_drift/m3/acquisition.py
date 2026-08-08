@@ -1364,11 +1364,21 @@ class AcquisitionEngine:
     restrict_to_identities: frozenset[str] | None = None
     response_log: PhysicalResponseLog | None = None
     accounting: ResponseAccounting = field(default_factory=lambda: ResponseAccounting())
+    ledger: PreSendAttemptLedger | None = None
+    """The write-ahead physical-attempt ledger bound to this run, on the governed live path.
+
+    When supplied (``execute_live_acquisition`` wires it beside the recording transport), the
+    durable ``ops_retrieval_attempts`` reservation count — not the in-memory ceiling — is the
+    accepted source of this window's consumed physical-attempt count (Decision 051 §6, §7.2;
+    contract §12). The ceiling remains the untouched hard pre-attempt guard. Left ``None`` by the
+    accepted offline and fixture callers, which count from the ceiling exactly as before.
+    """
     progress_failures: tuple[str, ...] = field(default=(), init=False)
     _authorization: LiveOperationAuthorization | None = field(default=None, init=False)
     _requests: tuple[LogicalRequest, ...] = field(default=(), init=False)
     _in_flight: _InFlightRetrieval | None = field(default=None, init=False)
     _committed_any: bool = field(default=False, init=False)
+    _baseline_consumed: int = field(default=0, init=False)
 
     # -- preflight ---------------------------------------------------------- #
     def preflight(self, authorization: LiveOperationAuthorization) -> tuple[LogicalRequest, ...]:
@@ -1435,6 +1445,13 @@ class AcquisitionEngine:
         stop_detail = ""
         interruption_state: str | None = None
 
+        # The consumption this window starts from, captured before any request is placed. On a
+        # fresh window it is zero; on a resume it is the carry-forward the ceiling was constructed
+        # with. The durable ledger only counts *this run's* reservations, so this baseline is what
+        # keeps the window's consumed count cumulative when the physical-attempt source is the
+        # ledger rather than the ceiling (Decision 051 §5, §6).
+        self._baseline_consumed = self.ceiling.consumed
+
         for index, request in enumerate(self._requests):
             if stopped is not None:
                 outcomes.append(RequestOutcome(request=request, disposition="not_attempted"))
@@ -1449,7 +1466,7 @@ class AcquisitionEngine:
                 outcomes.append(RequestOutcome(request=request, disposition="not_attempted"))
                 continue
 
-            before = self.ceiling.consumed
+            before_durable = self._durable_consumed()
             try:
                 outcome = self._execute(request, closed_periods)
             except KeyboardInterrupt:
@@ -1468,7 +1485,7 @@ class AcquisitionEngine:
                     RequestOutcome(
                         request=request,
                         disposition="stopped",
-                        attempts=self.ceiling.consumed - before,
+                        attempts=self._durable_consumed() - before_durable,
                         reason_codes=stop_reasons,
                         detail=stop_detail,
                     )
@@ -1485,7 +1502,7 @@ class AcquisitionEngine:
                     RequestOutcome(
                         request=request,
                         disposition="stopped",
-                        attempts=self.ceiling.consumed - before,
+                        attempts=self._durable_consumed() - before_durable,
                         reason_codes=(exc.reason_code,),
                         detail=str(exc),
                     )
@@ -1506,7 +1523,7 @@ class AcquisitionEngine:
                     RequestOutcome(
                         request=request,
                         disposition="stopped",
-                        attempts=self.ceiling.consumed - before,
+                        attempts=self._durable_consumed() - before_durable,
                         detail=str(exc),
                     )
                 )
@@ -1527,7 +1544,7 @@ class AcquisitionEngine:
                     RequestOutcome(
                         request=request,
                         disposition="failed",
-                        attempts=self.ceiling.consumed - before,
+                        attempts=self._durable_consumed() - before_durable,
                         detail=stop_detail,
                     )
                 )
@@ -1554,6 +1571,25 @@ class AcquisitionEngine:
             stop_detail,
             interruption_state=interruption_state,
         )
+
+    def _durable_consumed(self) -> int:
+        """The physical attempts this window consumed, from the durable ledger when there is one.
+
+        On the governed live path a :class:`PreSendAttemptLedger` commits one
+        ``ops_retrieval_attempts`` row immediately before each physical send, so the durable
+        reservation count — added to the consumption carried forward from a predecessor — is the
+        exact number of physical attempts actually reserved (Decision 051 §6, §7.2; contract §12).
+        Reading it here, rather than :attr:`PhysicalAttemptCeiling.consumed`, is what keeps an
+        interruption in the pre-send window from charging an attempt that left no durable trace: the
+        in-memory ceiling may have incremented before the reservation committed, but no row means no
+        charge. The ceiling is untouched and remains the hard pre-attempt guard.
+
+        Without a ledger — the accepted offline and fixture callers — the in-memory ceiling remains
+        the count, so their behaviour is unchanged.
+        """
+        if self.ledger is None:
+            return self.ceiling.consumed
+        return self._baseline_consumed + self.ledger.reserved_count()
 
     def _report(self, outcome: RequestOutcome) -> None:
         """Hand one outcome to the optional progress callback, defensively.
@@ -1960,7 +1996,7 @@ class AcquisitionEngine:
             window=self.window,
             plan_sha256=self._authorization.plan_sha256,
             approved_ceiling=self.ceiling.approved_ceiling,
-            consumed_physical_attempts=self.ceiling.consumed,
+            consumed_physical_attempts=self._durable_consumed(),
             planned_logical_requests=planned,
             outcomes=outcomes,
             completion_status=status,
@@ -4132,6 +4168,29 @@ class PreSendAttemptLedger:
             ("succeeded" if succeeded else "failed", self.clock(), attempt_id),
         )
 
+    def reserved_count(self) -> int:
+        """The durable count of physical attempts this run has reserved, read from the ledger.
+
+        Every committed ``started`` row is exactly one consumed physical attempt — including a row
+        stranded before its transport call — and a terminal state never erases the consumption
+        (Decision 051 §6.3; data dictionary §5A rules 2-3). Counting the committed rows is what
+        makes the durable ledger, rather than the in-memory pre-attempt guard, the accepted source
+        of the physical-attempt count: an interruption in the pre-send window — after
+        :meth:`PhysicalAttemptCeiling.before_attempt` incremented but before this reservation
+        committed — leaves no row, so it is charged **zero** rather than inventing an attempt from a
+        lost in-memory claim (Decision 051 §7.2; contract §12).
+
+        The count is read through the single-writer connection the reservations commit on, so it
+        observes every reservation this run has made (the operational connection is autocommit, so a
+        committed row is visible immediately), and it binds to this run's job alone — a different
+        run's reservations never leak into it.
+        """
+        row = self.writer.connection.execute(
+            "SELECT COUNT(*) FROM ops_retrieval_attempts WHERE job_id = ?",
+            (self.job_id,),
+        ).fetchone()
+        return int(row[0])
+
 
 @dataclass(slots=True)
 class RecordingTransport:
@@ -5255,12 +5314,16 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
             # Bind the write-ahead attempt ledger to the same open single-writer the recorder uses,
             # so every physical send this run makes first commits a durable `started` reservation
             # at the transport seam (Decision 051 §6, §7.2). It is bound here, after the writer is
-            # open and before any request is placed, and is scoped to this invocation's job.
-            transport.ledger = PreSendAttemptLedger(
+            # open and before any request is placed, and is scoped to this invocation's job. The
+            # same ledger is handed to the engine so the window's consumed physical-attempt count is
+            # read from the durable reservations rather than the in-memory ceiling — an interruption
+            # in the pre-send window then charges no attempt that left no durable trace.
+            ledger = PreSendAttemptLedger(
                 writer=writer,
                 job_id=run.census_run_id,
                 clock=clock,
             )
+            transport.ledger = ledger
             client = SecClient(
                 transport,
                 user_agent,
@@ -5286,6 +5349,7 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
                 restrict_to_identities=restriction,
                 response_log=response_log,
                 accounting=accounting,
+                ledger=ledger,
             )
             engine.preflight(authorization)
             outcome = engine.run()

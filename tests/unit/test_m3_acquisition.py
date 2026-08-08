@@ -5177,6 +5177,44 @@ class _RaisingTransport:
         pass
 
 
+class _InterruptOnAcquire(AggregateRateLimiter):
+    """A limiter whose first ``acquire`` raises ``KeyboardInterrupt``, inside the pre-send wait.
+
+    ``sec/http_client`` calls ``PhysicalAttemptCeiling.before_attempt()`` — the in-memory hard
+    guard — and only then ``rate_limiter.acquire()``, before the transport send. Raising here
+    reproduces a SIGINT/SIGTERM that lands *after* the ceiling's in-memory claim and *before* any
+    durable reservation, physical send, or response event.
+    """
+
+    def __init__(self) -> None:
+        clock = _FrozenClock()
+        super().__init__(4.0, burst=1, clock=clock.time, sleeper=clock.sleep)
+        self.acquired = 0
+
+    def acquire(self) -> None:
+        self.acquired += 1
+        raise KeyboardInterrupt
+
+
+class _InterruptOnSend:
+    """A transport whose send raises ``KeyboardInterrupt`` after the reservation has committed.
+
+    In :class:`RecordingTransport.send` the ledger reserves *before* delegating, so raising here
+    strands a durable ``started`` row — the mid-send case a receipt cannot cover, whose reservation
+    stays consumed (Decision 051 §6.3, §6.5). Opens no socket.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def send(self, request: SecRequest) -> TransportResponse:  # noqa: ARG002 - never returns
+        self.calls += 1
+        raise KeyboardInterrupt
+
+    def close(self) -> None:
+        pass
+
+
 def _register_ledger_run(tmp_path: Path, job_id: str):  # noqa: ANN202 - returns a CatalogPreparation
     """Prepare a catalog and register one acquisition run under ``job_id``."""
     preparation = prepare_operational_catalog(
@@ -5408,3 +5446,186 @@ class TestPreSendAttemptLedger:
             (1, "started"),  # the stranded reservation, still consumed
             (2, "succeeded"),  # the next reservation continues the ordinal — no reset, no reuse
         ]
+
+    def test_a_presend_interruption_charges_no_attempt_without_a_durable_trace(
+        self, tmp_path: Path
+    ) -> None:
+        """Correction A: an interruption in the pre-send window charges nothing durable.
+
+        The transport seam runs ``before_attempt()`` (the in-memory hard guard), then
+        ``rate_limiter.acquire()``, then the recording transport's send. A signal during the limiter
+        wait lands after the ceiling's in-memory claim and before any durable reservation, physical
+        send, or response event — so the window must charge that not-sent attempt **zero**: the
+        durable ledger, not the in-memory ceiling, is the accepted source of the consumed count
+        (Decision 051 §6, §7.2; contract §12).
+        """
+        plan = _plan()
+        preparation = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+        storage = prepare_storage(evidence_root=tmp_path, data_root_relative=_DATA_RELATIVE)
+        ceiling = PhysicalAttemptCeiling(plan.hard_request_ceiling)
+        limiter = _InterruptOnAcquire()
+        log = PhysicalResponseLog()
+        accounting = ResponseAccounting()
+        clock = _FrozenClock()
+        scripted = _ScriptedTransport(_success_script(plan))
+
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(writer=writer, job_id="run-presend", clock=_stamp)
+            recording = RecordingTransport(transport=scripted, log=log, ledger=ledger)
+            client = SecClient(
+                recording, _AGENT, limiter, RetrievalPolicy(), sleeper=clock.sleep, ceiling=ceiling
+            )
+            engine = AcquisitionEngine(
+                plan=plan,
+                window="M3.2A",
+                ceiling=ceiling,
+                client=client,
+                storage=storage,
+                recorder=ObservationRecorder(writer=writer, tree=storage.tree),
+                clock=_stamp,
+                response_log=log,
+                accounting=accounting,
+                ledger=ledger,
+            )
+            engine.preflight(_authorization(plan))
+            outcome = engine.run()
+            durable = ledger.reserved_count()
+
+        # The in-memory ceiling guard DID claim the attempt — before_attempt() runs before the
+        # limiter wait — and is untouched, firing exactly once.
+        assert ceiling.consumed == 1
+        assert limiter.acquired == 1
+        # But nothing durable exists for that not-sent attempt: zero reservation, zero transport
+        # send, zero response event. No attempt is invented from the lost in-memory claim.
+        assert durable == 0
+        assert scripted.requests == []
+        assert log.pending == 0
+        assert accounting.status_event_count == 0
+        assert outcome.consumed_physical_attempts == 0
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "before_raw_store_write"
+        # The interrupted request is `stopped` with zero attempts, so the receipt's per-request
+        # totals stay reconcilable with a window that consumed nothing.
+        stopped = [item for item in outcome.outcomes if item.disposition == "stopped"]
+        assert len(stopped) == 1
+        assert stopped[0].attempts == 0
+        assert _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts") == []
+
+    def test_a_presend_interruption_charges_nothing_through_the_real_live_wiring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same pre-send interruption, driven end-to-end through ``execute_live_acquisition``.
+
+        The live path wires the ledger at the transport seam and hands it to the engine, so
+        interrupting the shared limiter's first ``acquire()`` reproduces the pre-send window against
+        the real ordering. The run is closed truthfully as ``stopped`` with nothing durable charged.
+        """
+        plan = _plan()
+        _interrupt_at(monkeypatch, AggregateRateLimiter, "acquire", call=1)
+        result, factory = _run_live(tmp_path, plan, _success_script(plan))
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        assert outcome.completion_status == "interrupted"
+        assert outcome.interruption_state == "before_raw_store_write"
+        assert outcome.consumed_physical_attempts == 0
+        assert factory.transports[0].requests == []  # no physical send was reached
+        assert result.accounting.status_event_count == 0  # type: ignore[attr-defined]
+        assert _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts") == []
+        assert _job_states(tmp_path) == ["stopped"]  # closed truthfully, never left running
+
+    def test_a_presend_interruption_fabricates_no_zero_attempt_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A window that charged no physical attempt is refused a receipt, never handed a fake one.
+
+        Decision 051 §7.3 and the correction packet require that an exact zero-attempt terminal
+        receipt is not fabricated. The pre-send interruption produces a window with zero consumed
+        attempts, so the live receipt assembler refuses it rather than writing empty execution
+        totals — the durable accounting stays truthful end to end.
+        """
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+        from disclosure_drift.errors import GateFailureError
+
+        plan = _plan()
+        _interrupt_at(monkeypatch, AggregateRateLimiter, "acquire", call=1)
+        result, _ = _run_live(tmp_path, plan, _success_script(plan))
+        assert result.outcome.consumed_physical_attempts == 0  # type: ignore[attr-defined]
+
+        with pytest.raises(GateFailureError, match="no physical attempt"):
+            _live_acquisition_receipt(
+                result,  # type: ignore[arg-type]
+                plan=plan,
+                window="M3.2A",
+                approved_ceiling=plan.hard_request_ceiling,
+                continuation=None,
+                config=load_config(None),
+                catalog_path=tmp_path / _CATALOG_RELATIVE,
+            )
+
+    def test_a_midsend_interruption_still_charges_the_reservation_it_committed(
+        self, tmp_path: Path
+    ) -> None:
+        """The complement: an interruption *after* the reservation commits still charges it.
+
+        A reservation committed before a send that is then interrupted is stranded but consumed
+        (Decision 051 §6.3, §6.5). The durable count is 1, not 0 — so the pre-send fix never
+        under-charges a genuine physical attempt, and the boundary sits exactly at the reservation.
+        """
+        plan = _plan()
+        preparation = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+        # The reservation reaches the catalog here, so the run it binds to must exist for the
+        # ops_retrieval_attempts foreign key — exactly as the live path registers it first.
+        register_acquisition_run(
+            catalog_path=preparation.database_path,
+            lock_directory=preparation.lock_directory,
+            census_run_id="run-midsend",
+            window="M3.2A",
+            started_at_utc=_stamp(),
+            detail="mid-send interruption fixture run",
+        )
+        storage = prepare_storage(evidence_root=tmp_path, data_root_relative=_DATA_RELATIVE)
+        ceiling = PhysicalAttemptCeiling(plan.hard_request_ceiling)
+        clock = _FrozenClock()
+        limiter = AggregateRateLimiter(4.0, burst=1, clock=clock.time, sleeper=clock.sleep)
+        log = PhysicalResponseLog()
+        accounting = ResponseAccounting()
+        interrupting = _InterruptOnSend()
+
+        with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+            ledger = PreSendAttemptLedger(writer=writer, job_id="run-midsend", clock=_stamp)
+            recording = RecordingTransport(transport=interrupting, log=log, ledger=ledger)
+            client = SecClient(
+                recording, _AGENT, limiter, RetrievalPolicy(), sleeper=clock.sleep, ceiling=ceiling
+            )
+            engine = AcquisitionEngine(
+                plan=plan,
+                window="M3.2A",
+                ceiling=ceiling,
+                client=client,
+                storage=storage,
+                recorder=ObservationRecorder(writer=writer, tree=storage.tree),
+                clock=_stamp,
+                response_log=log,
+                accounting=accounting,
+                ledger=ledger,
+            )
+            engine.preflight(_authorization(plan))
+            outcome = engine.run()
+            durable = ledger.reserved_count()
+
+        assert ceiling.consumed == 1
+        assert interrupting.calls == 1  # the send was reached, after the reservation committed
+        assert durable == 1  # the reservation committed before the send is consumed, not erased
+        assert outcome.consumed_physical_attempts == 1
+        assert outcome.completion_status == "interrupted"
+        stopped = [item for item in outcome.outcomes if item.disposition == "stopped"]
+        assert len(stopped) == 1
+        assert stopped[0].attempts == 1
+        rows = _catalog_rows(tmp_path, "SELECT attempt_state FROM ops_retrieval_attempts")
+        assert len(rows) == 1
+        assert rows[0]["attempt_state"] == "started"  # stranded but consumed; no fabricated receipt

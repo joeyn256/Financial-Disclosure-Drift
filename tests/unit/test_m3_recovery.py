@@ -16,6 +16,7 @@ finer per-condition split. These tests pin those two literally and do not invent
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -41,13 +42,29 @@ from disclosure_drift.sec.snapshots import SnapshotStore, SourceObservation
 from disclosure_drift.storage.catalog import CatalogWriter
 
 URL = "https://www.sec.gov/files/company_tickers.json"
+_BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+
+# Fixed instants for every ordering the receiptless attribution proves. Correctness never reads
+# the test machine's clock (Decision 051 §11 item 3): each fixture event is pinned to one of these,
+# and the proofs below are about their durable order, not about when the suite runs.
+_BEFORE_RUN_AT = "2026-07-01T00:00:00Z"  # strictly before the fixture run's registered start
+_REGISTERED_AT = "2026-08-01T12:00:00Z"  # the fixture run's registered start instant
+_IN_WINDOW_AT = "2026-08-02T00:00:00Z"  # inside the run, before any fixture reservation
+_RESERVED_AT = "2026-08-04T00:00:00Z"  # the fixture ledger reservation's pre-send commit
+_AFTER_RESERVATION_AT = "2026-08-04T00:00:05Z"  # after the reservation: a post-ledger retrieval
+_LATER_RUN_AT = "2026-08-05T00:00:00Z"  # a later governed acquisition run's start
+_AFTER_LATER_RUN_AT = "2026-08-06T00:00:00Z"  # after the later run began: bounded out
 
 
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
 def observation(tree: DataTree) -> SourceObservation:
-    """One stored, verifiable source observation."""
+    """One stored, verifiable source observation, at a fixed instant inside the fixture run.
+
+    The retrieval instant is pinned (after `_REGISTERED_AT`, before `_RESERVED_AT`) so every
+    ordering the receiptless attribution proves is fixed evidence, never the test machine's clock.
+    """
     return SnapshotStore(tree).record(
         FetchResult(
             outcome="retrieved",
@@ -59,7 +76,8 @@ def observation(tree: DataTree) -> SourceObservation:
             etag='"fixture"',
             declared_content_type="application/json",
             attempts=1,
-        )
+        ),
+        retrieved_at_utc=_IN_WINDOW_AT,
     )
 
 
@@ -606,18 +624,28 @@ def test_a_missing_head_receipt_is_refused(tmp_path: Path) -> None:
 _RUN_ID = "incident-run-01"
 
 
-def _register(tree: DataTree, run_id: str = _RUN_ID) -> None:
+def _register(
+    tree: DataTree, run_id: str = _RUN_ID, *, started_at_utc: str = _REGISTERED_AT
+) -> None:
     register_acquisition_run(
         catalog_path=tree.catalog_database,
         lock_directory=tree.locks,
         census_run_id=run_id,
         window="M3.2A",
-        started_at_utc="2026-08-01T12:00:00Z",
+        started_at_utc=started_at_utc,
         detail="interrupted initial invocation fixture",
     )
 
 
-def _reserve(tree: DataTree, run_id: str, *, attempt_id: str, ordinal: int) -> None:
+def _reserve(
+    tree: DataTree,
+    run_id: str,
+    *,
+    attempt_id: str,
+    ordinal: int,
+    url: str = _BULK_URL,
+    started_at_utc: str = _RESERVED_AT,
+) -> None:
     """Commit one durable `started` reservation, exactly as the pre-send ledger would."""
     with CatalogWriter(tree.catalog_database, tree.locks) as writer:
         writer.insert(
@@ -625,13 +653,11 @@ def _reserve(tree: DataTree, run_id: str, *, attempt_id: str, ordinal: int) -> N
             {
                 "retrieval_attempt_id": attempt_id,
                 "job_id": run_id,
-                "source_url_canonical": (
-                    "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
-                ),
+                "source_url_canonical": url,
                 "logical_role": "bulk_archive",
                 "attempt_number": ordinal,
                 "attempt_state": "started",
-                "started_at_utc": "2026-08-04T00:00:00Z",
+                "started_at_utc": started_at_utc,
             },
         )
 
@@ -739,3 +765,343 @@ def test_receiptless_inspection_writes_nothing(tmp_path: Path) -> None:
     _receiptless(tree)
     _receiptless(tree)  # repeatable and inert
     assert _row_counts(tree) == before  # no row added, removed, or mutated
+
+
+# --------------------------------------------------------------------------- #
+# Correction B — exact consumed-attempt reconciliation. The ledger is the primary surface, every
+# selected-run reservation counts exactly once, and raw lineage enters only by durable run/event
+# identity and order — never URL equality alone (Decision 051 §5, §6; data dictionary §5A;
+# contract §12 accounting rules 1-5).
+# --------------------------------------------------------------------------- #
+def _write_lineage_manifest(
+    tree: DataTree,
+    *,
+    source_id: str,
+    attempts: object,
+    name: str,
+    url: str = URL,
+    retrieved_at_utc: str | None = None,
+) -> None:
+    """Write one raw-object lineage manifest directly, for precise accounting-scope fixtures.
+
+    The real store writes these beside a promoted object; here one is written alone so a single
+    test controls its source identity, canonical URL, recorded attempt count, and retrieval
+    instant without also standing up an object — which the pre-ledger accounting reads and the
+    orphan scan ignores. ``retrieved_at_utc=None`` omits the field, for the absent-evidence cases.
+    """
+    raw_dir = tree.data_root / "raw" / "bulk"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "manifest_version": "raw-object-lineage/1.0",
+        "source_id": source_id,
+        "requested_url": url,
+        "final_url": url,
+        "attempts": attempts,
+    }
+    if retrieved_at_utc is not None:
+        payload["retrieved_at_utc"] = retrieved_at_utc
+    (raw_dir / f"{name}.lineage.json").write_text(
+        json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def test_receiptless_counts_a_post_ledger_segment_once_not_twice(tmp_path: Path) -> None:
+    """A retrieval whose preceding reservation accounts for it counts once, never twice."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    # A post-ledger bulk-archive retrieval: the reservation's pre-send commit strictly precedes
+    # the retrieval instant its lineage records, and fully accounts for its one attempt.
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="submissions.zip",
+        url=_BULK_URL,
+        retrieved_at_utc=_AFTER_RESERVATION_AT,
+    )
+    state = _receiptless(tree)
+    # The ledger is the authority for that segment; its lineage is not added a second time.
+    assert state.consumed_physical_attempts == 1
+    assert state.determination != "SAFE"
+
+
+def test_receiptless_a_later_same_url_reservation_never_erases_earlier_lineage(
+    tmp_path: Path,
+) -> None:
+    """Pre-ledger lineage plus a genuinely later same-URL reservation are two consumed attempts.
+
+    URL identity does not prove event identity: the reservation's pre-send commit is strictly
+    *after* the retrieval the lineage records, so it cannot be the reservation that accounted for
+    that send. Both events consumed an attempt — the historical pre-ledger send (Decision 051 §5)
+    and the durable reservation (§5A rule 2) — and neither absorbs the other.
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="submissions.zip",
+        url=_BULK_URL,
+        retrieved_at_utc=_IN_WINDOW_AT,  # retrieved first...
+    )
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)  # ...reserved later, same URL
+    state = _receiptless(tree)
+    assert state.consumed_physical_attempts == 2
+    assert state.determination != "SAFE"
+
+
+def test_receiptless_excludes_same_source_lineage_that_predates_the_selected_run(
+    tmp_path: Path,
+) -> None:
+    """Older same-source lineage never enters the selected run's count.
+
+    A manifest retrieved strictly before the run's registered start is proven to belong to an
+    earlier accounting, however exactly its source and URL match the selected run's plan. Only the
+    segment inside the run's window counts (Decision 051 §6.4's boundary discipline).
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=5,
+        name="older-run-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_BEFORE_RUN_AT,  # strictly before the selected run's start
+    )
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="selected-run-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_IN_WINDOW_AT,
+    )
+    state = _receiptless(tree)
+    assert state.consumed_physical_attempts == 1  # never 6: the older 5 are not this run's
+    assert state.determination != "SAFE"
+
+
+def test_receiptless_a_later_governed_run_start_bounds_later_lineage(tmp_path: Path) -> None:
+    """Lineage retrieved after a later governed acquisition run began is never counted here."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _register(tree, "later-run-01", started_at_utc=_LATER_RUN_AT)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=3,
+        name="later-run-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_AFTER_LATER_RUN_AT,  # after the later governed run began
+    )
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="selected-run-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_IN_WINDOW_AT,
+    )
+    state = _receiptless(tree)
+    assert state.consumed_physical_attempts == 1  # the 3 after the later run's start are excluded
+    assert state.determination != "SAFE"
+
+
+def test_receiptless_partial_ledger_coverage_is_undetermined_with_a_floor(tmp_path: Path) -> None:
+    """Reservations that only partially account for a segment's attempts fail closed."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)  # one preceding reservation...
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=2,  # ...for a segment recording two sends: partially matched evidence
+        name="submissions.zip",
+        url=_BULK_URL,
+        retrieved_at_utc=_AFTER_RESERVATION_AT,
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 1  # the ledger's provable floor, never a guess
+    assert "durable floor" in state.basis
+
+
+def test_receiptless_an_in_scope_manifest_without_a_retrieval_instant_is_undetermined(
+    tmp_path: Path,
+) -> None:
+    """A manifest that cannot be ordered against the run boundaries is never silently placed."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _write_lineage_manifest(
+        tree, source_id="sec_bulk_submissions", attempts=1, name="unordered", url=_BULK_URL
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert "cannot be reconciled" in state.basis
+    assert state.consumed_physical_attempts == 0  # nothing provable: the floor holds at zero
+
+
+def test_receiptless_a_malformed_retrieval_instant_is_undetermined(tmp_path: Path) -> None:
+    """A retrieval instant that does not parse as a strict UTC instant proves no order."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="malformed-instant",
+        url=_BULK_URL,
+        retrieved_at_utc="not-an-instant",
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert "cannot be reconciled" in state.basis
+
+
+def test_receiptless_a_reservation_at_the_exact_retrieval_instant_is_undetermined(
+    tmp_path: Path,
+) -> None:
+    """Equal instants prove no order between a reservation and a same-URL retrieval."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="simultaneous",
+        url=_BULK_URL,
+        retrieved_at_utc=_RESERVED_AT,  # exactly the reservation's commit instant
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 1  # the reservation itself remains consumed
+
+
+def test_receiptless_a_retrieval_at_the_selected_run_start_is_undetermined(tmp_path: Path) -> None:
+    """A retrieval at exactly the run's registered start cannot be attributed to either side."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="boundary",
+        url=_BULK_URL,
+        retrieved_at_utc=_REGISTERED_AT,  # exactly the selected run's start instant
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 0
+
+
+def test_receiptless_a_retrieval_at_a_later_run_start_is_undetermined(tmp_path: Path) -> None:
+    """A retrieval at exactly a later governed run's start is order-ambiguous, not excluded."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _register(tree, "later-run-01", started_at_utc=_LATER_RUN_AT)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="boundary",
+        url=_BULK_URL,
+        retrieved_at_utc=_LATER_RUN_AT,  # exactly the later run's start instant
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+
+
+def test_receiptless_a_manifest_without_source_identity_is_undetermined(tmp_path: Path) -> None:
+    """Out-of-plan lineage is excluded only on proof; an absent identity is never proof."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    raw_dir = tree.data_root / "raw" / "bulk"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"manifest_version": "raw-object-lineage/1.0", "attempts": 4}
+    (raw_dir / "identityless.lineage.json").write_text(
+        json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 0  # the 4 are never counted in, nor proven out
+
+
+def test_receiptless_ignores_lineage_outside_the_plan_scope(tmp_path: Path) -> None:
+    """Lineage for a source the interrupted run's plan does not include never changes the count."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    observation(tree)  # the incident baseline: attempts=1, source_id in the plan
+    _register(tree)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_not_a_planned_route",
+        attempts=5,
+        name="unrelated",
+        url="https://example.invalid/unrelated.json",
+    )
+    state = _receiptless(tree)
+    # Only the in-scope incident attempt is counted; the unrelated 5 is excluded, never summed.
+    assert state.consumed_physical_attempts == 1
+
+
+def test_receiptless_fails_closed_on_a_malformed_in_scope_manifest(tmp_path: Path) -> None:
+    """An in-scope manifest with no usable attempt count fails closed, never silently zero."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_company_tickers",
+        attempts="not-a-count",
+        name="broken",
+        retrieved_at_utc=_IN_WINDOW_AT,  # provably in-window, so the attempt count is what fails
+    )
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+    assert "cannot be reconciled" in state.basis
+
+
+def test_receiptless_fails_closed_on_an_unreadable_manifest(tmp_path: Path) -> None:
+    """An unreadable lineage manifest is unattributable evidence, not silently a zero."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    raw_dir = tree.data_root / "raw" / "bulk"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "corrupt.lineage.json").write_text("{ not valid json", encoding="utf-8")
+    state = _receiptless(tree)
+    assert state.determination == "UNDETERMINED"
+
+
+def test_receiptless_refuses_a_non_acquisition_job(tmp_path: Path) -> None:
+    """The run id must be a governed M3.2 acquisition run, not merely any ingestion job."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.insert(
+            "ops_ingestion_jobs",
+            {
+                "job_id": _RUN_ID,
+                "job_kind": "m2_2_census",  # a real job row, but not an acquisition run
+                "job_state": "running",
+                "stage": "M3.2A",
+                "started_at_utc": "2026-08-01T12:00:00Z",
+            },
+        )
+    with pytest.raises(RecoveryInspectionError, match="not a governed M3.2 acquisition run"):
+        _receiptless(tree)
+
+
+def test_receiptless_refuses_a_run_whose_stage_is_a_different_window(tmp_path: Path) -> None:
+    """A governed acquisition run for another window is not this plan's interrupted run."""
+    tree = build_catalog(tmp_path, with_observation=False)
+    register_acquisition_run(
+        catalog_path=tree.catalog_database,
+        lock_directory=tree.locks,
+        census_run_id=_RUN_ID,
+        window="M3.2B",  # a governed acquisition run, but for the other window
+        started_at_utc="2026-08-01T12:00:00Z",
+        detail="different-window fixture",
+    )
+    with pytest.raises(RecoveryInspectionError, match="records stage"):
+        _receiptless(tree)  # plan() is M3.2A

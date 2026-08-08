@@ -74,14 +74,30 @@ PUBLISHED** by accepted
 (2026-08-07, outcome `M3_2_PRE_T4_RAWSTORE_ACCEPTED_AND_PUBLISHED`), on the fresh independent verdict
 `M3_2_PRE_T4_RAWSTORE_CORRECTED_INDEPENDENT_REREVIEW_PASS` (**BLOCKER 0 · MAJOR 0**) and its durable
 artifact — **and limitation `M3-L13` is CLOSED, with F4 COMPLETE**, Decision 047's substage authority
-now exhausted. **T4 has NOT been executed and T4 is NOT accepted, and T5 is NOT AUTHORIZED and
-NOT BEGUN**; network stays disabled, live SEC acquisition stays unauthorized, no operational catalog
-exists — **Decision 047 ruling 047-A fixes that the catalog is first created inside the first
+now exhausted. **The T4 operational preflight has since been EXECUTED, and it is now ACCEPTED AND
+PUBLISHED** by accepted
+[Decision 049](../Docs/Decisions/decision_049_m3_2_t4_operational_preflight_acceptance.md)
+(2026-08-07, outcome `M3_2_T4_OPERATIONAL_PREFLIGHT_ACCEPTED_AND_PUBLISHED`, classification
+**T4 `COMPLETE_AND_ACCEPTED`**), on final findings **BLOCKER 0 · MAJOR 0 · MINOR 0 · OPTIMIZATION 0**
+and with **no independent rereview required**. The acceptance is bound to two private artifacts that
+stay outside Git — the T4 attestation `runs/m3_2_t4_preflight/t4_preflight_attestation.md` (SHA-256
+`8483a549cf894f1d186750ec13c24b41e5279134e782ca6e28ff4514e75d10c8`) and the backup manifest
+`backups/m3_2_t4_pre_window/manifest.sha256` (SHA-256
+`0bb2b1d96bcefe7885d538fa054c93e4887a8a5233529538f9de39f059b84c8d`, **17** covered files) — with **no
+`operational_preflight_attestation` evidence type and no public evidence-index row**. T4 left the
+repository **byte-identical** and **enabled nothing**: `FREE_DISK_50_GIB_GATE: PASS`
+(74,481,328,128 bytes / 69.3661 GiB against the 50.00 GiB floor), the off-device USB backup verified
+**17/17** at the destination and **17/17** on scratch restore, and the disposable offline catalog
+passed with migrations contiguous `0001`–`0013` and the corrected expectation
+**`reference_policy_versions = 25`** now frozen (21 migration keys + 4 `seed_reference_data()` keys,
+zero overlap — resolving the stale packet value of 6). **T5 is NOT AUTHORIZED and NOT BEGUN, and T6 is
+NOT AUTHORIZED**; network stays disabled, live SEC acquisition stays unauthorized, no operational
+catalog exists — **Decision 047 ruling 047-A fixes that the catalog is first created inside the first
 lawfully authorized M3.2A live invocation under a later T5 instrument** — and ceiling **801** remains
-unused.** **The next authorized action is
-`CHATGPT_OWNER_M3_2_T4_OPERATIONAL_PREFLIGHT_EXECUTION_PACKET`** — Decision 047 is the governing T4
-authorization, but actual T4 execution still requires that separate exact owner packet; nothing yet
-authorizes T4 execution, T5 or T6 work, or any live operation. The earlier bounded
+unused at **0**.** **The next authorized action is
+`CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_PACKET`** — T4 acceptance is **not**
+combined with T5 authorization; nothing yet authorizes T5 or T6 work, network enablement, SEC
+contact, or any live operation. The earlier bounded
 **non-production** stage
 **M3.2 G1 — Navigation and Workflow Repair**, authorized on a seven-path ceiling by accepted
 [Decision 043](../Docs/Decisions/decision_043_m3_2_g1_navigation_workflow_repair_authorization.md)
@@ -953,14 +969,50 @@ draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and cha
 
 ## Next authorized action
 
-**`CHATGPT_OWNER_M3_2_T4_OPERATIONAL_PREFLIGHT_EXECUTION_PACKET`**
-— control returns to the ChatGPT owner for the **separate exact T4 operational-preflight execution
-packet**. Accepted
-[Decision 047](../Docs/Decisions/decision_047_m3_2_t4_operational_preflight_authorization.md) is the
-**governing T4 authorization**, but **T4 operational execution has NOT YET OCCURRED** and may not
-begin without that packet. Nothing currently authorizes **T4 execution, T5 or T6 work, network
-enablement, SEC contact, or any live operation**, and no session may read this marker as any of
-those.
+**`CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_PACKET`**
+— control returns to the ChatGPT owner for the **separate exact T5 initial-live-invocation
+authorization packet**. **T4 is COMPLETE AND ACCEPTED** (accepted
+[Decision 049](../Docs/Decisions/decision_049_m3_2_t4_operational_preflight_acceptance.md)), but
+**T4 acceptance is not T5 authorization**. Nothing currently authorizes **T5 or T6 work, network
+enablement, SEC contact, operational-catalog creation, or any live operation**, and no session may
+read this marker as any of those.
+
+**The T4 operational preflight is EXECUTED, ACCEPTED, AND PUBLISHED** (accepted
+[Decision 049](../Docs/Decisions/decision_049_m3_2_t4_operational_preflight_acceptance.md),
+2026-08-07, outcome `M3_2_T4_OPERATIONAL_PREFLIGHT_ACCEPTED_AND_PUBLISHED`), on final findings
+**BLOCKER 0 · MAJOR 0 · MINOR 0 · OPTIMIZATION 0**, at published baseline
+`b7d83d389a92685bac776759b2af9762dc5301eb`, tree `6f54cdbccfa77def555c27c61e6ad9dd178369a0`. **No
+independent rereview was required.** The acceptance is bound to exactly two private artifacts, both
+**outside Git**: the T4 attestation `runs/m3_2_t4_preflight/t4_preflight_attestation.md` (SHA-256
+`8483a549cf894f1d186750ec13c24b41e5279134e782ca6e28ff4514e75d10c8`, mode `600`) and the backup
+manifest `backups/m3_2_t4_pre_window/manifest.sha256` (SHA-256
+`0bb2b1d96bcefe7885d538fa054c93e4887a8a5233529538f9de39f059b84c8d`, mode `600`, **17** covered
+files). Neither is copied into the repository, **no `operational_preflight_attestation` evidence type
+is added, and no public evidence-index row is added for the T4 attestation**.
+
+**T4 left the repository byte-identical and enabled nothing.** Accepted facts: **`FREE_DISK_50_GIB_GATE:
+PASS`** on measured free storage **74,481,328,128 bytes / 69.3661 GiB** against the **50.00 GiB**
+floor, with measured physical RAM **8,589,934,592 bytes / 8.00 GiB** recorded as an observation and
+**no invented object-size RAM floor**; a qualifying **local external USB** backup that was
+device-distinct (`st_dev`), writable, and stable throughout the complete successful execution, leaving
+**pre-existing USB contents unchanged** in a **non-overwriting** new snapshot, with **destination hash
+verification 17/17 PASS**, count equality PASS, **scratch restore 17/17 PASS** then deleted with
+deletion proven, **`.env` excluded**, and the attestation copied separately with an exactly matching
+destination SHA; and a disposable offline catalog that passed with migrations contiguous
+`0001`–`0013`, `quick_check`/`integrity_check`/foreign-key checks PASS, all six reference counts PASS,
+operational tables empty, and the disposable root removed. **The earlier unsuccessful T4 attempt, in
+which the same USB disconnected, remains historical operational context**; it does not invalidate the
+successful run, because the device was requalified and remained stable throughout the complete accepted
+execution, and **it is not erased or rewritten**.
+
+**The corrected operational expectation `reference_policy_versions = 25` is FROZEN** (Decision 049 §7)
+on its accepted provenance — **21** distinct policy keys from accepted migrations `0002`–`0011` plus
+**4** from `seed_reference_data()` (`universe`, `filing_inventory`, `raw_governance`, `temporal`), with
+**zero** overlap. This **resolves the stale earlier packet expectation of 6**, which was incorrect. It
+is **not** a defect, and **no code, migration, seed data, or governance record may be changed to obtain
+another value**. The intermediate `backups/` permission issue was corrected within authorized
+private-evidence scope from `0755` to `0700`, passed the final permissions gate, and **is not an open
+limitation**.
 
 **The pre-T4 RawStore streaming substage is ACCEPTED, COMPLETE, AND PUBLISHED** (accepted
 [Decision 048](../Docs/Decisions/decision_048_m3_2_pre_t4_rawstore_acceptance_and_publication.md),
@@ -2243,13 +2295,13 @@ DECISION_026_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome MILESTONES_
 DECISION_027_STATUS: v0.2; ACCEPTED — OWNER APPROVED 2026-07-31; outcome M3_MASTER_PLAN_AND_OPERATIONAL_READINESS_DESIGN_ACCEPTED; controls the accepted Milestone 3 master plan as narrowly corrected by accepted Decision 028; grants no implementation authority
 DECISION_029_STATUS: ACCEPTED — OWNER APPROVED 2026-08-02; outcome M3_1_REHEARSAL_COMPLETENESS_AND_REASON_SEMANTICS_ACCEPTED; narrowly supersedes two Decision 028 clauses only; controls the per-route full-path A_reachable witness (a zero U never waives it), the rehearsal-only manifest-resolution fixture, the single code OFFLINE_REHEARSAL_SCENARIO_MISMATCH (integrity, blocks_release true, requires_manual_review false by owner ruling), the four-predicate M3.1A token gate, and the first durable section 17 review artifact; changes no receipt schema field or digest preimage; creates no migration; grants no network authority and no tag
 DECISION_028_STATUS: ACCEPTED — OWNER APPROVED 2026-08-01; outcome M3_1_READINESS_CORRECTIONS_ACCEPTED; independent rereview PASS; records planner-v2, corrected A1-A12, two future reason codes, receipt-v2, budget, ceiling, recovery-ownership, and M3-L11 rulings; grants no implementation or network authority
-CURRENT_STAGE: M3.2 T3 ACCEPTED AND PUBLISHED (DECISION 046); DECISION 047 ACCEPTED AND PUBLISHED — T4 GOVERNANCE AUTHORITY RECORDED BUT T4 OPERATIONAL EXECUTION NOT YET BEGUN AND T4 NOT ACCEPTED; PRE-T4 RAWSTORE STREAMING SUBSTAGE AND ITS INDEPENDENT PASS REREVIEW ACCEPTED AND PUBLISHED (DECISION 048); M3-L13 CLOSED; F4 COMPLETE; T5 AND T6 NOT AUTHORIZED AND NOT BEGUN; NETWORK DISABLED; REAL OPERATIONAL CATALOG ABSENT; CEILING 801 UNUSED
-ACTIVE_BLOCKER: M3.2 BLOCKS ON THE SEPARATE EXACT CHATGPT-OWNER T4 OPERATIONAL-PREFLIGHT EXECUTION PACKET; DECISION 047 IS THE GOVERNING T4 AUTHORIZATION BUT T4 EXECUTION HAS NOT OCCURRED, AND T5 AND T6 REMAIN UNAUTHORIZED
+CURRENT_STAGE: M3.2 T3 ACCEPTED AND PUBLISHED (DECISION 046); DECISION 047 ACCEPTED AND PUBLISHED; PRE-T4 RAWSTORE STREAMING SUBSTAGE AND ITS INDEPENDENT PASS REREVIEW ACCEPTED AND PUBLISHED (DECISION 048); T4 OPERATIONAL PREFLIGHT EXECUTED, ACCEPTED, AND PUBLISHED (DECISION 049) — T4 COMPLETE_AND_ACCEPTED WITH BLOCKER 0 / MAJOR 0 / MINOR 0 / OPTIMIZATION 0, FREE_DISK_50_GIB_GATE PASS, OFF-DEVICE BACKUP VERIFIED 17/17 AND RESTORE 17/17, REFERENCE_POLICY_VERSIONS FROZEN AT 25; M3-L13 CLOSED; F4 COMPLETE; PROGRESS SINK DISCHARGED; D023-O1 LATENT AND NOT TRIGGERED; T5 AND T6 NOT AUTHORIZED AND NOT BEGUN; NETWORK DISABLED; COMPANYFACTS DISABLED; REAL OPERATIONAL CATALOG ABSENT; NO LIVE M3.2 RUN; NO LIVE RECEIPT; NO RAW LIVE SEC OBJECT; CEILING 801 CONSUMED 0
+ACTIVE_BLOCKER: M3.2 BLOCKS ON THE SEPARATE EXACT CHATGPT-OWNER T5 INITIAL-LIVE-INVOCATION AUTHORIZATION PACKET; T4 IS COMPLETE AND ACCEPTED BY DECISION 049 BUT T4 ACCEPTANCE IS NOT T5 AUTHORIZATION, AND T5 AND T6 REMAIN UNAUTHORIZED AND NOT BEGUN
 DECISION_022_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; controls crosswalk item 46 reserve-rank applicability only
 DECISION_023_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M23_STAGE_S6_ACCEPTED_AND_COMPLETE; controls S6 acceptance, delivered-path ratification, limitations O1-O4, and checkpoint authorization
 DECISION_024_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome M2_M3_BOUNDARY_GOVERNANCE_ACCEPTED; controls the M2 to M3 phase boundary and five entry conditions; grants no implementation authority
 DECISION_025_STATUS: ACCEPTED — OWNER APPROVED 2026-07-31; outcome INTEGRATED_AUDIT_DOCUMENTATION_CORRECTIONS_AUTHORIZED
-IMPLEMENTATION_AUTHORIZATION: NONE — DECISION 047'S TWO-PATH PRE-T4 RAWSTORE STREAMING SUBSTAGE (src/disclosure_drift/sec/raw_store.py, tests/unit/test_raw_store.py) IS EXHAUSTED AND ACCEPTED AND PUBLISHED BY DECISION 048; EVERY T2.1-T2.6 AND G1 GRANT REMAINS EXHAUSTED; T4 EXECUTION, T5, AND T6 ARE NOT AUTHORIZED; NO NETWORK, LIVE-SEC, OPERATIONAL-CATALOG, CEILING-801, MIGRATION, RECEIPT-SCHEMA, REASON-CODE, CONFIGURATION-SCHEMA, EXECUTABLE, TEST, OR TAG WORK IS AUTHORIZED
+IMPLEMENTATION_AUTHORIZATION: NONE — DECISION 047'S TWO-PATH PRE-T4 RAWSTORE STREAMING SUBSTAGE (src/disclosure_drift/sec/raw_store.py, tests/unit/test_raw_store.py) IS EXHAUSTED AND ACCEPTED AND PUBLISHED BY DECISION 048; DECISION 047'S T4 AUTHORIZATION IS EXHAUSTED AND T4 IS ACCEPTED AND PUBLISHED BY DECISION 049; EVERY T2.1-T2.6 AND G1 GRANT REMAINS EXHAUSTED; T5 AND T6 ARE NOT AUTHORIZED; NO NETWORK, LIVE-SEC, OPERATIONAL-CATALOG, CEILING-801, MIGRATION, RECEIPT-SCHEMA, REASON-CODE, CONFIGURATION-SCHEMA, EXECUTABLE, TEST, OR TAG WORK IS AUTHORIZED
 ACTIVE_STAGE_CONTRACT: Milestones/contracts/m3_2.md
-NEXT_AUTHORIZED_ACTION: CHATGPT_OWNER_M3_2_T4_OPERATIONAL_PREFLIGHT_EXECUTION_PACKET
+NEXT_AUTHORIZED_ACTION: CHATGPT_OWNER_M3_2_T5_INITIAL_LIVE_INVOCATION_AUTHORIZATION_PACKET
 ```

@@ -1,0 +1,772 @@
+# Decision 057 — M3.2 Historical Orphan-Adoption Procedure Architecture
+
+**Date:** 2026-08-09
+**Status:** ACCEPTED — OWNER APPROVED 2026-08-09
+**Authority classification:** `M3_2_ORPHAN_ADOPTION_PROCEDURE_ARCHITECTURE_ACCEPTED`
+**Type:** Governance-only owner adjudication of the completed read-only orphan-adoption architecture
+discovery authorized by [Decision 056](decision_056_m3_2_carry_in_implementation_acceptance_and_m3_l14_closure.md)
+§10. It records the discovery's confirmed **MAJOR** correction and fixes the exact architecture,
+row-construction, content, preflight, postcondition, fault-semantics, synthetic-proof, evidence, and
+boundary requirements that a later separately authorized execution packet must impose. It changes no
+executable or test byte, opens no operational state, and performs no adoption.
+
+**Non-self-executing.** This record **fixes architecture and procedure requirements. It does not
+itself grant the operational invocation.** No session may perform, simulate against private state,
+or partially begin the adoption on the strength of this record.
+
+**Amends:** nothing in place. Decisions 001–056 remain byte-unchanged.
+**Narrowly supersedes:** only the current-state statement in
+[Decision 056](decision_056_m3_2_carry_in_implementation_acceptance_and_m3_l14_closure.md) §10,
+the decision registry, and `Milestones/STATUS.md` that the next action is the read-only
+orphan-adoption architecture discovery. That discovery **has since been issued and completed**; its
+statements were accurate when written and are preserved as historical.
+**Preserves unchanged:** ceiling **801**; historical seed **1**; the frozen 75-logical-request plan
+and SHA-256 `19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68`; consumption
+**1 of 801**; the old run's permanent no-resume status; recovery `UNDETERMINED`; the absence of a
+terminating receipt; zero historical `ops_retrieval_attempts` rows; **M3-L15**; every network, SEC,
+transport, recovery, provenance, and live-operation stop condition; and the rule that **M3-L16 blocks
+every clean or live run** until the orphan is adopted and the limitation is separately closed.
+**Related:** [Decision 056](decision_056_m3_2_carry_in_implementation_acceptance_and_m3_l14_closure.md),
+[Decision 055](decision_055_m3_2_carry_in_architecture_and_offline_implementation_authorization.md) §9,
+[Decision 053](decision_053_m3_2_interrupted_run_closure_procedure_authorization.md) (the
+ephemeral-procedure precedent), [Decision 052](decision_052_m3_2_post_t5_remediation_acceptance_and_publication.md),
+[`Milestones/contracts/m3_2.md`](../../Milestones/contracts/m3_2.md),
+[`Docs/m3/limitations_register.md`](../m3/limitations_register.md), and
+[`Milestones/STATUS.md`](../../Milestones/STATUS.md).
+
+---
+
+## 1. What this record does, and what it does not
+
+**It does:**
+
+- adjudicate the completed read-only architecture discovery authorized by Decision 056 §10;
+- record the owner's confirmation that the discovery's central contract assertion was **MAJOR-wrong**,
+  and replace it with the corrected contract (§4);
+- fix the exact procedure shape, row construction, content, preflight, terminal delta, fault
+  semantics, synthetic proof, evidence contract, and execution boundary a later packet must impose
+  (§§5–12).
+
+**It does not:**
+
+- authorize, perform, simulate, or partially begin the adoption;
+- open, read, or mutate the real operational catalog, data root, raw object, lineage intent, receipt
+  inventory, writer lease, private evidence, or any identity value;
+- create any production, test, migration, configuration, reason-code, runbook, contract, or template
+  byte;
+- mint or consume a carry-in authority;
+- close **M3-L16**, claim live readiness, or authorize **T6**, **M3.2B**, or **Gate H**.
+
+The discovery report and its remediation addendum are **advisory evidence, not repository
+authority**. Where they conflict with this record, this record controls.
+
+## 2. The owner determination, recorded without alteration
+
+```text
+M3.2 — DECISION 057
+CORRECTED ORPHAN-ADOPTION PROCEDURE ARCHITECTURE
+
+The completed read-only orphan-adoption architecture discovery is adjudicated.
+
+Its central contract assertion — that a successful adoption adds exactly one new
+row and leaves every other table unchanged — is a confirmed MAJOR error. Replace
+it with the corrected deterministic two-table, two-row, three-transaction
+projection-rebuild contract recorded below.
+
+Retain Architecture C, corrected: one ephemeral, SHA-256-recorded, one-time
+procedure outside the repository, using the accepted _observation_from_intent as
+its sole verifier and one guarded INSERT inside CatalogWriter.batch, followed by
+one mandatory rebuild_audit_projection call in the same authorized process
+invocation.
+
+Override the remediation addendum's unbounded "retry to success" recommendation.
+One later explicitly authorized process invocation attempts both limbs, once.
+No retry loop, no auto-retry, no auto-resume, no automatic relaunch. Any
+exception, interruption, uncertainty, or failed postcondition stops and refers
+to the owner.
+
+This record is non-self-executing. It authorizes no invocation. The next action
+is its fresh independent non-author review. After a passing review and a
+separate owner publication ruling, a separate explicit execution packet is still
+required.
+
+M3-L16 remains ACTIVE and blocking. No carry-in authority may be minted or
+consumed. Consumption remains 1 of 801. The old run remains never resumable.
+Recovery remains UNDETERMINED. Live readiness is not claimed.
+```
+
+## 3. Authority verification
+
+| Item | Value |
+|---|---|
+| Baseline `HEAD` | `ea0647459ef38069c75f7b8da2873abf0cbccdb1` |
+| `origin/main` | `ea0647459ef38069c75f7b8da2873abf0cbccdb1` — identical |
+| Working tree at entry | clean |
+| Packaged migration inventory | latest `0013_m23_manifest_lifecycle_guards.sql`, count **13**, contiguous `0001`–`0013` |
+| Tracked network switches | `network.enabled: false`; `network.m3_acquire_enabled: false` (`configs/project.yaml`) |
+| Tracked CompanyFacts switch | `companyfacts.enabled: false` (`configs/project.yaml:54`) |
+| Predecessor authority | Decision 056 §10 authorized the read-only discovery; it completed |
+| Authorizing instrument for this record | the owner's response to the prior recommendation: *"Okay fix the major and run a new review."* |
+
+That instruction is authority to **prepare this governance candidate and its fresh review**. It is
+**not** authority for operational execution.
+
+**Candidate provenance — two bounded pre-publication remediations.** This uncommitted candidate has
+now been corrected **twice** before publication, each time under a bounded owner instrument and each
+time changing **no** executable, test, migration, configuration, contract, runbook, or template byte
+and touching **no** operational state.
+
+1. **First remediation (2026-08-09).** Fixed one owner-identified **MAJOR** omission: the record
+   fixed the verifier and the guarded `INSERT` but did not mandate the full persisted row
+   construction, so a later direct `INSERT` could have satisfied the prose while persisting a
+   different tuple or failing to prove exactly one row was written. It added §4.4, §5.1, content
+   rulings 8–10, the terminal row-shape postcondition, evidence item 14, the additive fifteenth
+   synthetic case, and the §4.2 precision that `record` and `_row` are cited **only** as row-shape
+   precedent.
+2. **Second remediation (2026-08-09) — this one.** The fresh independent review of the first-remediated
+   candidate found **two further MAJOR defects, both in the proof layer rather than the
+   architecture**: (a) §8 asserted that *"no second generated instant exists anywhere in the run"*,
+   which is **false** — a correct rebuild necessarily generates two further library-owned instants
+   (§4.2); and (b) §10 demanded that deleting the `cursor.rowcount == 1` guard be caught by a
+   behaviourally non-vacuous mutation, which is **impossible** under the accepted plain-`INSERT`
+   and schema shape. Four directly related **MINOR** ambiguities were corrected alongside them
+   (§5 and §5.1 step 6 — the batch must exit and transaction 1 must commit before the rebuild; §5's
+   pinned second-limb call shape; §6 rulings 4–5 — the grounding for the zero-row rulings; §7 gate 10
+   and §12 clause 9 — what "exactly one invocation" counts).
+
+The **accepted central orphan-adoption architecture is unchanged by both remediations.** Neither
+granted execution authority. **No third automatic correction loop is permitted**; any further defect
+returns to the owner. §2 is preserved **verbatim** as the prior owner determination — its
+"next action" line is historical, and §16 carries the current pointer.
+
+Every source and schema fact recorded below was verified by direct read-only inspection of the
+**committed repository** at that baseline — the packaged migrations, the accepted production source,
+and the tracked configuration. **No operational state was opened**, not even read-only. The
+**catalog's applied** migration head, orphan count, blocked-row count, and projection validity are
+therefore **not** verified here; they are §7 preflight obligations for the later execution packet.
+
+## 4. Ruling 057-A — the confirmed MAJOR correction
+
+### 4.1 What was asserted, and what is true
+
+The discovery asserted a **single-write** contract: one new `census_source_observations` row, one
+table touched, every other table unchanged. That is **wrong**, and it is wrong in a way that would
+have made the execution packet's postcondition set reject a *correct* run and accept an *incomplete*
+one. The owner classifies it **MAJOR** and replaces it.
+
+The corrected contract is **binding**:
+
+| # | Corrected fact |
+|---|---|
+| 1 | the successful path adds **one** `census_source_observations` row |
+| 2 | it **also** adds **one** `census_projection_recovery_events` row, ending `resolved` |
+| 3 | the new observation's `projected_to_audit` transitions **0 → 1** |
+| 4 | `audit/sec/census_source_observations.jsonl` is **atomically replaced**, not appended |
+| 5 | the path spans **three separately committed SQLite transactions** |
+| 6 | end-to-end adoption **plus** projection rebuild is **not atomic** |
+| 7 | **no source suppresses** the incident row after the orphan `INSERT` |
+| 8 | the final `UPDATE` resolves **every** blocked event for the projection path |
+
+**Two tables, two rows, three transactions.** Any later packet that restates the single-write
+contract is refused.
+
+### 4.2 The verified three-transaction sequence
+
+Line references are to the committed baseline.
+
+**Transaction 1 — the observation `INSERT`.**
+One `BEGIN IMMEDIATE` (`src/disclosure_drift/storage/sqlite.py:100`), entered through
+`CatalogWriter.batch()` (`src/disclosure_drift/storage/catalog.py:336`, which wraps `transaction()`
+at `:338`), inserts one `census_source_observations` row and commits on exit.
+
+**The later procedure performs that `INSERT` directly, and must not call
+`ObservationRecorder.record`.** `record`
+(`src/disclosure_drift/sec/observation_catalog.py:299`) opens `transaction(self.writer.connection)`
+itself at `:343`, and `transaction()` issues `BEGIN IMMEDIATE` unconditionally
+(`sqlite.py:100`) — so calling `record` inside `CatalogWriter.batch` would attempt a **nested**
+`BEGIN IMMEDIATE` and raise rather than write. `record` and its serializer
+`ObservationRecorder._row` are cited in this record — here and in §4.4 — **only** as the accepted
+precedent for the persisted **row shape**, never as a surface the procedure invokes. §5.1 fixes the
+direct form that reproduces that row exactly while taking the transaction once.
+
+**Transaction 2 — the blocked incident `INSERT`.**
+`rebuild_audit_projection` (`:634`) first calls `validate_audit_projection` at `:648`. Immediately
+after transaction 1 the projection file holds `N` lines while SQLite holds `N+1` observations, so
+`requires_recovery` is true and `_persist_projection_recovery_detection` runs at `:650`. That
+function (`:1101`) opens its **own** transaction at `:1116` and inserts one
+`census_projection_recovery_events` row with `resolution_state = 'blocked'`,
+`release_blocking_before_resolution = 1`, `projection_sha256 = NULL`, `resolved_at_utc = NULL`.
+It commits independently.
+
+**Suppression is scoped, and does not apply here.** `_persist_projection_recovery_detection` returns
+early **only** when a `blocked` row already exists **for that same `projection_path`** (`:1108`–`:1115`).
+Under the mandatory zero-blocked-rows preflight (§7) no such row exists, so the incident row **is**
+written. This is the exact mechanism behind corrected fact 7.
+
+**Between the transactions — the durable file work.** The rebuild loads observations at `:651`
+(`load_observations`, `:617`, ordered `retrieved_at_utc, recorded_at_utc, observation_id`), writes a
+`uuid4`-named temporary at `:655`–`:665` with `fsync`, calls `temporary.replace(destination)` at
+`:668`, `fsync`s the parent directory at `:671`, then **re-reads the destination and compares digest
+and size against the temporary** at `:676`–`:682`, raising `CatalogWriteError` on mismatch **before**
+any SQLite flag changes. Stale strictly-named temporaries are removed at `:683`.
+
+**Transaction 3 — the flag and resolution `UPDATE`.**
+`rebuild_audit_projection` opens its final transaction at `:686` and executes:
+
+- `UPDATE census_source_observations SET projected_to_audit = 1` at `:687` — **unqualified**, so it
+  sets the flag on every row, including the newly adopted one (0 → 1) and every pre-existing row
+  already at 1 (1 → 1, a no-op in value);
+- `UPDATE census_projection_recovery_events SET projection_sha256 = ?, resolution_state = 'resolved',
+  resolved_at_utc = ?, detail = detail || ? WHERE projection_path = ? AND resolution_state = 'blocked'`
+  at `:689`–`:700`.
+
+The second statement is **path-scoped, not event-scoped**. It resolves **every** blocked event for
+that projection path — including one that pre-dated this procedure. That is corrected fact 8, and it
+is the reason §7's zero-blocked-rows gate is mandatory rather than advisory: a pre-existing blocked
+event would be **both** suppressed at `:1108` **and** silently resolved at `:693`, destroying an
+unrelated incident record.
+
+`census_run_id` defaults to `None` (`:639`), so the `census_recovery_states` `UPDATE` at `:701`–`:710`
+does **not** execute.
+
+### 4.2.1 The two rebuild-owned instants — expected, and not the procedure's
+
+A correct run generates **three** instants, not one. Exactly one of them belongs to the procedure;
+the other two belong to the library and are **required** for the run to be correct:
+
+| # | Instant | Owner | Where generated | Where it lands |
+|---|---|---|---|---|
+| 1 | `recorded_at_utc` | **the procedure** | §5.1 step 3, once, inside transaction 1 after both guards pass | the new `census_source_observations` row |
+| 2 | `detected_at_utc` | **the library** | `utc_now()` evaluated inline in the transaction-2 `INSERT` at `:1130` | the `blocked` `census_projection_recovery_events` row |
+| 3 | `resolved_at_utc` | **the library** | `now = utc_now()` at `:673`, after the directory `fsync` and before transaction 3 opens at `:686` | the same event row, on resolution at `:689`–`:700` |
+
+Instants 2 and 3 are **not optional and not suppressible**. `0008:456` makes `detected_at_utc`
+`NOT NULL`, so instant 2 must exist for the incident row to be insertable at all; `0008:459`'s
+`CHECK ((resolution_state = 'resolved') = (resolved_at_utc IS NOT NULL))` makes instant 3 must-exist
+for that row to reach its terminal `resolved` state. The same transaction-2 `INSERT` likewise
+generates two library-owned `uuid4` identifiers — `event_id` (`:1124`) and `rebuild_identity`
+(`:1129`).
+
+**Consequently:** the "one instant, read once, used once" rule of §5.1 step 3 is scoped **solely to
+constructing the new observation row's `recorded_at_utc`**. It is **not** a claim about the run as a
+whole. Instants 2 and 3 are **expected**, must be **separately evidenced** (§11 items 6 and 14), and
+are **not required to equal one another or to equal `recorded_at_utc`** — they are generated at
+different points by different code, and any packet demanding their equality is refused.
+
+### 4.3 Schema facts relied on
+
+- `census_projection_recovery_events` — `0008_r3_durability_and_lineage.sql:445`–`:460`, `STRICT`,
+  with `CHECK (resolution_state IN ('blocked','resolved'))` and
+  `CHECK ((resolution_state = 'resolved') = (resolved_at_utc IS NOT NULL))`. A `resolved` terminal
+  row therefore **must** carry a non-NULL `resolved_at_utc`; the §8 postcondition is enforced by the
+  schema, not merely asserted.
+- `census_source_observations.projected_to_audit` — `INTEGER NOT NULL DEFAULT 0 CHECK (… IN (0,1))`
+  (`0002_source_observations.sql:57`; `0008:56`).
+- `CatalogWriter.batch()` (`src/disclosure_drift/storage/catalog.py:336`) wraps `transaction()` and
+  therefore takes the ordinary `BEGIN IMMEDIATE` inside the ordinary process-lifetime `fcntl` writer
+  lease taken by `CatalogWriter.__enter__` (`catalog.py:107`).
+- The `BEFORE INSERT` trigger `census_observation_lineage_insert` (`0008:145`) evaluates
+  supersession and reuse lineage. The adopted observation carries neither
+  (`supersedes_observation_id` and `reused_observation_id` default `None`,
+  `src/disclosure_drift/sec/snapshots.py:139`–`:140`), so the trigger passes without writing.
+
+### 4.4 Row-construction facts relied on
+
+**The verifier does not produce a persistable row.** These are the facts §5.1's row-construction
+requirements rest on; each was read directly at the committed baseline.
+
+- `OBSERVATION_COLUMNS` (`observation_catalog.py:126`–`:161`) is the accepted **34-column** insert
+  tuple for `census_source_observations`. Its final two columns are `projected_to_audit` and
+  `recorded_at_utc`.
+- `_observation_from_intent` returns a `SourceObservation`, and that dataclass carries **neither**
+  `projected_to_audit` **nor** `recorded_at_utc`. The verifier therefore supplies **32** of the 34
+  values and **structurally cannot** supply the last two.
+- `ObservationRecorder._row(observation, now)` (`observation_catalog.py:558`–`:595`) is the accepted
+  serializer that closes exactly that gap. It is a **`@staticmethod`**, so it is callable without
+  constructing an `ObservationRecorder`. It fixes `projected_to_audit` to the literal `0` (`:593`)
+  and `recorded_at_utc` to its `now` argument (`:594`), and it fixes the canonical JSON
+  serialization of `validators_sent`, `headers`, `redirects`, and `redirect_hops` (`:572`–`:573`,
+  `:589`–`:590`) — forms a hand-built tuple could silently get wrong while still inserting
+  successfully.
+- **`recorded_at_utc` is the only newly generated catalog value in the row.** `record` captures it as
+  `now = utc_now()` at `:342`, before opening its transaction at `:343`.
+- `_recover_orphan` (`:1372`–`:1387`) is the committed in-repository precedent for performing this
+  construction **outside** `record`: it captures `now = utc_now()` at `:1373`, opens `transaction()`
+  at `:1374`, re-checks for a duplicate `observation_id` **inside** that transaction at
+  `:1375`–`:1379`, then executes a **direct** `INSERT` over `OBSERVATION_COLUMNS` with
+  `ObservationRecorder._row(observation, now)` at `:1382`–`:1387`. §5 excludes `_recover_orphan`
+  itself — solely for its verifier-failure fall-through to `RawStore.quarantine` at `:1400`–`:1411` —
+  but its **row-construction limb** is the accepted shape §5.1 requires. §5.1 is **stricter** in two
+  respects: it also guards `relative_storage_path`, and it requires `cursor.rowcount == 1`.
+- `record`'s own duplicate check (`self._exists(…)`, `:335`) runs **outside** the transaction. That is
+  a second, independent reason the guards must be reasserted **inside** the procedure's own
+  transaction rather than carried over from a pre-transaction read.
+
+## 5. Ruling 057-B — Architecture C retained, corrected
+
+The procedure shape is retained from the Decision 053 precedent and corrected for this operation.
+
+**It must:**
+
+- be **one ephemeral, one-time procedure** built in a disposable `mktemp -d` scratch directory
+  **outside the repository**, with its **SHA-256 recorded privately** before it runs;
+- use the accepted **`_observation_from_intent` unchanged as its sole verifier**
+  (`observation_catalog.py:1423`);
+- use **`CatalogWriter`** and **one guarded `INSERT` inside `CatalogWriter.batch`**, thereby taking
+  the ordinary OS-lock and writer lifecycle — which is the accepted single-writer boundary, not a
+  workaround of it;
+- construct, guard, and prove that `INSERT` **exactly** as §5.1 fixes — in-transaction re-checks on
+  both the target `observation_id` and the target `relative_storage_path`, one captured
+  `recorded_at_utc`, the accepted `OBSERVATION_COLUMNS` / `ObservationRecorder._row` tuple, and
+  `cursor.rowcount == 1`;
+- call **`rebuild_audit_projection` exactly once, mandatorily, in the same authorized process
+  invocation** as the `INSERT` — but **after the `CatalogWriter.batch` context has exited and
+  transaction 1 has committed**, never inside it (§5.1 step 6). The rebuild opens its **own**
+  transactions (`:686`, and `:1116` via `_persist_projection_recovery_detection`), and
+  `transaction()` issues `BEGIN IMMEDIATE` unconditionally (`sqlite.py:100`), so calling it inside
+  the batch would nest and raise. **Same process, outside the batch context**;
+- make that call in **exactly** the shape `rebuild_audit_projection(connection, destination)` —
+  supplying **neither** `census_run_id` **nor** `fault_hook`. Both are keyword-only and default to
+  `None` (`:638`–`:639`), and both defaults are load-bearing: a supplied `census_run_id` would
+  enable the `census_recovery_states` `UPDATE` at `:701`–`:710` that §6 ruling 6 forbids, and
+  `fault_hook` belongs **only** to the disposable synthetic suite (§10 cases 2 and 13), never to the
+  real invocation;
+- create **no permanent production surface and no tracked procedure**.
+
+**It must never call:** `ObservationRecorder.record` (§5.1 — it opens its own transaction and would
+nest inside `CatalogWriter.batch`); `apply_recovery_action`; `reconcile`; `_recover_orphan`;
+`RawStore.quarantine`; `RawStore.reconcile`; `prepare_operational_catalog`; `migrate`;
+`seed_reference_data`; any receipt, checkpoint, run-registration, or transport function; or any
+live-acquisition entry point.
+
+**Why the governed recovery surface is excluded.** `_recover_orphan` (`:1351`) verifies through the
+same `_observation_from_intent`, but on **any** verifier failure it falls through to
+`RawStore.quarantine` at `:1400`–`:1411`, which **moves the governed raw object and its lineage
+intent**. `reconcile` (`:1136`) additionally quarantines a stray lineage intent whose object is
+missing (`:1222`–`:1226`). For a one-shot disposition of a single irreplaceable historical object,
+a verifier failure must leave that object exactly where it is. Calling the verifier directly and
+raising on failure is the only shape that guarantees it.
+
+### 5.1 The exact form of transaction 1
+
+The `INSERT` limb must take **exactly** this form, in this order. A later packet that satisfies §5's
+prose while persisting a different tuple, generating more than one instant **for this row's
+`recorded_at_utc`**, or failing to prove that exactly one row was written is **refused**. The
+scoping matters: the run as a whole legitimately generates two further library-owned instants
+(§4.2.1), and this rule says nothing about them.
+
+1. Enter **one** `CatalogWriter.batch()` — one `BEGIN IMMEDIATE` (`sqlite.py:100`) inside the
+   ordinary process-lifetime writer lease.
+2. **On that same connection, inside that transaction,** reassert both guards: **no** row holds the
+   target `observation_id`, and **no** row holds the target `relative_storage_path`. The §7 preflight
+   readings do **not** discharge this — they are pre-transaction reads (§4.4).
+3. **Only after both guards pass,** capture **exactly one** `recorded_at_utc = utc_now()`. One
+   instant, read once, used once — **for this row's `recorded_at_utc`, and for nothing else**. This
+   is a rule about constructing the observation row. It is **not** a claim that the run generates no
+   other instant: transactions 2 and 3 generate their own library-owned `detected_at_utc` and
+   `resolved_at_utc` (§4.2.1), which are expected and are **not** governed by this step.
+4. Execute **one** direct `INSERT INTO census_source_observations` over the accepted
+   `OBSERVATION_COLUMNS` (`observation_catalog.py:126`), with values that are **exactly**
+   `ObservationRecorder._row(verified_observation, recorded_at_utc)` (`:559`), where
+   `verified_observation` is the **unmodified** return of `_observation_from_intent`. The tuple is
+   **not** hand-built, reordered, re-serialized, extended, or partially overridden.
+5. Require **`cursor.rowcount == 1`**. Anything else — `0`, more than `1`, or unavailable — **raises
+   inside the transaction**, so `transaction()` rolls back and nothing is committed. This check is
+   **defense-in-depth and stays in the real procedure**: under the accepted plain-`INSERT` and
+   schema shape a permitted insert yields exactly `1` and every other accepted outcome raises first,
+   so the check is a **directly asserted invariant** rather than a branch expected to fire. The
+   actual successful cursor result **must be asserted and evidenced** (§10 case 1, §11 item 14), not
+   assumed. §10 case 15 states the corresponding — and deliberately narrower — proof obligation.
+6. **Exit the `CatalogWriter.batch` context, committing transaction 1, before anything else
+   happens.** `rebuild_audit_projection` is called **only after** that commit, in the same process
+   but **outside** the batch (§5). Transaction 1 is the whole of the adoption limb; nothing else may
+   ride inside it.
+
+**`ObservationRecorder.record` must not be called.** It opens `transaction(self.writer.connection)`
+itself (`:343`) and would nest a second `BEGIN IMMEDIATE` inside `CatalogWriter.batch`, raising
+rather than writing. Steps 1–5 reproduce `record`'s persisted **row** exactly while taking the
+transaction once — that is the whole reason the row shape is mandated here rather than inherited by
+calling `record`.
+
+**The guards are one-use refusals, not reconciliation.** A guard that fires is a **STOP referred to
+the owner** under §12 — never an `UPDATE`, `INSERT OR REPLACE`, `INSERT OR IGNORE`, upsert, delete,
+retry, or replay. **No path in this procedure revises, replaces, or re-writes an existing row.**
+
+## 6. Ruling 057-C — exact content rulings
+
+| # | Ruling |
+|---|---|
+| 1 | **Accept `_observation_from_intent`'s hardcoded `detail` unchanged** — `"verified adoption after raw promotion and before catalog commit"` (`:1514`). It is not overridden, appended to, or re-worded |
+| 2 | **Accept `outcome = 'stored_new'`** exactly as the verifier fixes it (`:1492`) |
+| 3 | **Accept `observation_id`, `retrieved_at_utc`, and every identity, hash, and size value exactly as the governed lineage intent and verifier output produce them.** No value is supplied, defaulted, corrected, or re-derived by the procedure. The **sole** exception is `recorded_at_utc` — ruling 8 |
+| 4 | Write **zero** `census_observation_reasons` rows. **The ground is the procedure's own shape, not a library default:** §5.1 executes **exactly one** direct `census_source_observations` `INSERT` and issues **no** reason statement at all. The reason loop at `:350` lives inside the **prohibited** `ObservationRecorder.record` and never runs here, so it must not be cited as the reason. Corroborating but **not** load-bearing: `_observation_from_intent` never sets `reason_codes`, so the verified observation carries the `()` default (`snapshots.py:144`) — there would be nothing to write even if a loop existed |
+| 5 | Write **zero** `census_archive_members` rows. **Same ground:** the procedure issues **no** member statement. `members = ()` at `:303` is a parameter default of the **prohibited** `record` and is **not** the reason; `_observation_from_intent` returns a bare `SourceObservation`, which carries no members at all — archive members reach the catalog only as a separate argument to `record`, which is never called |
+| 6 | Call **neither** `record_recovery_events` (`:1619`) **nor** `open_recovery_state` (`:1675`); create **no** `census_recovery_states` row |
+| 7 | Create **no** receipt, checkpoint, attempt, ingestion-job, or run-registration row |
+| 8 | **`recorded_at_utc` is the sole catalog value the *procedure itself* generates, and the sole newly generated value in the observation row.** It is captured **once**, inside transaction 1 and only after both guards pass, as `utc_now()` (§5.1 step 3). Its value is **never** taken from the lineage intent, a caller argument, an environment value, or a second clock read. It is **not** `retrieved_at_utc`, which comes from the governed intent unchanged. **Scope:** this ruling is about the observation row and the procedure's own generation. It does **not** say the run generates nothing else — transactions 2 and 3 generate library-owned `detected_at_utc`, `resolved_at_utc`, `event_id`, `rebuild_identity`, and `projection_sha256` (§4.2.1), all expected, none of them the procedure's to supply or suppress |
+| 9 | **Every persisted value is exactly the `ObservationRecorder._row` serialization** of the unmodified verifier result plus that one captured instant, written over the accepted `OBSERVATION_COLUMNS`. No column is added, dropped, reordered, re-serialized, or overridden |
+| 10 | **`projected_to_audit` is inserted as `0`** — the literal `_row` fixes at `:593`. It is **not** pre-set to `1`. Transaction 3's rebuild is what moves it **0 → 1** (§8); pre-setting it would make that transition unobservable and would falsely satisfy the §8 flag postcondition |
+
+## 7. Ruling 057-D — mandatory private preflight
+
+All gates are **conjunctive** and **fail closed**. Any mismatch, ambiguity, or unavailable proof is a
+**STOP before any write**, referred to the owner.
+
+1. The accepted repository baseline is checked out, the working tree is clean, tracked network is
+   **false / false**, and CompanyFacts is disabled.
+2. Catalog migration head is **`0013`**; `quick_check`, `integrity_check`, and `foreign_key_check`
+   are clean.
+3. The historical M3.2A job is `stopped`; historical `ops_retrieval_attempts` count is **zero**; no
+   receipt has been manufactured.
+4. **Exactly one** orphan exists (`object_without_catalog_row`), **zero** `catalog_row_without_object`
+   conditions exist, and **zero** stray lineage intents exist.
+5. The audit projection **validates** before adoption — `validate_audit_projection` returns
+   `is_valid`.
+6. **Zero** rows with `resolution_state = 'blocked'` exist in `census_projection_recovery_events`
+   **catalog-wide.** This is a deliberately **stronger** gate than the code's path-scoped checks
+   (`:693`, `:1095`, `:1110`): the resolution `UPDATE` is path-scoped and would silently resolve a
+   pre-existing blocked event for the same path, and a blocked event on any other path is itself an
+   unadjudicated incident that must be referred before an irreversible one-shot proceeds.
+7. **No row** already holds the target `observation_id`, and **no row** already holds the target
+   `relative_storage_path`.
+8. Lineage schema, path, request-identity, registry, storage-representation, hash, and size
+   verification all pass **through `_observation_from_intent`** — not through a reimplementation.
+9. **No live writer holds the OS lock**, re-verified immediately before the real transaction.
+10. The **§10 synthetic suite passes first**, against disposable fixtures, before the real catalog is
+    touched. **Counting, stated unambiguously:** that suite runs **before**, **outside**, and
+    **without any access to** the governed real catalog, data root, raw object, or lineage intent. It
+    is **not** the single real adoption invocation and is **never counted as one**. Running it is
+    **not authorized by this record** — like every other limb here, it becomes performable only under
+    the later owner execution instrument (§12 clause 9).
+11. The exact procedure's **SHA-256 is recorded privately** before it runs.
+
+Private absolute paths, identifiers, identity values, and raw bodies are resolved **without printing
+or committing** them.
+
+## 8. Ruling 057-E — the correct successful terminal delta
+
+A successful run **must** satisfy **all** of the following. Nothing less is success.
+
+**Catalog:**
+
+- `census_source_observations` count **N → N+1**;
+- the target row's `projected_to_audit` **0 → 1**, and **every** row's flag is **1**;
+- the target row's persisted tuple is **exactly**
+  `ObservationRecorder._row(verified_observation, recorded_at_utc)` under `OBSERVATION_COLUMNS`, and
+  its **`recorded_at_utc` equals the single instant the procedure captured in transaction 1**
+  (§5.1 step 3) — **exactly one procedure-generated instant exists, and it is that field's value**.
+  **This postcondition is scoped to the observation row and to the procedure's own generation.** It
+  is emphatically **not** a requirement that no other instant exists in the run: a correct run also
+  carries the two **library-owned** instants of §4.2.1, and a packet that asserts otherwise, or that
+  fails a run for producing them, is **refused**;
+- the **two rebuild-owned instants are present and separately evidenced** — the incident row's
+  `detected_at_utc` (non-NULL by `0008:456`) and its `resolved_at_utc` (non-NULL by `0008:459` once
+  `resolved`). They are recorded as distinct values (§11 items 6 and 14). They are **not required to
+  equal one another, and not required to equal `recorded_at_utc`**; equality between any of them is
+  neither expected nor a success criterion, and inequality is **never** a failure;
+- every **pre-existing logical row value** is unchanged;
+- `census_projection_recovery_events` count **+1**; that row is terminal `resolved`, with a
+  **non-NULL `resolved_at_utc`** and `projection_sha256` **equal to the digest of the new projection
+  file**;
+- **zero** `blocked` rows remain **catalog-wide**;
+- **all other** `census_*` and `ops_*` row counts and content are **unchanged**.
+
+**Projection:**
+
+- the JSONL projection goes **N → N+1** lines and **validates**;
+- **no temporary residue** remains — no `.<name>.<32-hex>.tmp` file survives.
+
+**Raw store:**
+
+- the raw object and its lineage intent are unchanged in **SHA-256, size, inode, and location**;
+- orphan count **1 → 0**; `catalog_row_without_object` **0**; attempts **0**; **no** receipt and
+  **no** checkpoint created.
+
+**Environment:**
+
+- the repository is **unchanged**; network remains **disabled**; no SEC or DNS action occurred.
+
+**Terminal classification.** The receiptless terminal determination for the old run is expected to be
+**`UNSAFE`**, **solely because no predecessor receipt exists** — never because the adoption failed.
+The old run remains **permanently non-resumable**, and `UNSAFE` **never authorizes resumption**.
+**`SAFE` is not expected and could not authorize anything**: receiptless inspection is inspection-only
+and structurally cannot return `SAFE`. The **current, pre-execution** recovery state remains
+**`UNDETERMINED`**.
+
+## 9. Ruling 057-F — three-transaction fault semantics
+
+**The procedure is not atomic end-to-end.** Transaction 1 and transaction 3 are each locally atomic;
+the sequence spanning them, the incident insert, and the file replacement **is not**. Any later
+packet claiming end-to-end atomicity is refused.
+
+The six interruption points, each classified **fail-closed**:
+
+| # | Interruption point | State | Classification |
+|---|---|---|---|
+| 1 | **before** the observation commit | nothing written; orphan intact | **NO-OP** — the adoption did not occur |
+| 2 | **after** the observation commit, **before** the incident insert | observation committed; projection stale by one line; every flag on the new row `0`; **no** incident row | **ADOPTED, PROJECTION UNRECONCILED** |
+| 3 | **after** the blocked incident insert, **before** the file replace | as above **plus** one `blocked` incident row; projection file still the old `N` lines | **ADOPTED, RECOVERY BLOCKED** |
+| 4 | **after** the file replace, **before** the directory fsync | new `N+1`-line projection in place but its directory entry is not durable; flags and incident still stale | **ADOPTED, REPLACEMENT NOT PROVEN DURABLE** |
+| 5 | **after** the fsync, **before** the final SQLite update | projection durable and correct; `projected_to_audit` still `0` on the new row; incident still `blocked` | **ADOPTED, FLAGS AND INCIDENT UNRESOLVED** |
+| 6 | **after** the final update | all §8 postconditions met | **CANDIDATE SUCCESS** — confirmed only by the full §8 check |
+
+**Rules.**
+
+- **No successful completion may be claimed unless every §8 terminal postcondition passes.** Reaching
+  point 6 is necessary, not sufficient.
+- States 2–5 are **not** failures of the adoption limb — the observation is committed and must never
+  be re-adopted. They are **unfinished projection reconciliation**, and each is referred to the owner
+  under §12.
+- Fault points 3, 4, and 5 correspond exactly to the committed fault hooks
+  `after_rebuild_temporary_durable_before_replace` (`:667`),
+  `after_rebuild_replace_before_directory_fsync` (`:670`), and
+  `after_rebuild_directory_fsync_before_catalog_update` (`:685`), so each is reachable and provable
+  in the synthetic suite rather than reasoned about.
+
+## 10. Ruling 057-G — synthetic non-vacuity requirements
+
+Against disposable fixtures, **before** the real catalog is touched, and — per §7 gate 10 — **never**
+against the governed catalog or object, and **not authorized by this record**.
+
+**The non-vacuity rule, stated correctly.** Every case that guards a **behaviourally reachable**
+requirement must be **non-vacuous**: it must be shown to fail when the behaviour it guards is
+removed. That covers **all** row-shape, timestamp, flag, and nested-transaction mutations, and each
+of those remains **mandatory and non-vacuous**.
+
+**The one carve-out — the `rowcount` guard.** `cursor.rowcount == 1` is a **statically and directly
+asserted invariant**, not a required negative-mutation demonstration. Under the accepted plain
+`INSERT INTO … VALUES (…)` and the accepted schema, a **permitted** insert yields exactly `1` and
+**every** other accepted outcome raises before the check is reached — so there is no behaviourally
+reachable state in which deleting the check changes the outcome. Demanding that its removal be
+caught by a non-vacuous mutation demands the impossible, and any packet restating that demand is
+**refused**. What **is** required: the check **stays in the real procedure** as defense-in-depth
+(§5.1 step 5), and the **actual successful cursor result is asserted and evidenced** (case 1, §11
+item 14).
+
+| # | Case | Required behaviour |
+|---|---|---|
+| 1 | healthy fixture: valid projection, zero blocked rows | positive control — full §8 delta reproduced, **including** that the persisted target tuple equals `ObservationRecorder._row(verified_observation, recorded_at_utc)` under `OBSERVATION_COLUMNS` **field by field**; that the procedure captured **exactly one** instant **of its own** and it is that row's `recorded_at_utc`; that the **two library-owned instants** of §4.2.1 are separately observed as present and non-NULL, with **no equality asserted** between them or against `recorded_at_utc`; and that the **actual successful `cursor.rowcount` was `1`**, asserted directly from the real cursor rather than assumed |
+| 2 | **blocked observed mid-flight** via fault hook | the incident row is proven to exist as `blocked`, then proven `resolved` — `blocked → resolved` observed, not inferred |
+| 3 | orphan sorting **last** under `load_observations` order | correct projection content and ordering |
+| 4 | orphan sorting **middle** and **first** | correct projection content and ordering |
+| 5 | pre-existing observation values | proven **unchanged**, field by field |
+| 6 | **negative table assertions** | zero rows added to `census_observation_reasons`, `census_archive_members`, `census_projection_recovery_events` beyond the one, `census_recovery_states`, and every `ops_*` table |
+| 7 | **verifier failure** | the raw object and lineage intent are **preserved in place**; **zero** writes occur |
+| 8 | duplicate `observation_id` | refuses before any write |
+| 9 | duplicate `relative_storage_path` | refuses before any write |
+| 10 | **two** orphans present | refuses — the preflight requires exactly one |
+| 11 | **lock contention** | refuses; no partial effect |
+| 12 | **fault inside the transaction** | rolls back; neither row nor partial effect |
+| 13 | **fault at each of the three projection fault points** | classified per §9; never reported as success |
+| 14 | **non-vacuous contrast** | a `reconcile`/`quarantine` variant is shown to **move a disposable fixture object** — proving the excluded path is materially different, and that the governed real object is never exposed to it |
+| 15 | **row-shape non-vacuity, and the `rowcount` assertion** | **Mutation limb (mandatory, non-vacuous).** Mutating or removing §5.1's row construction **must fail the suite**. Each of these is shown to be **caught**: a hand-built, reordered, or re-serialized tuple; a `recorded_at_utc` taken from the lineage intent or a caller argument; a **second procedure clock read used for the observation row's `recorded_at_utc`** — scoped to the procedure's own reads, since the library's §4.2.1 reads are expected and must **not** be counted against it; and a `projected_to_audit` pre-set to `1`. Separately, a nested `ObservationRecorder.record` call inside `CatalogWriter.batch` is shown to **raise rather than write**. **Assertion limb (mandatory, not a mutation).** The **real** `cursor.rowcount` is asserted to be `1` on the successful path and that value is evidenced. **A removed `cursor.rowcount == 1` check is _not_ required to be caught by a mutation** — it cannot be, for the reason given above the table — and no packet may demand it |
+
+Case 14 is mandatory and must run **only** against a disposable fixture. It exists to prove §5's
+exclusion is substantive rather than stylistic. **Case 15 is mandatory too, in both limbs**, but for
+two different reasons: §5.1's **row construction** is a behaviourally reachable requirement, so a
+suite that would still pass with it removed has not proved it; the **`rowcount` guard** is instead a
+directly asserted invariant, so what case 15 proves about it is that the real successful cursor
+returned `1`, not that its deletion is detectable. **Cases 1–14 are preserved as accepted and are
+not renumbered; case 15 is additive.** The suite remains **fifteen** cases.
+
+## 11. Ruling 057-H — the private evidence contract
+
+The later execution must produce a **private, mode-`0600` execution bundle and manifest**, outside
+Git, over **safe relative names only**, containing at minimum:
+
+1. the **accepted Decision 057 commit identity**, once published;
+2. the **procedure SHA-256**;
+3. **safe before/after counts**;
+4. the incident **`event_id`**;
+5. the incident **`detected_condition`**;
+6. the **two rebuild-owned instants** — the incident row's **`detected_at_utc`** and its
+   **`resolved_at_utc`** (§4.2.1) — recorded as **two separate values**. They are **library-owned**,
+   **expected**, and **not required** to equal one another or the transaction-1 `recorded_at_utc` of
+   item 14;
+7. projection digests **S0** (before) and **S1** (after);
+8. a **safe table-delta summary**;
+9. raw-object and lineage **before/after hashes, sizes, and inodes**, **without private absolute
+   paths**;
+10. **synthetic case results**;
+11. **integrity results**;
+12. **repository, configuration, and network assertions**;
+13. an explicit **termination classification** drawn from §9;
+14. the transaction-1 **captured `recorded_at_utc`** — the **one instant the procedure itself
+    generated**, recorded as its own value and **distinct from** the two library-owned instants of
+    item 6, with **no equality asserted or expected** between them — together with the assertions
+    that the persisted target row equalled `ObservationRecorder._row` under `OBSERVATION_COLUMNS`
+    and that the **real** `cursor.rowcount` was **`1`** on the successful `INSERT`, recorded as the
+    **observed** cursor result rather than a restated requirement. All of these are recorded as
+    **safe** values, never beside a private absolute path or an identity value.
+
+**Never placed in Git:** private absolute paths, user identity values, `.env` contents, raw SEC
+response bodies, credentials, or the raw object itself.
+
+**Binding correction.** [Decision 055](decision_055_m3_2_carry_in_architecture_and_offline_implementation_authorization.md)
+§6.1 requires the carry-in authority to bind "the later accepted orphan-adoption decision identity
+and evidence identity." That binding is to the **eventual accepted orphan-adoption decision** and the
+**accepted evidence-manifest SHA-256** — **not** to this architecture record. Decision 057 fixes the
+procedure; it is not the acceptance, and a carry-in artifact must never bind it as though it were.
+
+## 12. Ruling 057-I — execution and recovery boundary
+
+This ruling **overrides** the remediation addendum's unbounded "retry to success" recommendation.
+
+1. **Decision 057 performs and authorizes no real invocation.**
+2. After a passing **final** fresh independent review (§16) and a separate owner publication ruling, the exact next
+   action is a **separate owner execution packet**.
+3. That later packet may authorize **exactly one real process invocation** — one that touches the
+   **governed** catalog, data root, raw object, or lineage intent — and **no second**. That single
+   invocation must attempt **both** limbs: the adoption **and** one mandatory
+   `rebuild_audit_projection` call, the second called after the batch commits and outside it
+   (§5.1 step 6). Clause 9 states exactly what does and does not count against that one.
+4. **No retry loop, no auto-retry, no auto-resume, no automatic relaunch, and no "retry until
+   success"** is authorized under any failure point.
+5. **Any exception, interruption, uncertainty, or failed postcondition stops and refers to the
+   owner.**
+6. If the observation `INSERT` is **proven not committed** (state 1), any later adoption attempt
+   requires **new owner authority**.
+7. If the `INSERT` **is committed, or its commit state is uncertain** (states 2–6), the adoption
+   **must never be rerun**. The only authorized next step is **read-only classification**; only a
+   **separate explicit rebuild-only recovery ruling** may authorize any further mutation.
+8. **No manual `UPDATE` or `DELETE` of an incident row** is authorized under any circumstance.
+9. **What "exactly one" counts, stated unambiguously.** The mandatory §10 synthetic preflight suite
+   runs **before**, **outside**, and **without any access to** the governed catalog, data root, raw
+   object, or lineage intent, entirely against disposable fixtures. It is therefore **not** the
+   single real adoption invocation and is **not counted as one** — running it does not consume the
+   one permitted invocation, and completing it does not create a second. **Exactly one real process
+   invocation may touch the governed object or catalog**, only under a later owner execution
+   instrument, and **no second real invocation is authorized** under any outcome. **This record
+   authorizes neither.** Nothing here — including the synthetic suite — becomes performable on the
+   strength of this record; Decision 057 remains architecture-only.
+
+## 13. Limitations disposition
+
+```text
+M3_L14:  CLOSED — DECISION 056; UNTOUCHED BY THIS RECORD
+M3_L15:  ACTIVE — UNTOUCHED AND BYTE-UNCHANGED
+M3_L16:  ACTIVE — PROCEDURE ARCHITECTURE ACCEPTED; ADOPTION NOT AUTHORIZED, NOT PERFORMED;
+         STILL BLOCKS EVERY CLEAN-RUN AND LIVE AUTHORIZATION
+```
+
+**M3-L16 remains `ACTIVE`.** Fixing the procedure architecture is **not** performing the adoption and
+is **not** closing the entry. Its outstanding closure requirements are unchanged: the separately
+authorized one-time verified adoption, its independent verification and owner acceptance with **zero
+unresolved orphan mismatch**, and a **separate owner closure act**.
+
+**No carry-in authority may be minted or consumed.** Consumption remains **1 of 801**; the old run
+remains **never resumable**; recovery remains **`UNDETERMINED`**. **M3-L15 is preserved
+byte-for-byte.**
+
+## 14. Path and publication boundary
+
+Exactly **four** repository paths are authorized for this recording, with **no fifth**:
+
+1. `Docs/Decisions/decision_057_m3_2_orphan_adoption_procedure_authorization.md` (this record)
+2. [`Docs/Decisions/decision_registry.md`](decision_registry.md)
+3. [`Milestones/STATUS.md`](../../Milestones/STATUS.md)
+4. [`Docs/m3/limitations_register.md`](../m3/limitations_register.md) — **M3-L16** current
+   authority, status, mitigation, and closure text **only**; **M3-L15 and every unrelated entry are
+   preserved byte-for-byte**
+
+[`Docs/decision_index.md`](../decision_index.md) is **not** edited, following the convention for
+Decisions 050–056.
+
+Expressly **not** edited: any accepted decision 001–056; the accepted contract; the receipt
+specification; the operator runbook; every template and evidence index; the SEC data dictionary;
+every durable review artifact; every production source; every test; every configuration; every
+migration; every reason code; the master plan; the `Makefile`; `pyproject.toml`; and every script.
+
+**Publication is not authorized by the authoring task.** This record is an **uncommitted candidate**.
+Nothing is staged, committed, pushed, or tagged. A future governance publication may use the exact
+subject:
+
+```text
+Authorize M3.2 orphan-adoption procedure architecture
+```
+
+That subject is **reserved, not authorized**. It becomes usable only under a separate owner
+publication ruling issued after the §16 review passes. **No publication has occurred.**
+
+## 15. Recorded status
+
+```text
+ORPHAN_ADOPTION_PROCEDURE_ARCHITECTURE:   ACCEPTED — BINDING
+RECORD_IS_SELF_EXECUTING:                 NO — FIXES REQUIREMENTS, GRANTS NO INVOCATION
+DISCOVERY_MAJOR_CORRECTION:               CONFIRMED — SINGLE-WRITE CONTRACT REPLACED
+CORRECTED_CONTRACT:                       TWO TABLES, TWO ROWS, THREE TRANSACTIONS
+END_TO_END_ATOMICITY:                     NO — T1 AND T3 LOCALLY ATOMIC ONLY
+INCIDENT_ROW_SUPPRESSION:                 NONE AFTER THE ORPHAN INSERT
+BLOCKED_ROW_PREFLIGHT:                    ZERO CATALOG-WIDE — STRONG OWNER RULING
+PROCEDURE_SHAPE:                          ARCHITECTURE C — EPHEMERAL, SHA-256-RECORDED, ONE-TIME
+SOLE_VERIFIER:                            _observation_from_intent — UNCHANGED
+MANDATORY_SECOND_LIMB:                    rebuild_audit_projection(connection, destination) — SAME PROCESS, AFTER THE BATCH EXITS AND T1 COMMITS, OUTSIDE THE BATCH; NEITHER census_run_id NOR fault_hook SUPPLIED
+OBSERVATION_ROW_SHAPE:                    OBSERVATION_COLUMNS + ObservationRecorder._row — EXACT
+RECORDED_AT_UTC:                          SOLE PROCEDURE-GENERATED CATALOG VALUE AND SOLE NEW VALUE IN THE ROW — ONE utc_now() AFTER GUARDS
+REBUILD_OWNED_INSTANTS:                   TWO — detected_at_utc AND resolved_at_utc; LIBRARY-GENERATED, EXPECTED, SEPARATELY EVIDENCED; NO EQUALITY REQUIRED WITH EACH OTHER OR WITH recorded_at_utc
+PROJECTED_TO_AUDIT_AT_INSERT:             0 — LITERAL FROM _row; T3 MOVES IT TO 1
+INSERT_ROWCOUNT_GUARD:                    cursor.rowcount == 1 — ELSE RAISE AND ROLL BACK; KEPT IN THE REAL PROCEDURE AS DEFENSE-IN-DEPTH; DIRECTLY ASSERTED AND EVIDENCED, NOT A REQUIRED NEGATIVE MUTATION
+NESTED_record_CALL:                       PROHIBITED — record OPENS ITS OWN BEGIN IMMEDIATE
+DUPLICATE_GUARDS:                         observation_id AND relative_storage_path — IN-TRANSACTION
+REPLAY_UPDATE_OR_REPLACEMENT:             PROHIBITED — ONE-USE REFUSAL, NO UPSERT PATH
+SYNTHETIC_CASES:                          15 — 1-14 PRESERVED AND NOT RENUMBERED; 15 ADDITIVE, ROW-SHAPE MUTATION LIMB PLUS ROWCOUNT ASSERTION LIMB
+SYNTHETIC_SUITE_COUNTING:                 DISPOSABLE FIXTURES ONLY; RUNS BEFORE, OUTSIDE, AND WITHOUT ACCESS TO THE GOVERNED CATALOG OR OBJECT; NOT THE REAL INVOCATION; NOT COUNTED AGAINST IT; NOT AUTHORIZED BY THIS RECORD
+PERMANENT_SURFACE:                        NONE — NO TRACKED PROCEDURE
+RETRY_POLICY:                             NONE — NO LOOP, NO AUTO-RETRY, NO AUTO-RESUME
+RE_ADOPTION_AFTER_COMMIT:                 PROHIBITED — READ-ONLY CLASSIFICATION ONLY
+MANUAL_INCIDENT_ROW_EDIT:                 PROHIBITED
+EXECUTION_AUTHORIZED_BY_THIS_RECORD:      NO — SEPARATE OWNER EXECUTION PACKET REQUIRED
+INVOCATIONS_A_LATER_PACKET_MAY_AUTHORIZE: EXACTLY ONE REAL INVOCATION TOUCHING THE GOVERNED CATALOG OR OBJECT — NO SECOND
+OPERATIONAL_STATE_OPENED:                 NONE — NOT EVEN READ-ONLY
+ORPHAN_ADOPTION_PERFORMED:                NO
+CARRY_IN_AUTHORITY:                       NOT MINTED, NOT CONSUMED
+CARRY_IN_BINDS:                           LATER ACCEPTED ADOPTION DECISION + EVIDENCE MANIFEST SHA-256
+CUMULATIVE_CEILING:                       801 — UNCHANGED
+CONSUMPTION:                              1 / 801 — UNCHANGED
+OLD_RUN_STATE:                            stopped — PERMANENTLY NON-RESUMABLE
+RECOVERY_CLASSIFICATION:                  UNDETERMINED — UNCHANGED, PRE-EXECUTION
+EXPECTED_TERMINAL_DETERMINATION:          UNSAFE — SOLELY FOR ABSENCE OF A PREDECESSOR RECEIPT
+SAFE_DETERMINATION:                       NOT EXPECTED — NEVER AUTHORIZES RESUMPTION
+TERMINATING_RECEIPT:                      NONE — NOT CREATED, NOT RECONSTRUCTED
+MIGRATION:                                NONE — 0001-0013 UNCHANGED
+M3_L14:                                   CLOSED — DECISION 056; UNTOUCHED
+M3_L15:                                   ACTIVE — UNTOUCHED, BYTE-UNCHANGED
+M3_L16:                                   ACTIVE — BLOCKS EVERY CLEAN-RUN AND LIVE AUTHORIZATION
+NETWORK_AUTHORITY:                        NONE — TRACKED false / false
+COMPANYFACTS:                             DISABLED AND PROHIBITED
+SEC_CONTACT:                              NONE OCCURRED — NONE AUTHORIZED
+TRANSPORT_CONSTRUCTION:                   NOT_AUTHORIZED
+CLEAN_RUN:                                NOT_AUTHORIZED
+LIVE_READINESS:                           NOT_CLAIMED
+T6:                                       NOT_AUTHORIZED
+M3_2B:                                    NOT_AUTHORIZED
+GATE_H:                                   NOT_AUTHORIZED
+CANDIDATE_PRE_PUBLICATION_REMEDIATIONS:   TWO — FIRST FIXED THE ROW-CONSTRUCTION MAJOR OMISSION; SECOND FIXED TWO PROOF-LAYER MAJORS (THE FALSE "NO SECOND GENERATED INSTANT" CLAIM AND THE IMPOSSIBLE ROWCOUNT NON-VACUITY DEMAND) PLUS FOUR RELATED MINORS; CENTRAL ARCHITECTURE UNCHANGED BY BOTH; NO THIRD AUTOMATIC CORRECTION LOOP PERMITTED
+RECORD_PUBLICATION:                       NOT AUTHORIZED BY THE AUTHORING TASK — UNCOMMITTED CANDIDATE
+TAG:                                      NONE
+M3_2:                                     NOT_COMPLETE
+```
+
+## 16. Formal outcome and exact next action
+
+```text
+FORMAL_OUTCOME: M3_2_ORPHAN_ADOPTION_PROCEDURE_ARCHITECTURE_ACCEPTED
+M3_L16: ACTIVE — PROCEDURE ARCHITECTURE ACCEPTED; ADOPTION AND OWNER CLOSURE OUTSTANDING
+EXECUTION_AUTHORITY: NONE
+LIVE_READINESS: NOT_CLAIMED
+NETWORK_OR_SEC_AUTHORITY: NONE
+NEXT_AUTHORIZED_ACTION: CLAUDE_M3_2_DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_PACKET
+```
+
+That next action is the **final fresh, independent, non-author review** of this twice-remediated
+candidate (§3). It is **read-only and non-self-executing**: it may inspect accepted repository
+authority and this record,
+but it may **not** open or mutate the real operational catalog, raw object, lineage, or private
+evidence; perform or simulate the adoption; create a checkpoint or receipt; contact the network or
+SEC; publish this record; or authorize its own execution.
+
+**Authorization is not implementation, implementation is not acceptance, and none of them discharges
+M3-L16.**
+
+Owner: **Joseph Nihill, acting through the ChatGPT project-owner role.** This is a transparent
+recorded owner decision; it is not a handwritten, cryptographic, or third-party digital signature.

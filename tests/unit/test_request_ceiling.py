@@ -191,3 +191,91 @@ def test_the_ceiling_cannot_be_raised_during_a_running_window() -> None:
     with pytest.raises(AttributeError):
         gate.approved_ceiling = 50  # type: ignore[misc]
     assert gate.approved_ceiling == 5
+
+
+# --------------------------------------------------------------------------- #
+# The M3.2A carry-in baseline (accepted Decision 055 §5, ruling 055-A)
+#
+# Historical seed `H` = 1 of cumulative ceiling 801. Future cumulative consumption is `H` plus new
+# durable reservations — never 802, never additive, never shadowed, and never reset to a fresh zero.
+# --------------------------------------------------------------------------- #
+_M3_2A_CEILING = 801
+_HISTORICAL_SEED = 1
+
+
+def _carry_in_gate() -> PhysicalAttemptCeiling:
+    """The gate a clean carry-in root constructs: ceiling 801, already consumed 1."""
+    return PhysicalAttemptCeiling(_M3_2A_CEILING, consumed=_HISTORICAL_SEED)
+
+
+@pytest.mark.parametrize("new_reservations", [0, 1, 5, 17, 400])
+def test_the_carry_in_baseline_plus_new_reservations_is_the_cumulative_count(
+    new_reservations: int,
+) -> None:
+    """Cumulative consumption is `H + N`, for every `N`. The baseline is never reset."""
+    gate = _carry_in_gate()
+
+    for _ in range(new_reservations):
+        gate.before_attempt()
+
+    assert gate.consumed == _HISTORICAL_SEED + new_reservations
+    assert gate.remaining == _M3_2A_CEILING - _HISTORICAL_SEED - new_reservations
+
+
+def test_the_eight_hundredth_new_attempt_reaches_cumulative_801_and_the_next_is_refused() -> None:
+    """The exact boundary: 1 carried in + 800 new = 801, and attempt 802 never happens."""
+    gate = _carry_in_gate()
+
+    ordinals = [gate.before_attempt() for _ in range(800)]
+
+    assert ordinals[-1] == _M3_2A_CEILING, "the 800th new attempt is cumulative attempt 801"
+    assert gate.consumed == _M3_2A_CEILING
+    assert gate.is_exhausted
+
+    with pytest.raises(RequestCeilingExhaustedError) as excinfo:
+        gate.before_attempt()
+
+    assert excinfo.value.consumed == _M3_2A_CEILING
+    assert gate.consumed == _M3_2A_CEILING, "a refused attempt never increments past the ceiling"
+    assert gate.approved_ceiling == _M3_2A_CEILING, "never 802, never additive, never raised"
+
+
+def test_the_carry_in_baseline_is_never_a_fresh_zero_baseline() -> None:
+    """A run that restarted the count at zero would breach the accepted ceiling accounting."""
+    carried = _carry_in_gate()
+    fresh = PhysicalAttemptCeiling(_M3_2A_CEILING)
+
+    assert carried.remaining == fresh.remaining - _HISTORICAL_SEED
+    assert carried.consumed == _HISTORICAL_SEED
+    assert fresh.consumed == 0
+
+
+def test_a_baseline_already_at_the_ceiling_refuses_the_next_attempt_immediately() -> None:
+    gate = PhysicalAttemptCeiling(_M3_2A_CEILING, consumed=_M3_2A_CEILING)
+
+    assert gate.is_exhausted
+    with pytest.raises(RequestCeilingExhaustedError):
+        gate.before_attempt()
+    assert gate.consumed == _M3_2A_CEILING
+
+
+def test_the_global_ceiling_is_the_sole_runtime_enforcement_with_no_per_route_guard() -> None:
+    """Decision 055 §5: route attribution is accounting and reporting only.
+
+    The accepted historical attempt is attributable to `sec_bulk_submissions`, leaving a *reported*
+    bulk-route headroom of 5. That figure is evidence, never a second gate: a sixth future bulk
+    attempt must be permitted by the runtime while global headroom remains, and only the global
+    ceiling may ever refuse one.
+    """
+    gate = _carry_in_gate()
+
+    # Six further attempts on the same route the historical attempt is attributed to.
+    ordinals = [gate.before_attempt() for _ in range(6)]
+
+    assert ordinals == [2, 3, 4, 5, 6, 7], "no per-route guard refused the sixth bulk attempt"
+    assert gate.consumed == _HISTORICAL_SEED + 6
+
+    # The gate has no route surface at all, which is what makes the absence structural rather than
+    # a property of how this test happened to call it.
+    assert not hasattr(gate, "route")
+    assert not any("route" in name for name in dir(gate))

@@ -13,7 +13,9 @@ frozen Parquet release tables. Sections 1–8 cover the SEC ingestion and census
 `0009`–`0013`), added at version 0.3 to close the coverage gap the final integrated Milestones 1–2
 audit recorded ([Decision 025](Decisions/decision_025_integrated_audit_documentation_corrections.md)).
 Decision 051 changes no schema and creates no migration; it assigns accepted runtime meaning to the
-existing `ops_retrieval_attempts` table.
+existing `ops_retrieval_attempts` table. Decision 055 likewise changes no schema and creates no
+migration; it assigns accepted runtime meaning to the existing `ops_checkpoints` table (§5B) and
+fixes the fail-closed receiptless coverage rule (§5A). **The chain remains `0001`–`0013`.**
 
 **Migrations are the schema ground truth; accepted decisions govern methodology and semantics.**
 This dictionary describes what the migrations create and what the accepted decisions say about it.
@@ -190,7 +192,7 @@ rules.
 | `writer_lease_id`, `writer_pid`, `lease_expires_at_utc` | TEXT / INTEGER | no | Diagnostic metadata only. Process-lifetime exclusivity is enforced by a held non-blocking OS advisory lock; timestamps never authorize takeover. |
 | `attempt_state` | TEXT | no | `started`, `succeeded`, `failed`, `quarantined`, `abandoned` |
 | `http_status`, `retry_after_seconds`, `action_taken` | INTEGER / TEXT | yes | `raw_http_responses`; `action_taken` from the response policy |
-| `checkpoint_key`, `checkpoint_value` | TEXT | no | `ops_checkpoints`; supports resumable acquisition |
+| `checkpoint_key`, `checkpoint_value` | TEXT | no | `ops_checkpoints`; supports resumable acquisition. `checkpoint_key` is the table's `TEXT PRIMARY KEY`, which is what makes a namespaced key a single-use token (§5B) |
 | `event_kind`, `event_payload_json` | TEXT | no | Audit tables; payloads never contain the SEC contact value |
 | `parser_run_id`, `parser_version`, `failure_reason_code` | TEXT | no | `audit_parser_runs`, `audit_parser_failures`; failures are recorded, never discarded |
 | `schema_drift_kind` | TEXT | no | `unknown_field_retained`, `required_field_missing`, `type_changed`, `unexpected_null`, `malformed_nested_array`, `new_historical_file_reference` |
@@ -232,6 +234,78 @@ The interrupted initial T5 invocation predates this runtime writer. Its real tab
 is not backfilled. Decision 051 accepts **1 of 801** for that one historical invocation from the
 verified immutable raw lineage and sequential call-path proof. That incident-specific evidence does
 not make raw lineage the future primary attempt ledger.
+
+**Receiptless ledger coverage is decided globally and one-to-one (Decision 055 §8).** Where a
+receiptless inspection reconciles reservations against owned raw-lineage segments, coverage is a
+property of the **whole** segment set, not of each manifest independently: a durable reservation may
+satisfy **at most one** segment. The determination is `UNDETERMINED` on unmatched cardinality,
+multiply matchable cardinality, duplicate reservation reuse, source/URL/run mismatch, a leftover
+contradiction, or any inability to establish an exact bijection — including one reservation against
+two owned same-URL segments, which is `UNDETERMINED` rather than a consumed count of `1`. This
+corrects the per-manifest evaluation recorded as **M3-L14**; the entry is **not closed** by the
+correction being implemented.
+
+### 5B. M3.2 carry-in authority consumption (Decision 055)
+
+A **carry-in authority** is the one-use owner artifact that lets a *clean* new M3.2A run begin from
+an approved non-zero consumed baseline. It is **never a resume**. Consumption is recorded as exactly
+one `ops_checkpoints` row. **No migration is involved**: the table created by migration
+`0001_initial.sql` already provides everything required, and the chain remains `0001`–`0013`.
+
+| Field | Value written |
+|---|---|
+| `checkpoint_key` | `m3_2_carry_in_authority:<sha256>` — the namespace prefix plus the SHA-256 of the authority's exact canonical bytes. The table's `TEXT PRIMARY KEY` is what enforces single use |
+| `checkpoint_value` | Canonical JSON, a **closed document** with exactly these nine fields: `acquisition_window`, `approved_request_ceiling`, `authority_sha256`, `authorized_census_run_id`, `authorizing_decision_reference`, `consumed_request_count_carried_forward`, `historical_route_allocation`, `request_plan_sha256`, `schema_version`. The stored TEXT is **byte-for-byte the canonical serialization** of that document — not merely bytes that parse to it |
+| `updated_at_utc` | The invocation's recorded UTC start instant |
+
+Rules:
+
+1. The row is inserted in the **same existing `BEGIN IMMEDIATE` transaction** as the new run's
+   `ops_ingestion_jobs` registration. **Both commit, or neither row exists.**
+2. **Replay is refused by the primary key.** An authority is consumed exactly once.
+3. **Burn-before-wire:** a pre-wire failure after that commit leaves the authority consumed **even
+   with zero physical attempts placed**. There is **no automatic reissue, retry, or replacement** — a
+   replacement authority is a new owner act.
+4. The `checkpoint_value` carries **no secret, no identity header or value, no response body, and no
+   private absolute path**. Every field in it is a public hash, a governed window or plan identity,
+   an integer, or an opaque run identifier.
+5. The checkpoint and the chain's root receipt **mutually cross-check**, and the checkpoint is read
+   as the **whole closed document** rather than for the one figure the arithmetic needs — finding a
+   row under the expected key proves only that something was written there. Any of the following is
+   **`UNDETERMINED`** and **cannot authorize continuation**; neither surface is ever edited to match
+   the other:
+   - a missing authority hash on the root, or an absent checkpoint;
+   - malformed JSON, a non-object, a **missing** field, or an **extra** field;
+   - **bytes that are not the canonical serialization** of the document they parse to —
+     re-indented, re-ordered, or carrying a duplicate key whose discarded value no comparison would
+     ever see. A lawful consumption writes canonical bytes, so anything else records no burn this
+     catalog made;
+   - a malformed value: an unknown schema version, an unaccepted acquisition window, an
+     authorizing reference that is not a canonical `Decision NNN`, an allocation keyed by anything
+     but a non-empty registered route, an allocation count that is not a **non-negative integer**
+     (a Boolean and a negative count are each refused, so an allocation can never sum to a
+     plausible baseline out of impossible parts), an allocation not summing to the carried
+     baseline, or a baseline above the ceiling;
+   - an embedded `authority_sha256` that disagrees with the deterministic key the row is filed
+     under;
+   - a plan, window, ceiling, or carried-forward figure that disagrees with the root receipt;
+   - **any departure from the fixed Decision 055 values** (below);
+   - an `authorized_census_run_id` that does not resolve to a governed acquisition run registered
+     in that same window — the checkpoint and the run registration commit together, so they cannot
+     lawfully disagree;
+   - two carry-in checkpoints claiming the **same** authorized run, which no lawful consumption
+     produces.
+
+   The **fixed** Decision 055 values — schema `m3-carry-in-authority/1.0`, window `M3.2A`, the
+   frozen plan, ceiling `801`, seed `1` on `sec_bulk_submissions`, and `Decision 055` as the
+   authorizing record — are proved **here as well as** where the artifact is admitted, against the
+   same constants through the same validator. Agreement between the checkpoint and the receipt is
+   not authorization: a forged root and a checkpoint forged to match it agree perfectly, and
+   neither surface can influence what the accepted values are.
+
+**No carry-in artifact exists or has been consumed.** The mechanism is implemented and tested only;
+a clean carry-in run additionally requires the separately authorized orphan adoption of
+Decision 055 §9, and **M3-L16** remains open.
 
 ## 6. Release fields
 
@@ -581,7 +655,7 @@ requires of every Milestone 3 phase — none of which has begun or is authorized
 
 | Migration | Layer | Dictionary sections |
 |---|---|---|
-| `0001_initial` | core catalog, reference tables | 2, 3, 5, 7 |
+| `0001_initial` | core catalog, reference tables | 2, 3, 5, 5B, 7 |
 | `0002_source_observations` | source observations | 4, 6A |
 | `0003_census_catalog` | census, operating calendar | 6A, 7.1 |
 | `0004_m22_r1_safety` | safety and rate state | 5, 6A |

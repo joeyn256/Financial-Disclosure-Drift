@@ -45,6 +45,7 @@ inspection, and resume are stage T2.4 and are deliberately absent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -55,6 +56,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Literal
 
 from disclosure_drift.errors import (
@@ -65,11 +67,25 @@ from disclosure_drift.errors import (
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.receipt import (
     RESPONSE_CLASSIFICATION_BUCKETS,
+    ProhibitedReceiptContentError,
     ReceiptValidationError,
+    canonical_bytes,
     inspect_receipt,
+    scan_for_prohibited_content,
 )
 from disclosure_drift.m3.recovery import (
+    CARRY_IN_ACQUISITION_WINDOW,
+    CARRY_IN_APPROVED_REQUEST_CEILING,
+    CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+    CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+    CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+    CARRY_IN_HISTORICAL_ROUTE_ALLOCATION,
+    CARRY_IN_REQUEST_PLAN_SHA256,
+    CarryInFixedBindings,
     RecoveryState,
+    carry_in_checkpoint_key,
+    carry_in_fixed_binding_disagreement,
+    carry_in_orphan_reference_disagreement,
     inspect_recovery_state,
     read_only_catalog,
 )
@@ -127,6 +143,13 @@ __all__ = [
     "ACQUISITION_JOB_KIND",
     "ACQUISITION_RUN_JOB_STATES",
     "ACQUISITION_WINDOWS",
+    "CARRY_IN_ACQUISITION_WINDOW",
+    "CARRY_IN_APPROVED_REQUEST_CEILING",
+    "CARRY_IN_AUTHORITY_SCHEMA_VERSION",
+    "CARRY_IN_AUTHORIZING_DECISION_REFERENCE",
+    "CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT",
+    "CARRY_IN_HISTORICAL_ROUTE_ALLOCATION",
+    "CARRY_IN_REQUEST_PLAN_SHA256",
     "DEPENDENT_RECONCILIATION_SET_VERSION",
     "FINAL_MIGRATION_VERSION",
     "M3_2B_DEPENDENT_ROUTES",
@@ -139,6 +162,8 @@ __all__ = [
     "AcquisitionGateError",
     "AcquisitionRunBinding",
     "AcquisitionRunError",
+    "CarryInAuthority",
+    "CarryInAuthorityError",
     "CatalogPreparation",
     "CatalogPreparationError",
     "CatalogReconstruction",
@@ -177,6 +202,7 @@ __all__ = [
     "drift_for_run",
     "execute_live_acquisition",
     "load_approved_plan",
+    "load_carry_in_authority",
     "observe_recovery_state",
     "prepare_operational_catalog",
     "prepare_storage",
@@ -184,10 +210,13 @@ __all__ = [
     "reconcile_requests",
     "reconstruct_catalog_state",
     "register_acquisition_run",
+    "require_admitted_carry_in_authority",
+    "require_m3_2a_consumed_baseline",
     "resolve_within",
     "route_is_streamed",
     "validate_acquisition_run",
     "verified_reusable_predecessor",
+    "verify_carry_in_authority",
     "verify_window_bindings",
 ]
 
@@ -4397,6 +4426,606 @@ class AcquisitionRunBinding:
             raise AcquisitionRunError(message)
 
 
+# --------------------------------------------------------------------------- #
+# One-use clean-root carry-in authority (Decision 055 §6, ruling 055-B)
+# --------------------------------------------------------------------------- #
+#: The canonical-JSON schema of a carry-in authority artifact, and the fixed Decision 055 values
+#: every authority is bound to. They live in :mod:`disclosure_drift.m3.recovery` beside the
+#: consumption checkpoint they are also cross-checked against, so the artifact gate here and the
+#: later catalog cross-check there compare against one set of constants rather than two. Re-exported
+#: through this module's ``__all__`` because this is where the authority itself is validated.
+#: Every field an authority artifact must carry, and nothing else. The set is **closed**: an
+#: unknown field is refused rather than ignored, so an artifact cannot smuggle an unread claim past
+#: validation. There is deliberately **no** self-hash field (Decision 055 §6.1) — the artifact's
+#: identity is the SHA-256 of its exact canonical bytes, computed by the reader, and a hash recorded
+#: inside its own preimage could never be verified without circularity.
+_CARRY_IN_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
+    "acquisition_window",
+    "approved_request_ceiling",
+    "authorized_census_run_id",
+    "authorizing_decision_reference",
+    "historical_consumed_request_count",
+    "historical_route_allocation",
+    "orphan_adoption_decision_reference",
+    "orphan_adoption_evidence_sha256",
+    "request_plan_sha256",
+    "schema_version",
+)
+
+#: A SHA-256 identity as this repository writes them: lowercase, exactly 64 hex digits. An
+#: authority's external identity is one, because it is the digest of the artifact's canonical bytes
+#: (Decision 055 §6.1) — an uppercase, truncated, prefixed, or free-text value identifies nothing.
+_SHA256_IDENTITY_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+class CarryInAuthorityError(AcquisitionError):
+    """Raised when a carry-in authority is malformed, mismatched, or already consumed.
+
+    Every one of these refuses **before** a transport is constructed, and none of them is
+    recoverable in place: a replacement authority is a new owner act, never an automatic retry
+    (Decision 055 §6.5).
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class CarryInAuthority:
+    """One validated, not-yet-consumed carry-in authority.
+
+    It authorizes exactly one **clean-root** live invocation to begin from a non-zero cumulative
+    consumed baseline. It is **never a resume**: it names no predecessor receipt, and it may not
+    coexist with ``--resume-from`` (Decision 055 §6).
+
+    Like every other gate object in this module it is inert evidence rather than a grant, and here
+    that is enforced rather than asserted: this is an ordinary public dataclass, so **constructing
+    one directly is possible and grants nothing an artifact would not**. Every production surface
+    that executes or burns an authority re-proves, from the object it was handed, the §6.1 content
+    rule, the fixed Decision 055 bindings, and the canonical external identity
+    (:func:`require_admitted_carry_in_authority`) — so an object carrying anything §6.1 forbids, an
+    object naming any unaccepted binding, and a lawfully loaded one whose fields were mutated
+    afterwards are each refused before any durable state or transport.
+
+    An object whose bindings are the accepted ones and whose identity is recomputed to match them
+    is, by construction, indistinguishable from the artifact carrying those bindings, and is
+    admitted. That is not a gap this type can close: the identity is a digest over public inputs by
+    a published rule, so it is an integrity identity rather than a signature. What bounds the
+    exception is stated elsewhere and deliberately: the accepted bindings are fixed *values* rather
+    than a shape (:func:`_verify_fixed_carry_in_bindings`), the single use is enforced by a durable
+    ``ops_checkpoints`` primary key rather than by this object's existence, and the artifact's
+    provenance — that it came from the governed evidence root — is a **procedural** control under
+    §6.2, never an in-process one.
+    """
+
+    authority_sha256: str
+    acquisition_window: str
+    request_plan_sha256: str
+    approved_request_ceiling: int
+    historical_consumed_request_count: int
+    historical_route_allocation: Mapping[str, int]
+    authorizing_decision_reference: str
+    authorized_census_run_id: str
+    orphan_adoption_decision_reference: str
+    orphan_adoption_evidence_sha256: str
+
+    @property
+    def checkpoint_key(self) -> str:
+        """The deterministic ``ops_checkpoints`` key this authority burns its single use in."""
+        return carry_in_checkpoint_key(self.authority_sha256)
+
+    def checkpoint_value(self) -> str:
+        """The canonical, non-sensitive record a later receipt and catalog cross-check reads.
+
+        It preserves exactly what §7.5's cross-check needs and nothing more: the baseline carried
+        in, the bindings it was granted against, and the run it authorized. It carries no secret, no
+        identity header or value, no response body, and no private absolute path — and that is
+        **proved** before this is ever called rather than asserted here. Every field below except
+        ``authority_sha256`` is copied from a binding that
+        :func:`require_admitted_carry_in_authority` has already scanned under §6.1, and
+        ``authority_sha256`` is proved by that same re-proof to be a lowercase 64-hex digest, which
+        no prohibited value can be. Since every boundary reaching this method runs that re-proof
+        first, §6.3 holds for any authority — not only for one the CLI loader happened to admit.
+        """
+        return canonical_bytes(
+            {
+                "acquisition_window": self.acquisition_window,
+                "approved_request_ceiling": self.approved_request_ceiling,
+                "authority_sha256": self.authority_sha256,
+                "authorized_census_run_id": self.authorized_census_run_id,
+                "authorizing_decision_reference": self.authorizing_decision_reference,
+                "consumed_request_count_carried_forward": (self.historical_consumed_request_count),
+                "historical_route_allocation": dict(
+                    sorted(self.historical_route_allocation.items())
+                ),
+                "request_plan_sha256": self.request_plan_sha256,
+                "schema_version": CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+            }
+        ).decode()
+
+
+def _carry_in_authority_document(authority: CarryInAuthority) -> dict[str, object]:
+    """The closed artifact document this object claims to be the admitted form of.
+
+    Rebuilt from the object's **current** field values rather than retained from the bytes it was
+    loaded from, because that is what makes it a proof rather than a memo: hashing a retained
+    preimage would re-assert what the loader already knew, while hashing the reconstruction detects
+    every field the object no longer agrees with.
+
+    ``schema_version`` is supplied as the fixed constant because the object carries no version of
+    its own and there is exactly one an authority may declare (Decision 055 §6.1) — an artifact
+    declaring any other never becomes a :class:`CarryInAuthority` at all. The key set is exactly
+    :data:`_CARRY_IN_REQUIRED_FIELDS`, which is what makes the digest below comparable to the
+    digest of the artifact on disk.
+
+    Raises:
+        CarryInAuthorityError: the route allocation is not a mapping, so no closed document can be
+            reconstructed from this object at all.
+    """
+    try:
+        allocation = dict(authority.historical_route_allocation)
+    except (TypeError, ValueError) as exc:
+        message = (
+            "the carry-in authority's route allocation is not a mapping, so the closed artifact "
+            "document it claims to be the admitted form of cannot be reconstructed"
+        )
+        raise CarryInAuthorityError(message) from exc
+    return {
+        "acquisition_window": authority.acquisition_window,
+        "approved_request_ceiling": authority.approved_request_ceiling,
+        "authorized_census_run_id": authority.authorized_census_run_id,
+        "authorizing_decision_reference": authority.authorizing_decision_reference,
+        "historical_consumed_request_count": authority.historical_consumed_request_count,
+        "historical_route_allocation": allocation,
+        "orphan_adoption_decision_reference": authority.orphan_adoption_decision_reference,
+        "orphan_adoption_evidence_sha256": authority.orphan_adoption_evidence_sha256,
+        "request_plan_sha256": authority.request_plan_sha256,
+        "schema_version": CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+    }
+
+
+def _verify_carry_in_document_content(document: Mapping[str, object]) -> None:
+    """Refuse a carry-in document carrying §6.1 prohibited content, one field at a time.
+
+    The single scan that **both** the byte-ingestion boundary and the object re-proof run, so an
+    artifact admitted from bytes and an object handed straight to an execution or burn boundary are
+    held to exactly the same closed-document rule. Decision 055 states that rule of the artifact
+    (§6.1) and of the checkpoint (§6.3), and neither statement is conditional on how the value in
+    hand came to exist — so neither may be proved only on the path that happens to start from bytes.
+
+    Each field's **value** is scanned in isolation, under a neutral key. The receipt scanner's
+    key-fragment guard is therefore not applied to this artifact's own field names, and does not
+    need to be: the key set is closed to :data:`_CARRY_IN_REQUIRED_FIELDS` on both paths before a
+    caller reaches here, so a prohibited key name is impossible by construction rather than by
+    scanning. Several of those decision-fixed names (``authorized_census_run_id``,
+    ``authorizing_decision_reference``) contain the ``auth`` fragment that guards against an
+    authorization header, and widening the receipt's own allowlist to accommodate a different
+    artifact would loosen a control this artifact does not need loosened. Only the **top** level is
+    neutralized, so nested keys — the route-allocation source identifiers — are still scanned.
+
+    A refusal names the field and the rule it broke, never the value that broke it: the scanner's
+    reason text is fixed prose. Where the prohibited content is itself a nested key, that key
+    appears in the reported location, which is the minimum needed to say which entry was refused.
+
+    Raises:
+        CarryInAuthorityError: a value carries prohibited content, or is not in a form the scan can
+            traverse. Both refuse before any durable state and before any transport.
+    """
+    for field_name in sorted(document):
+        try:
+            scan_for_prohibited_content({"value": document[field_name]})
+        except ProhibitedReceiptContentError as exc:
+            message = f"the carry-in authority carries prohibited content in {field_name}: {exc}"
+            raise CarryInAuthorityError(message) from exc
+        except ReceiptValidationError as exc:
+            # Unreachable through either current caller, which each prove the field shapes first.
+            # Kept because this is a safety scan: if it cannot traverse a value, it has not cleared
+            # it, and "could not check" must fail closed rather than fall through as "clean".
+            message = (
+                f"the carry-in authority's {field_name} cannot be proved free of prohibited "
+                f"content: {exc}"
+            )
+            raise CarryInAuthorityError(message) from exc
+
+
+def require_admitted_carry_in_authority(authority: CarryInAuthority) -> None:
+    """Re-prove, from the object alone, that this is *the* admitted Decision 055 carry-in.
+
+    :func:`load_carry_in_authority` is the only place bytes become an authority, but it is not the
+    only way an authority object reaches a production surface. :class:`CarryInAuthority` is an
+    ordinary public dataclass: a caller can construct one directly, and a caller holding a lawfully
+    loaded one can still mutate a mapping inside it. Neither may buy the one-use exception. So
+    every production surface that **executes** or **burns** an authority calls this function on the
+    object it was actually handed, and proves three things about it:
+
+    1. **The §6.1 content rule** — no secret, no identity header or value, no response body, and no
+       private absolute path in any binding. This is the same scan
+       :func:`load_carry_in_authority` applies to the artifact's bytes, over the same closed
+       document (:func:`_verify_carry_in_document_content`).
+    2. **The fixed Decision 055 bindings** — schema ``m3-carry-in-authority/1.0``, window
+       ``M3.2A``, the frozen request plan, cumulative ceiling ``801``, historical seed ``1``
+       allocated wholly to ``sec_bulk_submissions`` as a whole mapping, ``Decision 055`` as the
+       authorizing record, and a canonical non-055 orphan-adoption decision with a lowercase
+       64-hex evidence identity.
+    3. **The canonical external identity** — ``authority_sha256`` is the SHA-256 of the canonical
+       bytes of the closed document the object represents (Decision 055 §6.1).
+
+    The content rule is proved **first**, for two reasons. It is the one property Decision 055
+    states unconditionally, of the artifact and of the checkpoint alike; and the binding comparison
+    below quotes the values it disagrees with, so scanning first is what keeps a prohibited value
+    out of a refusal message as well as out of ``ops_checkpoints``.
+
+    What the third proves, and what it does not, is why the first two are proved here at all. The
+    digest is an **integrity** identity, not a signature: it is computed from public bindings by a
+    published rule, with no secret and no key, so a caller can recompute one matching whatever
+    bindings it chose. What a match establishes is that the bindings are internally intact and have
+    not moved since the object was minted — which is what catches post-admission mutation,
+    including a moved route-allocation entry. What it cannot establish is **provenance**: that the
+    artifact came from the governed evidence root remains a procedural control under §6.2, and no
+    in-process check substitutes for it. So a matching digest is never treated as evidence that
+    this module's own loader ran, and every property this gate needs is proved from the object.
+
+    Raises:
+        CarryInAuthorityError: a binding carries prohibited content, a fixed binding disagrees, or
+            the external identity is not this document's. Each refuses before any durable state and
+            before any transport.
+    """
+    document = _carry_in_authority_document(authority)
+    _verify_carry_in_document_content(document)
+    _verify_fixed_carry_in_bindings(authority)
+    _verify_carry_in_authority_identity(authority, document)
+
+
+def _verify_carry_in_authority_identity(
+    authority: CarryInAuthority, document: Mapping[str, object]
+) -> None:
+    """Prove ``authority_sha256`` is the digest of the canonical document this object represents.
+
+    Decision 055 §6.1 makes the SHA-256 of the exact canonical artifact bytes the authority's
+    external identity, and forbids a self-hash field inside the artifact for it to be read back
+    from. The identity is therefore *recomputable* from the bindings, and recomputing it is the
+    check: an authority admitted from bytes reproduces it exactly, because the loader proved those
+    bytes were already canonical before hashing them.
+
+    Recomputable by **anyone**, though — the rule is published and every input is public — so a
+    mismatch is evidence and a match is not. This detects an object whose bindings no longer agree
+    with the identity it carries; it authenticates nothing. That is why
+    :func:`require_admitted_carry_in_authority` proves the §6.1 content rule and the fixed bindings
+    separately, rather than letting a matching digest stand in for either.
+
+    ``document`` is the reconstruction the caller already built, passed in so the digest is proved
+    over exactly the document the content scan cleared rather than over a second reconstruction.
+
+    Raises:
+        CarryInAuthorityError: the identity is not a lowercase 64-hex SHA-256, the bindings do not
+            serialize to a canonical document at all, or the digest is not the one carried.
+    """
+    if not _SHA256_IDENTITY_PATTERN.match(authority.authority_sha256):
+        message = (
+            f"the carry-in authority's external identity {authority.authority_sha256!r} is not a "
+            f"lowercase 64-hex SHA-256, so it identifies no canonical artifact"
+        )
+        raise CarryInAuthorityError(message)
+    try:
+        expected = hashlib.sha256(canonical_bytes(document)).hexdigest()
+    except (ReceiptValidationError, TypeError) as exc:
+        message = (
+            f"the carry-in authority's bindings do not serialize to a canonical artifact document, "
+            f"so it has no external identity to prove: {exc}"
+        )
+        raise CarryInAuthorityError(message) from exc
+    if authority.authority_sha256 != expected:
+        message = (
+            "the carry-in authority's external identity is not the SHA-256 of the canonical "
+            "artifact document its own bindings form, so that identity no longer describes those "
+            "bindings: an authority whose bindings were mutated after admission, and an object "
+            "assembled without recomputing its identity, each carry one that does not"
+        )
+        raise CarryInAuthorityError(message)
+
+
+def load_carry_in_authority(payload: bytes) -> CarryInAuthority:
+    """Parse, canonicalize, hash, and validate one carry-in authority artifact.
+
+    Decision 055 §6.2 requires all four to happen **before transport construction**, and this
+    function is where they happen: it is called from the operator surface, well before the single
+    construction site is reachable at all.
+
+    The bytes are validated *as bytes*. An artifact whose identity is a hash over its own canonical
+    form has to round-trip exactly, so a document that parses but does not re-serialize to the same
+    bytes — a different key order, extra whitespace, a non-canonical number — is refused rather than
+    silently re-canonicalized into a different identity than the one the owner approved.
+
+    Raises:
+        CarryInAuthorityError: the artifact is unreadable, non-canonical, incomplete, or carries a
+            field it may not.
+    """
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"the carry-in authority is not readable UTF-8 JSON: {exc}"
+        raise CarryInAuthorityError(message) from exc
+    if not isinstance(document, dict):
+        message = "the carry-in authority is not a JSON object"
+        raise CarryInAuthorityError(message)
+
+    present = set(document)
+    required = set(_CARRY_IN_REQUIRED_FIELDS)
+    if missing := sorted(required - present):
+        message = (
+            f"the carry-in authority is missing required binding(s): {', '.join(missing)}; every "
+            f"binding is mandatory and none is inferred"
+        )
+        raise CarryInAuthorityError(message)
+    if unexpected := sorted(present - required):
+        message = (
+            f"the carry-in authority carries unpermitted field(s): {', '.join(unexpected)}; the "
+            f"field set is closed and no self-hash field is permitted inside the artifact"
+        )
+        raise CarryInAuthorityError(message)
+
+    if canonical_bytes(document) != payload:
+        message = (
+            "the carry-in authority's stored bytes are not in canonical form, so the SHA-256 that "
+            "identifies it would not be the digest of what is on disk"
+        )
+        raise CarryInAuthorityError(message)
+
+    # The §6.1 prohibited-content scan, on the artifact's values exactly as they arrived. The field
+    # set was just proved to be `_CARRY_IN_REQUIRED_FIELDS`, which is the precondition the shared
+    # scan documents. It runs here *and* inside the re-proof below, and the two are not redundant:
+    # this one sees the document as parsed — including a `schema_version` the reconstruction
+    # replaces with the fixed constant, and values a later narrowing would reject for some other
+    # reason — so prohibited content is refused as prohibited content wherever it was put.
+    _verify_carry_in_document_content(document)
+
+    if document["schema_version"] != CARRY_IN_AUTHORITY_SCHEMA_VERSION:
+        message = (
+            f"the carry-in authority declares schema {document['schema_version']!r}, not "
+            f"{CARRY_IN_AUTHORITY_SCHEMA_VERSION!r}"
+        )
+        raise CarryInAuthorityError(message)
+
+    route_allocation = document["historical_route_allocation"]
+    if not isinstance(route_allocation, dict) or not route_allocation:
+        message = "the carry-in authority's historical_route_allocation must be a non-empty object"
+        raise CarryInAuthorityError(message)
+    allocation: dict[str, int] = {}
+    for source_id, count in route_allocation.items():
+        if not isinstance(source_id, str) or not source_id.strip():
+            message = "the carry-in authority's route allocation keys must be source identifiers"
+            raise CarryInAuthorityError(message)
+        allocation[source_id] = _carry_in_count(count, f"route allocation for {source_id!r}")
+
+    authority = CarryInAuthority(
+        authority_sha256=hashlib.sha256(payload).hexdigest(),
+        acquisition_window=_carry_in_text(document["acquisition_window"], "acquisition_window"),
+        request_plan_sha256=_carry_in_text(document["request_plan_sha256"], "request_plan_sha256"),
+        approved_request_ceiling=_carry_in_count(
+            document["approved_request_ceiling"], "approved_request_ceiling"
+        ),
+        historical_consumed_request_count=_carry_in_count(
+            document["historical_consumed_request_count"], "historical_consumed_request_count"
+        ),
+        # Wrapped so an admitted authority's allocation cannot be mutated through it afterwards.
+        # The local `allocation` goes out of scope with this call, so the proxy holds the only
+        # reference to it. Prevention and detection are both wanted: this stops the mutation, and
+        # `require_admitted_carry_in_authority` refuses any object that carries one anyway.
+        historical_route_allocation=MappingProxyType(allocation),
+        authorizing_decision_reference=_carry_in_text(
+            document["authorizing_decision_reference"], "authorizing_decision_reference"
+        ),
+        authorized_census_run_id=_carry_in_text(
+            document["authorized_census_run_id"], "authorized_census_run_id"
+        ),
+        orphan_adoption_decision_reference=_carry_in_text(
+            document["orphan_adoption_decision_reference"], "orphan_adoption_decision_reference"
+        ),
+        orphan_adoption_evidence_sha256=_carry_in_text(
+            document["orphan_adoption_evidence_sha256"], "orphan_adoption_evidence_sha256"
+        ),
+    )
+    # An artifact that is well-formed but is not *the* accepted carry-in never becomes a
+    # `CarryInAuthority` at all. The same re-proof every execution and consumption boundary runs is
+    # run here, on the object just built: refusing at ingestion keeps a forged artifact out
+    # entirely, and running the identical check means anything this function admits is something
+    # those later boundaries will admit too, so a lawful artifact is never accepted here and
+    # refused three frames later.
+    require_admitted_carry_in_authority(authority)
+    return authority
+
+
+def _carry_in_text(value: object, field: str) -> str:
+    """Narrow one required non-empty string binding, or refuse."""
+    if not isinstance(value, str) or not value.strip():
+        message = f"the carry-in authority's {field} must be a non-empty string"
+        raise CarryInAuthorityError(message)
+    return value
+
+
+def _carry_in_count(value: object, field: str) -> int:
+    """Narrow one required non-negative integer binding, or refuse."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        message = f"the carry-in authority's {field} must be a non-negative integer"
+        raise CarryInAuthorityError(message)
+    return value
+
+
+def verify_carry_in_authority(
+    authority: CarryInAuthority,
+    *,
+    window: str,
+    plan_sha256: str,
+    approved_ceiling: int,
+    resuming: bool,
+) -> None:
+    """Prove the authority was granted for *this* invocation.
+
+    Decision 055 §6.4: each of these refuses **before transport construction**. The authority is
+    never trusted to describe the invocation — the invocation's own plan, window, and ceiling are
+    the authority on those, and a disagreement means this artifact was not granted for this run.
+
+    Two layers are proved here, and both are needed. The **invocation** layer is the comparison
+    against this run's own arguments. The **fixed** layer — that the object is *the* accepted
+    Decision 055 carry-in at all, seeded 1 of 801 on ``sec_bulk_submissions`` under the frozen
+    plan, carrying the external identity its own bindings hash to — is re-proved at the end, on the
+    object this call was handed. :func:`load_carry_in_authority` proves it too, but proving it only
+    there would leave the guarantee resting on the assumption that every authority came from bytes,
+    and :class:`CarryInAuthority` is publicly constructible and internally mutable, so that
+    assumption is not one this gate may make.
+
+    The fixed re-proof runs **last** deliberately. Nothing between here and there touches durable
+    state, so the ordering changes no outcome — only which refusal an operator is shown, and the
+    specific disagreement between an authority and *this invocation* is the more useful message
+    when there is one.
+
+    Raises:
+        CarryInAuthorityError: a binding disagrees, the invocation is a resume, or the object is
+            not the admitted Decision 055 carry-in.
+    """
+    if resuming:
+        message = (
+            "a carry-in authority and --resume-from may never coexist: a carry-in root begins a "
+            "clean run from an approved baseline and is never a resume, and a resume carries its "
+            "baseline forward from an exact predecessor receipt instead"
+        )
+        raise CarryInAuthorityError(message)
+    if authority.acquisition_window != window:
+        message = (
+            f"the carry-in authority was granted for window {authority.acquisition_window!r} but "
+            f"this invocation executes {window!r}"
+        )
+        raise CarryInAuthorityError(message)
+    if authority.request_plan_sha256 != plan_sha256:
+        message = (
+            "the carry-in authority names a different approved request plan than this invocation "
+            "is executing; a baseline is carried in only under the plan it was approved against"
+        )
+        raise CarryInAuthorityError(message)
+    if authority.approved_request_ceiling != approved_ceiling:
+        message = (
+            f"the carry-in authority names ceiling {authority.approved_request_ceiling} but this "
+            f"invocation was given {approved_ceiling}; the cumulative ceiling is never reset, "
+            f"raised, shadowed, or made additive by a carry-in"
+        )
+        raise CarryInAuthorityError(message)
+    allocated = sum(authority.historical_route_allocation.values())
+    if allocated != authority.historical_consumed_request_count:
+        message = (
+            f"the carry-in authority allocates {allocated} historical attempt(s) across routes but "
+            f"declares a consumed baseline of {authority.historical_consumed_request_count}; the "
+            f"route allocation must account for the baseline exactly"
+        )
+        raise CarryInAuthorityError(message)
+    for source_id in authority.historical_route_allocation:
+        if source_id not in SOURCES:
+            message = (
+                f"the carry-in authority allocates historical consumption to {source_id!r}, which "
+                f"is not a registered source route"
+            )
+            raise CarryInAuthorityError(message)
+    if authority.historical_consumed_request_count > approved_ceiling:
+        message = (
+            f"the carry-in authority's baseline {authority.historical_consumed_request_count} "
+            f"already exceeds the approved ceiling {approved_ceiling}; no further physical request "
+            f"could lawfully occur"
+        )
+        raise CarryInAuthorityError(message)
+    require_admitted_carry_in_authority(authority)
+
+
+def _verify_fixed_carry_in_bindings(authority: CarryInAuthority) -> None:
+    """Refuse any artifact that is not *the* Decision 055 M3.2A carry-in.
+
+    Decision 055 authorizes one carry-in, for one historical fact: **1** physical attempt of
+    cumulative **801**, on ``sec_bulk_submissions``, under the frozen plan, in window ``M3.2A``,
+    citing Decision 055 and the separately authorized later Path-B adoption. That is not a shape an
+    artifact may instantiate freely — it is a specific accepted value, and every part of it is
+    compared literally here.
+
+    This is what makes the exception single-use in substance rather than only in bookkeeping. The
+    ``ops_checkpoints`` primary key stops the same artifact being consumed twice; this stops a
+    *different* artifact being minted to obtain a second, differently-shaped exception — one seeded
+    at ``0`` so a fresh run silently restarts the count, one allocating the attempt to another
+    registered route, or one citing a decision that authorized nothing.
+
+    Reached only through :func:`require_admitted_carry_in_authority`, which every artifact
+    ingestion, execution, and consumption boundary calls. It is deliberately not the *whole* of
+    that re-proof: the content scan proves separately that no binding carries anything §6.1
+    forbids, and the identity check proves separately that the bindings still agree with the digest
+    the object carries. These are public constants, so copying them is possible and is meant to be
+    — what no object may do is name a different window, plan, ceiling, seed, route, or authorizing
+    decision and still be admitted.
+
+    Raises:
+        CarryInAuthorityError: any fixed binding disagrees.
+    """
+    disagreement = carry_in_fixed_binding_disagreement(
+        CarryInFixedBindings(
+            # The artifact's own declared schema was proved equal to this constant before a
+            # `CarryInAuthority` could be constructed from bytes, and the type carries no other
+            # version, so supplying it here restates a proved fact rather than trusting a claim.
+            # The shared validator takes it as a parameter because the *checkpoint* document it also
+            # validates does carry a schema field that can genuinely be wrong.
+            schema_version=CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+            acquisition_window=authority.acquisition_window,
+            request_plan_sha256=authority.request_plan_sha256,
+            approved_request_ceiling=authority.approved_request_ceiling,
+            consumed_request_count=authority.historical_consumed_request_count,
+            route_allocation=authority.historical_route_allocation,
+            authorizing_decision_reference=authority.authorizing_decision_reference,
+        )
+    )
+    if disagreement is None:
+        disagreement = carry_in_orphan_reference_disagreement(
+            authority.orphan_adoption_decision_reference,
+            authority.orphan_adoption_evidence_sha256,
+        )
+    if disagreement is not None:
+        message = (
+            f"the carry-in authority does not match the accepted Decision 055 carry-in: "
+            f"{disagreement}"
+        )
+        raise CarryInAuthorityError(message)
+
+
+def require_m3_2a_consumed_baseline(window: str, *, carry_in: bool, resuming: bool) -> None:
+    """Refuse an M3.2A live acquisition that would begin from no established baseline.
+
+    **M3-L16** records that cumulative M3.2A consumption starts at **1**, not at zero, and lists a
+    run observed starting its consumed count at zero as a stop condition. Before Decision 055 there
+    was no mechanism to carry that baseline into a clean run, which is precisely why the entry is
+    open; now that there is one, using it is not optional. An M3.2A invocation states where its
+    baseline comes from, or it does not run.
+
+    Exactly one source is required, and the two are mutually exclusive:
+
+    * a **carry-in authority** — a clean root beginning from the approved historical baseline;
+    * a **continuation** — a resume, whose baseline comes from its exact predecessor receipt, and
+      which is separately gated by everything Decision 050 §8 requires of a resume.
+
+    Supplying **both** is a contradiction a carry-in is never a resume, refused before this by
+    :func:`verify_carry_in_authority`. Supplying **neither** is the zero-baseline start M3-L16
+    forbids, refused here.
+
+    This is scoped to ``M3.2A`` alone. Other windows have no historical consumption to carry, so
+    their ordinary zero-baseline roots stay lawful and their receipts stay valid — M3.2B in
+    particular begins with a genuinely unconsumed ceiling and is untouched by this gate.
+
+    Raises:
+        AcquisitionGateError: an M3.2A invocation supplies neither baseline source.
+    """
+    if window != CARRY_IN_ACQUISITION_WINDOW or carry_in or resuming:
+        return
+    message = (
+        f"an {CARRY_IN_ACQUISITION_WINDOW} live acquisition must state the consumed baseline it "
+        f"begins from: cumulative consumption already stands at "
+        f"{CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT} of "
+        f"{CARRY_IN_APPROVED_REQUEST_CEILING}, and a run that silently restarted the count at zero "
+        f"would breach the accepted ceiling accounting. Supply the one-use carry-in authority for "
+        f"a clean root, or an exact predecessor receipt for a resume; neither is inferred and "
+        f"there is no zero-baseline default"
+    )
+    raise AcquisitionGateError(message)
+
+
 def default_run_id_factory() -> str:
     """Allocate one opaque invocation run identity.
 
@@ -4415,6 +5044,7 @@ def register_acquisition_run(
     window: str,
     started_at_utc: str,
     detail: str,
+    carry_in: CarryInAuthority | None = None,
 ) -> AcquisitionRunBinding:
     """Register exactly one durable ``ops_ingestion_jobs`` row for this live invocation.
 
@@ -4425,19 +5055,69 @@ def register_acquisition_run(
     ``ops_ingestion_jobs`` carries no CHECK constraint on either column, so an M3.2 row is
     schema-legal and no migration is required or authorized.
 
+    When ``carry_in`` is supplied, the authority is **consumed here, exactly once**, by inserting
+    its deterministic ``ops_checkpoints`` primary key inside the **same** ``BEGIN IMMEDIATE``
+    transaction as the run registration (Decision 055 §6.3). The two writes commit together or not
+    at all, so there is no ordering in which a burned authority leaves no run, or a registered run
+    leaves an unburned authority. The primary key itself is what enforces single use — a replay
+    collides on it and is refused — so no migration, no new table, and no new column is needed.
+
+    This is a **consumption** boundary, so it re-proves the authority itself rather than trusting
+    that whoever assembled the call had it validated, and it compares the authority against **this
+    registration's** window and run identity rather than only against the fixed Decision 055
+    values. The two halves prove different things and neither implies the other: the re-proof shows
+    the object is the admitted authority, while the contextual comparison shows the caller is the
+    one it was granted to. It is reachable directly, and burning is the irreversible half of the
+    mechanism: both checks happen before the catalog is even opened, so an authority that is not
+    the admitted Decision 055 carry-in, or that authorizes some other window or run, leaves
+    **neither** the checkpoint row nor the run row.
+
     Raises:
         AcquisitionRunError: the identity is malformed, already registered, or could not be
             committed. Every one of those refuses **before** a transport is constructed.
+        CarryInAuthorityError: the authority is not the admitted Decision 055 carry-in, does not
+            authorize this window or this run, or was already consumed. A consumed authority stays
+            consumed; a replacement is a new owner act and is never minted here (Decision 055
+            §6.5).
     """
     binding = AcquisitionRunBinding(census_run_id=census_run_id, window=window)
     if not started_at_utc.strip():
         message = "an acquisition run registration requires an explicit UTC start instant"
         raise AcquisitionRunError(message)
+    if carry_in is not None:
+        require_admitted_carry_in_authority(carry_in)
+        # The re-proof above establishes that the authority names `M3.2A`; it establishes nothing
+        # about the window *this registration* is for. Both contextual bindings are therefore
+        # compared here for the same reason: what an authority authorizes is fixed and provable
+        # from the object, while what a caller is registering is not, and the burn below is
+        # irreversible. Without this, a genuine authority reaches an `M3.2B` job row and spends the
+        # one M3.2A exception on a window with no historical consumption to carry.
+        if carry_in.acquisition_window != binding.window:
+            message = (
+                f"the carry-in authority authorizes window {carry_in.acquisition_window!r} but "
+                f"this registration is for {binding.window!r}; an authority may be consumed only "
+                f"by the window it authorizes, and its single use is never spent on another"
+            )
+            raise CarryInAuthorityError(message)
+        if carry_in.authorized_census_run_id != binding.census_run_id:
+            message = (
+                f"the carry-in authority authorizes run {carry_in.authorized_census_run_id!r} but "
+                f"this registration is for {binding.census_run_id!r}; the authorized run identity "
+                f"comes from the artifact and is never substituted"
+            )
+            raise CarryInAuthorityError(message)
     try:
         with (
             CatalogWriter(Path(catalog_path), Path(lock_directory)) as writer,
             writer.batch() as connection,
         ):
+            # The authority is burned first, so a replay reports the refusal that actually caused
+            # it. A carry-in root runs under the run identity its artifact names, so a replayed
+            # authority also collides on that run id — and reporting *that* would tell the operator
+            # a true but downstream fact, sending them to look at the run row rather than at the
+            # authority they tried to reuse.
+            if carry_in is not None:
+                _consume_carry_in_authority(writer, connection, carry_in, started_at_utc)
             existing = connection.execute(
                 "SELECT 1 FROM ops_ingestion_jobs WHERE job_id = ?",
                 (binding.census_run_id,),
@@ -4460,7 +5140,7 @@ def register_acquisition_run(
                     "detail": detail,
                 },
             )
-    except AcquisitionRunError:
+    except (AcquisitionRunError, CarryInAuthorityError):
         raise
     except (DisclosureDriftError, sqlite3.Error, OSError) as exc:
         message = (
@@ -4469,6 +5149,47 @@ def register_acquisition_run(
         )
         raise AcquisitionRunError(message) from exc
     return binding
+
+
+def _consume_carry_in_authority(
+    writer: CatalogWriter,
+    connection: sqlite3.Connection,
+    carry_in: CarryInAuthority,
+    started_at_utc: str,
+) -> None:
+    """Burn one carry-in authority inside the caller's open transaction.
+
+    The read-then-insert pair is safe precisely because the caller's transaction is
+    ``BEGIN IMMEDIATE``: the write lock is already held, so nothing can interleave between the
+    check and the insert. The explicit ``SELECT`` exists for the refusal *message* — the
+    ``checkpoint_key TEXT PRIMARY KEY`` is the actual guarantee, and the ``IntegrityError`` path
+    below is what holds if this check is ever removed.
+    """
+    key = carry_in.checkpoint_key
+    if connection.execute(
+        "SELECT 1 FROM ops_checkpoints WHERE checkpoint_key = ?", (key,)
+    ).fetchone():
+        message = (
+            "this carry-in authority has already been consumed; it authorizes exactly one clean "
+            "run and is never reissued, retried, or replaced automatically — a replacement "
+            "authority is a new owner act"
+        )
+        raise CarryInAuthorityError(message)
+    try:
+        writer.insert(
+            "ops_checkpoints",
+            {
+                "checkpoint_key": key,
+                "checkpoint_value": carry_in.checkpoint_value(),
+                "updated_at_utc": started_at_utc,
+            },
+        )
+    except sqlite3.IntegrityError as exc:
+        message = (
+            "this carry-in authority has already been consumed; its single use is enforced by the "
+            "checkpoint primary key and is never reissued automatically"
+        )
+        raise CarryInAuthorityError(message) from exc
 
 
 def validate_acquisition_run(catalog_path: Path, census_run_id: str) -> str:
@@ -5179,11 +5900,17 @@ class LiveAcquisitionResult:
     predecessor_receipt_id: str | None
     carried_forward_consumed: int | None
     run_closed: bool
+    carry_in_authority_sha256: str | None = None
 
     @property
     def resumed(self) -> bool:
         """Whether this invocation continued an exact predecessor receipt."""
         return self.predecessor_receipt_id is not None
+
+    @property
+    def carried_in(self) -> bool:
+        """Whether this invocation was a clean carry-in root rather than an ordinary fresh run."""
+        return self.carry_in_authority_sha256 is not None
 
 
 def default_live_transport_factory() -> Transport:
@@ -5217,6 +5944,7 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
     burst: int,
     policy: RetrievalPolicy,
     continuation: ContinuationProposal | None = None,
+    carry_in: CarryInAuthority | None = None,
     transport_factory: Callable[[], Transport] = default_live_transport_factory,
     run_id_factory: Callable[[], str] = default_run_id_factory,
     clock: Callable[[], str] = _utc_now,
@@ -5271,10 +5999,38 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
         )
         raise AcquisitionGateError(message)
 
-    carried_forward = _resume_consumption(continuation, approved_ceiling)
+    if carry_in is not None:
+        # Re-proved adjacent to the construction site, exactly as the operator gate is, and against
+        # the object this driver was handed rather than the bytes some earlier frame read. The
+        # command surface validates the artifact before any durable state exists; this is what a
+        # caller several frames away — one that never read an artifact at all — cannot bypass
+        # (Decision 055 §6.2, §6.4). It refuses here, before the run identity is chosen, before
+        # registration, and long before `transport_factory` is reachable.
+        verify_carry_in_authority(
+            carry_in,
+            window=window,
+            plan_sha256=plan.request_plan_sha256,
+            approved_ceiling=approved_ceiling,
+            resuming=continuation is not None,
+        )
+    # Re-asserted here, before the run is registered and long before the transport factory is
+    # reachable, for the same reason the operator gate is: the command surface proves it too, and
+    # this is what a caller several frames away cannot bypass.
+    require_m3_2a_consumed_baseline(
+        window, carry_in=carry_in is not None, resuming=continuation is not None
+    )
+
+    carried_forward = (
+        carry_in.historical_consumed_request_count
+        if carry_in is not None
+        else _resume_consumption(continuation, approved_ceiling)
+    )
     predecessor_receipt_id = continuation.predecessor_receipt_id if continuation else None
 
-    census_run_id = run_id_factory()
+    # A carry-in root runs under the run identity its authority names, rather than a freshly
+    # generated one: the artifact binds the authorized run, and the checkpoint burned against that
+    # binding is what a later receipt and catalog cross-check reads (Decision 055 §6.2).
+    census_run_id = carry_in.authorized_census_run_id if carry_in is not None else run_id_factory()
     started_at_utc = clock()
     run = register_acquisition_run(
         catalog_path=catalog.database_path,
@@ -5286,6 +6042,7 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
             "approved Milestone 3.2 metadata acquisition under the owner-approved request plan; "
             "filing bodies and accession packages prohibited"
         ),
+        carry_in=carry_in,
     )
     registered_stage = validate_acquisition_run(catalog.database_path, run.census_run_id)
     if registered_stage != window:
@@ -5392,6 +6149,7 @@ def execute_live_acquisition(  # noqa: PLR0913 - every collaborator is supplied 
         predecessor_receipt_id=predecessor_receipt_id,
         carried_forward_consumed=carried_forward,
         run_closed=run_closed,
+        carry_in_authority_sha256=None if carry_in is None else carry_in.authority_sha256,
     )
 
 

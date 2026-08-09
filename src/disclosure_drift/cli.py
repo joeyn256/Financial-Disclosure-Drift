@@ -47,12 +47,15 @@ from disclosure_drift.m3.acquisition import (
     derive_dependent_plan,
     drift_for_run,
     execute_live_acquisition,
+    load_carry_in_authority,
     prepare_operational_catalog,
     prepare_storage,
     propose_continuation,
     reconcile_requests,
     reconstruct_catalog_state,
+    require_m3_2a_consumed_baseline,
     validate_acquisition_run,
+    verify_carry_in_authority,
     verify_window_bindings,
 )
 from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
@@ -65,6 +68,7 @@ from disclosure_drift.m3.receipt import (
 from disclosure_drift.m3.recovery import (
     inspect_receiptless_first_invocation,
     inspect_recovery_state,
+    walk_receipt_chain,
 )
 from disclosure_drift.m3.rehearsal import SCENARIO_IDS, RehearsalReport, run_rehearsal
 from disclosure_drift.m3.request_plan import (
@@ -525,6 +529,17 @@ def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.Argumen
         help=(
             "For --show-scope: the receipt chain whose consumed-count baseline is reconstructed. "
             "Omitting it reports a fresh chain baseline of zero."
+        ),
+    )
+    acquire.add_argument(
+        "--carry-in-authority",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help=(
+            "The one-use owner authority carrying an approved consumed baseline into a clean new "
+            "run, relative to --evidence-root. This is never a resume: it may not be combined with "
+            "--resume-from, it is consumed exactly once, and it is never reissued automatically."
         ),
     )
 
@@ -2170,6 +2185,17 @@ def _m3_acquire_command(
             logger,
             "acquire",
         )
+    # Decision 055 §6: the carry-in interface is *never* resume. The two are refused together here,
+    # at the very top of the dispatch, so the contradiction is rejected before a configuration is
+    # consulted, a plan is read, an artifact is opened, or any durable state is touched - and long
+    # before a transport could be constructed.
+    if getattr(args, "carry_in_authority", None) is not None and args.resume_from is not None:
+        return _usage_failure(
+            "--carry-in-authority and --resume-from are mutually exclusive; a carry-in root begins "
+            "a clean run from an approved baseline and is never a resume",
+            logger,
+            "acquire",
+        )
     if show_scope:
         return _m3_acquire_show_scope(args, config, logger, evidence_root)
     if not live:
@@ -2224,17 +2250,25 @@ def _m3_acquire_show_scope(
 
     consumed = 0
     chain_length = 0
+    carried_in = 0
     if args.receipt_chain_head is not None:
         head_path = _m3_artifact_path(evidence_root, args.receipt_chain_head)
-        head = inspect_receipt(head_path)
-        chain_length = len(_resolve_receipt_chain(head_path, head))
-        # The head receipt already validated, so both counts are non-negative integers of the
-        # frozen schema. They are still narrowed rather than cast: the baseline reported here is
-        # what a later resume charges against the ceiling, so a value that is not a count must
-        # refuse rather than round to zero.
-        consumed = _receipt_count(head, "actual_physical_attempt_count") + _receipt_count(
-            head, "consumed_request_count_carried_forward"
-        )
+        inspect_receipt(head_path)  # refuse an invalid head before any chain arithmetic
+        # Decision 055 §7.5 requires `--show-scope` to agree with the receipt-chain walker, so it
+        # calls the walker rather than restating the arithmetic. Reading the head alone would be
+        # correct only while every receipt's carried-forward count happens to equal the sum of its
+        # predecessors; the walker sums `actual_physical_attempt_count` across the whole chain and
+        # adds the single no-predecessor root's carry-in exactly once, which is the definition.
+        chain = walk_receipt_chain(head_path)
+        if not chain.resolved:
+            message = (
+                f"the receipt chain does not resolve to a first attempt, so the consumed-count "
+                f"baseline cannot be established: {chain.detail}"
+            )
+            raise GateFailureError(message)
+        chain_length = len(chain.receipt_ids)
+        consumed = chain.consumed_physical_attempts
+        carried_in = chain.root_carried_forward
 
     hosts = sorted({route.host for route in plan.routes})
     allowed = sorted(route.source_id for route in plan.routes)
@@ -2248,6 +2282,7 @@ def _m3_acquire_show_scope(
     print(f"  {'approved plan sha256':<34}: {plan.request_plan_sha256}")
     print(f"  {'approved request ceiling':<34}: {plan.hard_request_ceiling}")
     print(f"  {'consumed-count baseline':<34}: {consumed}")
+    print(f"  {'of which carried in at root':<34}: {carried_in}")
     print(f"  {'receipt chain length':<34}: {chain_length}")
     print(f"  {'transport':<34}: not constructed by this command")
     print(f"  {'receipt':<34}: not emitted by this command")
@@ -2401,6 +2436,35 @@ def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate lad
         authorization=authorization,
     )
 
+    # The carry-in authority is parsed, canonicalized, hashed, and fully bound here - before the
+    # operational catalog exists, before storage is prepared, and long before the transport factory
+    # is reachable (Decision 055 §6.2). A refused authority therefore burns nothing and leaves no
+    # durable state behind, and `execute_live_acquisition` re-proves the same bindings adjacent to
+    # the construction site.
+    carry_in = None
+    if args.carry_in_authority is not None:
+        carry_in = load_carry_in_authority(
+            _read_artifact_bytes(evidence_root, args.carry_in_authority)
+        )
+        verify_carry_in_authority(
+            carry_in,
+            window=window,
+            plan_sha256=plan.request_plan_sha256,
+            approved_ceiling=ceiling,
+            resuming=args.resume_from is not None,
+        )
+
+    # M3-L16: an M3.2A run states the consumed baseline it begins from. Decided from the operator's
+    # arguments alone, so it lands here with the other argument-decidable refusals - before the
+    # operational catalog is created, before storage is prepared, and before any durable state
+    # exists to leave behind. `execute_live_acquisition` re-asserts it adjacent to the construction
+    # site.
+    require_m3_2a_consumed_baseline(
+        window,
+        carry_in=args.carry_in_authority is not None,
+        resuming=args.resume_from is not None,
+    )
+
     catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
     catalog = prepare_operational_catalog(
         evidence_root=evidence_root,
@@ -2449,6 +2513,7 @@ def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate lad
                     cooldown_seconds=float(config.sec.cooldown_seconds),
                 ),
                 continuation=continuation,
+                carry_in=carry_in,
             )
     except KeyboardInterrupt:
         # The invocation was interrupted (SIGINT, or a SIGTERM routed through the same path) and its
@@ -2486,6 +2551,10 @@ def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate lad
     print(f"  {'planned logical requests':<34}: {outcome.planned_logical_requests}")
     print(f"  {'satisfied':<34}: {len(outcome.satisfied)}")
     print(f"  {'consumed physical attempts':<34}: {outcome.consumed_physical_attempts}")
+    if result.carried_forward_consumed:
+        print(f"  {'of which carried forward':<34}: {result.carried_forward_consumed}")
+    if result.carry_in_authority_sha256 is not None:
+        print(f"  {'carry-in authority':<34}: {result.carry_in_authority_sha256}")
     print(f"  {'approved request ceiling':<34}: {outcome.approved_ceiling}")
     print(f"  {'receipt written':<34}: {args.receipt_out or written.name}")
     print(f"  {'receipt_id':<34}: {receipt.receipt_id}")
@@ -2654,6 +2723,7 @@ def _live_acquisition_receipt(  # noqa: PLR0913 - the frozen receipt binds many 
         interruption_state=outcome.interruption_state,
         recovery_predecessor_receipt_id=result.predecessor_receipt_id,
         consumed_request_count_carried_forward=carried,
+        carry_in_authority_sha256=result.carry_in_authority_sha256,
     )
 
 

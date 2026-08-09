@@ -210,6 +210,25 @@ as narrowly corrected by proposed
 | 9.2 | The ceiling was **not raised** at any point during the run | `PASS`/`FAIL` |
 | 9.3 | If a run reached the ceiling, it either completed exactly there or stopped with `SEC_REQUEST_CEILING_EXHAUSTED` before `C+1` | `PASS`/`N/A` |
 | 9.4 | A resumed run carried its consumed count forward against the same ceiling | `PASS`/`N/A` |
+| 9.5 | **Cumulative consumption is the carried-in baseline plus new attempts** — `1 + N` for an M3.2A carry-in root — and **no run started its consumed count at zero** | `PASS`/`N/A` |
+| 9.6 | **The ceiling was never made `802`, additive, shadowed, or reset**, and no per-route runtime refusal was introduced — the global ceiling was the sole runtime enforcement | `PASS`/`FAIL` |
+| 9.7 | Any remaining **per-route** headroom figure (e.g. bulk-route `5`) is reported as **accounting and reporting only**, never as a gate that refused a request | `PASS`/`N/A` |
+
+**If a clean carry-in root ran in either window** (accepted
+[Decision 055](../../Decisions/decision_055_m3_2_carry_in_architecture_and_offline_implementation_authorization.md)
+§§6–7), additionally record:
+
+| # | Item | Result |
+|---|---|---|
+| 9.8 | The carry-in authority validated **before any transport was constructed** | `PASS`/`N/A` |
+| 9.9 | It was **consumed exactly once** — exactly one `ops_checkpoints` row keyed by its SHA-256, committed in the **same** transaction as the run registration | `PASS`/`N/A` |
+| 9.10 | The authority was **never reissued, retried, or replaced automatically**, including after any pre-wire failure that burned it with zero attempts placed | `PASS`/`N/A` |
+| 9.11 | The run executed under the **run id the artifact named**, not a generated one | `PASS`/`N/A` |
+| 9.12 | `--carry-in-authority` and `--resume-from` **never coexisted** in any invocation | `PASS`/`N/A` |
+| 9.13 | The root receipt and the catalog checkpoint **cross-check and agree**; no `UNDETERMINED` carry-in disagreement is open | `PASS`/`N/A` |
+| 9.14 | The artifact's bindings matched the **accepted Decision 055 values** — window `M3.2A`, the frozen plan, ceiling `801`, seed `1` on `sec_bulk_submissions`, `Decision 055` — and not merely each other | `PASS`/`N/A` |
+| 9.15 | The consumption checkpoint is the **exact closed document**: its field set, its embedded authority hash against its key, and its plan/window/ceiling against the root receipt all agree, and its authorized run resolves to that run | `PASS`/`N/A` |
+| 9.16 | The separately authorized **orphan adoption** had executed and been accepted, with zero unresolved historical orphan mismatch, **before** the clean run was authorized (**M3-L16**) | `PASS`/`N/A` |
 
 ## 10. Schema drift
 
@@ -243,10 +262,13 @@ as narrowly corrected by proposed
 | # | Item | Result |
 |---|---|---|
 | 12.1 | **One receipt per live command**, none missing | `PASS`/`FAIL` |
-| 12.2 | Every receipt validates against `m3-execution-receipt/2.0` | `PASS`/`FAIL` |
+| 12.2 | Every receipt validates against the schema version it declares — `m3-execution-receipt/2.0` or `m3-execution-receipt/3.0` | `PASS`/`FAIL` |
 | 12.3 | Actual counts in the receipts reconcile with §3 | `PASS`/`FAIL` |
 | 12.4 | Any recovery chain resolves completely to its first attempt | `PASS`/`N/A` |
 | 12.5 | **No receipt appears in any governed identity** | `PASS`/`FAIL` |
+| 12.6 | **No pre-existing `2.0` receipt was rewritten, upgraded, or migrated** — every one is byte-unchanged | `PASS`/`FAIL` |
+| 12.7 | Chain arithmetic adds the root carry-in **exactly once** — never `N` alone, never double-counted — and `m3 acquire --show-scope` reports the same cumulative figure | `PASS`/`N/A` |
+| 12.8 | On a carry-in root, `actual_physical_attempt_count` records **that invocation's wire attempts only**, with the baseline in `consumed_request_count_carried_forward` | `PASS`/`N/A` |
 
 ## 13. Nothing beyond acquisition has happened
 

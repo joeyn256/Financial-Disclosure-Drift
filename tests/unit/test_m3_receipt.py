@@ -29,7 +29,9 @@ from disclosure_drift.m3.receipt import (
     INTERRUPTION_STATES,
     INVOCATION_MODES,
     PHASES,
+    READABLE_RECEIPT_SCHEMA_VERSIONS,
     RECEIPT_SCHEMA_VERSION,
+    RECEIPT_SCHEMA_VERSION_V2,
     RESPONSE_CLASSIFICATION_BUCKETS,
     SCHEMA_DRIFT_OUTCOMES,
     ZERO_NETWORK_MODES,
@@ -187,8 +189,18 @@ _ZERO_NETWORK_BUILDERS: Mapping[str, Any] = {
 # --------------------------------------------------------------------------- #
 # Fixed vocabularies (§4, §12)
 # --------------------------------------------------------------------------- #
-def test_the_schema_version_is_the_one_decision_028_fixed() -> None:
-    assert RECEIPT_SCHEMA_VERSION == "m3-execution-receipt/2.0"
+def test_the_writer_schema_version_is_the_one_decision_055_fixed() -> None:
+    """Decision 055 §7.1 unfroze the schema for exactly one successor. The writer emits it."""
+    assert RECEIPT_SCHEMA_VERSION == "m3-execution-receipt/3.0"
+    assert RECEIPT_SCHEMA_VERSION_V2 == "m3-execution-receipt/2.0"
+
+
+def test_both_schema_versions_remain_readable() -> None:
+    """`2.0` receipts stay readable; the reader dispatches on the version it finds (§7.1)."""
+    assert READABLE_RECEIPT_SCHEMA_VERSIONS == (
+        "m3-execution-receipt/2.0",
+        "m3-execution-receipt/3.0",
+    )
 
 
 def test_the_enumerations_are_exactly_the_specified_value_sets() -> None:
@@ -615,9 +627,31 @@ def test_a_resumed_live_run_that_omits_the_carried_forward_count_is_refused() ->
         live(recovery_predecessor_receipt_id="c" * 64)
 
 
-def test_a_run_that_resumed_nothing_carries_no_carried_forward_count() -> None:
-    with pytest.raises(ReceiptValidationError, match="consumed_request_count_carried_forward"):
+def test_a_run_that_resumed_nothing_may_not_claim_a_baseline_from_nowhere() -> None:
+    """Still refused under `3.0`, and now for the accurate reason.
+
+    Under `2.0` a carried-forward count without a predecessor was simply a field outside its
+    condition. Decision 055 §7.2 makes a non-zero baseline lawful on a clean carry-in root, so the
+    combination is no longer nonsensical on its face — what makes *this* document invalid is that
+    it names no carry-in authority for the baseline it claims. The refusal is preserved; only the
+    reason is sharper.
+    """
+    with pytest.raises(ReceiptValidationError, match="carry_in_authority_sha256"):
         live(consumed_request_count_carried_forward=5)
+
+
+def test_the_v2_table_still_refuses_a_carried_forward_count_without_a_predecessor() -> None:
+    """The `2.0` table is unchanged: there, the field is conditional on a resume alone."""
+    resumed = live(
+        recovery_predecessor_receipt_id="c" * 64,
+        consumed_request_count_carried_forward=5,
+    )
+    document = _as_v2(resumed.as_document())
+    del document["recovery_predecessor_receipt_id"]  # leaving the count with nothing to resume from
+    document["receipt_id"] = compute_receipt_id(document)
+
+    with pytest.raises(ReceiptValidationError, match="consumed_request_count_carried_forward"):
+        validate_receipt_document(document)
 
 
 def test_a_predecessor_identifier_must_look_like_a_receipt_id() -> None:
@@ -1095,3 +1129,227 @@ def test_no_governed_module_imports_the_receipt_module() -> None:
         assert "m3.receipt" not in source, f"{name} references the receipt module"
         assert "ExecutionReceipt" not in source, f"{name} references the receipt type"
     assert all(name in sys.modules for name in governed)
+
+
+# --------------------------------------------------------------------------- #
+# Schema 3.0: the carry-in root, and mixed-version reading (Decision 055 §7)
+#
+# `2.0` receipts stay byte-unchanged, valid, and readable; the writer emits `3.0`; and the two new
+# field conditions interlock so that every malformed combination fails closed.
+# --------------------------------------------------------------------------- #
+def _as_v2(document: dict[str, Any]) -> dict[str, Any]:
+    """Relabel a document as `2.0` and re-derive its identity, as a real `2.0` receipt would."""
+    downgraded = {
+        key: value
+        for key, value in document.items()
+        if key not in {"receipt_id", "receipt_schema_version"}
+    }
+    downgraded["receipt_schema_version"] = RECEIPT_SCHEMA_VERSION_V2
+    downgraded["receipt_id"] = compute_receipt_id(downgraded)
+    return downgraded
+
+
+def carry_in_root(**overrides: Any) -> ExecutionReceipt:
+    """A clean carry-in root: no predecessor, a non-zero baseline, and its authority hash."""
+    fields: dict[str, Any] = {
+        "consumed_request_count_carried_forward": 1,
+        "carry_in_authority_sha256": "c" * 64,
+    }
+    fields.update(overrides)
+    return live(**fields)
+
+
+def test_a_written_receipt_declares_the_writer_schema() -> None:
+    assert live().as_document()["receipt_schema_version"] == "m3-execution-receipt/3.0"
+
+
+def test_a_v2_receipt_remains_valid_and_readable(tmp_path: Path) -> None:
+    """The compatibility guarantee, exercised end to end rather than asserted."""
+    document = _as_v2(live().as_document())
+
+    validate_receipt_document(document)  # still valid under its own table
+
+    path = tmp_path / "receipt-v2.json"
+    path.write_bytes(canonical_bytes(document))
+    assert inspect_receipt(path) == document
+
+
+def test_a_v2_receipt_is_never_rewritten_by_being_read(tmp_path: Path) -> None:
+    """Reading dispatches on the declared version; it never upgrades bytes in place (§7.1)."""
+    payload = canonical_bytes(_as_v2(live().as_document()))
+    path = tmp_path / "receipt-v2.json"
+    path.write_bytes(payload)
+
+    inspect_receipt(path)
+    inspect_receipt(path)
+
+    assert path.read_bytes() == payload
+
+
+def test_a_v2_receipt_keeps_its_own_ceiling_rule_and_is_not_retroactively_invalidated() -> None:
+    """§7.1: `2.0` receipts remain valid **under their former rules**, not under `3.0`'s.
+
+    `3.0` introduced the cumulative bound — carried-forward plus actual must fit the ceiling.
+    `2.0` never had it: it bounded `actual_physical_attempt_count` alone. Applying the new rule to
+    old documents would refuse receipts that were correct when written, which is a rewrite of the
+    record by refusal rather than the version dispatch the ruling calls for.
+
+    The document below is exactly that case: its actual count of 9 fits the ceiling of 40 on its
+    own, and only the *sum* with its carried-forward 35 exceeds it. It is assembled by relabelling
+    a validated document rather than by constructing one, because the `3.0` writer would refuse to
+    produce it — which is the point: only a receipt written under `2.0` can look like this.
+    """
+    document = _as_v2(
+        live(
+            recovery_predecessor_receipt_id="d" * 64,
+            consumed_request_count_carried_forward=1,
+        ).as_document()
+    )
+    document["consumed_request_count_carried_forward"] = 35  # 35 + 9 = 44, over a ceiling of 40
+    document["receipt_id"] = compute_receipt_id(document)
+
+    validate_receipt_document(document)  # readable and usable, exactly as it always was
+
+    # The positive control: the same accounting under `3.0` is refused, so the dispatch above is a
+    # real version distinction rather than the cumulative rule having been dropped altogether.
+    promoted = {
+        key: value
+        for key, value in document.items()
+        if key not in {"receipt_id", "receipt_schema_version"}
+    }
+    promoted["receipt_schema_version"] = RECEIPT_SCHEMA_VERSION
+    promoted["receipt_id"] = compute_receipt_id(promoted)
+
+    with pytest.raises(ReceiptValidationError, match="ceiling bounds cumulative consumption"):
+        validate_receipt_document(promoted)
+
+
+def test_a_v2_receipt_still_bounds_its_own_actual_count_by_the_ceiling() -> None:
+    """The `2.0` rule it *did* have is untouched: `actual` alone may not exceed the ceiling."""
+    document = _as_v2(live().as_document())
+    document["approved_request_ceiling"] = 8  # its actual count is 9
+    document["receipt_id"] = compute_receipt_id(document)
+
+    with pytest.raises(ReceiptValidationError, match="exceeds the approved_request_ceiling"):
+        validate_receipt_document(document)
+
+
+def test_a_v2_receipt_may_not_carry_the_new_field() -> None:
+    """`2.0`'s permitted set is closed, so the `3.0` field is not readable into it."""
+    document = _as_v2(live().as_document())
+    document["carry_in_authority_sha256"] = "c" * 64
+    document["receipt_id"] = compute_receipt_id(document)
+
+    with pytest.raises(ReceiptValidationError, match="carry_in_authority_sha256"):
+        validate_receipt_document(document)
+
+
+def test_an_unknown_schema_version_is_refused() -> None:
+    document = live().as_document()
+    document["receipt_schema_version"] = "m3-execution-receipt/4.0"
+
+    with pytest.raises(ReceiptValidationError, match="receipt_schema_version"):
+        validate_receipt_document(document)
+
+
+def test_a_clean_carry_in_root_records_its_authority_and_its_baseline() -> None:
+    """§7.4: no predecessor, carries 1, names the authority, counts only this run's attempts."""
+    receipt = carry_in_root()
+    document = receipt.as_document()
+
+    assert "recovery_predecessor_receipt_id" not in document
+    assert document["consumed_request_count_carried_forward"] == 1
+    assert document["carry_in_authority_sha256"] == "c" * 64
+    assert document["actual_physical_attempt_count"] == 9  # this invocation's wire attempts only
+    validate_receipt_document(document)
+
+
+def test_an_ordinary_fresh_root_omits_both_carry_in_fields() -> None:
+    document = live().as_document()
+    assert "consumed_request_count_carried_forward" not in document
+    assert "carry_in_authority_sha256" not in document
+
+
+def test_a_resume_requires_its_carried_forward_count_and_omits_the_authority() -> None:
+    receipt = live(
+        recovery_predecessor_receipt_id="d" * 64,
+        consumed_request_count_carried_forward=5,
+    )
+    document = receipt.as_document()
+
+    assert "carry_in_authority_sha256" not in document
+    validate_receipt_document(document)
+
+
+def test_a_resume_may_not_also_name_a_carry_in_authority() -> None:
+    """§7.3: the authority is absent on resume receipts. A root is not a continuation."""
+    with pytest.raises(ReceiptValidationError, match="carry_in_authority_sha256"):
+        live(
+            recovery_predecessor_receipt_id="d" * 64,
+            consumed_request_count_carried_forward=5,
+            carry_in_authority_sha256="c" * 64,
+        )
+
+
+def test_a_nonzero_baseline_without_a_predecessor_must_name_its_authority() -> None:
+    """A baseline claimed from nowhere is exactly what the authority hash exists to prevent."""
+    with pytest.raises(ReceiptValidationError, match="carry_in_authority_sha256"):
+        live(consumed_request_count_carried_forward=1)
+
+
+def test_an_authority_without_a_baseline_is_refused() -> None:
+    with pytest.raises(ReceiptValidationError, match="consumed_request_count_carried_forward"):
+        live(carry_in_authority_sha256="c" * 64)
+
+
+def test_a_zero_baseline_on_an_ordinary_root_is_refused() -> None:
+    """§7.2: an ordinary zero-baseline fresh root *omits* the field rather than writing 0."""
+    with pytest.raises(ReceiptValidationError, match="consumed_request_count_carried_forward"):
+        live(consumed_request_count_carried_forward=0)
+
+
+def test_the_carry_in_fields_may_not_appear_outside_a_live_receipt() -> None:
+    with pytest.raises(ReceiptValidationError, match="carry_in_authority_sha256"):
+        rehearsal(carry_in_authority_sha256="c" * 64)
+
+
+def test_carried_forward_plus_actual_may_not_exceed_the_approved_ceiling() -> None:
+    """§7.4: the ceiling bounds *cumulative* consumption, not this invocation alone."""
+    with pytest.raises(ReceiptValidationError, match="cumulative"):
+        carry_in_root(
+            approved_request_ceiling=9,  # 1 carried + 9 actual = 10
+            consumed_request_count_carried_forward=1,
+        )
+
+
+def test_cumulative_consumption_exactly_at_the_ceiling_is_lawful() -> None:
+    """Equality is not overflow: a window may lawfully finish exactly at its ceiling."""
+    receipt = carry_in_root(approved_request_ceiling=10)
+    assert receipt.consumed_request_count_carried_forward == 1
+    validate_receipt_document(receipt.as_document())
+
+
+def test_the_carry_in_field_name_exemption_is_exactly_one_key_wide() -> None:
+    """The `auth` key-fragment guard is narrowed by one permitted name, and no further.
+
+    `carry_in_authority_sha256` is a decision-fixed field name that happens to contain `auth`.
+    Exempting it must not reopen the guard: every neighbouring name, and the same name nested one
+    level down, must still be refused.
+    """
+    for prohibited in (
+        "authorization",
+        "auth_token",
+        "carry_in_authority_sha256_extra",
+        "x_carry_in_authority_sha256",
+    ):
+        with pytest.raises(ProhibitedReceiptContentError, match="auth"):
+            scan_for_prohibited_content({prohibited: "value"})
+
+    with pytest.raises(ProhibitedReceiptContentError, match="auth"):
+        scan_for_prohibited_content({"parser_versions": {"carry_in_authority_sha256": "1.0"}})
+
+
+def test_the_exempt_field_is_still_scanned_for_prohibited_values() -> None:
+    """Exempting the *name* never exempts the *value* it carries."""
+    with pytest.raises(ProhibitedReceiptContentError):
+        scan_for_prohibited_content({"carry_in_authority_sha256": "Bearer abc123"})

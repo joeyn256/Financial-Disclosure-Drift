@@ -36,6 +36,17 @@ each is handled explicitly rather than being flattened into "optional":
     resumed one, which in turn makes ``consumed_request_count_carried_forward`` required in
     ``live``.
 
+Schema ``3.0`` adds one field and restates one condition (accepted Decision 055 §7), and changes
+nothing else. ``consumed_request_count_carried_forward`` means **cumulative physical attempts before
+the current invocation**: required for a resume, required for a clean carry-in root, and omitted for
+an ordinary zero-baseline fresh root. ``carry_in_authority_sha256`` names the one-use carry-in
+authority a clean carry-in root consumed, and is required **only** there -- on a receipt with no
+predecessor and a non-zero carried-forward count -- and absent on ordinary roots and on resumes.
+
+**Version dispatch, not migration.** ``2.0`` receipts remain byte-unchanged, valid, readable, and
+usable in mixed-version chains; reading dispatches on the version the document declares and nothing
+here ever rewrites or upgrades a stored receipt. Only the writer moved.
+
 ``resulting_snapshot_id`` and the other ``resulting_*`` references
     §4.7 qualifies each with "where the command produced one". That condition is a fact about the
     command, not about the receipt, so the mode gate is enforced strictly -- they may never appear
@@ -66,7 +77,9 @@ __all__ = [
     "INTERRUPTION_STATES",
     "INVOCATION_MODES",
     "PHASES",
+    "READABLE_RECEIPT_SCHEMA_VERSIONS",
     "RECEIPT_SCHEMA_VERSION",
+    "RECEIPT_SCHEMA_VERSION_V2",
     "RESPONSE_CLASSIFICATION_BUCKETS",
     "SCHEMA_DRIFT_OUTCOMES",
     "ZERO_NETWORK_MODES",
@@ -84,9 +97,19 @@ __all__ = [
     "write_receipt",
 ]
 
-#: The schema this module implements. Decision 028 §9 fixes the v2 field set; a new major version
-#: requires a new accepted decision, so this is a constant and not a parameter (spec §12).
-RECEIPT_SCHEMA_VERSION: Final = "m3-execution-receipt/2.0"
+#: The schema this module **writes**. Decision 028 §9 fixed the v2 field set and Decision 045 froze
+#: it; accepted Decision 055 §7 unfreezes it for exactly one backward-compatible successor, so the
+#: writer emits ``3.0`` and nothing else. A further major version requires a new accepted decision,
+#: which is why this is a constant and not a parameter (spec §12).
+RECEIPT_SCHEMA_VERSION: Final = "m3-execution-receipt/3.0"
+
+#: The predecessor schema. Receipts already written under it are **byte-unchanged, valid, readable,
+#: and usable in mixed-version chains**, and are **never rewritten** (Decision 055 §7.1). Reading
+#: dispatches on the version found in the document; it never upgrades one in place.
+RECEIPT_SCHEMA_VERSION_V2: Final = "m3-execution-receipt/2.0"
+
+#: Every schema version a reader accepts. The writer is :data:`RECEIPT_SCHEMA_VERSION` alone.
+READABLE_RECEIPT_SCHEMA_VERSIONS: Final = (RECEIPT_SCHEMA_VERSION_V2, RECEIPT_SCHEMA_VERSION)
 
 INVOCATION_MODES: Final = ("approval", "dry_run", "live", "offline_execution", "rehearsal")
 """The five invocation modes (spec §4)."""
@@ -288,13 +311,73 @@ _RULES: Final[tuple[_Rule, ...]] = (
     _Rule("rehearsal_evidence_reference", "string", _REHEARSAL),
 )
 
-_RULES_BY_NAME: Final[Mapping[str, _Rule]] = {rule.name: rule for rule in _RULES}
+#: The ``3.0`` table (Decision 055 §§7.2-7.4). It is the ``2.0`` table with exactly two changes, and
+#: no other field is added, removed, retyped, or re-moded:
+#:
+#: * ``consumed_request_count_carried_forward`` now means **cumulative physical attempts before the
+#:   current invocation**, and is required for a resume *and* for a clean carry-in root, while still
+#:   being omitted for an ordinary zero-baseline fresh root;
+#: * ``carry_in_authority_sha256`` is new, and is required **only** on a clean carry-in root — one
+#:   with no predecessor and a non-zero carried-forward count.
+#:
+#: The two conditions interlock, which is what makes every malformed combination fail closed
+#: without a separate cross-field pass: an authority hash with a predecessor is a field present
+#: outside its condition; a non-zero carried-forward count with no predecessor and no authority hash
+#: leaves a required field missing; and a carried-forward count on an ordinary root is a
+#: conditionally-required field present where it must be omitted.
+_RULES_V3: Final[tuple[_Rule, ...]] = tuple(
+    _Rule(
+        "consumed_request_count_carried_forward",
+        "integer",
+        _LIVE,
+        condition="carried_forward",
+    )
+    if rule.name == "consumed_request_count_carried_forward"
+    else rule
+    for rule in _RULES
+) + (_Rule("carry_in_authority_sha256", "sha256", _LIVE, condition="carry_in_root"),)
+
+
+@dataclass(frozen=True, slots=True)
+class _Schema:
+    """One receipt schema version: its permitted-field table, indexed for lookup.
+
+    Reading dispatches on the version found in the document, so a ``2.0`` receipt is validated
+    against the ``2.0`` table exactly as it always was — ``carry_in_authority_sha256`` is not a
+    permitted field there, and the closed field set refuses it — while a ``3.0`` receipt is
+    validated against the ``3.0`` table. Neither table can leak into the other.
+    """
+
+    version: str
+    rules: tuple[_Rule, ...]
+
+    @property
+    def by_name(self) -> Mapping[str, _Rule]:
+        return {rule.name: rule for rule in self.rules}
+
+    @property
+    def caller_fields(self) -> tuple[str, ...]:
+        """Field names a caller supplies: neither the version nor the derived identity."""
+        return tuple(
+            rule.name
+            for rule in self.rules
+            if rule.name not in {"receipt_schema_version", "receipt_id"}
+        )
+
+
+_SCHEMA_V2: Final = _Schema(version=RECEIPT_SCHEMA_VERSION_V2, rules=_RULES)
+_SCHEMA_V3: Final = _Schema(version=RECEIPT_SCHEMA_VERSION, rules=_RULES_V3)
+
+_SCHEMAS: Final[Mapping[str, _Schema]] = {
+    _SCHEMA_V2.version: _SCHEMA_V2,
+    _SCHEMA_V3.version: _SCHEMA_V3,
+}
+
+_RULES_BY_NAME: Final[Mapping[str, _Rule]] = _SCHEMA_V3.by_name
 
 #: Field names the caller supplies. ``receipt_schema_version`` is written by this module and
 #: ``receipt_id`` is derived, so neither is a constructor argument.
-_CALLER_FIELDS: Final = tuple(
-    rule.name for rule in _RULES if rule.name not in {"receipt_schema_version", "receipt_id"}
-)
+_CALLER_FIELDS: Final = _SCHEMA_V3.caller_fields
 
 
 # --------------------------------------------------------------------------- #
@@ -328,6 +411,16 @@ _PROHIBITED_VALUE_FRAGMENTS: Final = (
     "password",
     "secret",
 )
+
+#: Top-level field names an accepted decision fixed that collide with a prohibited key *fragment*
+#: without carrying anything prohibited. ``carry_in_authority_sha256`` (Decision 055 §7.3) contains
+#: ``auth``, the fragment that guards against an ``authorization`` header; the field holds a SHA-256
+#: digest of a public artifact and no header, credential, or identity.
+#:
+#: The exemption is deliberately as small as it can be: the exact name, at the **top level** only.
+#: A nested key of the same name, any other key containing ``auth``, and the value scan over this
+#: field's own contents are all unaffected — so a credential still cannot ride in under this name.
+_KEY_FRAGMENT_EXEMPT_FIELDS: Final = frozenset({"carry_in_authority_sha256"})
 
 _EMAIL_PATTERN: Final = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
@@ -364,9 +457,12 @@ def _scan_node(location: str, value: object) -> None:
                 raise ReceiptValidationError(message)
             child = f"{location}.{key}" if location else key
             lowered_key = key.casefold()
-            for fragment in _PROHIBITED_KEY_FRAGMENTS:
-                if fragment in lowered_key:
-                    raise _refuse(child, f"the field name carries a prohibited marker {fragment!r}")
+            if not (location == "" and key in _KEY_FRAGMENT_EXEMPT_FIELDS):
+                for fragment in _PROHIBITED_KEY_FRAGMENTS:
+                    if fragment in lowered_key:
+                        raise _refuse(
+                            child, f"the field name carries a prohibited marker {fragment!r}"
+                        )
             _scan_string(child, key)
             _scan_node(child, item)
         return
@@ -585,6 +681,31 @@ def _is_required(rule: _Rule, document: Mapping[str, object]) -> bool:
         return status == "stopped_at_ceiling"
     if rule.condition == "resumed":
         return "recovery_predecessor_receipt_id" in document
+    if rule.condition == "carried_forward":
+        # Decision 055 §7.2: a resume and a clean carry-in root both state what they inherit; an
+        # ordinary zero-baseline fresh root states nothing and omits the field.
+        #
+        # A claimed *non-zero* baseline also counts as required, which is what keeps the refusal
+        # accurate rather than merely present. Without it, a non-zero baseline naming no authority
+        # is rejected here — for being a field present outside its condition — and the operator
+        # never learns that the missing authority is the actual defect. With it, this rule is
+        # satisfied and `carry_in_authority_sha256` reports the real problem. A zero baseline is
+        # still refused on an ordinary root, because zero is not a carried-forward claim at all.
+        carried = document.get("consumed_request_count_carried_forward")
+        return (
+            "recovery_predecessor_receipt_id" in document
+            or "carry_in_authority_sha256" in document
+            or (_is_integer(carried) and _as_int(carried) > 0)
+        )
+    if rule.condition == "carry_in_root":
+        # Decision 055 §7.3: required only where there is no predecessor to inherit from and a
+        # non-zero baseline is nonetheless claimed — which is exactly a clean carry-in root.
+        carried = document.get("consumed_request_count_carried_forward")
+        return (
+            "recovery_predecessor_receipt_id" not in document
+            and _is_integer(carried)
+            and _as_int(carried) > 0
+        )
     message = f"unknown condition {rule.condition!r}"  # pragma: no cover - table defect
     raise ReceiptValidationError(message)  # pragma: no cover
 
@@ -595,17 +716,37 @@ def _condition_text(rule: _Rule) -> str:
         "interrupted": "an interrupted run",
         "stopped_at_ceiling": "a run stopped at its ceiling",
         "resumed": "a resumed run",
+        "carried_forward": "a resumed run or a clean carry-in root",
+        "carry_in_root": "a clean carry-in root (no predecessor, non-zero carried-forward count)",
     }.get(rule.condition, "this invocation mode")
 
 
-def _check_closed_field_set(document: Mapping[str, object]) -> None:
+def _schema_for(document: Mapping[str, object]) -> _Schema:
+    """Dispatch on the version the document declares (§12; Decision 055 §7.1).
+
+    A reader dispatches on the version it finds. An unknown version is refused rather than assumed
+    to be the current one, and an old receipt is never rewritten or upgraded in place.
+    """
+    version = document.get("receipt_schema_version")
+    schema = _SCHEMAS.get(version) if isinstance(version, str) else None
+    if schema is None:
+        message = (
+            f"receipt_schema_version {version!r} is not one of "
+            f"{', '.join(repr(name) for name in READABLE_RECEIPT_SCHEMA_VERSIONS)}; a reader "
+            f"dispatches on the version it finds and old receipts are never rewritten"
+        )
+        raise ReceiptValidationError(message)
+    return schema
+
+
+def _check_closed_field_set(document: Mapping[str, object], schema: _Schema) -> None:
     """No unknown field, and no placeholder standing in for an omission (§4, §6.8, §14)."""
     for key, value in document.items():
-        rule = _RULES_BY_NAME.get(key)
+        rule = schema.by_name.get(key)
         if rule is None:
             message = (
-                f"{key} is not a permitted receipt field; the permitted set is closed and a new "
-                f"field requires a new accepted decision"
+                f"{key} is not a permitted {schema.version} receipt field; the permitted set is "
+                f"closed and a new field requires a new accepted decision"
             )
             raise ReceiptValidationError(message)
         if value is None:
@@ -619,10 +760,15 @@ def _check_closed_field_set(document: Mapping[str, object]) -> None:
             raise ReceiptValidationError(message)
 
 
-def _check_class_conformance(document: Mapping[str, object], *, with_identity: bool) -> None:
+def _check_class_conformance(
+    document: Mapping[str, object],
+    schema: _Schema,
+    *,
+    with_identity: bool,
+) -> None:
     """Enforce the §4 table exactly: present in its modes, absent outside them."""
     mode = document["invocation_mode"]
-    for rule in _RULES:
+    for rule in schema.rules:
         if rule.name == "receipt_id" and not with_identity:
             continue
         present = rule.name in document
@@ -680,6 +826,30 @@ def _check_accounting(document: Mapping[str, object]) -> None:
             f"{_as_int(ceiling)}; the ceiling is a hard bound, not a target"
         )
         raise ReceiptValidationError(message)
+
+    # Decision 055 §7.4: in `3.0` the ceiling bounds *cumulative* consumption, so what a receipt
+    # inherited and what it then placed are checked together. `actual_physical_attempt_count`
+    # records this invocation's wire attempts only, so neither figure bounds the ceiling on its own.
+    #
+    # This rule is dispatched on the document's own version, and that is not a detail. Decision 055
+    # §7.1 unfreezes the schema for a new writer version and requires existing `2.0` receipts to
+    # stay byte-unchanged, valid, readable, and usable in mixed-version chains. `2.0` used
+    # `consumed_request_count_carried_forward` under different semantics and was never validated
+    # against a cumulative bound, so applying the new rule to old documents would retroactively
+    # invalidate receipts that were correct when written — a rewrite of history by refusal rather
+    # than the version dispatch the ruling calls for. A `2.0` receipt therefore keeps exactly the
+    # bound it always had, checked above.
+    carried = document.get("consumed_request_count_carried_forward")
+    is_v3 = document.get("receipt_schema_version") == RECEIPT_SCHEMA_VERSION
+    if is_v3 and ceiling is not None and carried is not None:
+        cumulative = _as_int(carried) + physical
+        if cumulative > _as_int(ceiling):
+            message = (
+                f"{_as_int(carried)} carried-forward plus {physical} actual physical attempt(s) is "
+                f"{cumulative}, which exceeds the approved_request_ceiling {_as_int(ceiling)}; the "
+                f"ceiling bounds cumulative consumption and is never reset by a new invocation"
+            )
+            raise ReceiptValidationError(message)
 
     planned_routes = document.get("planned_per_route")
     planned_total = document.get("planned_logical_request_count")
@@ -744,27 +914,21 @@ def _validate(document: Mapping[str, object], *, with_identity: bool) -> None:
     Prohibited content is scanned before the identity is recomputed, because a receipt carrying a
     credential is a disclosure problem whether or not its digest happens to agree.
     """
-    version = document.get("receipt_schema_version")
-    if version != RECEIPT_SCHEMA_VERSION:
-        message = (
-            f"receipt_schema_version {version!r} is not {RECEIPT_SCHEMA_VERSION!r}; a reader "
-            f"dispatches on the version it finds and old receipts are never rewritten"
-        )
-        raise ReceiptValidationError(message)
+    schema = _schema_for(document)
 
-    _check_closed_field_set(document)
+    _check_closed_field_set(document, schema)
     scan_for_prohibited_content(document)
 
     for name in ("invocation_mode", "phase", "completion_status"):
         if name not in document:
             message = f"{name} is required in every receipt and is missing"
             raise ReceiptValidationError(message)
-        _check_kind(_RULES_BY_NAME[name], document[name])
+        _check_kind(schema.by_name[name], document[name])
 
-    _check_class_conformance(document, with_identity=with_identity)
+    _check_class_conformance(document, schema, with_identity=with_identity)
 
     for key, value in document.items():
-        _check_kind(_RULES_BY_NAME[key], value)
+        _check_kind(schema.by_name[key], value)
 
     _check_accounting(document)
 
@@ -854,6 +1018,7 @@ class ExecutionReceipt:
     interruption_state: str | None = None
     recovery_predecessor_receipt_id: str | None = None
     consumed_request_count_carried_forward: int | None = None
+    carry_in_authority_sha256: str | None = None
     rehearsal_evidence_reference: str | None = None
 
     def __post_init__(self) -> None:

@@ -2189,7 +2189,15 @@ class TestAccountingAndRefusalSemantics:
     def test_cumulative_consumption_above_the_ceiling_has_a_deterministic_reason(
         self, tmp_path: Path
     ) -> None:
-        """Each chained receipt lawfully records at most the ceiling; the chain sums past it."""
+        """Each chained receipt lawfully records at most the ceiling; the chain sums past it.
+
+        Decision 055 §7.4 bounds each receipt's own ``carried_forward + actual`` by the ceiling, so
+        both receipts here are individually valid: the root carries nothing and places the ceiling
+        exactly, and its successor carries nothing forward and places the ceiling again. What
+        exceeds the ceiling is the **chain arithmetic** summed across both — precisely the condition
+        the continuation proposal must refuse, and now proven through the chain rather than through
+        a single receipt the schema would no longer accept.
+        """
         ceiling = _plan().hard_request_ceiling
         at_ceiling = {
             "actual_logical_request_count": ceiling,
@@ -2221,7 +2229,7 @@ class TestAccountingAndRefusalSemantics:
                 _receipt(
                     harness.plan,
                     recovery_predecessor_receipt_id=first_receipt.receipt_id,
-                    consumed_request_count_carried_forward=ceiling,
+                    consumed_request_count_carried_forward=0,
                     **at_ceiling,
                 ),
             )

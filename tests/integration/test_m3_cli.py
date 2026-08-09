@@ -901,8 +901,11 @@ def test_an_evidence_gap_records_the_decision_029_reason_not_an_interruption(
     assert receipt["completion_status"] == "failed"
     assert receipt["reason_code"] == "OFFLINE_REHEARSAL_SCENARIO_MISMATCH"
     assert receipt["reason_code"] != "SEC_ACQUISITION_INTERRUPTED"
-    # The schema is untouched: Decision 029 registers a permitted value, not a schema element.
-    assert receipt["receipt_schema_version"] == "m3-execution-receipt/2.0"
+    # Decision 029 registers a permitted *value*, not a schema element, so this receipt carries
+    # whatever the current writer schema is rather than pinning a version of its own here.
+    from disclosure_drift.m3.receipt import RECEIPT_SCHEMA_VERSION
+
+    assert receipt["receipt_schema_version"] == RECEIPT_SCHEMA_VERSION
     assert receipt["actual_logical_request_count"] == 0
     assert receipt["actual_physical_attempt_count"] == 0
 
@@ -1930,12 +1933,24 @@ FIXTURE_PLACEHOLDER_IDENTITY = "Disclosure Drift CLI Fixture (cli-fixture@exampl
 
 
 def _config_with_network(tmp_path: Path, repo_root: Path, *, enabled: bool, acquire: bool) -> Path:
-    """Write a configuration that differs from the tracked one only in the network switches."""
+    """Write a configuration that differs from the tracked one only in the network switches.
+
+    The one further difference applies to the acquisition configuration alone: it raises
+    ``requests_per_second`` to the schema maximum so the suite spends less of its time asleep. A
+    clean M3.2A run executes the frozen 75-request plan, which at the tracked 4/s is roughly
+    nineteen seconds of real sleeping per invocation and nothing else. The value stays inside the
+    accepted bound — the project maximum is 8/s — so this is still a configuration the validator
+    accepts, not a relaxed one. No assertion here observes spacing: the limiter has its own unit
+    tests, and the API-level acquisition test injects a deterministic clock rather than relying on
+    this value.
+    """
     source = (repo_root / "configs" / "project.yaml").read_text(encoding="utf-8")
     replaced = source.replace("  enabled: false", f"  enabled: {str(enabled).lower()}", 1)
     replaced = replaced.replace(
         "  m3_acquire_enabled: false", f"  m3_acquire_enabled: {str(acquire).lower()}", 1
     )
+    if acquire:
+        replaced = replaced.replace("  requests_per_second: 4.0", "  requests_per_second: 8.0", 1)
     # A distinct name per combination: two configurations built in one test must not alias.
     destination = tmp_path / f"network-{str(enabled).lower()}-{str(acquire).lower()}.yaml"
     destination.write_text(replaced, encoding="utf-8")
@@ -2725,6 +2740,7 @@ def _acquired_window(evidence_root: Path, *, run_id: str, quarantine_bulk: bool 
         LiveOperatorGate,
         derive_logical_requests,
         execute_live_acquisition,
+        load_carry_in_authority,
         prepare_operational_catalog,
         prepare_storage,
     )
@@ -2735,12 +2751,17 @@ def _acquired_window(evidence_root: Path, *, run_id: str, quarantine_bulk: bool 
     from disclosure_drift.sec.http_client import RetrievalPolicy  # noqa: PLC0415
     from disclosure_drift.sec.rate_limit import AggregateRateLimiter  # noqa: PLC0415
 
+    # The **frozen** accepted M3.2A plan. A clean M3.2A run carries a baseline in, a carry-in
+    # authority binds the frozen plan and ceiling 801 literally, and the driver re-proves both
+    # against the authority object it is handed - so this fixture drives the only configuration a
+    # lawful clean run has, rather than a smaller one made to work by injecting an authority no
+    # owner could mint.
     plan = build_m3_2a_request_plan(
-        coverage_start=date(2010, 1, 1),
-        coverage_end=date(2010, 6, 30),
-        as_of_date=date(2010, 7, 1),
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
         include_open_quarter=False,
-        calendar_year=2010,
+        calendar_year=2026,
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
@@ -2787,6 +2808,13 @@ def _acquired_window(evidence_root: Path, *, run_id: str, quarantine_bulk: bool 
         clock=lambda: "2026-08-04T00:00:00Z",
         sleeper=_sleep,
         rate_limiter=AggregateRateLimiter(4.0, burst=1, clock=_clock, sleeper=_sleep),
+        # M3-L16: an M3.2A run states the baseline it begins from. The authority is minted as
+        # canonical bytes and admitted through the real artifact boundary, exactly as an operator's
+        # would be, because the driver re-proves the fixed Decision 055 bindings and the canonical
+        # external identity from the object it is handed - a directly constructed one buys nothing.
+        carry_in=load_carry_in_authority(
+            _carry_in_authority_bytes(run_id=run_id, evidence_sha256="f" * 64)
+        ),
     )
 
     plan_path = evidence_root / "plans" / "acquired.json"
@@ -3191,7 +3219,14 @@ def _install_live_seams(monkeypatch: pytest.MonkeyPatch, script: _InterruptScrip
 
 
 def _live_plan(evidence_root: Path) -> object:
-    """Derive one real M3.2A plan and store it below the evidence root."""
+    """Derive the **frozen** accepted M3.2A plan and store it below the evidence root.
+
+    These suites drive the only configuration a clean M3.2A run may lawfully have. Decision 055
+    binds a carry-in authority to the frozen plan hash and to cumulative ceiling ``801`` literally,
+    and M3-L16 requires every clean M3.2A invocation to carry a baseline in — so an acquisition
+    under any other plan is not a thing the corrected system can perform, and testing one would
+    prove nothing about the path an operator will actually take.
+    """
     from datetime import date  # noqa: PLC0415
 
     from disclosure_drift.m3.request_plan import (  # noqa: PLC0415
@@ -3200,11 +3235,11 @@ def _live_plan(evidence_root: Path) -> object:
     )
 
     plan = build_m3_2a_request_plan(
-        coverage_start=date(2010, 1, 1),
-        coverage_end=date(2010, 6, 30),
-        as_of_date=date(2010, 7, 1),
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
         include_open_quarter=False,
-        calendar_year=2010,
+        calendar_year=2026,
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
@@ -3213,6 +3248,54 @@ def _live_plan(evidence_root: Path) -> object:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(canonical_plan_bytes(plan))
     return plan
+
+
+def _carry_in_authority_bytes(*, run_id: str, evidence_sha256: str = "f" * 64) -> bytes:
+    """The canonical bytes of one lawful carry-in authority artifact.
+
+    Every binding is the accepted Decision 055 value, because both the CLI's artifact boundary and
+    every production execution and consumption boundary compare them literally. Only the
+    orphan-adoption references are synthetic — they name a later Path-B act that has not happened —
+    and ``Decision 999`` is used as clearly synthetic data.
+
+    Sole builder for both the on-disk artifacts the CLI reads and the in-process authority the
+    acquisition fixture hands the driver, so no fixture can drift into minting something the
+    artifact boundary would have refused.
+    """
+    from disclosure_drift.m3.acquisition import (  # noqa: PLC0415
+        CARRY_IN_ACQUISITION_WINDOW,
+        CARRY_IN_APPROVED_REQUEST_CEILING,
+        CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+        CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+        CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+        CARRY_IN_HISTORICAL_ROUTE_ALLOCATION,
+        CARRY_IN_REQUEST_PLAN_SHA256,
+    )
+    from disclosure_drift.m3.receipt import canonical_bytes  # noqa: PLC0415
+
+    return canonical_bytes(
+        {
+            "acquisition_window": CARRY_IN_ACQUISITION_WINDOW,
+            "approved_request_ceiling": CARRY_IN_APPROVED_REQUEST_CEILING,
+            "authorized_census_run_id": run_id,
+            "authorizing_decision_reference": CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+            "historical_consumed_request_count": CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+            "historical_route_allocation": dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION),
+            "orphan_adoption_decision_reference": "Decision 999",
+            "orphan_adoption_evidence_sha256": evidence_sha256,
+            "request_plan_sha256": CARRY_IN_REQUEST_PLAN_SHA256,
+            "schema_version": CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+        }
+    )
+
+
+def _write_carry_in(evidence_root: Path, *, name: str, run_id: str) -> str:
+    """Write one canonical carry-in authority artifact and return its safe relative path."""
+    relative = f"authorities/{name}.json"
+    destination = evidence_root / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(_carry_in_authority_bytes(run_id=run_id))
+    return relative
 
 
 def _acquire_argv(
@@ -3225,7 +3308,16 @@ def _acquire_argv(
     window: str = "M3.2A",
     ceiling: int | None = None,
     catalog: str = _LIVE_CATALOG,
+    carry_in: str | None = "auto",
 ) -> list[str]:
+    """One ``m3 acquire --live`` command line.
+
+    A clean ``M3.2A`` invocation is given a carry-in authority by default, because M3-L16 makes one
+    mandatory: without a baseline source the command refuses before it creates anything. Each
+    authority is minted per ``receipt_out``, so a test that runs two clean acquisitions does not
+    trip the single-use replay refusal instead of exercising what it means to. Pass
+    ``carry_in=None`` to drive the refusal itself.
+    """
     argv = [
         "m3",
         "acquire",
@@ -3249,6 +3341,14 @@ def _acquire_argv(
     ]
     if resume_from is not None:
         argv += ["--resume-from", resume_from]
+    elif carry_in == "auto" and window == "M3.2A":
+        # Named from the receipt's stem alone, never its directory: `_receipt_files` matches the
+        # whole relative path for the word "receipt", and an authority filed under a name carrying
+        # it would register as a receipt and quietly weaken every no-receipt assertion.
+        stem = Path(receipt_out).stem
+        carry_in = _write_carry_in(evidence_root, name=stem, run_id=f"m3-2-acquisition-{stem}")
+    if resume_from is None and carry_in not in {None, "auto"}:
+        argv += ["--carry-in-authority", str(carry_in)]
     return argv
 
 
@@ -3354,7 +3454,7 @@ _INTERRUPTION_SCENARIOS = {
         "committed": 1,
         "orphans": 0,
         "adopt_orphan": False,
-        "remaining": 6,
+        "remaining": 74,
     },
     "I2_after_raw_store_write_before_catalog_commit": {
         "owner": "recorder",
@@ -3363,7 +3463,7 @@ _INTERRUPTION_SCENARIOS = {
         "committed": 1,
         "orphans": 1,
         "adopt_orphan": True,
-        "remaining": 5,
+        "remaining": 73,
     },
     "I3_after_catalog_commit": {
         "owner": "recorder",
@@ -3372,7 +3472,7 @@ _INTERRUPTION_SCENARIOS = {
         "committed": 2,
         "orphans": 0,
         "adopt_orphan": False,
-        "remaining": 5,
+        "remaining": 73,
     },
 }
 
@@ -3506,11 +3606,18 @@ def test_a_real_interruption_recovers_to_safe_and_resumes_through_the_real_cli(
     resumed = json.loads((evidence_root / "receipts" / "resumed.json").read_text(encoding="utf-8"))
     assert resumed["completion_status"] == "complete"
     assert resumed["recovery_predecessor_receipt_id"] == interrupted["receipt_id"]
-    # The predecessor's consumption is carried forward exactly, never reset to zero.
-    assert (
-        resumed["consumed_request_count_carried_forward"]
-        == (interrupted["actual_physical_attempt_count"])
+    # The predecessor's consumption is carried forward exactly, never reset to zero — and the
+    # chain's root carry-in is added exactly once on the way through (Decision 055 §7.5). The
+    # interrupted run is a clean carry-in root, so what the resume inherits is that root's own
+    # wire attempts *plus* the single baseline it carried in: never one alone, never both twice.
+    assert interrupted["consumed_request_count_carried_forward"] == 1
+    assert interrupted["carry_in_authority_sha256"], "a clean carry-in root names its authority"
+    assert resumed["consumed_request_count_carried_forward"] == (
+        interrupted["actual_physical_attempt_count"]
+        + interrupted["consumed_request_count_carried_forward"]
     )
+    # A resume is not a carry-in root: it names a predecessor, so it carries no authority hash.
+    assert "carry_in_authority_sha256" not in resumed
     # Only the remainder was placed: already-satisfied work is never re-requested.
     assert resumed["actual_logical_request_count"] == expected["remaining"]
     assert script.sent - sent_before == expected["remaining"]
@@ -3786,6 +3893,62 @@ def test_positive_control_the_same_invocation_does_create_the_catalog_when_it_is
     assert script.constructions == 1
 
 
+def test_an_m3_2a_run_without_a_baseline_source_creates_no_catalog_and_no_transport(
+    repo_root: Path, evidence_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M3-L16 at the command surface: no carry-in, no resume, no run.
+
+    The refusal is decidable from the operator's own arguments, so it lands with the other
+    argument-decidable gates — before the operational catalog is created, before storage is
+    prepared, and before any transport could be constructed. A run that silently restarted the
+    consumed count at zero is exactly the stop condition M3-L16 records.
+    """
+    from disclosure_drift.cli import main  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+
+    assert (
+        main(
+            _acquire_argv(
+                evidence_root, config, plan, receipt_out="receipts/none.json", carry_in=None
+            )
+        )
+        == EXIT_GATE_FAILURE
+    )
+    assert not _live_catalog_path(evidence_root).exists(), "no durable state was created"
+    assert script.constructions == 0, "no transport was constructed"
+    assert _receipt_files(evidence_root) == [], "a refused invocation writes no receipt"
+
+
+def test_a_carry_in_and_a_resume_together_are_refused_at_the_command_surface(
+    repo_root: Path, evidence_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly one baseline source. A carry-in root is never a resume, and the two never coexist."""
+    from disclosure_drift.cli import main  # noqa: PLC0415
+
+    config = _config_with_network(tmp_path, repo_root, enabled=True, acquire=True)
+    script = _InterruptScript()
+    _install_live_seams(monkeypatch, script)
+    plan = _live_plan(evidence_root)
+    authority = _write_carry_in(evidence_root, name="both", run_id="m3-2-acquisition-both")
+
+    argv = _acquire_argv(
+        evidence_root,
+        config,
+        plan,
+        receipt_out="receipts/both.json",
+        resume_from="receipts/interrupted.json",
+    )
+    argv += ["--carry-in-authority", authority]
+
+    assert main(argv) == EXIT_USAGE
+    assert not _live_catalog_path(evidence_root).exists()
+    assert script.constructions == 0
+
+
 # --------------------------------------------------------------------------- #
 # Scoped SIGTERM handling (Decision 051 §7.3)
 # --------------------------------------------------------------------------- #
@@ -3967,3 +4130,162 @@ def test_sigterm_mid_send_leaves_a_durable_started_reservation(tmp_path: Path) -
     assert rows[0]["attempt_number"] == 1
     assert rows[0]["attempt_state"] == "started"  # stranded but consumed; no fabricated receipt
     assert rows[0]["finished_at_utc"] is None
+
+
+# --------------------------------------------------------------------------- #
+# The clean-root carry-in interface at the operator surface
+# (accepted Decision 055 §6, §7.5)
+# --------------------------------------------------------------------------- #
+def test_carry_in_authority_and_resume_from_are_mutually_exclusive(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """§6: the carry-in interface is never resume, and the contradiction is a usage failure.
+
+    Refused at dispatch, before a configuration is consulted, a plan is read, an artifact is
+    opened, or any durable state is created — so nothing needs cleaning up after it.
+    """
+    before = sorted(str(path.relative_to(evidence_root)) for path in evidence_root.rglob("*"))
+
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--evidence-root",
+            str(evidence_root),
+            "--live",
+            "--carry-in-authority",
+            "authorities/carry-in.json",
+            "--resume-from",
+            "receipts/predecessor.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_USAGE
+    assert "mutually exclusive" in result.stderr
+    assert "never a resume" in result.stderr
+    assert sorted(str(path.relative_to(evidence_root)) for path in evidence_root.rglob("*")) == (
+        before
+    )
+
+
+def test_the_carry_in_flag_is_documented_on_the_acquire_surface(repo_root: Path) -> None:
+    result = _run(["m3", "acquire", "--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    assert "--carry-in-authority" in result.stdout
+
+
+def test_show_scope_reports_the_walkers_cumulative_count_including_the_root_carry_in(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """§7.5: `--show-scope` must agree with the receipt-chain walker, root carry-in included.
+
+    The chain here is a carry-in root that placed one attempt on a baseline of one, followed by a
+    resume that placed one more. The walker's answer is 3; reporting the head receipt alone, or
+    omitting the root's baseline, would give 2. The command must print what the walker computes.
+    """
+    _approved_plan(repo_root, evidence_root)
+
+    from disclosure_drift.m3.recovery import walk_receipt_chain
+
+    root, head_path = _carry_in_chain(evidence_root)
+    expected = walk_receipt_chain(head_path).consumed_physical_attempts
+    assert expected == 3, "1 carried in + 1 placed by the root + 1 placed by the resume"
+
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--evidence-root",
+            str(evidence_root),
+            "--show-scope",
+            "--plan",
+            "plans/m3_2a.json",
+            "--window",
+            "M3.2A",
+            "--receipt-chain-head",
+            f"receipts/{head_path.name}",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK, result.stderr
+    baseline = next(
+        line for line in result.stdout.splitlines() if "consumed-count baseline" in line
+    )
+    assert baseline.rsplit(":", 1)[1].strip() == str(expected)
+    carried = next(line for line in result.stdout.splitlines() if "carried in at root" in line)
+    assert carried.rsplit(":", 1)[1].strip() == "1"
+    assert root.receipt_id  # the root really is part of the reported chain
+    chain_line = next(line for line in result.stdout.splitlines() if "receipt chain length" in line)
+    assert chain_line.rsplit(":", 1)[1].strip() == "2"
+
+
+def _carry_in_chain(evidence_root: Path) -> tuple[object, Path]:
+    """Write a two-receipt chain rooted in a clean carry-in root, and return the head path."""
+    from disclosure_drift.m3.receipt import ExecutionReceipt, write_receipt
+
+    common: dict[str, object] = {
+        "command_name": "m3 acquire",
+        "command_version": "m3.2a/1.0",
+        "phase": "M3.2A",
+        "invocation_mode": "live",
+        "configuration_fingerprint": "a" * 64,
+        "migration_chain_head": "0013_m23_manifest_lifecycle_guards",
+        "started_at_utc": "2026-08-01T12:00:00Z",
+        "completed_at_utc": "2026-08-01T12:00:09Z",
+        "elapsed_seconds": 9.0,
+        "source_registry_version": "m2.2-source-registry/1.0",
+        "index_plan_policy_version": "quarterly-index-instances/2.0",
+        "request_plan_schema_version": "m3-request-plan/1.0",
+        "parser_versions": {"company-tickers": "1.0"},
+        "acquisition_window": "M3.2A",
+        "request_plan_id": "plan-0001",
+        "request_plan_sha256": "b" * 64,
+        "approved_request_ceiling": 801,
+        "planned_logical_request_count": 7,
+        "maximum_physical_attempt_count": 60,
+        "planned_per_route": {"sec_company_tickers": 7},
+        "actual_logical_request_count": 1,
+        "actual_physical_attempt_count": 1,
+        "actual_per_route": {
+            "sec_company_tickers": {"logical_request_count": 1, "physical_attempt_count": 1},
+        },
+        "response_classification_totals": {
+            "proceed": 1,
+            "retry": 0,
+            "retry_after": 0,
+            "cooldown": 0,
+            "fail": 0,
+            "quarantine": 0,
+        },
+        "status_code_totals": {"200": 1},
+        "raw_object_count": 1,
+        "duplicate_object_count": 0,
+        "cache_hit_count": 0,
+        "not_modified_count": 0,
+        "quarantined_object_count": 0,
+        "redirect_hop_count": 0,
+        "cooldown_count": 0,
+        "schema_drift_outcome": "none",
+        "schema_drift_event_count": 0,
+        "completion_status": "interrupted",
+        "reason_code": "SEC_ACQUISITION_INTERRUPTED",
+        "reason_detail": "the acquisition was interrupted before completion.",
+        "interruption_state": "after_catalog_commit",
+    }
+    checkout = evidence_root.parent / "checkout"
+    checkout.mkdir(exist_ok=True)
+    root = ExecutionReceipt(
+        **common,
+        consumed_request_count_carried_forward=1,
+        carry_in_authority_sha256="e" * 64,
+    )
+    write_receipt(root, evidence_root=evidence_root, repository_root=checkout)
+    head = ExecutionReceipt(
+        **{**common, "command_version": "m3.2a/1.1"},
+        recovery_predecessor_receipt_id=root.receipt_id,
+        consumed_request_count_carried_forward=2,
+    )
+    return root, write_receipt(head, evidence_root=evidence_root, repository_root=checkout)

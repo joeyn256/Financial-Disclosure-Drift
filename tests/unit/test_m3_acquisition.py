@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import os
 import sqlite3
@@ -30,9 +31,17 @@ from typing import Final
 import pytest
 
 from disclosure_drift.errors import CatalogWriteError, RawObjectIntegrityError
+from disclosure_drift.m3 import acquisition as acquisition_module
 from disclosure_drift.m3.acquisition import (
     ACQUISITION_JOB_KIND,
     ACQUISITION_WINDOWS,
+    CARRY_IN_ACQUISITION_WINDOW,
+    CARRY_IN_APPROVED_REQUEST_CEILING,
+    CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+    CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+    CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+    CARRY_IN_HISTORICAL_ROUTE_ALLOCATION,
+    CARRY_IN_REQUEST_PLAN_SHA256,
     FINAL_MIGRATION_VERSION,
     M3_2B_DEPENDENT_ROUTES,
     NO_HTTP_STATUS_SENTINEL,
@@ -41,6 +50,8 @@ from disclosure_drift.m3.acquisition import (
     AcquisitionEngine,
     AcquisitionGateError,
     AcquisitionRunError,
+    CarryInAuthority,
+    CarryInAuthorityError,
     CatalogPreparationError,
     ContainmentError,
     LiveOperationAuthorization,
@@ -57,13 +68,16 @@ from disclosure_drift.m3.acquisition import (
     drift_for_run,
     execute_live_acquisition,
     load_approved_plan,
+    load_carry_in_authority,
     observe_recovery_state,
     prepare_operational_catalog,
     prepare_storage,
     register_acquisition_run,
+    require_admitted_carry_in_authority,
     resolve_within,
     route_is_streamed,
     validate_acquisition_run,
+    verify_carry_in_authority,
     verify_window_bindings,
 )
 from disclosure_drift.m3.receipt import ExecutionReceipt
@@ -237,7 +251,13 @@ def _success_for(source_id: str) -> TransportResponse:
 # Plan and harness
 # --------------------------------------------------------------------------- #
 def _plan(*, satisfied: frozenset[str] = frozenset()) -> RequestPlan:
-    """A small but genuine M3.2A plan: five singletons plus two quarterly instances."""
+    """A small but genuine M3.2A plan: five singletons plus two quarterly instances.
+
+    Used wherever the subject is the **engine** rather than the live driver, because seven logical
+    requests keep an expansion, a ceiling, or a reconciliation legible. It is deliberately *not*
+    the frozen plan, so nothing that drives it can be mistaken for a lawful clean M3.2A run — see
+    :func:`_live_plan`.
+    """
     return build_m3_2a_request_plan(
         coverage_start=date(2010, 1, 1),
         coverage_end=date(2010, 6, 30),
@@ -246,6 +266,33 @@ def _plan(*, satisfied: frozenset[str] = frozenset()) -> RequestPlan:
         calendar_year=2010,
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=satisfied,
+        requests_per_second=4.0,
+    )
+
+
+def _live_plan() -> RequestPlan:
+    """The **frozen** accepted M3.2A plan — the only one a clean live invocation may execute.
+
+    Decision 055 §§5-6 bind a carry-in authority to the frozen plan hash
+    ``19be7bdc…`` and to cumulative ceiling ``801`` *literally*, and M3-L16 requires every clean
+    M3.2A invocation to state a baseline. A lawful clean run under any other plan therefore does
+    not exist, so every test that drives :func:`execute_live_acquisition` to a *success* drives
+    this one: a small-plan invocation could only be made to pass by handing the driver an authority
+    no owner could mint, which is precisely the bypass these suites exist to refuse.
+
+    Derived here rather than pinned as a literal, so a change to route derivation or
+    ``A_reachable`` surfaces as a failing carry-in binding rather than as a stale constant. Its
+    identity is separately asserted, against the accepted values, by
+    ``TestRequestPlanConsumption.test_the_accepted_m3_2a_plan_identity_reproduces``.
+    """
+    return build_m3_2a_request_plan(
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+        include_open_quarter=False,
+        calendar_year=2026,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
     )
 
@@ -3246,12 +3293,26 @@ def _live_arguments(
     run_id: str = "run-fixture-0001",
     data_relative: str = _DATA_RELATIVE,
 ) -> dict[str, object]:
-    """Every explicit collaborator one live invocation needs, over offline seams."""
+    """Every explicit collaborator one live invocation needs, over offline seams.
+
+    An ``M3.2A`` invocation carries a baseline by default, because M3-L16 makes that mandatory:
+    a clean M3.2A run states where its consumed count starts or it does not run
+    (:func:`require_m3_2a_consumed_baseline`). The default authority is a genuine one, minted as
+    canonical bytes and admitted through the real artifact boundary (:func:`_live_authority`), and
+    it names ``run_id`` — so the run identity these suites assert on is unchanged, because a
+    carry-in root runs under the identity its authority names rather than a generated one. Pass
+    ``carry_in=None`` explicitly to exercise the refusal itself.
+
+    A genuine authority binds the frozen plan and ceiling ``801`` literally, so an ``M3.2A``
+    invocation assembled here must be given :func:`_live_plan`. That is not a fixture convenience
+    — it is the only shape a lawful clean run has.
+    """
     approved = plan.hard_request_ceiling if ceiling is None else ceiling
     clock = _FrozenClock()
     return {
         "plan": plan,
         "window": window,
+        "carry_in": _live_authority(run_id) if window == "M3.2A" else None,
         "approved_ceiling": approved,
         "authorization": LiveOperationAuthorization(
             window=window,
@@ -3280,12 +3341,24 @@ def _run_live(
     evidence_root: Path,
     plan: RequestPlan,
     responses: Sequence[TransportResponse],
+    *,
+    run_id: str = "run-fixture-0001",
     **overrides: object,
 ) -> tuple[object, _CountingTransportFactory]:
-    """Execute one live invocation over a scripted transport, and return it with its factory."""
+    """Execute one live invocation over a scripted transport, and return it with its factory.
+
+    ``run_id`` names the invocation. It reaches the run through the default carry-in authority
+    rather than through ``run_id_factory``, because a carry-in root runs under the identity its
+    authority names and never generates one.
+    """
     factory = _CountingTransportFactory(responses)
-    arguments = _live_arguments(evidence_root, plan, factory)
+    arguments = _live_arguments(evidence_root, plan, factory, run_id=run_id)
     arguments.update(overrides)
+    if arguments.get("continuation") is not None:
+        # A resume carries its baseline forward from its predecessor receipt, so it needs no
+        # carry-in - and the two may never coexist. The default is dropped rather than overridden
+        # in every resume test.
+        arguments["carry_in"] = None
     result = execute_live_acquisition(**arguments)  # type: ignore[arg-type]
     return result, factory
 
@@ -3304,7 +3377,7 @@ class TestResponseEventAccounting:
     def test_a_normal_response_contributes_its_actual_status_and_one_bucket(
         self, tmp_path: Path
     ) -> None:
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         accounting = result.accounting  # type: ignore[attr-defined]
 
@@ -3323,7 +3396,7 @@ class TestResponseEventAccounting:
         Redirect-hop counting and response-policy counting are different metrics, and both
         increment for the same physical response.
         """
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(
             plan,
             {
@@ -3386,7 +3459,7 @@ class TestResponseEventAccounting:
         self, tmp_path: Path
     ) -> None:
         """Decision 045 §9.4: no HTTP status exists, and no bucket is invented for it."""
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(
             plan, {0: [_scripted(0, body=b"", content_type=None, failure="connection_error")]}
         )
@@ -3421,7 +3494,7 @@ class TestResponseEventAccounting:
 
     def test_cooldown_count_is_exactly_the_cooldown_bucket(self, tmp_path: Path) -> None:
         """Decision 045 §11: never a count of sleeps, hops, or elapsed seconds."""
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(plan, {0: [_scripted(429, body=b"", content_type=None)]})
         result, _ = _run_live(tmp_path, plan, script)
         accounting = result.accounting  # type: ignore[attr-defined]
@@ -3433,7 +3506,7 @@ class TestResponseEventAccounting:
 
     def test_a_mixed_sequence_accounts_every_event_exactly_once(self, tmp_path: Path) -> None:
         """The §22 mixed-sequence case: redirect, normal response, and transport failure."""
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(
             plan,
             {
@@ -3463,7 +3536,7 @@ class TestResponseEventAccounting:
 
     def test_a_pre_transport_refusal_contributes_to_neither_total(self, tmp_path: Path) -> None:
         """Decision 045 §9.1: a refusal before any physical response is not a response event."""
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory([])
         arguments = _live_arguments(tmp_path, plan, factory)
         arguments["approved_ceiling"] = plan.hard_request_ceiling - 1
@@ -3513,8 +3586,8 @@ class TestAcquisitionRunIdentity:
     """Decision 045 §6A: one durable run per live invocation, registered before any transport."""
 
     def test_a_lawful_invocation_registers_exactly_one_m3_2_run_row(self, tmp_path: Path) -> None:
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-alpha")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-alpha")
 
         rows = _catalog_rows(tmp_path, "SELECT job_id, job_kind, stage FROM ops_ingestion_jobs")
 
@@ -3525,7 +3598,7 @@ class TestAcquisitionRunIdentity:
 
     def test_the_registered_kind_is_not_the_m2_2_census_kind(self, tmp_path: Path) -> None:
         """The M2.2-only registration is never reused, and its job kind is never hardcoded."""
-        plan = _plan()
+        plan = _live_plan()
         _run_live(tmp_path, plan, _success_script(plan))
 
         rows = _catalog_rows(tmp_path, "SELECT job_kind, stage FROM ops_ingestion_jobs")
@@ -3540,7 +3613,7 @@ class TestAcquisitionRunIdentity:
         already committed proves the ordering from the construction site's own point of view,
         which a test that only inspected the end state could not.
         """
-        plan = _plan()
+        plan = _live_plan()
         observed: list[int] = []
 
         class _OrderingFactory(_CountingTransportFactory):
@@ -3561,15 +3634,19 @@ class TestAcquisitionRunIdentity:
     def test_a_registration_failure_prevents_every_transport_and_request(
         self, tmp_path: Path
     ) -> None:
-        """On failure: no transport, no physical request, and nothing attributed to the run."""
-        plan = _plan()
+        """On failure: no transport, no physical request, and nothing attributed to the run.
+
+        The fault is injected through the invocation's own clock, whose first reading *is* the
+        start instant the registration requires. It is no longer injected through the run identity:
+        a clean carry-in root takes its identity from its authority artifact, and no lawful
+        artifact carries an unusable one — the artifact boundary refuses a blank run id before an
+        authority object exists at all — so forging one here would prove only that the forgery is
+        refused, which a different test already proves.
+        """
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
-
-        def _refuse() -> str:
-            return "   "
-
-        arguments["run_id_factory"] = _refuse
+        arguments["clock"] = lambda: "   "
 
         with pytest.raises(AcquisitionRunError):
             execute_live_acquisition(**arguments)  # type: ignore[arg-type]
@@ -3592,7 +3669,7 @@ class TestAcquisitionRunIdentity:
         """
         import disclosure_drift.m3.acquisition as acquisition_module
 
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
 
@@ -3609,12 +3686,16 @@ class TestAcquisitionRunIdentity:
 
     def test_a_repeated_run_identity_is_refused_before_any_transport(self, tmp_path: Path) -> None:
         """One live invocation registers one run; an existing identity is never adopted."""
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-repeated")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-repeated")
 
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
-        arguments["run_id_factory"] = lambda: "run-repeated"
+        # A *different* authority naming the *same* run: the identity collision is what must be
+        # reported, so the authority must not collide on its own single-use key first. Both are
+        # lawful artifacts; they differ only in the orphan-adoption evidence they name, which is
+        # enough to make them distinct bytes and therefore distinct single-use keys.
+        arguments["carry_in"] = _live_authority("run-repeated", evidence="a" * 64)
 
         with pytest.raises(AcquisitionRunError, match="already registered"):
             execute_live_acquisition(**arguments)  # type: ignore[arg-type]
@@ -3623,10 +3704,8 @@ class TestAcquisitionRunIdentity:
 
     def test_every_planned_request_is_durably_attributed_to_its_run(self, tmp_path: Path) -> None:
         """Decision 045 §6A.4, through the existing accepted run-scoped relation."""
-        plan = _plan()
-        result, _ = _run_live(
-            tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-attributed"
-        )
+        plan = _live_plan()
+        result, _ = _run_live(tmp_path, plan, _success_script(plan), run_id="run-attributed")
 
         rows = _catalog_rows(
             tmp_path,
@@ -3647,13 +3726,13 @@ class TestAcquisitionRunIdentity:
         The two runs share one catalog and one data root, so a listing that fell back to unscoped
         global drift would report the second run's quarantined object under the first.
         """
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-clean")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-clean")
 
         # A second, independent invocation whose bulk archive is refused, producing drift.
         drifting = _script_with(plan, {})
         drifting[0] = _scripted(body=b"not-a-zip-archive", content_type="application/zip")
-        _run_live(tmp_path, plan, drifting, run_id_factory=lambda: "run-drifting")
+        _run_live(tmp_path, plan, drifting, run_id="run-drifting")
 
         clean = drift_for_run(catalog_path=tmp_path / _CATALOG_RELATIVE, census_run_id="run-clean")
         drifted = drift_for_run(
@@ -3672,8 +3751,8 @@ class TestAcquisitionRunIdentity:
         self, tmp_path: Path
     ) -> None:
         """Every unlawful run identity fails closed; none falls back to a global listing."""
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-known")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-known")
         catalog = tmp_path / _CATALOG_RELATIVE
 
         with pytest.raises(AcquisitionRunError, match="does not resolve"):
@@ -3710,8 +3789,8 @@ class TestAcquisitionRunIdentity:
 
     def test_positive_control_the_known_run_still_lists(self, tmp_path: Path) -> None:
         """The refusals above are not a guard that refuses everything."""
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-known")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-known")
 
         scoped = drift_for_run(catalog_path=tmp_path / _CATALOG_RELATIVE, census_run_id="run-known")
 
@@ -3719,8 +3798,8 @@ class TestAcquisitionRunIdentity:
         assert scoped.attributed_observation_count == plan.planned_unique_logical_requests
 
     def test_validate_acquisition_run_refuses_a_fabricated_identity(self, tmp_path: Path) -> None:
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-real")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-real")
         catalog = tmp_path / _CATALOG_RELATIVE
 
         assert validate_acquisition_run(catalog, "run-real") == "M3.2A"
@@ -3765,7 +3844,7 @@ class TestLiveOperatorBoundary:
         self, tmp_path: Path, element: str
     ) -> None:
         """Every element is load-bearing individually, not merely as part of a conjunction."""
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
 
@@ -3783,7 +3862,7 @@ class TestLiveOperatorBoundary:
         either point refusing is the property that matters — and the transport factory must be
         untouched whichever one fires.
         """
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
 
@@ -3796,7 +3875,7 @@ class TestLiveOperatorBoundary:
     def test_a_plan_hash_mismatch_refuses_before_the_construction_site(
         self, tmp_path: Path
     ) -> None:
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
         arguments["authorization"] = LiveOperationAuthorization(
@@ -3815,7 +3894,7 @@ class TestLiveOperatorBoundary:
         self, tmp_path: Path, delta: int
     ) -> None:
         """C-1 and C+1 both refuse; only exact equality passes."""
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(
             tmp_path, plan, factory, ceiling=plan.hard_request_ceiling + delta
@@ -3834,7 +3913,7 @@ class TestLiveOperatorBoundary:
         disagrees with the authorization it was issued under, even when the authorization itself
         is internally consistent with some other plan.
         """
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
         arguments["approved_ceiling"] = plan.hard_request_ceiling + 1
@@ -3844,7 +3923,7 @@ class TestLiveOperatorBoundary:
         assert factory.calls == 0
 
     def test_a_window_the_plan_was_not_built_for_refuses(self, tmp_path: Path) -> None:
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory, window="M3.2B")
 
@@ -3856,7 +3935,7 @@ class TestLiveOperatorBoundary:
         self, tmp_path: Path
     ) -> None:
         """Without this, every refusal above would pass against a gate that refuses everything."""
-        plan = _plan()
+        plan = _live_plan()
         result, factory = _run_live(tmp_path, plan, _success_script(plan))
 
         assert factory.calls == 1
@@ -3866,7 +3945,7 @@ class TestLiveOperatorBoundary:
         self, tmp_path: Path
     ) -> None:
         """A scripted transport exhausted mid-window still releases its resources."""
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory([_success_for("sec_bulk_submissions")])
         arguments = _live_arguments(tmp_path, plan, factory)
 
@@ -3928,7 +4007,7 @@ class TestProgressSinkExclusion:
             message = f"sink wrote {private_path} and notified {_SINK_ADDRESS}"
             raise RuntimeError(message)
 
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
         outcome = result.outcome  # type: ignore[attr-defined]
         retained = " ".join(outcome.progress_failures)
@@ -3953,7 +4032,7 @@ class TestProgressSinkExclusion:
             message = f"sink wrote {private_path} and notified {_SINK_ADDRESS}"
             raise RuntimeError(message)
 
-        plan = _plan()
+        plan = _live_plan()
         _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
 
         for path in sorted(tmp_path.rglob("*")):
@@ -4066,13 +4145,13 @@ class TestResumeIntegration:
 
     def test_a_resumed_invocation_registers_a_new_run_identity(self, tmp_path: Path) -> None:
         """Decision 045 §6A.3: a run identifies one invocation, never a whole window."""
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-first")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-first")
         result, factory = _run_live(
             tmp_path,
             plan,
             _success_script(plan),
-            run_id_factory=lambda: "run-resumed",
+            run_id="run-resumed",
             continuation=_continuation(plan),
         )
 
@@ -4085,9 +4164,10 @@ class TestResumeIntegration:
     def test_a_refused_proposal_refuses_the_resume_before_any_transport(
         self, tmp_path: Path
     ) -> None:
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = _continuation(plan, permitted=False)
 
         with pytest.raises(AcquisitionGateError, match="refuses this resume"):
@@ -4098,9 +4178,10 @@ class TestResumeIntegration:
     def test_a_resume_proceeds_only_from_a_safe_inspection(
         self, tmp_path: Path, determination: str
     ) -> None:
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = _continuation(plan, determination=determination)
 
         with pytest.raises(AcquisitionGateError, match="SAFE"):
@@ -4109,9 +4190,10 @@ class TestResumeIntegration:
 
     def test_a_resume_may_not_change_the_approved_ceiling(self, tmp_path: Path) -> None:
         """The approved ceiling is never reset, raised, or replaced across a resume."""
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = _continuation(
             plan, approved_ceiling=plan.hard_request_ceiling + 5
         )
@@ -4121,9 +4203,10 @@ class TestResumeIntegration:
         assert factory.calls == 0
 
     def test_a_resume_requires_an_exact_predecessor_receipt_identity(self, tmp_path: Path) -> None:
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = _continuation(plan, predecessor_receipt_id=None)
 
         with pytest.raises(AcquisitionGateError, match="exact predecessor receipt"):
@@ -4134,9 +4217,10 @@ class TestResumeIntegration:
         self, tmp_path: Path
     ) -> None:
         """An already-satisfied substantive write is never repeated."""
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = _continuation(plan, remaining_count=0)
 
         with pytest.raises(AcquisitionGateError, match="nothing lawful to acquire"):
@@ -4144,9 +4228,10 @@ class TestResumeIntegration:
         assert factory.calls == 0
 
     def test_a_resume_past_its_own_ceiling_refuses(self, tmp_path: Path) -> None:
-        plan = _plan()
+        plan = _live_plan()
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = _continuation(plan, consumed=plan.hard_request_ceiling + 1)
 
         with pytest.raises(AcquisitionGateError, match="already exceeds"):
@@ -4157,7 +4242,7 @@ class TestResumeIntegration:
         self, tmp_path: Path
     ) -> None:
         """The resumed window starts at the predecessor's consumption, never at zero."""
-        plan = _plan()
+        plan = _live_plan()
         carried = 3
         remaining = 2
         result, _ = _run_live(
@@ -4184,15 +4269,15 @@ class TestResumeIntegration:
         is scripted with exactly two responses. A resume that re-derived the whole expansion would
         exhaust the script and fail loudly, which is precisely the duplication being excluded.
         """
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-predecessor")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-predecessor")
         remaining = derive_logical_requests(plan)[:2]
 
         result, factory = _run_live(
             tmp_path,
             plan,
             [_success_for(request.source_id) for request in remaining],
-            run_id_factory=lambda: "run-continued",
+            run_id="run-continued",
             continuation=_continuation(plan, remaining_count=2),
         )
         outcome = result.outcome  # type: ignore[attr-defined]
@@ -4212,10 +4297,11 @@ class TestResumeIntegration:
 
     def test_a_remainder_the_plan_does_not_contain_refuses(self, tmp_path: Path) -> None:
         """The proposal and the plan must agree about what the window contains."""
-        plan = _plan()
+        plan = _live_plan()
         proposal = _continuation(plan, remaining_count=1)
         factory = _CountingTransportFactory(_success_script(plan))
         arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None  # a resume carries its baseline from its predecessor
         arguments["continuation"] = replace(
             proposal,  # type: ignore[arg-type]
             remaining=(replace(proposal.remaining[0], identity_label="not_a_planned_identity"),),  # type: ignore[attr-defined]
@@ -4226,7 +4312,7 @@ class TestResumeIntegration:
 
     def test_positive_control_a_permitted_safe_proposal_resumes(self, tmp_path: Path) -> None:
         """Without this, every refusal above would pass against a resume that refuses everything."""
-        plan = _plan()
+        plan = _live_plan()
         remaining = derive_logical_requests(plan)[:2]
         result, factory = _run_live(
             tmp_path,
@@ -4253,7 +4339,7 @@ class TestReceiptAssembly:
         from disclosure_drift.cli import _live_acquisition_receipt
         from disclosure_drift.config import load_config
 
-        result, _ = _run_live(tmp_path, plan, script, run_id_factory=lambda: run_id)
+        result, _ = _run_live(tmp_path, plan, script, run_id=run_id)
         return _live_acquisition_receipt(
             result,  # type: ignore[arg-type]
             plan=plan,
@@ -4267,7 +4353,7 @@ class TestReceiptAssembly:
     def test_a_complete_window_produces_a_valid_live_receipt(self, tmp_path: Path) -> None:
         from disclosure_drift.m3.receipt import validate_receipt_document
 
-        plan = _plan()
+        plan = _live_plan()
         receipt = self._receipt(tmp_path, plan, _success_script(plan))
         document = receipt.as_document()
         validate_receipt_document(document)
@@ -4282,7 +4368,7 @@ class TestReceiptAssembly:
 
     def test_the_response_totals_satisfy_the_equality_invariant(self, tmp_path: Path) -> None:
         """Decision 045 §9: the two universes agree exactly in the written receipt."""
-        plan = _plan()
+        plan = _live_plan()
         document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
 
         classification = document["response_classification_totals"]
@@ -4293,9 +4379,43 @@ class TestReceiptAssembly:
     def test_the_cache_hit_count_is_the_excluded_set_not_the_304_reuses(
         self, tmp_path: Path
     ) -> None:
-        """Decision 045 §8: the legacy `WindowOutcome.cache_hits` alias must not populate it."""
+        """Decision 045 §8: the legacy `WindowOutcome.cache_hits` alias must not populate it.
+
+        Driven at the engine rather than through the live driver, because the distinction needs a
+        plan carrying an *excluded* index key and the frozen plan has none — a plan built with one
+        is not the frozen plan, so no lawful carry-in authority names it and no clean run could
+        execute it. The subject here is the receipt producer's mapping of a window outcome, which
+        the engine produces exactly as the driver would.
+        """
+        from disclosure_drift.cli import _live_acquisition_receipt
+        from disclosure_drift.config import load_config
+        from disclosure_drift.m3.acquisition import LiveAcquisitionResult
+
         plan = _plan(satisfied=frozenset({"2010QTR1"}))
-        document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
+        with _persistent(tmp_path, plan) as harness:
+            outcome = harness.run(_success_script(plan))
+
+        accounting = ResponseAccounting()
+        for _ in range(plan.planned_unique_logical_requests):
+            accounting.absorb(_fetch_result(status=200, actions=("proceed",)), (200,))
+        document = _live_acquisition_receipt(
+            LiveAcquisitionResult(
+                census_run_id="run-cache-hits",
+                outcome=outcome,  # type: ignore[arg-type]
+                accounting=accounting,
+                started_at_utc=_stamp(),
+                completed_at_utc=_stamp(),
+                predecessor_receipt_id=None,
+                carried_forward_consumed=None,
+                run_closed=True,
+            ),
+            plan=plan,
+            window="M3.2A",
+            approved_ceiling=plan.hard_request_ceiling,
+            continuation=None,
+            config=load_config(None),
+            catalog_path=tmp_path / _CATALOG_RELATIVE,
+        ).as_document()
 
         assert plan.expected_cache_hits == 1
         assert document["cache_hit_count"] == plan.expected_cache_hits
@@ -4311,7 +4431,7 @@ class TestReceiptAssembly:
         two counters — or populated either from the legacy ``cache_hits`` alias — would disagree
         with the window it describes.
         """
-        plan = _plan()
+        plan = _live_plan()
         document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
 
         assert document["raw_object_count"] == plan.planned_unique_logical_requests
@@ -4377,7 +4497,7 @@ class TestReceiptAssembly:
         from disclosure_drift.m3.receipt import validate_receipt_document
         from disclosure_drift.reasons import REASON_CODES
 
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(plan, {})
         script[0] = _scripted(body=b"not-a-zip-archive", content_type="application/zip")
         document = self._receipt(tmp_path, plan, script).as_document()
@@ -4412,11 +4532,12 @@ class TestReceiptAssembly:
         """The permitted field set is closed; a new field requires a new accepted decision."""
         from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
 
-        plan = _plan()
+        plan = _live_plan()
         document = self._receipt(tmp_path, plan, _success_script(plan)).as_document()
         document["m3_2_run_identity"] = "run-alpha"
 
-        with pytest.raises(ReceiptValidationError, match="not a permitted receipt field"):
+        # The refusal names the schema it was decided against, so the match stays version-agnostic.
+        with pytest.raises(ReceiptValidationError, match="is not a permitted .* receipt field"):
             validate_receipt_document(document)
 
     def test_no_progress_sink_text_reaches_the_receipt(self, tmp_path: Path) -> None:
@@ -4432,7 +4553,7 @@ class TestReceiptAssembly:
         from disclosure_drift.cli import _live_acquisition_receipt
         from disclosure_drift.config import load_config
 
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan), progress=_sink)
         receipt = _live_acquisition_receipt(
             result,  # type: ignore[arg-type]
@@ -4454,7 +4575,7 @@ class TestReceiptAssembly:
         from disclosure_drift.config import load_config
         from disclosure_drift.errors import GateFailureError
 
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         result.accounting.mark_undetermined("a fixture accounting defect")  # type: ignore[attr-defined]
 
@@ -4482,8 +4603,8 @@ class TestSeparateProcessDurability:
         rather than merely visible, which is exactly the property a resumed invocation and the
         accepted T2.4 recovery state both depend on.
         """
-        plan = _plan()
-        _run_live(tmp_path, plan, _success_script(plan), run_id_factory=lambda: "run-durable")
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-durable")
         database = tmp_path / _CATALOG_RELATIVE
 
         # The database path travels as an argument rather than being interpolated into the
@@ -4622,7 +4743,7 @@ class TestGenuineInterruption:
         snapshot store promotes anything, so the interrupted request has no committed observation
         and no promoted object of its own.
         """
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, SnapshotStore, "record", call=2)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         outcome = result.outcome  # type: ignore[attr-defined]
@@ -4645,7 +4766,7 @@ class TestGenuineInterruption:
         primitive the continuation proposal partitions - rather than from the window outcome the
         interrupted invocation happened to hold in memory.
         """
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, SnapshotStore, "record", call=2)
         _run_live(tmp_path, plan, _success_script(plan))
         monkeypatch.undo()
@@ -4671,7 +4792,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """I2: the promoted object survives, no observation committed, nothing deleted."""
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         outcome = result.outcome  # type: ignore[attr-defined]
@@ -4688,7 +4809,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """I3: the observation committed, so the retrieval is done and nothing is orphaned."""
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2, after=True)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         outcome = result.outcome  # type: ignore[attr-defined]
@@ -4702,7 +4823,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path
     ) -> None:
         """A signal arriving between requests: the previous one committed, the next never began."""
-        plan = _plan()
+        plan = _live_plan()
         seen: list[str] = []
 
         def _sink(outcome: object) -> None:
@@ -4723,7 +4844,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Nothing has committed at all, so the window stopped before any promotion."""
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, SnapshotStore, "record", call=1)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         outcome = result.outcome  # type: ignore[attr-defined]
@@ -4743,7 +4864,7 @@ class TestGenuineInterruption:
         cannot be established exactly — and the interrupt is re-raised rather than guessed at. No
         window outcome exists, so no receipt can be produced from one.
         """
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, SnapshotStore, "record", call=2, after=True)
 
         with pytest.raises(KeyboardInterrupt):
@@ -4758,7 +4879,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path
     ) -> None:
         """Interrupted before lawful execution begins: no observation, no window, no receipt."""
-        plan = _plan()
+        plan = _live_plan()
 
         def _interrupting_factory() -> object:
             raise KeyboardInterrupt
@@ -4778,7 +4899,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path
     ) -> None:
         """An ordinary terminal failure is never relabelled as an interruption."""
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(plan, {0: [_scripted(500, body=b"", content_type=None)] * 4})
         result, _ = _run_live(tmp_path, plan, script)
         outcome = result.outcome  # type: ignore[attr-defined]
@@ -4790,7 +4911,7 @@ class TestGenuineInterruption:
         self, tmp_path: Path
     ) -> None:
         """A response-policy transport failure is a retry event, not a signal."""
-        plan = _plan()
+        plan = _live_plan()
         script = _script_with(
             plan, {0: [_scripted(0, body=b"", content_type=None, failure="connection_error")]}
         )
@@ -4898,7 +5019,7 @@ class TestInterruptedRunJobState:
     def test_an_interrupted_window_closes_its_run_as_stopped(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2, after=True)
         _run_live(tmp_path, plan, _success_script(plan))
 
@@ -4906,7 +5027,7 @@ class TestInterruptedRunJobState:
 
     def test_a_complete_window_still_closes_its_run_as_completed(self, tmp_path: Path) -> None:
         """Positive control: the new third state did not swallow the ordinary two."""
-        plan = _plan()
+        plan = _live_plan()
         _run_live(tmp_path, plan, _success_script(plan))
 
         assert _job_states(tmp_path) == ["completed"]
@@ -4974,7 +5095,7 @@ class TestInterruptedReceiptAssembly:
     ) -> None:
         from disclosure_drift.m3.receipt import validate_receipt_document
 
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         monkeypatch.undo()
@@ -4987,7 +5108,7 @@ class TestInterruptedReceiptAssembly:
         assert "remaining_planned_logical_request_count" not in document
 
     def test_a_complete_receipt_carries_no_interruption_state(self, tmp_path: Path) -> None:
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         document = self._receipt_for(tmp_path, plan, result).as_document()
 
@@ -4999,7 +5120,7 @@ class TestInterruptedReceiptAssembly:
     ) -> None:
         from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
 
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         document = self._receipt_for(tmp_path, plan, result).as_document()
         document["interruption_state"] = "after_catalog_commit"
@@ -5012,7 +5133,7 @@ class TestInterruptedReceiptAssembly:
     ) -> None:
         from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
 
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         monkeypatch.undo()
@@ -5027,7 +5148,7 @@ class TestInterruptedReceiptAssembly:
     ) -> None:
         from disclosure_drift.m3.receipt import ReceiptValidationError, validate_receipt_document
 
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, ObservationRecorder, "record", call=2)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         monkeypatch.undo()
@@ -5046,7 +5167,7 @@ class TestInterruptedReceiptAssembly:
         the run itself produced, which charges them a second time against the approved ceiling on
         every resume. Binding both instants to the run's own clock removes the possibility.
         """
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         document = self._receipt_for(tmp_path, plan, result).as_document()
 
@@ -5115,7 +5236,7 @@ class TestResponsePairingDiagnostic:
         from disclosure_drift.config import load_config
         from disclosure_drift.errors import GateFailureError
 
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         mispaired = ResponseAccounting()
         mispaired.absorb(_fetch_result(status=200, actions=("proceed",)), (200, 200))
@@ -5398,7 +5519,7 @@ class TestPreSendAttemptLedger:
     def test_execute_live_acquisition_wires_the_ledger_and_reconciles_with_consumed(
         self, tmp_path: Path
     ) -> None:
-        plan = _plan()
+        plan = _live_plan()
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
         rows = _catalog_rows(
             tmp_path,
@@ -5410,9 +5531,14 @@ class TestPreSendAttemptLedger:
         # One row per physical send, a contiguous positive ordinal sequence, no reset.
         assert [row["attempt_number"] for row in rows] == list(range(1, len(rows) + 1))
         assert all(row["attempt_state"] in {"succeeded", "failed"} for row in rows)
-        # The ledger reconciles exactly with the ceiling's consumed count — no segment counted
-        # twice, none dropped.
-        assert len(rows) == result.outcome.consumed_physical_attempts  # type: ignore[attr-defined]
+        # The ledger reconciles exactly with what this run charged — no segment counted twice, none
+        # dropped. The window's consumed count is cumulative, so the carried-in baseline comes off
+        # first: the ledger records physical sends, and a baseline is not a send.
+        own = (
+            result.outcome.consumed_physical_attempts  # type: ignore[attr-defined]
+            - result.carried_forward_consumed  # type: ignore[attr-defined]
+        )
+        assert len(rows) == own
         for row in rows:
             assert row["logical_role"]
             assert str(row["source_url_canonical"]).startswith("https://")
@@ -5522,14 +5648,16 @@ class TestPreSendAttemptLedger:
         interrupting the shared limiter's first ``acquire()`` reproduces the pre-send window against
         the real ordering. The run is closed truthfully as ``stopped`` with nothing durable charged.
         """
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, AggregateRateLimiter, "acquire", call=1)
         result, factory = _run_live(tmp_path, plan, _success_script(plan))
         outcome = result.outcome  # type: ignore[attr-defined]
 
         assert outcome.completion_status == "interrupted"
         assert outcome.interruption_state == "before_raw_store_write"
-        assert outcome.consumed_physical_attempts == 0
+        # Nothing of this run's own was charged. The cumulative figure still carries the baseline
+        # the root began from, which is a fact about the past rather than an attempt this run made.
+        assert outcome.consumed_physical_attempts - result.carried_forward_consumed == 0  # type: ignore[attr-defined]
         assert factory.transports[0].requests == []  # no physical send was reached
         assert result.accounting.status_event_count == 0  # type: ignore[attr-defined]
         assert _catalog_rows(tmp_path, "SELECT * FROM ops_retrieval_attempts") == []
@@ -5549,10 +5677,14 @@ class TestPreSendAttemptLedger:
         from disclosure_drift.config import load_config
         from disclosure_drift.errors import GateFailureError
 
-        plan = _plan()
+        plan = _live_plan()
         _interrupt_at(monkeypatch, AggregateRateLimiter, "acquire", call=1)
         result, _ = _run_live(tmp_path, plan, _success_script(plan))
-        assert result.outcome.consumed_physical_attempts == 0  # type: ignore[attr-defined]
+        assert (
+            result.outcome.consumed_physical_attempts  # type: ignore[attr-defined]
+            - result.carried_forward_consumed  # type: ignore[attr-defined]
+            == 0
+        )
 
         with pytest.raises(GateFailureError, match="no physical attempt"):
             _live_acquisition_receipt(
@@ -5629,3 +5761,1092 @@ class TestPreSendAttemptLedger:
         rows = _catalog_rows(tmp_path, "SELECT attempt_state FROM ops_retrieval_attempts")
         assert len(rows) == 1
         assert rows[0]["attempt_state"] == "started"  # stranded but consumed; no fabricated receipt
+
+
+# --------------------------------------------------------------------------- #
+# The one-use clean-root carry-in authority (accepted Decision 055 §6, ruling 055-B)
+#
+# It is never a resume, it is validated before a transport can be constructed, and it is consumed
+# exactly once by a deterministic `ops_checkpoints` primary key inside the same `BEGIN IMMEDIATE`
+# transaction as run registration.
+# --------------------------------------------------------------------------- #
+_CARRY_IN_RUN = "m3-2-acquisition-carry-in-fixture"
+
+
+def _authority_document(**overrides: object) -> dict[str, object]:
+    """The canonical artifact body, with one binding overridable per refusal test.
+
+    Every value here is the accepted Decision 055 one, because the artifact boundary compares them
+    literally: window ``M3.2A``, the frozen plan, ceiling ``801``, seed ``1`` allocated wholly to
+    ``sec_bulk_submissions``, and ``Decision 055`` as the authorizing record. The one synthetic
+    value is the orphan-adoption decision, which names a later Path-B act that has not happened;
+    ``Decision 999`` is used for it, as clearly synthetic test data.
+    """
+    document: dict[str, object] = {
+        "acquisition_window": CARRY_IN_ACQUISITION_WINDOW,
+        "approved_request_ceiling": CARRY_IN_APPROVED_REQUEST_CEILING,
+        "authorized_census_run_id": _CARRY_IN_RUN,
+        "authorizing_decision_reference": CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+        "historical_consumed_request_count": CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+        "historical_route_allocation": dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION),
+        "orphan_adoption_decision_reference": "Decision 999",
+        "orphan_adoption_evidence_sha256": "f" * 64,
+        "request_plan_sha256": CARRY_IN_REQUEST_PLAN_SHA256,
+        "schema_version": CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+    }
+    document.update(overrides)
+    return document
+
+
+def _authority_bytes(**overrides: object) -> bytes:
+    from disclosure_drift.m3.receipt import canonical_bytes
+
+    return canonical_bytes(_authority_document(**overrides))
+
+
+def _authority(**overrides: object) -> CarryInAuthority:
+    """One authority admitted through the real artifact boundary, bindings and all."""
+    return load_carry_in_authority(_authority_bytes(**overrides))
+
+
+def _live_authority(run_id: str, *, evidence: str = "f" * 64) -> CarryInAuthority:
+    """The legitimate carry-in every live-driver fixture uses, naming ``run_id``.
+
+    Minted as **bytes** and admitted through :func:`load_carry_in_authority`, exactly as an
+    operator's artifact is, so nothing in these suites hands the production driver an authority the
+    artifact boundary would not have produced. Only the authorized run identity varies between
+    fixtures; every binding that Decision 055 fixes is the accepted value, which is why the
+    invocation it is handed to must be the frozen plan at ceiling ``801`` (:func:`_live_plan`).
+
+    ``evidence`` varies the orphan-adoption evidence identity, which is the one remaining binding
+    two *lawful* authorities may legitimately differ on. It exists so a fixture can mint two
+    genuinely distinct authorities that name the **same** run — distinct bytes, distinct hashes,
+    distinct single-use keys — which is what proving the run-identity collision requires.
+
+    Defined here, beside the artifact fixtures it is built from, and called from
+    :func:`_live_arguments` far above — resolved at call time, like every other helper in this
+    module.
+    """
+    return load_carry_in_authority(
+        _authority_bytes(authorized_census_run_id=run_id, orphan_adoption_evidence_sha256=evidence)
+    )
+
+
+class TestCarryInAuthorityArtifact:
+    """§6.1-§6.2: canonical bytes, a closed binding set, and a hash that identifies them."""
+
+    def test_the_identity_is_the_digest_of_the_exact_canonical_bytes(self) -> None:
+        payload = _authority_bytes()
+
+        authority = load_carry_in_authority(payload)
+
+        assert authority.authority_sha256 == hashlib.sha256(payload).hexdigest()
+
+    def test_the_artifact_carries_no_circular_self_hash_field(self) -> None:
+        """§6.1 forbids one: a hash inside its own preimage could never be verified."""
+
+        with pytest.raises(CarryInAuthorityError, match="no self-hash field is permitted"):
+            load_carry_in_authority(_authority_bytes(authority_sha256="a" * 64))
+
+    def test_noncanonical_bytes_are_refused(self) -> None:
+        """Re-canonicalizing would silently change the identity the owner approved."""
+        noncanonical = json.dumps(_authority_document(), indent=2).encode()
+
+        with pytest.raises(CarryInAuthorityError, match="canonical form"):
+            load_carry_in_authority(noncanonical)
+
+    def test_bytes_that_are_not_readable_json_are_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="readable UTF-8 JSON"):
+            load_carry_in_authority(b"{not json\n")
+
+    @pytest.mark.parametrize("binding", sorted(_authority_document()))
+    def test_every_required_binding_is_mandatory(self, binding: str) -> None:
+        """§6.1: all of them. A missing binding is refused, never inferred or defaulted."""
+        from disclosure_drift.m3.receipt import canonical_bytes
+
+        document = _authority_document()
+        del document[binding]
+
+        with pytest.raises(CarryInAuthorityError, match="missing required binding"):
+            load_carry_in_authority(canonical_bytes(document))
+
+    def test_an_unknown_field_is_refused(self) -> None:
+
+        with pytest.raises(CarryInAuthorityError, match="unpermitted field"):
+            load_carry_in_authority(_authority_bytes(operator_note="anything"))
+
+    def test_a_wrong_schema_version_is_refused(self) -> None:
+
+        with pytest.raises(CarryInAuthorityError, match="schema"):
+            load_carry_in_authority(_authority_bytes(schema_version="m3-carry-in/2.0"))
+
+    def test_an_artifact_carrying_a_private_absolute_path_is_refused(self) -> None:
+        """§6.1: no secret, no identity header, no response body, and no private absolute path.
+
+        The probe is absolute but deliberately not home-shaped, so this positive control does not
+        itself put a `/Users/...`-style path into a tracked file for `make hygiene` to find.
+        """
+
+        with pytest.raises(CarryInAuthorityError, match="prohibited content"):
+            load_carry_in_authority(
+                _authority_bytes(authorizing_decision_reference="/private/evidence/root")
+            )
+
+    def test_an_artifact_carrying_an_identity_value_is_refused(self) -> None:
+
+        with pytest.raises(CarryInAuthorityError, match="prohibited content"):
+            load_carry_in_authority(
+                _authority_bytes(authorizing_decision_reference="operator@example.com")
+            )
+
+
+def _direct_authority(**overrides: object) -> CarryInAuthority:
+    """One authority constructed directly, for shapes the artifact boundary now forbids.
+
+    The invocation layer must still refuse a route allocation that does not account for its own
+    baseline, and one naming an unregistered route. Neither can reach it through
+    :func:`load_carry_in_authority` any more, because the fixed Decision 055 bindings refuse both
+    first — so those refusals are exercised on a directly constructed value instead of being
+    silently untested behind an earlier gate.
+    """
+    fields: dict[str, object] = {
+        "authority_sha256": "a" * 64,
+        "acquisition_window": CARRY_IN_ACQUISITION_WINDOW,
+        "request_plan_sha256": CARRY_IN_REQUEST_PLAN_SHA256,
+        "approved_request_ceiling": CARRY_IN_APPROVED_REQUEST_CEILING,
+        "historical_consumed_request_count": CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+        "historical_route_allocation": dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION),
+        "authorizing_decision_reference": CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+        "authorized_census_run_id": _CARRY_IN_RUN,
+        "orphan_adoption_decision_reference": "Decision 999",
+        "orphan_adoption_evidence_sha256": "f" * 64,
+    }
+    fields.update(overrides)
+    return CarryInAuthority(**fields)  # type: ignore[arg-type]
+
+
+class TestCarryInFixedBindings:
+    """§5, §6.1: the artifact must be *the* accepted carry-in, not merely a self-consistent one.
+
+    Every case here is refused at the artifact boundary, where an authority is made from bytes.
+    Each artifact is internally coherent — its route allocation sums to its declared seed, its
+    ceiling is whatever it claims — so nothing but comparison against the accepted Decision 055
+    values could reject it. That is the point: an artifact's author controls the artifact, so
+    self-consistency proves nothing about authorization.
+    """
+
+    def test_the_canonical_decision_055_carry_in_is_admitted(self) -> None:
+        """The positive control, so none of the refusals below is vacuous."""
+        authority = _authority()
+
+        assert authority.acquisition_window == "M3.2A"
+        assert authority.approved_request_ceiling == 801
+        assert authority.historical_consumed_request_count == 1
+        assert dict(authority.historical_route_allocation) == {"sec_bulk_submissions": 1}
+        assert authority.request_plan_sha256 == CARRY_IN_REQUEST_PLAN_SHA256
+        assert authority.authorizing_decision_reference == "Decision 055"
+
+    def test_a_self_consistent_artifact_seeded_at_zero_is_refused(self) -> None:
+        """The defect this binding exists for: a fresh run silently restarting the count.
+
+        The artifact below is entirely self-consistent — a baseline of ``0`` allocated as ``0`` —
+        and would satisfy any check that only compared the artifact against itself.
+        """
+        with pytest.raises(CarryInAuthorityError, match="historical consumed baseline of 0"):
+            _authority(
+                historical_consumed_request_count=0,
+                historical_route_allocation={"sec_bulk_submissions": 0},
+            )
+
+    def test_a_self_consistent_artifact_on_another_registered_route_is_refused(self) -> None:
+        """A *registered* route, so route-registration checks alone would admit it."""
+        with pytest.raises(CarryInAuthorityError, match="allocates the historical attempt"):
+            _authority(historical_route_allocation={"sec_submissions": 1})
+
+    def test_an_allocation_naming_an_extra_route_is_refused(self) -> None:
+        """The allocation is compared whole; a route added beside the accepted one is not it.
+
+        The extra route carries ``0``, so the allocation still sums to the accepted seed of ``1``
+        and every internal-consistency check it could face still passes.
+        """
+        with pytest.raises(CarryInAuthorityError, match="allocates the historical attempt"):
+            _authority(
+                historical_route_allocation={"sec_bulk_submissions": 1, "sec_submissions": 0},
+            )
+
+    def test_a_false_authorizing_decision_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="as its authorizing decision"):
+            _authority(authorizing_decision_reference="Decision 042")
+
+    def test_a_ceiling_other_than_801_is_refused(self) -> None:
+        """Not 802, not additive, not a shadow ceiling — the cumulative ceiling is 801."""
+        with pytest.raises(CarryInAuthorityError, match="names ceiling 802"):
+            _authority(approved_request_ceiling=802)
+
+    def test_a_plan_other_than_the_frozen_one_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="other than the frozen Decision 055 plan"):
+            _authority(request_plan_sha256="b" * 64)
+
+    def test_a_window_other_than_m3_2a_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="authorizes a carry-in for 'M3.2A' alone"):
+            _authority(acquisition_window="M3.2B")
+
+    @pytest.mark.parametrize(
+        "reference",
+        ["055", "decision_0XX_orphan_adoption_fixture", "Decision 55", "Decision 0999", ""],
+    )
+    def test_a_non_canonical_orphan_adoption_decision_is_refused(self, reference: str) -> None:
+        """§9 binds a *resolvable* later record, not a description of one."""
+        with pytest.raises(CarryInAuthorityError):
+            _authority(orphan_adoption_decision_reference=reference)
+
+    def test_the_orphan_adoption_decision_may_not_be_decision_055_itself(self) -> None:
+        """§9: Decision 055 expressly neither designs nor performs the adoption."""
+        with pytest.raises(CarryInAuthorityError, match="separately authorized later Path-B act"):
+            _authority(orphan_adoption_decision_reference="Decision 055")
+
+    @pytest.mark.parametrize(
+        "evidence",
+        ["F" * 64, "f" * 63, "f" * 65, "sha256:" + "f" * 64, "the adoption evidence bundle"],
+    )
+    def test_a_non_sha256_orphan_adoption_evidence_identity_is_refused(self, evidence: str) -> None:
+        with pytest.raises(CarryInAuthorityError, match="not a lowercase 64-hex SHA-256"):
+            _authority(orphan_adoption_evidence_sha256=evidence)
+
+
+class TestCarryInAuthorityBindings:
+    """§6.4: every mismatch against *this invocation* refuses, and each one names itself."""
+
+    def test_a_matching_authority_verifies(self) -> None:
+        verify_carry_in_authority(
+            _authority(),
+            window=CARRY_IN_ACQUISITION_WINDOW,
+            plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+            approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+            resuming=False,
+        )
+
+    def test_a_window_mismatch_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="window"):
+            verify_carry_in_authority(
+                _authority(),
+                window="M3.2B",
+                plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=False,
+            )
+
+    def test_a_plan_hash_mismatch_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="different approved request plan"):
+            verify_carry_in_authority(
+                _authority(),
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256="b" * 64,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=False,
+            )
+
+    def test_a_ceiling_mismatch_is_refused_and_never_made_additive(self) -> None:
+        """A carry-in never raises, resets, shadows, or adds to the cumulative ceiling."""
+        with pytest.raises(CarryInAuthorityError, match="never reset, raised, shadowed"):
+            verify_carry_in_authority(
+                _authority(),
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING + 1,
+                resuming=False,
+            )
+
+    def test_a_route_allocation_that_does_not_account_for_the_baseline_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="account for the baseline exactly"):
+            verify_carry_in_authority(
+                _direct_authority(historical_route_allocation={"sec_bulk_submissions": 2}),
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=False,
+            )
+
+    def test_an_unregistered_route_allocation_is_refused(self) -> None:
+        with pytest.raises(CarryInAuthorityError, match="not a registered source route"):
+            verify_carry_in_authority(
+                _direct_authority(historical_route_allocation={"sec_not_a_route": 1}),
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=False,
+            )
+
+    def test_a_carry_in_may_never_coexist_with_a_resume(self) -> None:
+        """§6: the carry-in interface is never resume, and refuses to be treated as one."""
+        with pytest.raises(CarryInAuthorityError, match="never a resume"):
+            verify_carry_in_authority(
+                _authority(),
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=True,
+            )
+
+
+def _forged_authority(**overrides: object) -> CarryInAuthority:
+    """A hand-built authority: no artifact, no artifact boundary, arbitrary bindings.
+
+    This is the object the reproduced finding constructs — window ``M3.2A`` and ceiling ``801`` so
+    it looks right where a shallow check would look, but seeded at ``0``, naming an arbitrary plan,
+    and citing a decision that authorized nothing. Every reference is syntactically valid, so
+    nothing but comparison against the accepted values and the canonical identity can reject it.
+    """
+    fields: dict[str, object] = {
+        "authority_sha256": "a" * 64,
+        "acquisition_window": CARRY_IN_ACQUISITION_WINDOW,
+        "request_plan_sha256": "b" * 64,
+        "approved_request_ceiling": CARRY_IN_APPROVED_REQUEST_CEILING,
+        "historical_consumed_request_count": 0,
+        "historical_route_allocation": {"sec_bulk_submissions": 0},
+        "authorizing_decision_reference": "Decision 999",
+        "authorized_census_run_id": _CARRY_IN_RUN,
+        "orphan_adoption_decision_reference": "Decision 998",
+        "orphan_adoption_evidence_sha256": "f" * 64,
+    }
+    fields.update(overrides)
+    return CarryInAuthority(**fields)  # type: ignore[arg-type]
+
+
+class TestCarryInAuthorityReproof:
+    """The artifact gate is a property of the *object*, not of how it happened to be made.
+
+    :func:`load_carry_in_authority` is the only place bytes become an authority, but
+    :class:`CarryInAuthority` is a public dataclass — so a production surface handed one has no
+    evidence it came from an artifact at all, and "the loader validated it" is an assumption rather
+    than a fact about the value in hand. Every surface that **executes** or **burns** an authority
+    therefore re-proves the §6.1 content rule, the fixed Decision 055 bindings, *and* the canonical
+    external identity from the object itself (:func:`require_admitted_carry_in_authority`).
+
+    Each test below hands a production entry point an authority no owner minted, and asserts the
+    refusal *and* its blast radius: no job row, no checkpoint row, no transport. The identity half
+    is an integrity check rather than an authentication;
+    :class:`TestCarryInProhibitedContentReproof` covers what that does and does not buy, on
+    objects that recompute their own digest.
+    """
+
+    def test_the_reproduced_forgery_is_refused_by_the_invocation_gate(self) -> None:
+        """Seed ``0``, an arbitrary plan, a decision that authorized nothing — and an invocation
+        that agrees with all of it, so only the accepted values can refuse it."""
+        with pytest.raises(CarryInAuthorityError, match="frozen Decision 055 plan"):
+            verify_carry_in_authority(
+                _forged_authority(),
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256="b" * 64,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=False,
+            )
+
+    def test_copying_every_fixed_binding_leaves_the_external_identity_describing_nothing(
+        self,
+    ) -> None:
+        """Copying the public constants is not enough: the carried identity must still fit.
+
+        This forgery satisfies every value comparison there is, and is refused anyway, because its
+        ``authority_sha256`` is not the digest of its own canonical document. That is an
+        **integrity** check, not an authentication: a forger who also recomputed the digest would
+        pass it, which :class:`TestCarryInProhibitedContentReproof` relies on and states in full.
+        What this refuses is the cheap case — bindings assembled or edited without the identity
+        being brought along.
+        """
+        copycat = _forged_authority(
+            request_plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+            historical_consumed_request_count=CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+            historical_route_allocation=dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION),
+            authorizing_decision_reference=CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+        )
+
+        with pytest.raises(CarryInAuthorityError, match="external identity is not the SHA-256"):
+            verify_carry_in_authority(
+                copycat,
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                approved_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+                resuming=False,
+            )
+
+    @pytest.mark.parametrize(
+        "identity", ["A" * 64, "a" * 63, "a" * 65, "sha256:" + "a" * 64, "not a hash"]
+    )
+    def test_an_identity_that_is_not_a_lowercase_64_hex_digest_is_refused(
+        self, identity: str
+    ) -> None:
+        with pytest.raises(CarryInAuthorityError, match="lowercase 64-hex SHA-256"):
+            require_admitted_carry_in_authority(
+                _forged_authority(
+                    authority_sha256=identity,
+                    request_plan_sha256=CARRY_IN_REQUEST_PLAN_SHA256,
+                    historical_consumed_request_count=CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+                    historical_route_allocation=dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION),
+                    authorizing_decision_reference=CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+                )
+            )
+
+    def test_the_identity_is_recomputed_rather_than_read_back(self) -> None:
+        """Change one binding on an admitted authority and its identity stops describing it.
+
+        ``authorized_census_run_id`` is inside the canonical preimage, so a copy that keeps the
+        original digest is exactly the "same authority, different run" forgery the digest exists to
+        catch — and nothing else in the re-proof compares that field at all.
+        """
+        admitted = _authority()
+        require_admitted_carry_in_authority(admitted)  # the positive control
+
+        with pytest.raises(CarryInAuthorityError, match="external identity is not the SHA-256"):
+            require_admitted_carry_in_authority(
+                replace(admitted, authorized_census_run_id="some-other-run")
+            )
+
+    def test_an_admitted_route_allocation_cannot_be_mutated_through_the_authority(self) -> None:
+        """Prevention: the mapping an admitted authority carries is not writable at all."""
+        admitted = _authority()
+
+        with pytest.raises(TypeError):
+            admitted.historical_route_allocation["sec_company_tickers"] = 0  # type: ignore[index]
+
+    def test_a_route_allocation_mutated_after_admission_is_refused(self, tmp_path: Path) -> None:
+        """Detection: the same object, admitted, then refused once its mapping moves under it.
+
+        The proxy above stops this on a loaded authority, so the mutable case is reconstructed
+        deliberately — an authority holding an ordinary dict, admitted, and then re-proved after
+        the dict gains a second route. Prevention and detection are separate controls and both are
+        wanted: one of them holds if the other is ever removed.
+
+        The added route is ``sec_company_tickers``: genuinely **registered**, and carrying ``0``, so
+        the allocation still sums to the accepted seed of ``1`` and every check that predates this
+        correction — the route-registration check and the sum-accounts-for-the-baseline check —
+        passes it. Only the whole-mapping comparison against the accepted allocation refuses it.
+        """
+        admitted = _authority()
+        allocation = dict(admitted.historical_route_allocation)
+        carried = replace(admitted, historical_route_allocation=allocation)
+        require_admitted_carry_in_authority(carried)
+
+        allocation["sec_company_tickers"] = 0
+
+        with pytest.raises(CarryInAuthorityError, match="allocates the historical attempt"):
+            require_admitted_carry_in_authority(carried)
+
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = carried
+
+        with pytest.raises(CarryInAuthorityError):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+        assert _catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints") == []
+
+    def test_the_live_driver_refuses_a_forged_authority_before_job_checkpoint_or_transport(
+        self, tmp_path: Path
+    ) -> None:
+        """The reproduced bypass, at the surface it would have been exploited through."""
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = _forged_authority(request_plan_sha256=plan.request_plan_sha256)
+
+        with pytest.raises(CarryInAuthorityError):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0, "no transport was constructed"
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+        assert _catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints") == []
+
+    def test_direct_registration_of_a_forged_authority_leaves_neither_row(
+        self, tmp_path: Path
+    ) -> None:
+        """The burn site is reachable on its own, so it re-proves on its own.
+
+        Consumption is the irreversible half of the mechanism: a forged authority that reached it
+        would burn a deterministic key nothing can un-burn, and register a governed run beside it.
+        """
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.raises(CarryInAuthorityError):
+            register_acquisition_run(
+                catalog_path=catalog.database_path,
+                lock_directory=catalog.lock_directory,
+                census_run_id=_CARRY_IN_RUN,
+                window="M3.2A",
+                started_at_utc="2026-08-09T00:00:00Z",
+                detail="a forged carry-in must burn nothing",
+                carry_in=_forged_authority(),
+            )
+
+        assert _catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints") == []
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+
+    def test_the_live_harness_authority_is_admitted_through_the_artifact_boundary(self) -> None:
+        """Non-vacuity for every successful live-driver test in this module.
+
+        A refusal proved with a forged authority means nothing if the *successful* runs are also
+        driven by one. They are not: the harness default is minted as canonical bytes and admitted
+        by :func:`load_carry_in_authority`, and it binds the frozen plan and ceiling ``801`` — so
+        the invocation it authorizes is the only one a lawful clean M3.2A run can have.
+        """
+        authority = _live_authority(_CARRY_IN_RUN)
+        plan = _live_plan()
+
+        assert authority == load_carry_in_authority(
+            _authority_bytes(authorized_census_run_id=_CARRY_IN_RUN)
+        )
+        assert authority.request_plan_sha256 == CARRY_IN_REQUEST_PLAN_SHA256
+        assert plan.request_plan_sha256 == CARRY_IN_REQUEST_PLAN_SHA256
+        assert authority.approved_request_ceiling == plan.hard_request_ceiling == 801
+        assert authority.historical_consumed_request_count == 1
+
+
+#: A synthetic private absolute path. Absolute, so §5's absolute-path rule fires on it, and
+#: deliberately not home-shaped — no ``/Users/…``-style path goes into a tracked file for
+#: ``make hygiene`` to find. It names no real machine, person, evidence root, or artifact.
+_PRIVATE_PATH_PROBE: Final = "/private/evidence/root/authority.json"
+
+#: A synthetic identity value, on the reserved ``example.com`` domain. No real address.
+_IDENTITY_PROBE: Final = "operator@example.com"
+
+
+def _self_certified_authority(**overrides: object) -> CarryInAuthority:
+    """A hand-built authority carrying the digest of its **own** current document.
+
+    This is the object the whole class below turns on, and being able to build it is the point.
+    The external identity is an **integrity** identity, not a signature: it is a SHA-256 over
+    public bindings, by a published rule, with no secret and no key anywhere in it. Any caller
+    holding this module can therefore recompute a digest that matches whatever bindings it chose.
+    A digest match proves an authority's bindings are internally intact and have not moved since
+    it was minted; it never proves the artifact came from the governed evidence root, which stays
+    a **procedural** provenance control that no in-process check can stand in for.
+
+    So a re-proof may not lean on the digest to infer that :func:`load_carry_in_authority` ever
+    ran. Every §6.1 property an execution or burn boundary needs, it has to prove from the object
+    in hand — which is exactly what these tests hold it to.
+    """
+    from disclosure_drift.m3.receipt import canonical_bytes
+
+    document = _authority_document(**overrides)
+    fields = {name: value for name, value in document.items() if name != "schema_version"}
+    return CarryInAuthority(
+        authority_sha256=hashlib.sha256(canonical_bytes(document)).hexdigest(),
+        **fields,  # type: ignore[arg-type]
+    )
+
+
+class TestCarryInProhibitedContentReproof:
+    """§6.1, §6.3: prohibited content is re-proved absent from the object, never from provenance.
+
+    :func:`load_carry_in_authority` scans an artifact's values as bytes, so the CLI path is safe.
+    That is a fact about **one** caller. :class:`CarryInAuthority` is public and every execution
+    and burn boundary is directly reachable, so a boundary handed one has no evidence it came from
+    an artifact — and the digest cannot supply that evidence, because the digest is recomputable
+    (:func:`_self_certified_authority`).
+
+    Without the content re-proof, an authority satisfying every fixed binding and carrying a freshly
+    recomputed matching digest carries a private absolute path or an identity value straight into
+    ``checkpoint_value`` and commits it, which §6.3 forbids **unconditionally**. Each test below
+    therefore drives a real production boundary and asserts the refusal *and* its blast radius.
+    """
+
+    def test_a_self_certified_authority_reproduces_a_minted_identity(self) -> None:
+        """Non-vacuity for every refusal below: the digest genuinely matches.
+
+        If it did not, the identity half of the re-proof would refuse these objects for an
+        unrelated reason and the content assertions would prove nothing.
+        """
+        forged = _self_certified_authority()
+
+        assert forged.authority_sha256 == hashlib.sha256(_authority_bytes()).hexdigest()
+        assert forged.authority_sha256 == _authority().authority_sha256
+
+    def test_a_safe_self_certified_authority_is_still_admitted(self) -> None:
+        """The same-boundary positive control: the guard is on content, not on construction.
+
+        A re-proof that refused every directly built object would pass every refusal test in this
+        class and fail here. Decision 055 draws the line at what an authority *carries*, not at how
+        the object in hand was assembled.
+        """
+        require_admitted_carry_in_authority(_self_certified_authority())
+
+    @pytest.mark.parametrize("probe", [_PRIVATE_PATH_PROBE, _IDENTITY_PROBE])
+    def test_the_reproof_refuses_prohibited_content_without_echoing_it(self, probe: str) -> None:
+        """§6.1: no identity value and no private absolute path, proved from the object.
+
+        ``authorized_census_run_id`` is the one binding Decision 055 leaves free-form, and it is
+        copied verbatim into the checkpoint — so it is where a prohibited value would actually
+        travel. The refusal names the field and the rule, never the value.
+        """
+        with pytest.raises(CarryInAuthorityError, match="prohibited content") as raised:
+            require_admitted_carry_in_authority(
+                _self_certified_authority(authorized_census_run_id=probe)
+            )
+
+        assert probe not in str(raised.value), "a refusal never echoes what it refused"
+
+    def test_the_content_reproof_precedes_the_binding_comparison(self) -> None:
+        """A binding disagreement quotes the value it disagrees with, so content is proved first.
+
+        Here the probe sits in ``authorizing_decision_reference``, which the fixed-binding check
+        reports by quoting. Scanning first is what keeps a prohibited value out of the refusal
+        message as well as out of the checkpoint.
+        """
+        with pytest.raises(CarryInAuthorityError, match="prohibited content") as raised:
+            require_admitted_carry_in_authority(
+                _self_certified_authority(authorizing_decision_reference=_PRIVATE_PATH_PROBE)
+            )
+
+        assert _PRIVATE_PATH_PROBE not in str(raised.value)
+
+    def test_the_burn_boundary_refuses_and_leaves_neither_row(self, tmp_path: Path) -> None:
+        """§6.3: the checkpoint carries no private absolute path, unconditionally.
+
+        Every contextual check at this boundary agrees with the authority — it authorizes the very
+        window being registered and names the very run being registered — so nothing but the §6.1
+        content re-proof can refuse it. Without that re-proof the probe reaches ``checkpoint_value``
+        and commits under a deterministic key nothing can un-burn.
+        """
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.raises(CarryInAuthorityError, match="prohibited content"):
+            register_acquisition_run(
+                catalog_path=catalog.database_path,
+                lock_directory=catalog.lock_directory,
+                census_run_id=_PRIVATE_PATH_PROBE,
+                window=CARRY_IN_ACQUISITION_WINDOW,
+                started_at_utc="2026-08-09T00:00:00Z",
+                detail="a carry-in carrying prohibited content burns nothing",
+                carry_in=_self_certified_authority(authorized_census_run_id=_PRIVATE_PATH_PROBE),
+            )
+
+        assert _catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints") == []
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+
+        # The positive control at the same boundary: the refusal burned nothing, so a lawful
+        # authority still registers its run and burns its one checkpoint here.
+        authority = _authority()
+        register_acquisition_run(
+            catalog_path=catalog.database_path,
+            lock_directory=catalog.lock_directory,
+            census_run_id=authority.authorized_census_run_id,
+            window=CARRY_IN_ACQUISITION_WINDOW,
+            started_at_utc="2026-08-09T00:00:00Z",
+            detail="a lawful carry-in still registers exactly once",
+            carry_in=authority,
+        )
+        assert len(_catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints")) == 1
+        assert len(_catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs")) == 1
+
+    def test_the_live_driver_refuses_before_the_transport_factory_is_invoked(
+        self, tmp_path: Path
+    ) -> None:
+        """§6.2, §6.4: the execution boundary refuses before any transport can be constructed."""
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = _self_certified_authority(
+            authorized_census_run_id=_PRIVATE_PATH_PROBE
+        )
+
+        with pytest.raises(CarryInAuthorityError, match="prohibited content"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0, "no transport was constructed"
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+        assert _catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints") == []
+
+    def test_a_prohibited_value_hidden_in_the_route_allocation_is_refused(self) -> None:
+        """The scan descends: a nested source identifier is no more exempt than a top-level one."""
+        with pytest.raises(CarryInAuthorityError, match="prohibited content"):
+            require_admitted_carry_in_authority(
+                _self_certified_authority(
+                    historical_route_allocation={_IDENTITY_PROBE: 1},
+                )
+            )
+
+
+class TestCarryInConsumption:
+    """§6.3, §6.5: exactly once, atomically, and never automatically reissued."""
+
+    @staticmethod
+    def _checkpoints(evidence_root: Path) -> list:
+        return _catalog_rows(evidence_root, "SELECT * FROM ops_checkpoints")
+
+    @staticmethod
+    def _jobs(evidence_root: Path) -> list:
+        return _catalog_rows(evidence_root, "SELECT * FROM ops_ingestion_jobs")
+
+    def _register(self, tmp_path: Path, authority: CarryInAuthority) -> None:
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+        register_acquisition_run(
+            catalog_path=catalog.database_path,
+            lock_directory=catalog.lock_directory,
+            census_run_id=authority.authorized_census_run_id,
+            window="M3.2A",
+            started_at_utc="2026-08-09T00:00:00Z",
+            detail="carry-in fixture",
+            carry_in=authority,
+        )
+
+    def test_one_consumption_writes_the_checkpoint_and_the_run_together(
+        self, tmp_path: Path
+    ) -> None:
+        authority = _authority()
+
+        self._register(tmp_path, authority)
+
+        checkpoints = self._checkpoints(tmp_path)
+        assert len(checkpoints) == 1
+        assert checkpoints[0]["checkpoint_key"] == authority.checkpoint_key
+        assert authority.authority_sha256 in checkpoints[0]["checkpoint_key"]
+        assert len(self._jobs(tmp_path)) == 1
+
+    def test_the_checkpoint_value_preserves_the_cross_check_data(self, tmp_path: Path) -> None:
+        """§6.3: enough canonical safe data for the later receipt and catalog cross-checks."""
+        authority = _authority()
+
+        self._register(tmp_path, authority)
+
+        recorded = json.loads(self._checkpoints(tmp_path)[0]["checkpoint_value"])
+        assert recorded["consumed_request_count_carried_forward"] == 1
+        assert recorded["authority_sha256"] == authority.authority_sha256
+        assert recorded["acquisition_window"] == "M3.2A"
+        assert recorded["authorized_census_run_id"] == _CARRY_IN_RUN
+
+    def test_the_checkpoint_value_carries_no_prohibited_content(self, tmp_path: Path) -> None:
+        """§6.3: no secret, no identity value, no response body, no private absolute path."""
+        from disclosure_drift.m3.receipt import scan_for_prohibited_content
+
+        authority = _authority()
+        self._register(tmp_path, authority)
+        recorded = self._checkpoints(tmp_path)[0]["checkpoint_value"]
+
+        # Scanned by value, exactly as the artifact itself is: the checkpoint's own keys are the
+        # decision-fixed names, several of which contain the `auth` fragment.
+        for value in json.loads(recorded).values():
+            scan_for_prohibited_content({"value": value})
+
+        assert "@" not in recorded, "no identity value"
+        assert "/Users/" not in recorded and "/home/" not in recorded, "no private absolute path"
+        for marker in ("bearer ", "authorization", "cookie", "secret", "password"):
+            assert marker not in recorded.casefold()
+
+    def test_a_replay_is_refused_and_the_authority_stays_consumed(self, tmp_path: Path) -> None:
+        """§6.4: replay refuses. §6.5: it is never reissued, retried, or replaced automatically."""
+        authority = _authority()
+        self._register(tmp_path, authority)
+
+        with pytest.raises(CarryInAuthorityError, match="already been consumed"):
+            self._register(tmp_path, authority)
+
+        assert len(self._checkpoints(tmp_path)) == 1, "no second checkpoint was minted"
+
+    def test_a_run_id_that_disagrees_with_the_authority_is_refused(self, tmp_path: Path) -> None:
+        authority = _authority()
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.raises(CarryInAuthorityError, match="authorizes run"):
+            register_acquisition_run(
+                catalog_path=catalog.database_path,
+                lock_directory=catalog.lock_directory,
+                census_run_id="some-other-run",
+                window="M3.2A",
+                started_at_utc="2026-08-09T00:00:00Z",
+                detail="carry-in fixture",
+                carry_in=authority,
+            )
+
+        assert self._checkpoints(tmp_path) == []
+        assert self._jobs(tmp_path) == []
+
+    def test_a_window_that_disagrees_with_the_authority_is_refused(self, tmp_path: Path) -> None:
+        """§6.4: a window mismatch refuses here, before the single use can be burned.
+
+        The fixed re-proof establishes that the authority names ``M3.2A``; it establishes nothing
+        about the window *this registration* is for. Those are different facts, and only the second
+        one is contextual — so without comparing them a genuine authority, admitted through the
+        artifact boundary and naming the very run being registered, burns its one use against an
+        ``M3.2B`` job row. That spends the M3-L16 exception on the window that has no historical
+        consumption to carry, and no replacement is ever minted automatically.
+        """
+        authority = _authority()
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.raises(CarryInAuthorityError, match="only by the window it authorizes"):
+            register_acquisition_run(
+                catalog_path=catalog.database_path,
+                lock_directory=catalog.lock_directory,
+                census_run_id=authority.authorized_census_run_id,
+                window="M3.2B",
+                started_at_utc="2026-08-09T00:00:00Z",
+                detail="carry-in fixture",
+                carry_in=authority,
+            )
+
+        assert self._checkpoints(tmp_path) == []
+        assert self._jobs(tmp_path) == []
+
+        # The positive control at the same boundary: because the refusal burned nothing, the very
+        # same artifact still registers the M3.2A run it does authorize, exactly once. A guard that
+        # refused everything would pass the assertions above and fail here.
+        self._register(tmp_path, authority)
+        assert len(self._checkpoints(tmp_path)) == 1
+        assert len(self._jobs(tmp_path)) == 1
+
+    def test_a_failure_after_the_checkpoint_rolls_back_both_rows(self, tmp_path: Path) -> None:
+        """§6.5: all-or-nothing. Neither row survives a failure inside the transaction.
+
+        The failure is injected between the checkpoint insertion and the run registration by making
+        the *second* insert fail, which is the exact window the atomicity rule exists for.
+        """
+        authority = _authority()
+        catalog = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+        real_insert = CatalogWriter.insert
+
+        injected = "injected failure after the checkpoint committed"
+
+        def failing_insert(writer: CatalogWriter, table: str, values: Mapping[str, object]) -> None:
+            if table == "ops_ingestion_jobs":
+                raise sqlite3.OperationalError(injected)
+            real_insert(writer, table, values)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(CatalogWriter, "insert", failing_insert)
+            with pytest.raises(AcquisitionRunError):
+                register_acquisition_run(
+                    catalog_path=catalog.database_path,
+                    lock_directory=catalog.lock_directory,
+                    census_run_id=authority.authorized_census_run_id,
+                    window="M3.2A",
+                    started_at_utc="2026-08-09T00:00:00Z",
+                    detail="carry-in fixture",
+                    carry_in=authority,
+                )
+
+        assert self._checkpoints(tmp_path) == [], "the checkpoint rolled back with the run"
+        assert self._jobs(tmp_path) == []
+
+        # And because neither committed, the authority is genuinely still unconsumed: the same
+        # artifact may still be used once. Atomicity is not a euphemism for a silent burn.
+        self._register(tmp_path, authority)
+        assert len(self._checkpoints(tmp_path)) == 1
+
+    def test_a_pre_wire_failure_after_registration_leaves_the_authority_burned(
+        self, tmp_path: Path
+    ) -> None:
+        """§6.5's burn-before-wire rule: consumed stays consumed, even with zero attempts placed.
+
+        The registration commits, then the invocation fails before any request reaches the wire.
+        Nothing reissues the authority — a replacement is a new owner act, never an automatic
+        recovery — so a second attempt with the same artifact is refused.
+        """
+        plan = _live_plan()
+        authority = _live_authority(_CARRY_IN_RUN)
+        factory = _CountingTransportFactory([])
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = authority
+        # Fail immediately after registration and before the construction site: the fresh
+        # read-only verification sees a stage this invocation is not executing.
+        arguments["window"] = "M3.2A"
+        arguments["catalog"] = prepare_operational_catalog(
+            evidence_root=tmp_path, relative_path=_CATALOG_RELATIVE
+        )
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                acquisition_module,
+                "validate_acquisition_run",
+                lambda *_args, **_kwargs: "M3.2B",
+            )
+            with pytest.raises(AcquisitionRunError):
+                execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0, "the failure happened before the transport was constructed"
+        assert len(self._checkpoints(tmp_path)) == 1, "the authority is burned"
+
+        with pytest.raises(CarryInAuthorityError, match="already been consumed"):
+            self._register(tmp_path, authority)
+
+
+class TestCarryInLiveInvocation:
+    """§5, §6.2, §7.4: the baseline is carried in, and the run reports only its own attempts."""
+
+    def test_a_clean_carry_in_root_runs_under_the_authorized_run_identity(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _live_plan()
+        authority = _live_authority(_CARRY_IN_RUN)
+
+        result, factory = _run_live(
+            tmp_path,
+            plan,
+            _success_script(plan),
+            carry_in=authority,
+            run_id_factory=_never_called_run_id_factory,
+        )
+
+        assert factory.calls == 1
+        assert result.census_run_id == _CARRY_IN_RUN  # type: ignore[attr-defined]
+        assert result.carry_in_authority_sha256 == authority.authority_sha256  # type: ignore[attr-defined]
+        assert result.carried_forward_consumed == 1  # type: ignore[attr-defined]
+        assert not result.resumed  # type: ignore[attr-defined]
+
+    def test_the_window_consumes_the_baseline_plus_only_its_own_attempts(
+        self, tmp_path: Path
+    ) -> None:
+        """§7.4: cumulative is 1 + N, and the receipt's actual count is N alone."""
+        plan = _live_plan()
+        result, _ = _run_live(
+            tmp_path,
+            plan,
+            _success_script(plan),
+            carry_in=_live_authority(_CARRY_IN_RUN),
+        )
+        outcome = result.outcome  # type: ignore[attr-defined]
+
+        placed = sum(item.attempts for item in outcome.outcomes)
+        assert outcome.consumed_physical_attempts == 1 + placed
+        assert result.carried_forward_consumed == 1  # type: ignore[attr-defined]
+
+    def test_a_carry_in_and_a_resume_together_refuse_before_any_transport(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = _live_authority(_CARRY_IN_RUN)
+        arguments["continuation"] = object()  # never inspected: the refusal precedes any use
+
+        with pytest.raises(CarryInAuthorityError, match="never a resume"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+    @pytest.mark.parametrize(
+        ("override", "match"),
+        [
+            ({"acquisition_window": "M3.2B"}, "window"),
+            ({"request_plan_sha256": "b" * 64}, "different approved request plan"),
+            ({"historical_route_allocation": {"sec_bulk_submissions": 3}}, "account for"),
+        ],
+    )
+    def test_every_binding_mismatch_refuses_before_the_transport_factory_is_invoked(
+        self, tmp_path: Path, override: dict[str, object], match: str
+    ) -> None:
+        """§6.4: each of these refuses *before transport construction*, proven by the call count."""
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = replace(
+            _live_authority(_CARRY_IN_RUN),
+            **override,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(CarryInAuthorityError, match=match):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+    def test_a_replayed_authority_refuses_before_the_transport_factory_is_invoked(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _live_plan()
+        authority = _live_authority(_CARRY_IN_RUN)
+        _run_live(tmp_path, plan, _success_script(plan), carry_in=authority)
+
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = authority
+
+        with pytest.raises(CarryInAuthorityError, match="already been consumed"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0
+
+
+def _never_called_run_id_factory() -> str:
+    """A run-id factory that fails the test if a carry-in root ever generates its own identity."""
+    message = "a carry-in root must use the run identity its authority names, never a random one"
+    raise AssertionError(message)
+
+
+class TestM32ABaselineInterlock:
+    """M3-L16: an M3.2A live acquisition states the baseline it begins from, or it does not run.
+
+    The entry's stop condition is "any run observed starting its consumed count at zero", and
+    before Decision 055 there was no mechanism to carry the historical baseline into a clean run.
+    Now that there is one, a run that supplies neither it nor a predecessor receipt is refused —
+    at the direct API as well as at the command surface, so a caller several frames away cannot
+    reach the transport with a zero baseline.
+    """
+
+    def test_neither_a_carry_in_nor_a_resume_refuses_before_any_durable_state(
+        self, tmp_path: Path
+    ) -> None:
+        """The refusal precedes the run registration and the transport factory, both proven."""
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None
+
+        with pytest.raises(AcquisitionGateError, match="must state the consumed baseline"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0, "no transport was constructed"
+        assert _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs") == []
+        assert _catalog_rows(tmp_path, "SELECT checkpoint_key FROM ops_checkpoints") == []
+
+    def test_a_carry_in_satisfies_the_interlock(self, tmp_path: Path) -> None:
+        """The positive control: the same invocation runs once it states its baseline."""
+        plan = _live_plan()
+        result, factory = _run_live(tmp_path, plan, _success_script(plan))
+
+        assert factory.calls == 1
+        assert result.carried_forward_consumed == 1  # type: ignore[attr-defined]
+
+    def test_a_resume_satisfies_the_interlock_without_a_carry_in(self, tmp_path: Path) -> None:
+        """The second lawful source: a resume inherits its baseline from its predecessor."""
+        plan = _live_plan()
+        _run_live(tmp_path, plan, _success_script(plan), run_id="run-interlock-first")
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None
+        arguments["continuation"] = _continuation(plan, remaining_count=2)
+
+        execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 1
+
+    def test_another_window_keeps_its_ordinary_zero_baseline_root(self, tmp_path: Path) -> None:
+        """Scoped to M3.2A. M3.2B has no historical consumption to carry, and is untouched.
+
+        Proven by the refusal it *does* reach: an M3.2A plan is not executed against another
+        window, which the window bindings decide. That refusal is reached with no baseline source
+        supplied at all — had the interlock been window-blind, it would have fired first and the
+        message would be the baseline one instead.
+        """
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory, window="M3.2B")
+        assert arguments["carry_in"] is None, "no baseline source is supplied for this window"
+
+        with pytest.raises(AcquisitionGateError, match="never executed against another window"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+
+        assert factory.calls == 0

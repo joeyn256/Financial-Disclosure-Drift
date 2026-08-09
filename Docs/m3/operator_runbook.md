@@ -461,7 +461,7 @@ python -m disclosure_drift m3 acquire --plan <path> --window M3.2A --live --ceil
 |---|---|
 | Purpose | Execute exactly the approved plan, metadata only |
 | Network | **Live, and only here.** Requires `--live`, an enabled configuration, a valid identity, and a matching plan hash |
-| Arguments | `--plan <path>`; `--window {M3.2A,M3.2B}`; `--live` (explicit, no default); `--ceiling <INT>` (must equal **that window's** approved ceiling); `--resume-from <receipt>` (recovery only); `--receipt-out <private-path>` |
+| Arguments | `--plan <path>`; `--window {M3.2A,M3.2B}`; `--live` (explicit, no default); `--ceiling <INT>` (must equal **that window's** approved ceiling); `--resume-from <receipt>` (recovery only); `--carry-in-authority <path>` (clean-root consumed baseline only — **never a resume**, and mutually exclusive with `--resume-from`; see step 27a); `--receipt-out <private-path>` |
 | Stdout | Progress by route: planned, attempted, succeeded, classified, stored — then the totals |
 | Stop behaviour | **Refuses the attempt that would exceed the ceiling**; halts aggregate traffic on `403` or unqualified `429`; fails closed on blocking schema drift |
 | Side effects | Immutable raw objects; source observations; catalog rows inside their transaction; quarantine entries; one receipt |
@@ -672,6 +672,70 @@ predecessor receipt.
 
 **On `UNDETERMINED`, stop.** Recovery uncertainty is a stop condition, not a judgement call.
 
+### 27a. Carrying an approved consumed baseline into a clean new run
+
+**`PLANNED — NOT YET AUTHORIZED`** · **`MANUAL OWNER APPROVAL`** · **`RECOVERY`**
+
+**This is not a resume, and it is not currently authorized to run.** A resume continues an exact
+predecessor receipt; a **carry-in root** starts a *clean* run that nonetheless begins from an
+owner-approved non-zero consumed baseline. The two may never be combined, and
+`--carry-in-authority` together with `--resume-from` is refused as a usage error before anything is
+read or created.
+
+```
+python -m disclosure_drift m3 acquire --plan <relative-path> --live --window M3.2A \
+  --ceiling 801 --carry-in-authority <relative-path> --receipt-out <relative-path> \
+  --catalog <relative-path> --data-root <relative-path-below-evidence-root>
+```
+
+The authority is a canonical-JSON artifact under schema `m3-carry-in-authority/1.0`, supplied by a
+**relative path beneath the evidence root** — an absolute or escaping path is refused. It binds, all
+mandatory: window `M3.2A`, the frozen request-plan SHA-256, the cumulative ceiling `801`, the
+historical seed `1`, that attempt's allocation to `sec_bulk_submissions`, `Decision 055` as the
+authorizing record, the authorized new run id, and the later accepted orphan-adoption decision and
+evidence identities. Its identity is the SHA-256 of its own canonical bytes; it contains no
+self-hash field, no secret, no identity value, no response body, and no private absolute path.
+
+**Those bindings are compared against the accepted values, not merely for internal consistency.**
+An artifact seeded at `0`, allocating the attempt to a different registered route, naming another
+plan or ceiling, or citing a decision that authorized nothing is **refused** even when it agrees
+with itself and with the command line — its author chose both. The orphan-adoption reference must
+be a canonical `Decision NNN` that is **not** Decision 055 (which expressly neither designs nor
+performs that adoption), and its evidence identity must be a lowercase 64-hex SHA-256.
+
+**What the operator must understand before ever using it:**
+
+1. **It is consumed exactly once.** Consumption is a deterministic `ops_checkpoints` row committed in
+   the *same* transaction as the new run's registration. Both commit, or neither exists.
+2. **A burned authority stays burned.** If the invocation fails *after* that commit but *before* any
+   request reaches the wire, the authority is spent with zero attempts placed. **Nothing reissues it
+   automatically** — no retry, no replacement, no second use. A replacement is a new owner act.
+3. **Re-running the same artifact is refused**, before any transport is constructed.
+4. **The run id comes from the artifact**, not from the command line and not from random generation.
+5. **The ceiling is not raised.** The gate is built with ceiling `801` and consumed `1`; cumulative
+   consumption is `1 + N`. There is no `802`, no additive or shadow ceiling, and no reset.
+6. **The receipt records `N`, not `1 + N`.** A carry-in root's `actual_physical_attempt_count` is this
+   invocation's wire attempts only; its baseline is in
+   `consumed_request_count_carried_forward`, and it names the authority in
+   `carry_in_authority_sha256`.
+
+Every one of the following **refuses before a transport is constructed**: a replayed authority; a
+run-id mismatch; a plan, window, ceiling, seed, or route mismatch; malformed or noncanonical bytes; a
+missing binding; an unsafe or escaping artifact path; and coexistence with `--resume-from`.
+
+**An M3.2A run with no baseline source at all is refused too.** Omitting both
+`--carry-in-authority` and `--resume-from` does not fall back to a zero baseline — the command
+exits `4` before it creates the operational catalog, prepares storage, or constructs anything. A
+run that silently restarted the consumed count at zero is a recorded stop condition
+(**M3-L16**), and the count already stands at `1` of `801`.
+
+**Preconditions that are not satisfied today.** `m3 acquire --live` remains gated by the accepted
+ladder — both tracked network switches, a valid SEC identity, and a separate per-window owner
+authorization. **In addition, no clean carry-in run may be authorized until the separately
+authorized, offline, one-time, verified orphan adoption has executed and been accepted with zero
+unresolved historical orphan mismatch** (limitations register **M3-L16**). Until then, do not mint a
+carry-in artifact and do not run this command.
+
 ## 28. Escalate an unrecognized failure
 
 **`MANUAL OWNER APPROVAL`**
@@ -777,6 +841,7 @@ deleted; every gate green.
 | `m3 show-receipt` | M3.1 | **implemented** | Render a receipt, failing closed on a prohibited field |
 | `m3 acquire --show-scope` | M3.2 | planned | Print the exact network scope; zero requests |
 | `m3 acquire --live` | M3.2 | planned | Execute the approved plan, metadata only |
+| `m3 acquire --carry-in-authority` | M3.2 | planned — **not authorized to run** | Begin a clean run from an owner-approved consumed baseline; consumed exactly once; never a resume (step 27a) |
 | `m3 reconcile-requests` | M3.2 | planned | Planned versus actual, per route and total |
 | `m3 show-drift` | M3.2 | planned | Every drift event, blocking ones separated |
 | `m3 recovery-state` | M3.1 (used by M3.2) | **implemented** | Read-only interruption state and safe-resume determination; never repairs |

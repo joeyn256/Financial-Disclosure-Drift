@@ -25,13 +25,28 @@ import pytest
 
 from disclosure_drift.m3 import recovery as recovery_module
 from disclosure_drift.m3.acquisition import register_acquisition_run
-from disclosure_drift.m3.receipt import ExecutionReceipt, write_receipt
+from disclosure_drift.m3.receipt import (
+    ExecutionReceipt,
+    ReceiptValidationError,
+    canonical_bytes,
+    write_receipt,
+)
 from disclosure_drift.m3.recovery import (
+    CARRY_IN_ACQUISITION_WINDOW,
+    CARRY_IN_APPROVED_REQUEST_CEILING,
+    CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+    CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+    CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+    CARRY_IN_HISTORICAL_ROUTE_ALLOCATION,
+    CARRY_IN_REQUEST_PLAN_SHA256,
     RECOVERY_DETERMINATIONS,
     RecoveryInspectionError,
     RecoveryState,
+    carry_in_checkpoint_disagreement,
+    carry_in_checkpoint_key,
     inspect_receiptless_first_invocation,
     inspect_recovery_state,
+    walk_receipt_chain,
 )
 from disclosure_drift.m3.request_plan import RequestPlan, build_m3_2a_request_plan
 from disclosure_drift.paths import DataTree
@@ -537,7 +552,9 @@ def test_a_clean_state_records_every_condition(tmp_path: Path) -> None:
     state = inspect(tmp_path, tree, head)
 
     numbers = [condition.number for condition in state.conditions]
-    assert numbers == [f"8.{index}" for index in range(1, 12)]
+    # 8.12 is the Decision 055 §7.5 carry-in/checkpoint cross-check, recorded on every inspection
+    # and `N/A` where the chain's root carries no baseline to cross-check.
+    assert numbers == [f"8.{index}" for index in range(1, 13)]
 
 
 def test_every_condition_carries_one_of_the_three_statuses(tmp_path: Path) -> None:
@@ -1105,3 +1122,641 @@ def test_receiptless_refuses_a_run_whose_stage_is_a_different_window(tmp_path: P
     )
     with pytest.raises(RecoveryInspectionError, match="records stage"):
         _receiptless(tree)  # plan() is M3.2A
+
+
+# --------------------------------------------------------------------------- #
+# M3-L14 — the global one-to-one reservation-consumption rule (Decision 055 §8, ruling 055-D).
+#
+# Coverage is decided across *all* owned receiptless lineage segments at once, not per manifest. A
+# durable reservation may satisfy at most one segment, and any inability to establish an exact
+# bijection is `UNDETERMINED` rather than a count that under-reports the durable floor.
+# --------------------------------------------------------------------------- #
+def test_receiptless_one_reservation_cannot_cover_two_owned_segments(tmp_path: Path) -> None:
+    """The measured M3-L14 counterexample: 1 reservation + 2 owned same-URL segments.
+
+    This is the exact case the independent rereview measured (limitations register **M3-L14**).
+    Deciding coverage independently per manifest lets the single reservation satisfy *both*
+    segments, reporting a consumed count of **1** with `UNSAFE` where the durable floor is **2**.
+    Decision 055 §8 requires the fail-closed answer: one reservation can be consumed by at most one
+    segment, the bijection cannot be established, and the determination is `UNDETERMINED`.
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)  # exactly one durable reservation...
+    for name in ("segment-one", "segment-two"):  # ...and two owned segments it could each cover
+        _write_lineage_manifest(
+            tree,
+            source_id="sec_bulk_submissions",
+            attempts=1,
+            name=name,
+            url=_BULK_URL,
+            retrieved_at_utc=_AFTER_RESERVATION_AT,
+        )
+
+    state = _receiptless(tree)
+
+    assert state.determination == "UNDETERMINED"  # never consumed count 1 with UNSAFE
+    assert "durable floor" in state.basis
+    assert not state.resume_authorized
+
+
+def test_receiptless_a_reservation_is_consumed_by_at_most_one_segment(tmp_path: Path) -> None:
+    """Two reservations and two owned same-URL segments still prove no exact assignment.
+
+    Cardinality alone is not a bijection: both reservations precede both retrievals, so which
+    reservation accounts for which segment is not provable. Fail closed rather than pair them by
+    an arbitrary order.
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    _reserve(tree, _RUN_ID, attempt_id="res-2", ordinal=2)
+    for name in ("segment-one", "segment-two"):
+        _write_lineage_manifest(
+            tree,
+            source_id="sec_bulk_submissions",
+            attempts=1,
+            name=name,
+            url=_BULK_URL,
+            retrieved_at_utc=_AFTER_RESERVATION_AT,
+        )
+
+    state = _receiptless(tree)
+
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 2  # the ledger's provable floor, never a guess
+
+
+def test_receiptless_one_segment_with_two_eligible_reservations_is_undetermined(
+    tmp_path: Path,
+) -> None:
+    """The **M3-L14** leftover counterexample: one counted attempt, two eligible reservations.
+
+    The segment's single attempt is satisfiable — either reservation could account for it — so a
+    rule that only asked "are there *enough* reservations?" reports coverage and a consumed count
+    of 2 with `UNSAFE`. But one durable pre-send commit for that URL, before that retrieval, is
+    then left unaccounted for by any lineage, and no exact bijection exists. Decision 055 §8 fails
+    closed on the leftover contradiction rather than reporting a count it cannot prove.
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    _reserve(tree, _RUN_ID, attempt_id="res-2", ordinal=2)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="only-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_AFTER_RESERVATION_AT,
+    )
+
+    state = _receiptless(tree)
+
+    assert state.determination == "UNDETERMINED"
+    assert state.consumed_physical_attempts == 2  # the ledger's provable floor, never a guess
+
+
+def test_receiptless_one_segment_with_its_own_single_reservation_is_covered(
+    tmp_path: Path,
+) -> None:
+    """The positive control for the leftover rule, so the refusal above is not blanket.
+
+    One counted attempt against exactly one eligible reservation is a forced, exact assignment.
+    The segment is covered, adds no second charge, and the count stands at the ledger's 1.
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="only-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_AFTER_RESERVATION_AT,
+    )
+
+    state = _receiptless(tree)
+
+    assert state.consumed_physical_attempts == 1, "covered exactly once, never double-charged"
+    assert "exact ledger coverage is not provable" not in state.basis
+
+
+def test_receiptless_two_distinct_url_segments_each_keep_their_own_reservation(
+    tmp_path: Path,
+) -> None:
+    """Disjoint eligibility is still provable, so exact coverage survives the one-to-one rule.
+
+    The positive half of the same rule: each reservation is eligible for exactly one segment, the
+    assignment is forced, and neither segment adds a second charge. Without this, the correction
+    could pass by making every multi-segment case `UNDETERMINED`.
+    """
+    tree = build_catalog(tmp_path, with_observation=False)
+    _register(tree)
+    _reserve(tree, _RUN_ID, attempt_id="res-1", ordinal=1, url=_BULK_URL)
+    _reserve(tree, _RUN_ID, attempt_id="res-2", ordinal=2, url=URL)
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_bulk_submissions",
+        attempts=1,
+        name="bulk-segment",
+        url=_BULK_URL,
+        retrieved_at_utc=_AFTER_RESERVATION_AT,
+    )
+    _write_lineage_manifest(
+        tree,
+        source_id="sec_company_tickers",
+        attempts=1,
+        name="tickers-segment",
+        url=URL,
+        retrieved_at_utc=_AFTER_RESERVATION_AT,
+    )
+
+    state = _receiptless(tree)
+
+    # Both segments are ledger-covered exactly once: the count is the two reservations, not four.
+    assert state.consumed_physical_attempts == 2
+
+
+# --------------------------------------------------------------------------- #
+# The chain walker's carry-in arithmetic and its catalog cross-check
+# (accepted Decision 055 §7.5, ruling 055-C)
+#
+#     cumulative = sum(actual_physical_attempt_count over every receipt in the chain)
+#                + carried_forward of the single no-predecessor root only
+#
+# The root carry-in is added exactly once — never `N` alone, never double-counted.
+# --------------------------------------------------------------------------- #
+_AUTHORITY_SHA = "e" * 64
+
+
+def frozen_plan() -> RequestPlan:
+    """The **frozen** accepted M3.2A plan — the only one a carry-in may ever be bound to.
+
+    Decision 055 §5 fixes the plan and its hash ``19be7bdc…`` and the cumulative ceiling ``801``,
+    and both the artifact gate and the checkpoint cross-check now compare them literally. So a
+    carry-in fixture built on this suite's small plan would not describe any burn the system can
+    produce: it would exercise the cross-check against values no lawful consumption ever writes.
+    """
+    return build_m3_2a_request_plan(
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+        include_open_quarter=False,
+        calendar_year=2026,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+
+
+def _carry_in_root(**overrides: object) -> ExecutionReceipt:
+    """A clean carry-in root: no predecessor, a baseline of 1, and its authority hash.
+
+    Its plan and ceiling are the frozen accepted ones, because that is what a lawful carry-in root
+    records — the authority it consumed was bound to them literally before it could be admitted.
+    """
+    fields: dict[str, object] = {
+        "consumed_request_count_carried_forward": 1,
+        "carry_in_authority_sha256": _AUTHORITY_SHA,
+        "request_plan_sha256": CARRY_IN_REQUEST_PLAN_SHA256,
+        "approved_request_ceiling": CARRY_IN_APPROVED_REQUEST_CEILING,
+    }
+    fields.update(overrides)
+    return receipt(**fields)
+
+
+_CARRY_IN_RUN_ID = "carry-in-root-run-01"
+
+
+def _checkpoint_document(**overrides: object) -> dict[str, object]:
+    """The complete canonical consumption checkpoint (data dictionary §5B).
+
+    Every value is the accepted Decision 055 one. The cross-check holds the durable record against
+    the same constants, through the same validator, as the artifact gate holds the artifact — so a
+    checkpoint carrying anything else records a burn the system could not have performed, however
+    self-consistent it is and however well it agrees with the receipt beside it. Window, plan, and
+    ceiling therefore also mirror the root receipt, which is exactly what one real burn produces:
+    two surfaces recording the same accepted carry-in.
+    """
+    document: dict[str, object] = {
+        "acquisition_window": CARRY_IN_ACQUISITION_WINDOW,
+        "approved_request_ceiling": CARRY_IN_APPROVED_REQUEST_CEILING,
+        "authority_sha256": _AUTHORITY_SHA,
+        "authorized_census_run_id": _CARRY_IN_RUN_ID,
+        "authorizing_decision_reference": CARRY_IN_AUTHORIZING_DECISION_REFERENCE,
+        "consumed_request_count_carried_forward": CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
+        "historical_route_allocation": dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION),
+        "request_plan_sha256": CARRY_IN_REQUEST_PLAN_SHA256,
+        "schema_version": CARRY_IN_AUTHORITY_SCHEMA_VERSION,
+    }
+    document.update(overrides)
+    return document
+
+
+def _checkpoint_text(**overrides: object) -> str:
+    """The exact bytes a lawful consumption writes: the canonical serialization, nothing else."""
+    return canonical_bytes(_checkpoint_document(**overrides)).decode()
+
+
+def _burn_authority(
+    tree: DataTree,
+    *,
+    authority_sha256: str = _AUTHORITY_SHA,
+    carried_forward: int = 1,
+    value: str | None = None,
+    register_run: bool = True,
+    **overrides: object,
+) -> None:
+    """Record the durable consumption checkpoint a real carry-in root would have written.
+
+    A real burn commits in the *same* transaction as its run's registration, so the fixture
+    registers the run too: the cross-check proves the checkpoint's authorized run against durable
+    catalog state, which is the only surface able to contradict it — no receipt field names a run.
+
+    The stored value is the **canonical** serialization, because that is what
+    ``CarryInAuthority.checkpoint_value`` writes and the cross-check now requires the stored TEXT to
+    be exactly that. ``value`` overrides it for the cases that are *about* bad bytes.
+    """
+    if register_run:
+        _register(tree, _CARRY_IN_RUN_ID)
+    document = _checkpoint_document(
+        authority_sha256=authority_sha256,
+        consumed_request_count_carried_forward=carried_forward,
+        **overrides,
+    )
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.insert(
+            "ops_checkpoints",
+            {
+                "checkpoint_key": carry_in_checkpoint_key(authority_sha256),
+                "checkpoint_value": (
+                    canonical_bytes(document).decode() if value is None else value
+                ),
+                "updated_at_utc": "2026-08-09T00:00:00Z",
+            },
+        )
+
+
+def _carry_in_inspect(tmp_path: Path, tree: DataTree, head: Path) -> RecoveryState:
+    """Inspect a carry-in chain against the frozen plan its receipts actually record."""
+    return inspect_recovery_state(
+        plan=frozen_plan(),
+        receipt_chain_head=head,
+        catalog_path=tree.catalog_database,
+        data_root=tree.data_root,
+    )
+
+
+def test_the_walker_adds_the_root_carry_in_exactly_once(tmp_path: Path) -> None:
+    """One receipt, one attempt, a baseline of 1: cumulative 2, never 1 and never 3."""
+    head = write_chain(tmp_path, _carry_in_root())
+
+    chain = walk_receipt_chain(head)
+
+    assert chain.resolved
+    assert chain.root_carried_forward == 1
+    assert chain.consumed_physical_attempts == 2  # 1 carried in + 1 placed
+    assert chain.root_carry_in_authority_sha256 == _AUTHORITY_SHA
+
+
+def test_the_root_carry_in_is_counted_once_through_a_mixed_version_chain(tmp_path: Path) -> None:
+    """A carry-in root under two resumes: the baseline is added once, at the root.
+
+    Each receipt places one attempt, and each resume states the cumulative total before it. The
+    walker must report 4 — three attempts plus the single carried-in baseline — rather than 7,
+    which is what adding every receipt's stated carried-forward count would give.
+    """
+    root = _carry_in_root(command_version="m3.2a/0.9")
+    middle = receipt(
+        command_version="m3.2a/0.10",
+        recovery_predecessor_receipt_id=root.receipt_id,
+        consumed_request_count_carried_forward=2,  # the root's 1 carried in, plus its 1 attempt
+    )
+    head_receipt = receipt(
+        recovery_predecessor_receipt_id=middle.receipt_id,
+        consumed_request_count_carried_forward=3,
+    )
+    head = write_chain(tmp_path, root, middle, head_receipt)
+
+    chain = walk_receipt_chain(head)
+
+    assert chain.receipt_ids == (head_receipt.receipt_id, middle.receipt_id, root.receipt_id)
+    assert chain.consumed_physical_attempts == 4  # never 3 (N alone), never 7 (double-counted)
+    assert chain.root_carried_forward == 1
+
+
+def test_an_ordinary_zero_baseline_chain_is_unchanged_by_the_carry_in_arithmetic(
+    tmp_path: Path,
+) -> None:
+    """Every chain written before Decision 055 walks to exactly the count it always did."""
+    root = receipt(command_version="m3.2a/0.9")
+    head = write_chain(
+        tmp_path,
+        root,
+        receipt(
+            recovery_predecessor_receipt_id=root.receipt_id,
+            consumed_request_count_carried_forward=1,
+        ),
+    )
+
+    chain = walk_receipt_chain(head)
+
+    assert chain.consumed_physical_attempts == 2
+    assert chain.root_carried_forward == 0
+    assert chain.root_carry_in_authority_sha256 is None
+
+
+def test_a_carry_in_root_agreeing_with_its_checkpoint_is_not_undetermined(tmp_path: Path) -> None:
+    """The positive control for every refusal below, and the strongest one available.
+
+    A canonical checkpoint recording the accepted Decision 055 carry-in, a root receipt recording
+    the same frozen plan and ceiling, and the governed run they burned alongside: the inspection
+    reaches ``SAFE``. Nothing here is refused incidentally, so nothing below is refused vacuously.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    statuses = {condition.number: condition.status for condition in state.conditions}
+    assert statuses["8.12"] == "MET"
+    assert state.determination == "SAFE"
+    assert state.consumed_physical_attempts == 2
+
+
+def test_a_carry_in_root_whose_checkpoint_is_missing_is_undetermined(tmp_path: Path) -> None:
+    """§7.5: a claimed burn the catalog does not record cannot authorize continuation."""
+    tree = build_catalog(tmp_path)  # no authority was ever burned here
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert not state.resume_authorized
+    assert "no consumption checkpoint" in state.basis
+
+
+def test_a_checkpoint_that_disagrees_with_the_root_receipt_is_undetermined(tmp_path: Path) -> None:
+    """The two surfaces must agree exactly; neither is edited to match the other."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, carried_forward=7)  # the catalog says 7...
+    head = write_chain(tmp_path, _carry_in_root())  # ...the receipt says 1
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert "disagree" in state.basis
+
+
+def test_no_valid_receipt_can_claim_a_baseline_without_naming_its_authority() -> None:
+    """The state is unreachable from either schema, and the cross-check still fails closed on it.
+
+    Under `3.0` a non-zero baseline with no predecessor requires the authority hash; under `2.0` a
+    carried-forward count requires a predecessor. So no valid receipt expresses "a root claiming a
+    baseline from nowhere" at all. The cross-check refuses it anyway — defence in depth against a
+    chain reaching it from somewhere these two tables do not govern.
+    """
+    with pytest.raises(ReceiptValidationError):
+        receipt(consumed_request_count_carried_forward=1)  # 3.0: names no authority
+
+    forged = recovery_module.ReceiptChainAccounting(
+        receipt_ids=("a" * 64,),
+        consumed_physical_attempts=2,
+        interruption_state=None,
+        resolved=True,
+        detail="synthetic",
+        root_carried_forward=1,
+        root_carry_in_authority_sha256=None,
+    )
+
+    with sqlite3.connect(":memory:") as connection:
+        disagreement = carry_in_checkpoint_disagreement(connection, forged)
+
+    assert disagreement is not None
+    assert "names no carry-in authority" in disagreement
+
+
+# --------------------------------------------------------------------------- #
+# The checkpoint is read as a whole document, not for one figure
+# --------------------------------------------------------------------------- #
+# Every case below is filed under the *correct* deterministic key and carries the *correct*
+# carried-forward baseline. Comparing only the figure the arithmetic needs would pass all of them,
+# which is exactly why the cross-check has to validate the record it is standing on.
+
+
+@pytest.mark.parametrize(
+    ("override", "fragment"),
+    [
+        ({"request_plan_sha256": "b" * 64}, "different request plans"),
+        ({"acquisition_window": "M3.2B"}, "different acquisition windows"),
+        ({"approved_request_ceiling": 999}, "different approved ceilings"),
+        ({"authorized_census_run_id": "never-registered-run"}, "no registered job"),
+        ({"authorizing_decision_reference": "decision_055"}, "canonical 'Decision NNN'"),
+        ({"schema_version": "m3-carry-in-authority/9.9"}, "declares schema"),
+        ({"historical_route_allocation": {"sec_bulk_submissions": 4}}, "contradicts itself"),
+        ({"historical_route_allocation": {"sec_not_a_route": 1}}, "not a registered source route"),
+    ],
+)
+def test_a_correctly_keyed_checkpoint_with_a_wrong_field_is_undetermined(
+    tmp_path: Path, override: dict[str, object], fragment: str
+) -> None:
+    """A right key and a matching baseline are not enough; the document must be the record."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, **override)
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert not state.resume_authorized
+    assert fragment in state.basis
+
+
+def test_a_checkpoint_whose_body_names_another_authority_is_undetermined(tmp_path: Path) -> None:
+    """Filed under the right deterministic key, describing a different burn entirely.
+
+    The key/document relationship is the one thing a lookup by key cannot check for itself: finding
+    a row proves only that something was written there.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(
+        tree,
+        value=_checkpoint_text(authority_sha256="d" * 64),
+    )
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert "names a different authority" in state.basis
+
+
+@pytest.mark.parametrize(
+    ("value", "fragment"),
+    [
+        ("{not json", "not readable JSON"),
+        ('["a", "list"]', "not a JSON object"),
+        ('{"authority_sha256": "' + "e" * 64 + '"', "not readable JSON"),
+        ('{"authority_sha256": "' + "e" * 64 + '"}', "missing required field"),
+    ],
+)
+def test_a_malformed_checkpoint_document_is_undetermined(
+    tmp_path: Path, value: str, fragment: str
+) -> None:
+    """Truncated, unparseable, and partial writes each fail closed rather than half-reading."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, value=value)
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert fragment in state.basis
+
+
+def test_a_checkpoint_carrying_an_extra_field_is_undetermined(tmp_path: Path) -> None:
+    """The record is a closed document: an unread field is refused, never ignored."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(
+        tree,
+        value=_checkpoint_text(resume_authorized=True),
+    )
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert "unpermitted field(s): resume_authorized" in state.basis
+
+
+def test_two_checkpoints_claiming_one_authorized_run_are_undetermined(tmp_path: Path) -> None:
+    """A run registers exactly once, so two authorities cannot both have burned alongside it."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    _burn_authority(tree, authority_sha256="c" * 64, register_run=False)
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert "same authorized run" in state.basis
+
+
+# --------------------------------------------------------------------------- #
+# The checkpoint must be *the* canonical record of *the* accepted carry-in
+# --------------------------------------------------------------------------- #
+# Two properties the cross-check above cannot get from agreement between surfaces:
+#
+# **The encoding is part of the record.** A consumption writes `canonical_bytes` of the closed
+# document, so anything that merely parses to the right fields was written by something else.
+#
+# **Agreement is not authorization.** A forged root and a checkpoint forged to match it agree
+# perfectly. Both are therefore held against the accepted Decision 055 constants — the same
+# constants, through the same validator, as the artifact the operator supplies.
+
+
+def test_a_semantically_identical_noncanonical_checkpoint_is_undetermined(tmp_path: Path) -> None:
+    """Every field is right and every value is right; only the bytes are not what a burn writes."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, value=json.dumps(_checkpoint_document(), indent=2, sort_keys=True))
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert "not stored in canonical form" in state.basis
+
+
+def test_a_duplicate_key_encoding_is_undetermined(tmp_path: Path) -> None:
+    """`json.loads` keeps the last value silently, so the discarded one is never compared.
+
+    The row below parses to exactly the accepted document — its *first* window value is the one no
+    comparison would ever see. Canonical re-serialization is the only check that can notice.
+    """
+    canonical = _checkpoint_text()
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, value='{"acquisition_window":"M3.2B",' + canonical[1:])
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert "not stored in canonical form" in state.basis
+
+
+@pytest.mark.parametrize(
+    "allocation",
+    [
+        {"sec_bulk_submissions": 2, "sec_company_tickers": -1},
+        {"sec_bulk_submissions": -1, "sec_company_tickers": 2},
+        {"sec_bulk_submissions": True},
+        {"": 1},
+    ],
+    ids=["negative-second", "negative-first", "boolean", "empty-key"],
+)
+def test_an_impossible_route_allocation_is_undetermined(
+    tmp_path: Path, allocation: dict[str, object]
+) -> None:
+    """A negative count lets an allocation sum to a plausible baseline out of impossible parts.
+
+    The first case is the measured one: two routes summing to the accepted baseline of ``1``, both
+    registered, so every self-consistency comparison downstream passes on arithmetic no
+    consumption could have produced.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, historical_route_allocation=allocation)
+    head = write_chain(tmp_path, _carry_in_root())
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert not state.resume_authorized
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_override", "root_override", "fragment"),
+    [
+        (
+            {"historical_route_allocation": {"sec_company_tickers": 1}},
+            {},
+            "allocates the historical attempt",
+        ),
+        (
+            {"request_plan_sha256": "b" * 64},
+            {"request_plan_sha256": "b" * 64},
+            "other than the frozen Decision 055 plan",
+        ),
+        (
+            {"approved_request_ceiling": 802},
+            {"approved_request_ceiling": 802},
+            "names ceiling 802",
+        ),
+        ({"authorizing_decision_reference": "Decision 042"}, {}, "as its authorizing decision"),
+    ],
+    ids=["another-registered-route", "not-the-frozen-plan", "not-801", "not-decision-055"],
+)
+def test_a_checkpoint_that_is_not_the_accepted_carry_in_is_undetermined(
+    tmp_path: Path,
+    checkpoint_override: dict[str, object],
+    root_override: dict[str, object],
+    fragment: str,
+) -> None:
+    """A forged root agreeing with a forged checkpoint is still not the accepted carry-in.
+
+    Each root receipt below is written to agree with its checkpoint exactly, so every comparison
+    *between the two surfaces* passes. What refuses them is the comparison neither surface can
+    influence: the fixed Decision 055 values.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, **checkpoint_override)
+    head = write_chain(tmp_path, _carry_in_root(**root_override))
+
+    state = _carry_in_inspect(tmp_path, tree, head)
+
+    assert state.determination == "UNDETERMINED"
+    assert not state.resume_authorized
+    assert "does not record the accepted Decision 055 carry-in" in state.basis
+    assert fragment in state.basis

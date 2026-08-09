@@ -33,16 +33,23 @@ downgraded.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from disclosure_drift.errors import DisclosureDriftError
-from disclosure_drift.m3.receipt import ReceiptValidationError, inspect_receipt
+from disclosure_drift.m3.receipt import (
+    ACQUISITION_WINDOWS,
+    ReceiptValidationError,
+    canonical_bytes,
+    inspect_receipt,
+)
 from disclosure_drift.m3.request_plan import RequestPlan, derive_a_reachable
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.observation_catalog import load_observations, validate_audit_projection
@@ -51,13 +58,26 @@ from disclosure_drift.storage.catalog import read_only_connection
 from disclosure_drift.storage.sqlite import integrity_report
 
 __all__ = [
+    "CARRY_IN_ACQUISITION_WINDOW",
+    "CARRY_IN_APPROVED_REQUEST_CEILING",
+    "CARRY_IN_AUTHORITY_SCHEMA_VERSION",
+    "CARRY_IN_AUTHORIZING_DECISION_REFERENCE",
+    "CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT",
+    "CARRY_IN_HISTORICAL_ROUTE_ALLOCATION",
+    "CARRY_IN_REQUEST_PLAN_SHA256",
     "RECOVERY_DETERMINATIONS",
+    "CarryInFixedBindings",
     "ConditionResult",
+    "ReceiptChainAccounting",
     "RecoveryInspectionError",
     "RecoveryState",
+    "carry_in_checkpoint_disagreement",
+    "carry_in_fixed_binding_disagreement",
+    "carry_in_orphan_reference_disagreement",
     "inspect_receiptless_first_invocation",
     "inspect_recovery_state",
     "read_only_catalog",
+    "walk_receipt_chain",
 ]
 
 RECOVERY_DETERMINATIONS: Final = ("SAFE", "UNDETERMINED", "UNSAFE")
@@ -182,8 +202,21 @@ class RecoveryState:
 # Receipt chain
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
-class _ChainWalk:
-    """The resolved receipt chain, and whether it reached the first attempt."""
+class ReceiptChainAccounting:
+    """The resolved receipt chain, its cumulative consumption, and its carry-in root.
+
+    ``consumed_physical_attempts`` is the Decision 055 §7.5 cumulative total:
+
+    .. code-block:: text
+
+        cumulative = sum(actual_physical_attempt_count over every receipt in the chain)
+                   + carried_forward of the single no-predecessor root only
+
+    The root's carried-forward baseline is added **exactly once** — never ``N`` alone, and never
+    once per receipt. Every consumer of a chain's consumed count reads this one number, so the
+    walker, ``m3 acquire --show-scope``, and every recovery and continuation surface cannot drift
+    apart: there is only one implementation of the arithmetic.
+    """
 
     receipt_ids: tuple[str, ...]
     consumed_physical_attempts: int
@@ -191,14 +224,30 @@ class _ChainWalk:
     resolved: bool
     detail: str
     request_plan_sha256: str | None = None
+    root_carried_forward: int = 0
+    root_carry_in_authority_sha256: str | None = None
+    #: The root receipt's own window and ceiling, carried so the carry-in cross-check can compare
+    #: the checkpoint against what the root actually recorded. Both are long-standing `2.0` receipt
+    #: fields (`acquisition_window`, `approved_request_ceiling`); nothing new is required of a
+    #: receipt to populate them.
+    root_acquisition_window: str | None = None
+    root_approved_request_ceiling: int | None = None
 
 
-def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
+def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
     """Follow `recovery_predecessor_receipt_id` back toward the first attempt.
 
     A missing or unreadable predecessor stops the walk and marks the chain unresolved. The missing
     receipt is *never* reconstructed: the template says so explicitly, and a reconstructed receipt
     would assert a consumed count nobody recorded.
+
+    Mixed ``2.0``/``3.0`` chains walk identically. A ``2.0`` root carries no carried-forward
+    baseline, so it contributes zero and the arithmetic is unchanged for every chain written before
+    Decision 055; a ``3.0`` clean carry-in root contributes its baseline once, at the root, where it
+    is the only receipt in the chain with no predecessor to have inherited it from.
+
+    An **unresolved** chain never contributes a carry-in baseline: the walk did not reach a root, so
+    there is no root to read one from, and the caller already treats an unresolved chain as a stop.
     """
     receipts_dir = head_path.parent
     seen: list[str] = []
@@ -212,7 +261,7 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
         try:
             document = inspect_receipt(current)
         except (OSError, ReceiptValidationError) as exc:
-            return _ChainWalk(
+            return ReceiptChainAccounting(
                 receipt_ids=tuple(seen),
                 consumed_physical_attempts=consumed,
                 interruption_state=interruption_state,
@@ -227,7 +276,7 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
 
         receipt_id = str(document["receipt_id"])
         if receipt_id in visited:
-            return _ChainWalk(
+            return ReceiptChainAccounting(
                 receipt_ids=tuple(seen),
                 consumed_physical_attempts=consumed,
                 interruption_state=interruption_state,
@@ -244,15 +293,585 @@ def _walk_receipt_chain(head_path: Path) -> _ChainWalk:
 
         predecessor = document.get("recovery_predecessor_receipt_id")
         if predecessor is None:
-            return _ChainWalk(
+            # The single no-predecessor root: the one receipt whose carried-forward baseline was
+            # inherited from outside the chain rather than from a receipt inside it. Added here,
+            # once, which is why no other iteration of this loop touches the field.
+            carried = _as_count(document.get("consumed_request_count_carried_forward", 0))
+            authority = document.get("carry_in_authority_sha256")
+            root_window = document.get("acquisition_window")
+            root_ceiling = document.get("approved_request_ceiling")
+            return ReceiptChainAccounting(
                 receipt_ids=tuple(seen),
-                consumed_physical_attempts=consumed,
+                consumed_physical_attempts=consumed + carried,
                 interruption_state=interruption_state,
                 resolved=True,
                 detail="the chain resolves to a first attempt",
                 request_plan_sha256=recorded_plan_sha256,
+                root_carried_forward=carried,
+                root_carry_in_authority_sha256=None if authority is None else str(authority),
+                root_acquisition_window=None if root_window is None else str(root_window),
+                root_approved_request_ceiling=(
+                    None if root_ceiling is None else _as_count(root_ceiling)
+                ),
             )
         current = receipts_dir / f"receipt-{predecessor}.json"
+
+
+#: The ``ops_checkpoints`` namespace a consumed carry-in authority burns its single use in. The
+#: authority's own SHA-256 completes the key, so the table's ``checkpoint_key TEXT PRIMARY KEY``
+#: enforces exactly-once consumption without a migration (Decision 055 §6.3). The prefix keeps the
+#: key from colliding with any other checkpoint while leaving the binding to the hash explicit.
+CARRY_IN_CHECKPOINT_KEY_PREFIX: Final = "m3_2_carry_in_authority:"
+
+
+def carry_in_checkpoint_key(authority_sha256: str) -> str:
+    """The deterministic single-use checkpoint key for one carry-in authority."""
+    return f"{CARRY_IN_CHECKPOINT_KEY_PREFIX}{authority_sha256}"
+
+
+# --------------------------------------------------------------------------- #
+# The fixed Decision 055 carry-in bindings
+# --------------------------------------------------------------------------- #
+#: Decision 055 authorizes **one** carry-in: one window, one plan, one ceiling, one historical
+#: attempt, on one route, under one decision. Every value below is therefore a fixed constant rather
+#: than a parameter, and that distinction is the whole control. Checking an artifact only for
+#: internal self-consistency — its route allocation summing to its own declared seed, its ceiling
+#: equalling whatever the operator typed — proves nothing an artifact's author could not arrange:
+#: a self-consistent artifact naming seed `0`, a different registered route, or a decision that
+#: authorized nothing would pass. The one-use exception exists for exactly one historical fact, so
+#: the values that fact consists of are written here and compared literally.
+#:
+#: They are deliberately *not* derived from the plan document, the operator's arguments, or the
+#: artifact itself. A derived binding is only ever as trustworthy as its input, and the inputs here
+#: are precisely what a forged artifact would supply.
+CARRY_IN_AUTHORITY_SCHEMA_VERSION: Final = "m3-carry-in-authority/1.0"
+
+#: The one window a carry-in may be granted for (Decision 055 §6.1).
+CARRY_IN_ACQUISITION_WINDOW: Final = "M3.2A"
+
+#: The frozen request plan (Decision 055 §5; contract §5). Never re-derived, trimmed, substituted.
+CARRY_IN_REQUEST_PLAN_SHA256: Final = (
+    "19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"
+)
+
+#: The cumulative ceiling (Decision 055 §5). Never 802, never additive, shadowed, or reset.
+CARRY_IN_APPROVED_REQUEST_CEILING: Final = 801
+
+#: The accepted historical physical-attempt consumption, `H` (Decision 055 §4, §5).
+CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT: Final = 1
+
+#: The route that one historical attempt is attributable to (Decision 055 §4 fact 2). This is a
+#: binding on the *artifact*, checked by literal equality against the whole allocation mapping, so
+#: an omitted route, an extra route, a substituted route, and a different count are each refused.
+#: It is **not** a runtime per-route ceiling: Decision 055 §5 keeps the global
+#: `PhysicalAttemptCeiling` as the sole runtime enforcement, and the remaining bulk-route headroom
+#: of 5 stays an accounting figure that refuses nothing at execution time.
+CARRY_IN_HISTORICAL_ROUTE_ALLOCATION: Final[Mapping[str, int]] = MappingProxyType(
+    {"sec_bulk_submissions": CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT}
+)
+
+#: The decision that authorizes the carry-in mechanism itself.
+CARRY_IN_AUTHORIZING_DECISION_REFERENCE: Final = "Decision 055"
+
+#: A canonical decision reference: the literal word, one space, exactly three digits. Anything else
+#: — a bare number, a file name, a title, a range, prose — is not a decision identity and cannot be
+#: resolved to an accepted record.
+_DECISION_REFERENCE_PATTERN: Final = re.compile(r"^Decision \d{3}$")
+
+#: A SHA-256 identity as this repository writes them: lowercase, exactly 64 hex digits. Uppercase,
+#: truncated, prefixed, and free-text "evidence" values are refused, so the orphan-adoption evidence
+#: binding cannot be satisfied by a description of evidence instead of an identity for it.
+_SHA256_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class CarryInFixedBindings:
+    """The seven Decision 055 values that are fixed, wherever they are carried.
+
+    Both surfaces that must agree about a carry-in carry these same seven: the authority artifact
+    the operator supplies, and the `ops_checkpoints` document its consumption durably records. They
+    are validated by one implementation against one set of constants, so the artifact gate and the
+    later cross-check cannot drift apart or be satisfied by different values.
+    """
+
+    schema_version: str
+    acquisition_window: str
+    request_plan_sha256: str
+    approved_request_ceiling: int
+    consumed_request_count: int
+    route_allocation: Mapping[str, int]
+    authorizing_decision_reference: str
+
+
+def carry_in_fixed_binding_disagreement(bindings: CarryInFixedBindings) -> str | None:
+    """Compare one set of carried bindings against the fixed Decision 055 values.
+
+    Returns the first disagreement, or ``None`` when every binding matches exactly. Each comparison
+    is literal equality against a constant above — never a range, a minimum, a subset, or a
+    consistency check between two fields the same author supplied.
+    """
+    if bindings.schema_version != CARRY_IN_AUTHORITY_SCHEMA_VERSION:
+        return (
+            f"the carry-in schema is {bindings.schema_version!r}, not "
+            f"{CARRY_IN_AUTHORITY_SCHEMA_VERSION!r}"
+        )
+    if bindings.acquisition_window != CARRY_IN_ACQUISITION_WINDOW:
+        return (
+            f"the carry-in names window {bindings.acquisition_window!r}; Decision 055 authorizes a "
+            f"carry-in for {CARRY_IN_ACQUISITION_WINDOW!r} alone"
+        )
+    if bindings.request_plan_sha256 != CARRY_IN_REQUEST_PLAN_SHA256:
+        return (
+            "the carry-in names a request plan other than the frozen Decision 055 plan; the plan "
+            "and its hash are unchanged and are never re-derived or substituted"
+        )
+    if bindings.approved_request_ceiling != CARRY_IN_APPROVED_REQUEST_CEILING:
+        return (
+            f"the carry-in names ceiling {bindings.approved_request_ceiling}, not the accepted "
+            f"cumulative {CARRY_IN_APPROVED_REQUEST_CEILING}; the ceiling is never raised, "
+            f"shadowed, made additive, or reset"
+        )
+    if bindings.consumed_request_count != CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT:
+        return (
+            f"the carry-in declares a historical consumed baseline of "
+            f"{bindings.consumed_request_count}, not the accepted "
+            f"{CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT}; the accepted historical consumption is "
+            f"a fact about what already happened, not a value an artifact may state"
+        )
+    if dict(bindings.route_allocation) != dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION):
+        return (
+            f"the carry-in allocates the historical attempt as "
+            f"{dict(sorted(bindings.route_allocation.items()))!r}, not the accepted "
+            f"{dict(CARRY_IN_HISTORICAL_ROUTE_ALLOCATION)!r}; the allocation is compared whole, so "
+            f"a substituted route, an extra route, and an omitted route are each refused"
+        )
+    if bindings.authorizing_decision_reference != CARRY_IN_AUTHORIZING_DECISION_REFERENCE:
+        return (
+            f"the carry-in cites {bindings.authorizing_decision_reference!r} as its authorizing "
+            f"decision, not {CARRY_IN_AUTHORIZING_DECISION_REFERENCE!r}"
+        )
+    return None
+
+
+def carry_in_orphan_reference_disagreement(
+    decision_reference: str,
+    evidence_sha256: str,
+) -> str | None:
+    """Check the two later-act bindings a carry-in authority must name (Decision 055 §6.1, §9).
+
+    Path B requires a **separately authorized** orphan adoption to have been executed, verified, and
+    accepted before a carry-in may be minted or consumed. The authority binds that later act by
+    naming its decision and its evidence identity. Neither can be verified here — the adoption has
+    not happened, and this module opens no operational state to look — so what is enforced is that
+    both are *resolvable identities* rather than free text, and that the adoption decision is a
+    genuinely different record from the one authorizing the mechanism.
+
+    Returns the first disagreement, or ``None``.
+    """
+    if not _DECISION_REFERENCE_PATTERN.match(decision_reference):
+        return (
+            f"the orphan-adoption decision reference {decision_reference!r} is not a canonical "
+            f"'Decision NNN' identity, so it names no resolvable accepted record"
+        )
+    if decision_reference == CARRY_IN_AUTHORIZING_DECISION_REFERENCE:
+        return (
+            f"the carry-in names {CARRY_IN_AUTHORIZING_DECISION_REFERENCE!r} as its own "
+            f"orphan-adoption decision, but Decision 055 §9 expressly neither designs nor performs "
+            f"that adoption; it must be the separately authorized later Path-B act"
+        )
+    if not _SHA256_PATTERN.match(evidence_sha256):
+        return (
+            "the orphan-adoption evidence identity is not a lowercase 64-hex SHA-256, so it names "
+            "no verifiable artifact"
+        )
+    return None
+
+
+def carry_in_checkpoint_disagreement(
+    connection: sqlite3.Connection,
+    chain: ReceiptChainAccounting,
+) -> str | None:
+    """Cross-check a chain's carry-in root against the durable catalog checkpoint.
+
+    Decision 055 §7.5: the catalog checkpoint and the root receipt **mutually cross-check**, and a
+    missing or mismatched authority or carry-in is ``UNDETERMINED`` and cannot authorize
+    continuation. Returns the disagreement, or ``None`` when the two agree — including the ordinary
+    case of a zero-baseline root, which has nothing to cross-check.
+
+    Both directions are checked, because either one alone can be forged by editing the other:
+
+    * a root claiming a non-zero baseline with **no** authority hash has no durable record of where
+      that baseline came from;
+    * a root naming an authority whose checkpoint is **absent** claims a burn that never committed;
+    * a checkpoint whose recorded baseline **differs** from the receipt's means the two surfaces
+      disagree about how much was carried in.
+
+    The checkpoint is validated as the **whole closed document** it is specified to be, not merely
+    read for the one figure being compared. Finding a row under the expected key proves only that
+    *something* was written there; the row's own contents still have to be the canonical record of
+    the accepted carry-in. A checkpoint whose embedded authority hash, plan, window, ceiling,
+    decision, route allocation, or authorized run is wrong — or that is truncated, carries an extra
+    field, is not stored as the canonical serialization of its own document, or is not parseable at
+    all — describes a burn that did not happen as recorded, and no baseline can be established
+    from it.
+
+    Three layers, in widening order: the record must be **coherent**, it must **agree with the root
+    receipt**, and it must be **the accepted Decision 055 carry-in** — window ``M3.2A``, the frozen
+    plan, ceiling ``801``, seed ``1`` on ``sec_bulk_submissions``, ``Decision 055``. The third is
+    not implied by the second: a forged root and a checkpoint forged to match it agree with each
+    other perfectly. Both surfaces are held against the same constants the artifact gate uses, by
+    the same validator.
+    """
+    if chain.root_carry_in_authority_sha256 is None:
+        if chain.root_carried_forward:
+            return (
+                "the receipt chain's root claims a carried-forward baseline of "
+                f"{chain.root_carried_forward} but names no carry-in authority, so the baseline "
+                "has no durable record of the authority it was carried in under"
+            )
+        return None
+
+    authority_sha256 = chain.root_carry_in_authority_sha256
+    row = connection.execute(
+        "SELECT checkpoint_value FROM ops_checkpoints WHERE checkpoint_key = ?",
+        (carry_in_checkpoint_key(authority_sha256),),
+    ).fetchone()
+    if row is None:
+        return (
+            "the receipt chain's root names a carry-in authority that the operational catalog "
+            "records no consumption checkpoint for, so the authority's single use cannot be "
+            "confirmed to have committed"
+        )
+    checkpoint, malformed = _carry_in_checkpoint_document(row[0])
+    if checkpoint is None:
+        return malformed
+
+    # Internal validity first: a coherent record of the burn it claims — a real schema, a
+    # resolvable decision, and an allocation that accounts for the baseline it says was carried.
+    # These are the narrower faults, and naming them precisely is more use to an operator than the
+    # blanket "this is not the accepted carry-in" the fixed comparison further down would give.
+    if checkpoint.schema_version != CARRY_IN_AUTHORITY_SCHEMA_VERSION:
+        return (
+            f"the carry-in consumption checkpoint declares schema "
+            f"{checkpoint.schema_version!r}, not {CARRY_IN_AUTHORITY_SCHEMA_VERSION!r}"
+        )
+    if not _DECISION_REFERENCE_PATTERN.match(checkpoint.authorizing_decision_reference):
+        return (
+            f"the carry-in consumption checkpoint cites "
+            f"{checkpoint.authorizing_decision_reference!r} as its authorizing decision, which is "
+            f"not a canonical 'Decision NNN' identity"
+        )
+    allocated = sum(checkpoint.historical_route_allocation.values())
+    if allocated != checkpoint.consumed_request_count_carried_forward:
+        return (
+            f"the carry-in consumption checkpoint allocates {allocated} historical attempt(s) "
+            f"across routes but records a carried-forward baseline of "
+            f"{checkpoint.consumed_request_count_carried_forward}; the record contradicts itself"
+        )
+    for source_id in checkpoint.historical_route_allocation:
+        if source_id not in SOURCES:
+            return (
+                f"the carry-in consumption checkpoint allocates historical consumption to "
+                f"{source_id!r}, which is not a registered source route"
+            )
+    if checkpoint.acquisition_window not in ACQUISITION_WINDOWS:
+        return (
+            f"the carry-in consumption checkpoint names window "
+            f"{checkpoint.acquisition_window!r}, which is not an accepted acquisition window"
+        )
+    if checkpoint.consumed_request_count_carried_forward > checkpoint.approved_request_ceiling:
+        return (
+            "the carry-in consumption checkpoint records a carried-forward baseline greater than "
+            "the ceiling it names, so no further physical request could lawfully have occurred"
+        )
+
+    # The key/document relationship. A row filed under one authority's deterministic key whose body
+    # names another is a checkpoint that never described the burn it is standing in for.
+    if checkpoint.authority_sha256 != authority_sha256:
+        return (
+            "the carry-in consumption checkpoint is stored under one authority's deterministic key "
+            "but its document names a different authority, so the recorded consumption does not "
+            "belong to the authority the chain's root claims"
+        )
+    if checkpoint.consumed_request_count_carried_forward != chain.root_carried_forward:
+        return (
+            f"the carry-in consumption checkpoint records a carried-forward baseline of "
+            f"{checkpoint.consumed_request_count_carried_forward} but the chain's root receipt "
+            f"records {chain.root_carried_forward}; the catalog and the receipt disagree"
+        )
+    if (
+        chain.request_plan_sha256 is not None
+        and chain.request_plan_sha256 != checkpoint.request_plan_sha256
+    ):
+        return (
+            "the carry-in consumption checkpoint and the receipt chain name different request "
+            "plans, so the baseline was not carried in under the plan the chain executed"
+        )
+    if (
+        chain.root_acquisition_window is not None
+        and chain.root_acquisition_window != checkpoint.acquisition_window
+    ):
+        return (
+            "the carry-in consumption checkpoint and the chain's root receipt name different "
+            "acquisition windows, so the recorded consumption is not this root's"
+        )
+    if (
+        chain.root_approved_request_ceiling is not None
+        and chain.root_approved_request_ceiling != checkpoint.approved_request_ceiling
+    ):
+        return (
+            "the carry-in consumption checkpoint and the chain's root receipt name different "
+            "approved ceilings; the cumulative ceiling is never reset, raised, or shadowed"
+        )
+
+    # The fixed Decision 055 values, compared literally against the same constants the artifact
+    # gate compares against. Everything above establishes that the checkpoint is coherent and that
+    # it agrees with the root receipt — but agreement between two surfaces proves only that whoever
+    # produced one could produce the other. A forged root and a matching forged checkpoint agree
+    # perfectly and are still not the accepted carry-in, so the accepted carry-in is what the
+    # durable record is finally held against.
+    disagreement = carry_in_fixed_binding_disagreement(
+        CarryInFixedBindings(
+            schema_version=checkpoint.schema_version,
+            acquisition_window=checkpoint.acquisition_window,
+            request_plan_sha256=checkpoint.request_plan_sha256,
+            approved_request_ceiling=checkpoint.approved_request_ceiling,
+            consumed_request_count=checkpoint.consumed_request_count_carried_forward,
+            route_allocation=checkpoint.historical_route_allocation,
+            authorizing_decision_reference=checkpoint.authorizing_decision_reference,
+        )
+    )
+    if disagreement is not None:
+        return (
+            f"the carry-in consumption checkpoint does not record the accepted Decision 055 "
+            f"carry-in: {disagreement}"
+        )
+    return _carry_in_run_disagreement(connection, checkpoint)
+
+
+@dataclass(frozen=True, slots=True)
+class _CarryInCheckpoint:
+    """One parsed, shape-checked carry-in consumption checkpoint document (data dictionary §5B).
+
+    Narrowing to this type is what lets the cross-check compare *values*. A validator that reached
+    into a raw mapping would have to re-prove a shape at every comparison, and the one comparison
+    that forgot would be the one a malformed row walked through.
+    """
+
+    acquisition_window: str
+    approved_request_ceiling: int
+    authority_sha256: str
+    authorized_census_run_id: str
+    authorizing_decision_reference: str
+    consumed_request_count_carried_forward: int
+    historical_route_allocation: Mapping[str, int]
+    request_plan_sha256: str
+    schema_version: str
+
+
+#: The exact field set of a carry-in consumption checkpoint document. Closed in both directions: a
+#: missing field leaves the record unable to support the cross-check it exists for, and an extra one
+#: means the row is not the document this validator is reading.
+_CARRY_IN_CHECKPOINT_TEXT_FIELDS: Final[tuple[str, ...]] = (
+    "acquisition_window",
+    "authority_sha256",
+    "authorized_census_run_id",
+    "authorizing_decision_reference",
+    "request_plan_sha256",
+    "schema_version",
+)
+_CARRY_IN_CHECKPOINT_COUNT_FIELDS: Final[tuple[str, ...]] = (
+    "approved_request_ceiling",
+    "consumed_request_count_carried_forward",
+)
+_CARRY_IN_CHECKPOINT_FIELDS: Final[frozenset[str]] = frozenset(
+    (*_CARRY_IN_CHECKPOINT_TEXT_FIELDS, *_CARRY_IN_CHECKPOINT_COUNT_FIELDS)
+) | {"historical_route_allocation"}
+
+
+def _noncanonical_checkpoint_reason(stored: object, parsed: Mapping[str, object]) -> str | None:
+    """Whether the stored TEXT is exactly the canonical serialization of what it parsed to.
+
+    Data dictionary §5B specifies ``checkpoint_value`` as **canonical JSON**, and
+    ``CarryInAuthority.checkpoint_value`` is the only thing that lawfully writes one — so the
+    stored bytes of a real burn are, byte for byte, ``canonical_bytes`` of the document. Requiring
+    that equality is what turns "is this document coherent" into "is this the record a consumption
+    wrote", and it is the only check that sees the *encoding* rather than the parse result:
+
+    * pretty-printed, re-indented, or re-ordered bytes parse to the same mapping and are refused,
+      because no lawful writer produced them;
+    * a duplicate-key encoding is refused, because ``json.loads`` silently keeps the last value and
+      the discarded one would never be seen by any comparison below.
+
+    Returns the disagreement, or ``None`` when the encoding is canonical.
+    """
+    try:
+        canonical = canonical_bytes(parsed).decode()
+    except (ReceiptValidationError, TypeError):
+        return (
+            "the carry-in consumption checkpoint does not serialize to canonical JSON at all, so "
+            "it is not a record any lawful consumption wrote"
+        )
+    if str(stored) != canonical:
+        return (
+            "the carry-in consumption checkpoint is not stored in canonical form; a consumption "
+            "writes the canonical serialization of the closed document, so bytes that merely "
+            "parse to the right fields — re-indented, re-ordered, or carrying a duplicate key "
+            "whose discarded value nothing here would ever see — record no burn this catalog made"
+        )
+    return None
+
+
+def _carry_in_checkpoint_document(
+    stored: object, *, require_canonical: bool = True
+) -> tuple[_CarryInCheckpoint | None, str]:
+    """Parse and shape-check one stored checkpoint value, or say why it is not the document.
+
+    Returns ``(checkpoint, "")`` when the stored value is the closed document with every field of
+    the expected type, and ``(None, reason)`` otherwise. A truncated write, a hand-edited row, an
+    added field, and a value that is not JSON at all each stop here rather than reaching a
+    comparison they might coincidence their way past.
+
+    ``require_canonical`` is off only for the duplicate-run scan, which asks a different question of
+    *other* rows — "does anything else claim this run?" — and must keep answering it for a row that
+    is malformed in a way this validator would otherwise discard. The subject checkpoint is always
+    read canonically.
+    """
+    try:
+        parsed = json.loads(str(stored))
+    except ValueError:
+        return None, "the carry-in authority's consumption checkpoint is not readable JSON"
+    if not isinstance(parsed, dict):
+        return None, "the carry-in authority's consumption checkpoint is not a JSON object"
+    present = set(parsed)
+    if missing := sorted(_CARRY_IN_CHECKPOINT_FIELDS - present):
+        return None, (
+            f"the carry-in consumption checkpoint is missing required field(s): "
+            f"{', '.join(missing)}"
+        )
+    if unexpected := sorted(present - _CARRY_IN_CHECKPOINT_FIELDS):
+        return None, (
+            f"the carry-in consumption checkpoint carries unpermitted field(s): "
+            f"{', '.join(unexpected)}; the record is a closed document"
+        )
+    if require_canonical and (reason := _noncanonical_checkpoint_reason(stored, parsed)):
+        return None, reason
+
+    text: dict[str, str] = {}
+    for name in _CARRY_IN_CHECKPOINT_TEXT_FIELDS:
+        value = parsed[name]
+        if not isinstance(value, str) or not value.strip():
+            return None, (
+                f"the carry-in consumption checkpoint's {name} is not a non-empty string, so the "
+                f"record is malformed"
+            )
+        text[name] = value
+    counts: dict[str, int] = {}
+    for name in _CARRY_IN_CHECKPOINT_COUNT_FIELDS:
+        value = parsed[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None, (
+                f"the carry-in consumption checkpoint's {name} is not a non-negative integer, so "
+                f"the record is malformed"
+            )
+        counts[name] = value
+    raw_allocation = parsed["historical_route_allocation"]
+    if not isinstance(raw_allocation, dict) or not raw_allocation:
+        return None, (
+            "the carry-in consumption checkpoint's historical_route_allocation is not a non-empty "
+            "object, so the record is malformed"
+        )
+    allocation: dict[str, int] = {}
+    for source_id, count in raw_allocation.items():
+        if not isinstance(source_id, str) or not source_id.strip():
+            return None, (
+                "the carry-in consumption checkpoint's historical_route_allocation is not a map "
+                "keyed by source identifiers, so the record is malformed"
+            )
+        # A negative count is not a small error to tolerate: it lets an allocation sum to a
+        # plausible baseline while charging an impossible number of attempts to some route, so the
+        # self-consistency comparison downstream would pass on arithmetic no consumption produced.
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None, (
+                f"the carry-in consumption checkpoint allocates {count!r} attempt(s) to "
+                f"{source_id!r}; every route allocation is a non-negative integer count, so the "
+                f"record is malformed"
+            )
+        allocation[source_id] = count
+
+    return (
+        _CarryInCheckpoint(
+            acquisition_window=text["acquisition_window"],
+            approved_request_ceiling=counts["approved_request_ceiling"],
+            authority_sha256=text["authority_sha256"],
+            authorized_census_run_id=text["authorized_census_run_id"],
+            authorizing_decision_reference=text["authorizing_decision_reference"],
+            consumed_request_count_carried_forward=counts["consumed_request_count_carried_forward"],
+            historical_route_allocation=allocation,
+            request_plan_sha256=text["request_plan_sha256"],
+            schema_version=text["schema_version"],
+        ),
+        "",
+    )
+
+
+def _carry_in_run_disagreement(
+    connection: sqlite3.Connection,
+    checkpoint: _CarryInCheckpoint,
+) -> str | None:
+    """Cross-check the checkpoint's authorized run against durable catalog state.
+
+    The receipt schema carries no run identity and Decision 055 authorized no new receipt field, so
+    the run the checkpoint names is proved against the ``ops_ingestion_jobs`` row it must have been
+    registered alongside. The two writes commit in one transaction, so that run existing as a
+    governed acquisition run in the checkpoint's own window is exactly the durable consequence a
+    truthful checkpoint has, and its absence is a state no lawful consumption produces.
+
+    Also refuses the impossible state of two distinct carry-in checkpoints claiming the same
+    authorized run: a run is registered exactly once, so at most one authority can have burned
+    alongside it.
+    """
+    # Local import: `acquisition` imports this module, so importing its job-kind constant at module
+    # scope would be a cycle. Both modules are fully initialised by call time.
+    from disclosure_drift.m3.acquisition import ACQUISITION_JOB_KIND
+
+    row = connection.execute(
+        "SELECT job_kind, stage FROM ops_ingestion_jobs WHERE job_id = ?",
+        (checkpoint.authorized_census_run_id,),
+    ).fetchone()
+    if row is None:
+        return (
+            "the carry-in consumption checkpoint names an authorized run that the catalog records "
+            "no registered job for, but an authority burns in the same transaction that registers "
+            "its run, so the two cannot lawfully disagree"
+        )
+    if str(row[0]) != ACQUISITION_JOB_KIND or str(row[1]) != checkpoint.acquisition_window:
+        return (
+            "the carry-in consumption checkpoint's authorized run is not registered as a governed "
+            "acquisition run in the checkpoint's own window, so the recorded consumption does not "
+            "describe the run it names"
+        )
+
+    own_key = carry_in_checkpoint_key(checkpoint.authority_sha256)
+    for key, value in connection.execute(
+        "SELECT checkpoint_key, checkpoint_value FROM ops_checkpoints"
+    ).fetchall():
+        if not str(key).startswith(CARRY_IN_CHECKPOINT_KEY_PREFIX) or str(key) == own_key:
+            continue
+        # Read without the canonical-encoding requirement on purpose. The question asked of another
+        # row is whether it *claims* this run, and a row that claims it while being noncanonical is
+        # more suspicious, not less — discarding it here would let a hand-written duplicate escape
+        # the one refusal that exists for it.
+        other, _ = _carry_in_checkpoint_document(value, require_canonical=False)
+        if other is not None and other.authorized_census_run_id == (
+            checkpoint.authorized_census_run_id
+        ):
+            return (
+                "more than one carry-in consumption checkpoint claims the same authorized run; a "
+                "run is registered exactly once, so at most one authority can have burned "
+                "alongside it and this state is not reachable by any lawful consumption"
+            )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -383,7 +1002,7 @@ def inspect_recovery_state(
         raise RecoveryInspectionError(message)
 
     tree = DataTree.from_root(data_root)
-    walk = _walk_receipt_chain(Path(receipt_chain_head))
+    walk = walk_receipt_chain(Path(receipt_chain_head))
 
     with read_only_catalog(Path(catalog_path)) as connection:
         integrity = integrity_report(connection)
@@ -391,6 +1010,7 @@ def inspect_recovery_state(
         projection = validate_audit_projection(connection, tree.audit / _PROJECTION_FILENAME)
         unresolved_states = _unresolved_recovery_states(connection)
         selection_runs = _in_flight_selection_runs(connection)
+        carry_in_disagreement = carry_in_checkpoint_disagreement(connection, walk)
 
     headroom_fits, headroom_detail = _headroom(plan, walk, store)
 
@@ -483,9 +1103,30 @@ def inspect_recovery_state(
                 f"selection lifecycle and this phase does not rule on it"
             ),
         ),
+        ConditionResult(
+            "8.12",
+            "The chain's carry-in root agrees with the catalog's consumption checkpoint",
+            _NOT_APPLICABLE
+            if walk.root_carry_in_authority_sha256 is None and not walk.root_carried_forward
+            else (_MET if carry_in_disagreement is None else _NOT_MET),
+            (
+                "the chain's root carries no baseline, so there is no carry-in to cross-check"
+                if walk.root_carry_in_authority_sha256 is None and not walk.root_carried_forward
+                else carry_in_disagreement
+                or (
+                    f"the root's carried-forward baseline of {walk.root_carried_forward} matches "
+                    f"the authority's durable consumption checkpoint"
+                )
+            ),
+        ),
     )
 
-    determination, basis, action = _determine(conditions, walk=walk, store=store)
+    determination, basis, action = _determine(
+        conditions,
+        walk=walk,
+        store=store,
+        carry_in_disagreement=carry_in_disagreement,
+    )
     return RecoveryState(
         determination=determination,
         basis=basis,
@@ -501,7 +1142,9 @@ def inspect_recovery_state(
     )
 
 
-def _headroom(plan: RequestPlan, walk: _ChainWalk, store: _StoreState) -> tuple[bool, str]:
+def _headroom(
+    plan: RequestPlan, walk: ReceiptChainAccounting, store: _StoreState
+) -> tuple[bool, str]:
     """Whether the remaining work fits under the ceiling the run has already partly consumed.
 
     The remainder is bounded **per route**, with each route's own ``A_reachable`` — the same
@@ -535,7 +1178,7 @@ def _headroom(plan: RequestPlan, walk: _ChainWalk, store: _StoreState) -> tuple[
     return fits, detail
 
 
-def _plan_hash_status(plan: RequestPlan, walk: _ChainWalk) -> str:
+def _plan_hash_status(plan: RequestPlan, walk: ReceiptChainAccounting) -> str:
     """Whether the supplied plan is the one the interrupted run was executing.
 
     Resuming against a *different* plan than the one the run consumed would carry a consumed count
@@ -548,7 +1191,7 @@ def _plan_hash_status(plan: RequestPlan, walk: _ChainWalk) -> str:
     return _MET if walk.request_plan_sha256 == plan.request_plan_sha256 else _NOT_MET
 
 
-def _plan_hash_detail(plan: RequestPlan, walk: _ChainWalk) -> str:
+def _plan_hash_detail(plan: RequestPlan, walk: ReceiptChainAccounting) -> str:
     """State what was compared, without assuming it matched."""
     if walk.request_plan_sha256 is None:
         return (
@@ -566,16 +1209,19 @@ def _plan_hash_detail(plan: RequestPlan, walk: _ChainWalk) -> str:
 def _determine(
     conditions: tuple[ConditionResult, ...],
     *,
-    walk: _ChainWalk,
+    walk: ReceiptChainAccounting,
     store: _StoreState,
+    carry_in_disagreement: str | None = None,
 ) -> tuple[str, str, str]:
     """Classify the conditions into `SAFE`, `UNSAFE`, or `UNDETERMINED`.
 
-    The split follows the governing prose exactly. `UNDETERMINED` is reserved for the two cases the
-    documents name, both of which leave it unknowable whether a write committed:
+    The split follows the governing prose exactly. `UNDETERMINED` is reserved for the cases the
+    documents name, each of which leaves something unknowable rather than merely wrong:
 
     - the receipt chain does not resolve, so the consumed count and interruption point are unknown;
-    - a committed row has no object, so it cannot be established what was actually persisted.
+    - a committed row has no object, so it cannot be established what was actually persisted;
+    - the chain's carry-in root and the catalog's consumption checkpoint disagree, so the cumulative
+      consumed count cannot be established at all (Decision 055 §7.5).
 
     Every other unmet condition has a known cause and is `UNSAFE`, which a separately authorized
     M3.2 repair may correct before inspection runs again. No finer rule is invented here.
@@ -585,6 +1231,19 @@ def _determine(
             "UNDETERMINED",
             f"the receipt chain does not resolve to a first attempt: {walk.detail}",
             "Stop. Do not resume. Refer for an owner ruling; never reconstruct a missing receipt.",
+        )
+    if carry_in_disagreement is not None:
+        return (
+            "UNDETERMINED",
+            (
+                f"the chain's carry-in root and the operational catalog disagree, so the "
+                f"cumulative consumed count cannot be established: {carry_in_disagreement}"
+            ),
+            (
+                "Stop. Do not resume. Refer for an owner ruling; a carry-in that the catalog and "
+                "the receipt do not agree on can never authorize continuation, and neither surface "
+                "is edited to match the other."
+            ),
         )
     if store.rows_without_object:
         return (
@@ -835,18 +1494,31 @@ def _run_window(selected: _SelectedRun, other_starts_raw: tuple[str, ...]) -> _R
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _OwnedSegment:
+    """One raw-lineage retrieval segment the selected run provably owns.
+
+    Ownership is decided by the run boundaries alone; how the segment is *charged* is decided
+    later, globally, against the whole reservation set (:func:`_reconcile_owned_segments`).
+    """
+
+    urls: frozenset[str]
+    retrieved: datetime
+    attempts: int
+
+
 def _selected_run_lineage_contribution(
     document: Mapping[str, object],
     *,
     window: _RunWindow,
     ledger: _LedgerReservations,
-) -> tuple[int, str | None]:
-    """Attribute one in-scope lineage manifest by durable event identity and order.
+) -> tuple[_OwnedSegment | None, str | None]:
+    """Decide whether the selected run owns one in-scope lineage manifest's segment.
 
-    Returns ``(attempts_to_add, undetermined_reason)``. ``(0, None)`` means the manifest is
-    provably excluded or provably ledger-covered; a non-``None`` reason means the evidence exists
-    but cannot be reconciled exactly, which the caller reports as ``UNDETERMINED`` rather than an
-    invented count. The decisions, in order:
+    Returns ``(owned_segment, undetermined_reason)``. ``(None, None)`` means the manifest is
+    provably excluded; a non-``None`` reason means the evidence exists but cannot be ordered
+    exactly, which the caller reports as ``UNDETERMINED`` rather than an invented count. The
+    decisions, in order:
 
     * a manifest retrieved strictly before the selected run's recorded start predates the run and
       is proven to belong elsewhere — excluded (Decision 051 §6.4's boundary discipline);
@@ -854,85 +1526,163 @@ def _selected_run_lineage_contribution(
       a later governed acquisition run's start) postdates the run — excluded the same way;
     * one whose retrieval instant *equals* a boundary instant proves no order, so ownership of the
       segment is not provable — ``UNDETERMINED``, never a guess;
-    * an owned segment is **ledger-covered** only when selected-run reservation rows whose commit
-      instants strictly precede the retrieval fully account for its recorded ``attempts`` — those
-      sends are already counted once by the ledger, so the lineage adds nothing (§5A rule 4). A
-      reservation committed strictly *after* the retrieval is a distinct later event: it is itself
-      counted once by the ledger and can never erase or absorb the earlier lineage attempt;
-    * an owned segment with **no** preceding or order-ambiguous matching reservation is genuine
-      pre-ledger evidence and adds exactly its recorded ``attempts`` (Decision 051 §5);
-    * anything between — reservations that only partially account for the segment's attempts, or
-      whose order against the retrieval is unparseable or exactly simultaneous — is partially
-      matched evidence, which is ``UNDETERMINED`` by rule, not a rounding choice.
+    * anything else inside the window is **owned**, and is returned for global reconciliation.
+
+    This function deliberately no longer decides ledger coverage. Deciding it here — per manifest,
+    against the full reservation set — is exactly the **M3-L14** defect: each manifest independently
+    found the same reservation sufficient, so one reservation could satisfy two owned segments and
+    the reported count fell below the durable floor. Coverage is now a property of the whole segment
+    set and is decided once, in one place (Decision 055 §8, ruling 055-D).
     """
     retrieved = _parse_utc_instant(document.get("retrieved_at_utc"))
     if retrieved is None:
-        return 0, (
+        return None, (
             "an in-scope raw-lineage manifest records no parseable UTC retrieval instant, so it "
             "cannot be ordered against the run boundaries"
         )
     if window.started is None:
-        return 0, (
+        return None, (
             "the selected run's recorded start instant cannot be parsed, so no in-scope lineage "
             "can be attributed to or excluded from the run"
         )
     if retrieved < window.started:
-        return 0, None  # proven to predate the selected run: recorded elsewhere, never added here
+        return None, None  # proven to predate the selected run: recorded elsewhere, never added
     if retrieved == window.started:
-        return 0, (
+        return None, (
             "an in-scope retrieval instant equals the selected run's recorded start, so which "
             "run owns the segment is not provable"
         )
     if window.upper_bound is not None:
         if retrieved > window.upper_bound:
-            return 0, None  # proven to postdate the selected run's window: a later run's segment
+            return None, None  # proven to postdate the selected run's window: a later run's segment
         if retrieved == window.upper_bound:
-            return 0, (
+            return None, (
                 "an in-scope retrieval instant equals a governed run boundary, so which run owns "
                 "the segment is not provable"
             )
     if window.boundary_ambiguous:
-        return 0, (
+        return None, (
             "another governed acquisition run records the selected run's exact start instant, so "
             "in-window lineage cannot be attributed between them"
         )
     if window.boundary_unparseable:
-        return 0, (
+        return None, (
             "a governed run-boundary instant cannot be parsed, so in-window lineage cannot be "
             "proven to belong to the selected run"
         )
     attempts = document.get("attempts")
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
-        return 0, "an in-scope raw-lineage manifest records no usable attempt count"
-    segment_urls = set()
-    for key in ("requested_url", "final_url"):
-        url = document.get(key)
-        if isinstance(url, str) and url:
-            segment_urls.add(url)
+        return None, "an in-scope raw-lineage manifest records no usable attempt count"
+    segment_urls = frozenset(
+        url
+        for key in ("requested_url", "final_url")
+        if isinstance(url := document.get(key), str) and url
+    )
     if not segment_urls and ledger.rows:
-        return 0, (
+        return None, (
             "an in-scope raw-lineage manifest records no request URL identity, so ledger "
             "coverage of its segment is not provable"
         )
-    preceding = 0
-    order_ambiguous = 0
-    for reservation in ledger.rows:
-        if reservation.source_url_canonical not in segment_urls:
-            continue
-        reserved_at = _parse_utc_instant(reservation.started_at_raw)
-        if reserved_at is None or reserved_at == retrieved:
-            order_ambiguous += 1
-        elif reserved_at < retrieved:
-            preceding += 1
-        # A strictly later reservation is its own consumed event, already counted once by the
-        # ledger; it neither covers nor erases this earlier retrieval segment.
-    if preceding >= attempts:
-        return 0, None  # ledger-covered: the preceding reservations already count these sends
-    if preceding == 0 and order_ambiguous == 0:
-        return attempts, None  # genuine pre-ledger evidence, counted exactly once
-    return 0, (
-        "selected-run reservations only partially or order-ambiguously account for an in-scope "
-        "retrieval segment, so exact ledger coverage is not provable"
+    return _OwnedSegment(urls=segment_urls, retrieved=retrieved, attempts=attempts), None
+
+
+def _reconcile_owned_segments(
+    segments: Sequence[_OwnedSegment],
+    ledger: _LedgerReservations,
+) -> tuple[int, str | None]:
+    """Charge every owned segment under one **global one-to-one** reservation-consumption rule.
+
+    Decision 055 §8 (ruling 055-D). A durable reservation may satisfy **at most one** segment, and
+    the answer is ``UNDETERMINED`` whenever an exact bijection between reservations and the segments
+    they account for cannot be established. Returns ``(pre_ledger_attempts, undetermined_reason)``.
+
+    A reservation is *eligible* for a segment when its canonical request URL is one the segment
+    records **and** its pre-send commit instant strictly precedes the segment's retrieval — the
+    same durable event-order test as before, applied here across the whole set at once. A
+    reservation committed strictly *after* a retrieval remains a distinct later event: it is
+    counted once by the ledger and neither covers nor erases the earlier segment.
+
+    The rule, applied over all owned segments together, is an **exact bijection** in both
+    directions:
+
+    * a matching reservation whose order against a retrieval is unparseable or exactly simultaneous
+      proves no order at all — ``UNDETERMINED``;
+    * a segment with **no** eligible reservation is genuine pre-ledger evidence and adds exactly its
+      recorded ``attempts`` (Decision 051 §5), consuming nothing;
+    * two covered segments whose eligible sets **intersect at all** are multiply matchable: the same
+      reservation could account for either, so no assignment is *proved* even where one exists —
+      ``UNDETERMINED``;
+    * every **counted physical attempt** of a covered segment must map to exactly one eligible
+      reservation. Fewer eligible reservations than attempts is unmatched cardinality —
+      ``UNDETERMINED``;
+    * every **eligible reservation** must map to exactly one counted attempt. One that no attempt
+      accounts for is a **leftover contradiction**: the ledger holds a durable pre-send commit for
+      that URL, before that retrieval, that the lineage does not explain — ``UNDETERMINED``.
+
+    The last two are a single exact-equality test, and reading it as ``>=`` instead is the
+    **M3-L14** defect the measured counterexample turns on. One owned segment recording a single
+    attempt, against two eligible preceding same-URL reservations, satisfies the segment's demand
+    — and leaves a reservation unaccounted for. Reporting coverage there states a consumed count
+    below the durable floor.
+    """
+    eligible_by_segment: list[frozenset[int]] = []
+    for segment in segments:
+        eligible: set[int] = set()
+        for index, reservation in enumerate(ledger.rows):
+            if reservation.source_url_canonical not in segment.urls:
+                continue
+            reserved_at = _parse_utc_instant(reservation.started_at_raw)
+            if reserved_at is None or reserved_at == segment.retrieved:
+                return 0, (
+                    "selected-run reservations only partially or order-ambiguously account for an "
+                    "in-scope retrieval segment, so exact ledger coverage is not provable"
+                )
+            if reserved_at < segment.retrieved:
+                eligible.add(index)
+        eligible_by_segment.append(frozenset(eligible))
+
+    covered = [
+        (segment, candidates)
+        for segment, candidates in zip(segments, eligible_by_segment, strict=True)
+        if candidates
+    ]
+
+    # Multiply matchable. If two covered segments share any eligible reservation, that reservation
+    # could account for either of them. A pairing would still *exist* — but it would be chosen, not
+    # proved, and Decision 055 §8 fails closed on multiply matchable cardinality rather than
+    # settling it by an arbitrary order.
+    claimed: set[int] = set()
+    for _segment, candidates in covered:
+        if claimed & candidates:
+            return 0, (
+                "one durable reservation could account for more than one owned retrieval segment, "
+                "so no exact one-to-one reservation-to-segment assignment is provable; a "
+                "reservation may satisfy at most one segment"
+            )
+        claimed |= candidates
+
+    # Exact in both directions, which is what makes the surviving assignment a bijection rather
+    # than merely a possibility. Fewer eligible reservations than counted attempts is unmatched
+    # cardinality. *More* is a leftover contradiction — a durable pre-send commit for that URL,
+    # committed before that retrieval, that the lineage does not account for — and it is the half
+    # a `>=` comparison silently accepts, reporting a count below the durable floor.
+    for segment, candidates in covered:
+        if len(candidates) != segment.attempts:
+            return 0, (
+                "selected-run reservations do not account for an in-scope retrieval segment "
+                "exactly: its counted attempts and the reservations eligible to cover them do not "
+                "correspond one-to-one, so exact ledger coverage is not provable"
+            )
+
+    # Only segments with no eligible reservation are genuine pre-ledger evidence; every covered
+    # segment's sends are already counted exactly once by the ledger itself.
+    return (
+        sum(
+            segment.attempts
+            for segment, candidates in zip(segments, eligible_by_segment, strict=True)
+            if not candidates
+        ),
+        None,
     )
 
 
@@ -954,11 +1704,12 @@ def _pre_ledger_lineage_attempts(
     * a manifest whose ``source_id`` is not a route of the interrupted run's plan is provably
       unrelated lineage outside this accounting scope, and never changes the count
       (Decision 051 §6.6);
-    * an in-scope manifest is attributed by :func:`_selected_run_lineage_contribution`, which
-      excludes segments the run boundaries prove belong elsewhere, adds pre-ledger segments the
-      selected run provably owns, and adds nothing for segments the ledger's strictly-preceding
-      reservations already account for — the same segment is never counted twice, and no segment
-      the run owns is ever silently dropped.
+    * an in-scope manifest's **ownership** is decided by :func:`_selected_run_lineage_contribution`,
+      which excludes segments the run boundaries prove belong elsewhere;
+    * every owned segment is then **charged together**, once, by
+      :func:`_reconcile_owned_segments`, under the global one-to-one reservation-consumption rule
+      (Decision 055 §8) — the same segment is never counted twice, one reservation never satisfies
+      two segments, and no segment the run owns is ever silently dropped.
 
     Evidence that cannot be reconciled is never silently treated as zero. A manifest that cannot
     be read, is not a JSON object, records no source identity, or fails exact attribution sets an
@@ -966,8 +1717,8 @@ def _pre_ledger_lineage_attempts(
     exact count (Decision 051 §6.5, §6.9; §5A rule 5). Provably unrelated manifests are excluded
     before any attribution field is inspected, so they never raise a spurious ambiguity.
     """
-    total = 0
     undetermined: str | None = None
+    owned: list[_OwnedSegment] = []
     raw_root = tree.data_root / "raw"
     if not raw_root.is_dir():
         return _LineageAccounting(0, None)
@@ -988,14 +1739,17 @@ def _pre_ledger_lineage_attempts(
             continue
         if source_id not in in_scope_source_ids:
             continue  # provably unrelated lineage: outside this run's plan scope, never counted
-        contribution, reason = _selected_run_lineage_contribution(
-            document, window=window, ledger=ledger
-        )
+        segment, reason = _selected_run_lineage_contribution(document, window=window, ledger=ledger)
         if reason is not None:
             undetermined = undetermined or reason
             continue
-        total += contribution
-    return _LineageAccounting(pre_ledger_attempts=total, undetermined_reason=undetermined)
+        if segment is not None:
+            owned.append(segment)
+    total, coverage_reason = _reconcile_owned_segments(owned, ledger)
+    return _LineageAccounting(
+        pre_ledger_attempts=total,
+        undetermined_reason=undetermined or coverage_reason,
+    )
 
 
 def inspect_receiptless_first_invocation(
@@ -1072,7 +1826,7 @@ def inspect_receiptless_first_invocation(
     # The headroom check reuses the same per-route decomposition the receipt-chain mode uses; only
     # the consumed count's provenance differs. No receipt is walked, so a synthetic unresolved walk
     # carries the durably derived consumed count into it.
-    walk = _ChainWalk(
+    walk = ReceiptChainAccounting(
         receipt_ids=(),
         consumed_physical_attempts=consumed,
         interruption_state=None,

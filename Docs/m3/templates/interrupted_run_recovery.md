@@ -166,6 +166,23 @@ one identifiable in-flight request is genuinely unrecorded or ambiguous; otherwi
 `UNDETERMINED`. Every future committed pre-send `started` row counts as consumed, including a
 row stranded before the transport call.
 
+**Chain arithmetic (Decision 055 §7.5).** The cumulative count for a receipt chain is:
+
+```text
+cumulative = sum(actual_physical_attempt_count over every receipt in the chain)
+           + carried_forward of the single no-predecessor root only
+```
+
+The root carry-in is added **exactly once** — never `N` alone, never once per receipt. A `2.0` root
+carries no baseline and contributes zero, so mixed-version chains walk to the same figure they always
+did. `m3 acquire --show-scope` reports exactly this number.
+
+**Receiptless ledger coverage is global and one-to-one (Decision 055 §8).** Across **all** owned
+receiptless lineage segments, a durable reservation may satisfy **at most one** segment. Return
+`UNDETERMINED` on unmatched cardinality, multiply matchable cardinality, duplicate reservation reuse,
+source/URL/run mismatch, a leftover contradiction, or any inability to prove an exact bijection — one
+reservation against two owned same-URL segments is `UNDETERMINED`, never a consumed count of `1`.
+
 ## 8. Safe-resume determination
 
 | # | Condition | Result |
@@ -181,6 +198,7 @@ row stranded before the transport call.
 | 8.9 | No unresolved schema-drift incident is open | `MET` / `NOT MET` |
 | 8.10 | The plan hash is unchanged | `MET` / `NOT MET` |
 | 8.11 | For a selection: the accepted lifecycle guards leave exactly one lawful next state | `MET` / `NOT MET` / `N/A` |
+| 8.12 | The chain's carry-in root agrees with the catalog's consumption checkpoint | `MET` / `NOT MET` / `N/A` |
 
 | Field | Value |
 |---|---|
@@ -197,6 +215,24 @@ row stranded before the transport call.
 **Explicit receiptless-first-invocation mode can never produce `SAFE` or a continuation
 proposal.** Even an exact consumed count does not substitute for the predecessor receipt Decision
 050 requires. The interrupted initial T5 invocation governed by Decision 051 is never resumed.
+
+**Condition 8.12 is `N/A` unless the chain's root carries a baseline.** Where it does, the root
+receipt and the durable `ops_checkpoints` consumption record must agree exactly. A missing authority
+hash, an absent checkpoint, or a differing carried-forward figure is **`UNDETERMINED`** and **cannot
+authorize continuation** — and **neither surface is ever edited to match the other**.
+
+The checkpoint is read as the **whole closed document** it is, not for the carried-forward figure
+alone: a row found under the expected key proves only that something was written there. It must
+carry exactly its specified field set with well-formed, internally consistent values; its embedded
+authority hash must match the key it is filed under; its plan, window, and ceiling must match the
+root receipt; its authorized run must resolve to a governed acquisition run registered in that same
+window; and no second carry-in checkpoint may claim that run. Any of these failing is
+**`UNDETERMINED`** (data dictionary §5B; receipt specification §11.2).
+
+**A carry-in root is not a resume, and this template does not authorize one.** Carrying an approved
+consumed baseline into a *clean* new run is a separate interface with its own owner preconditions
+(operator runbook step 27a); it is never reached by resuming, and it may not be combined with
+`--resume-from`.
 
 ## 9. Duplicate-prevention proof
 

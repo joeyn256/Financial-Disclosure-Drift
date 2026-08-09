@@ -210,8 +210,33 @@ is not the identity depending on the receipt.
 | `reason_detail` | string | **`C:`** every non-`complete` status | One short non-secret sentence. **Never a response body and never a path** |
 | `interruption_state` | string | **`C:`** `completion_status = "interrupted"` | One of `before_raw_store_write`, `after_raw_store_write_before_catalog_commit`, `after_catalog_commit`, `during_selection`, `during_manifest_write` |
 | `recovery_predecessor_receipt_id` | string | **`C:`** a resumed run | The `receipt_id` this run resumed from |
-| `consumed_request_count_carried_forward` | integer | **`C:`** a resumed `live` run | Physical attempts already spent against **that window's** ceiling |
+| `consumed_request_count_carried_forward` | integer | **`C:`** a resumed `live` run, **or** a clean carry-in root (`3.0`) | Cumulative physical attempts spent against **that window's** ceiling **before this invocation** |
+| `carry_in_authority_sha256` | string | **`C:`** a clean carry-in root only (`3.0`) | SHA-256 of the canonical bytes of the one-use carry-in authority this root consumed |
 | `rehearsal_evidence_reference` | string | **`C:`** `rehearsal` | The non-sensitive reference identifier of the private rehearsal evidence report holding the simulated totals (§4.5.1) |
+
+**The two carry-in classes, stated exactly** (accepted
+[Decision 055](../Decisions/decision_055_m3_2_carry_in_architecture_and_offline_implementation_authorization.md)
+§§7.2–7.4). In `3.0`, `consumed_request_count_carried_forward` means **cumulative physical attempts
+before the current invocation**, and `actual_physical_attempt_count` records **this invocation's wire
+attempts only**. There are exactly three lawful shapes for a `live` receipt, and every other
+combination fails closed:
+
+| Shape | `recovery_predecessor_receipt_id` | `consumed_request_count_carried_forward` | `carry_in_authority_sha256` |
+|---|---|---|---|
+| Ordinary zero-baseline fresh root | absent | **omitted** | absent |
+| Clean carry-in root | **absent** | **required**, non-zero | **required** |
+| Resume | **present** | **required** | **absent** |
+
+**In `3.0`**, receipt accounting additionally validates that **carried-forward plus actual is no
+greater than the approved ceiling**: the ceiling bounds *cumulative* consumption, and neither figure
+bounds it alone.
+
+**This rule is dispatched on the document's own version, and is `3.0`-only.** A `2.0` receipt is
+validated under the rule it was written against — `actual_physical_attempt_count` alone may not
+exceed the ceiling — and that check still applies to both versions. Applying the cumulative bound to
+`2.0` documents would retroactively invalidate receipts that were correct when written, which
+Decision 055 §7.1 forbids: existing `2.0` receipts remain byte-unchanged, valid, readable, and
+usable in mixed-version chains.
 
 ## 5. Prohibited fields
 
@@ -330,29 +355,119 @@ does **not** make them part of any governed preimage.
 5. The recovery chain is operational. **It enters no governed identity**, and a run recovered from
    three interruptions produces exactly the same identities as one that ran straight through.
 
+### 11.1 Chain arithmetic, and the consumers that must agree with it
+
+The cumulative consumed count for a chain is:
+
+```text
+cumulative = sum(actual_physical_attempt_count over every receipt in the chain)
+           + carried_forward of the single no-predecessor root only
+```
+
+The root carry-in is added **exactly once** — never `N` alone, and never once per receipt. The root
+is the only receipt in a chain with no predecessor to have inherited a baseline from, which is what
+makes "once, at the root" well defined rather than a convention.
+
+**Mixed `2.0`/`3.0` chains walk identically.** A `2.0` root carries no baseline and contributes zero,
+so every chain written before Decision 055 walks to exactly the count it always did.
+
+The **receipt-chain walker**, **`m3 acquire --show-scope`**, and **every recovery and continuation
+consumer** must agree with that formula. They agree by construction: there is one implementation of
+the arithmetic (`walk_receipt_chain`), and each of those surfaces calls it rather than restating it.
+
+### 11.2 The carry-in cross-check
+
+A clean carry-in root and the operational catalog's consumption checkpoint **mutually cross-check**.
+Either surface alone can be forged by editing the other, so both directions are checked:
+
+- a root claiming a non-zero baseline while naming **no** authority has no durable record of where
+  that baseline came from;
+- a root naming an authority whose **checkpoint is absent** claims a burn that never committed;
+- a checkpoint whose recorded baseline **differs** from the receipt's means the two disagree.
+
+**The checkpoint is read as the whole closed document it is, not for the one figure the arithmetic
+needs.** Finding a row under the expected deterministic key proves only that *something* was written
+there, so the record itself is validated:
+
+- it must parse, be a JSON object, and carry **exactly** the field set of data dictionary §5B — a
+  missing field and an extra field are each refused, never ignored;
+- the stored TEXT must be **byte-for-byte the canonical serialization** of the document it parses
+  to. A consumption writes canonical bytes, so re-indented, re-ordered, or duplicate-key encodings
+  record no burn the catalog made — and a duplicate key is otherwise invisible, because the parser
+  silently keeps the last value and nothing below would ever compare the discarded one;
+- every value must be well formed and internally consistent: a real schema version, an accepted
+  acquisition window, a canonical `Decision NNN` authorizing reference, a route allocation keyed by
+  non-empty registered routes whose counts are **non-negative integers** summing to the carried
+  baseline, and a baseline within the ceiling it names;
+- its embedded **authority hash must match the deterministic key it is filed under**, so a row
+  describing a different burn cannot stand in for this one;
+- its **plan, window, and ceiling must match the root receipt's**, and its carried baseline must
+  match the root's carried-forward count;
+- it must carry the **fixed Decision 055 values** — schema `m3-carry-in-authority/1.0`, window
+  `M3.2A`, the frozen plan, ceiling `801`, seed `1` allocated wholly to `sec_bulk_submissions`, and
+  `Decision 055` — compared literally against the same constants, through the same validator, that
+  the artifact gate uses. **Agreement between the two surfaces is not authorization:** a forged
+  root and a checkpoint forged to match it agree perfectly, and neither surface influences what the
+  accepted values are;
+- its **authorized run must resolve** to a governed acquisition run registered in that same window —
+  the two writes commit in one transaction, so a checkpoint whose run does not exist records a burn
+  that did not happen as described. No receipt field names a run, and none is added;
+- **no two carry-in checkpoints may claim the same authorized run**: a run registers exactly once,
+  so at most one authority can have burned alongside it.
+
+Each of these is **`UNDETERMINED`**, and **`UNDETERMINED` cannot authorize continuation.** Neither
+surface is ever edited to match the other.
+
 ## 12. Schema-versioning policy
 
 1. `receipt_schema_version` is **required in every receipt** and is the first field a reader
    consults.
-2. The version this document defines is:
+2. The version this document defines, and the one the **writer** emits, is:
 
    ```
-   m3-execution-receipt/2.0
+   m3-execution-receipt/3.0
    ```
 
 3. **Adding a conditionally-required field is a minor version increment.** Removing a field,
    renaming one, changing a type, changing a field's meaning, or **changing a field's
    classification** is a **major** increment.
 4. **A new major version requires a new accepted decision record.** The v2 field set is governed by
-   Decision 028 §9; it is not extended by an implementation session.
+   Decision 028 §9; it is not extended by an implementation session. The v3 field set is governed by
+   accepted
+   [Decision 055](../Decisions/decision_055_m3_2_carry_in_architecture_and_offline_implementation_authorization.md)
+   §7, which unfroze the schema for **exactly one** backward-compatible successor and nothing else.
 5. **Old receipts are never rewritten to a new schema.** A reader dispatches on the version it finds.
 6. Receipt-schema evolution remains a recorded limitation
    ([`limitations_register.md`](limitations_register.md), **M3-L09**). Once the first v2 receipt
    exists, later incompatible changes would make phases non-comparable and require an explicit
    versioned reader policy.
-7. **This document is at `m3-execution-receipt/2.0`.** The v1 design was corrected before any
-   receipt was ever produced. No v1 artifact exists, so no migration, rewrite, or compatibility
-   shim is required.
+7. **This document is at `m3-execution-receipt/3.0`.** The v1 design was corrected before any receipt
+   was ever produced, so no v1 artifact exists.
+
+### 12.1 The `2.0` → `3.0` step, and what it guarantees
+
+`3.0` is a **major** increment because one field's meaning and classification changed, and it is
+**backward compatible for readers**:
+
+- **`2.0` receipts remain byte-unchanged, valid, readable, and usable in mixed-version chains.** They
+  are **never rewritten, upgraded in place, or migrated.**
+- Readers accept both versions and **dispatch on the version the document declares**. Each version is
+  validated against **its own** permitted-field table: `carry_in_authority_sha256` is not a permitted
+  `2.0` field, and a `2.0` receipt carrying it is refused by the closed field set.
+- **Dispatch covers accounting, not only the field table.** The cumulative ceiling rule
+  (carried-forward plus actual, §4.5) is a `3.0` rule; a `2.0` receipt is bounded by
+  `actual_physical_attempt_count` alone, exactly as it always was. A `2.0` document whose sum
+  exceeds its ceiling while its actual count does not therefore stays valid — it was correct when
+  written, and refusing it now would be a rewrite of the record by refusal.
+- Only the **writer** moved. Every receipt written from now on declares `3.0`.
+
+The complete `3.0` delta over `2.0` — nothing else is added, removed, retyped, or re-moded:
+
+| Change | Field |
+|---|---|
+| Meaning and condition restated | `consumed_request_count_carried_forward` — now *cumulative attempts before this invocation*, required for a resume **and** for a clean carry-in root, omitted for an ordinary zero-baseline fresh root |
+| Added | `carry_in_authority_sha256` — required only on a clean carry-in root |
+| Accounting rule added, `3.0`-only | carried-forward **plus** actual may not exceed the approved ceiling; `2.0` keeps its former `actual`-alone bound |
 
 ## 13. The single receipt integrity identity
 

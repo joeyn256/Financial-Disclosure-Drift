@@ -1329,12 +1329,18 @@ M3_L16: ACTIVE — PROCEDURE ARCHITECTURE ACCEPTED; ADOPTION AND OWNER CLOSURE O
 EXECUTION_AUTHORITY: NONE
 LIVE_READINESS: NOT_CLAIMED
 NETWORK_OR_SEC_AUTHORITY: NONE
-NEXT_AUTHORIZED_ACTION: CLAUDE_M3_2_DECISION_057_FINAL_PROVENANCE_CORRECTION_FRESH_INDEPENDENT_REREVIEW_PACKET
+NEXT_AUTHORIZED_ACTION: CLAUDE_M3_2_DECISION_057_FABLE_MAX_FINAL_COMPREHENSIVE_ACCEPTANCE_AUDIT_PACKET
 ```
 
-That next action is a **fresh, independent, non-author rereview of this five-times-remediated
-record** (§3), performed against the commit that publishes this correction. **Three earlier pointers
-are discharged**, each by a review that was performed and returned `FAIL`:
+That next action is one **final comprehensive independent acceptance audit of this
+five-times-remediated record**, run in a **genuinely fresh Claude Fable 5 session and process at
+maximum effort**, against the commit that publishes the pointer synchronization. It is
+**read-only**: it authorizes no adoption, no operational action, no private-state access, and no
+network or SEC contact, and **owner review follows it**. It **supersedes**
+`CLAUDE_M3_2_DECISION_057_FINAL_PROVENANCE_CORRECTION_FRESH_INDEPENDENT_REREVIEW_PACKET`, the MIN-P1
+delta rereview this section named before the owner replaced that plan by ruling on 2026-08-09; that
+pointer is **superseded, not discharged**, and may not be cited as the current pointer. **Three
+earlier pointers are discharged**, each by a review that was performed and returned `FAIL`:
 `CLAUDE_M3_2_DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_PACKET` (findings remediated by
 remediation 3), `CLAUDE_M3_2_DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REVIEW_PACKET`
 (findings remediated by remediation 4), and
@@ -1342,23 +1348,26 @@ remediation 3), `CLAUDE_M3_2_DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REV
 remediation 5). **None may be cited as the current pointer.**
 
 **The non-author requirement is binding, and it is objectively testable rather than a matter of
-self-assessment.** Two identifiers are now disqualified: the session that authored remediations 3
-and 4 and produced the post-remediation rereview, and the session that produced the qualifying
-rereview and then authored this fifth remediation under the owner's separate instrument. Accordingly:
+self-assessment.** Three identifiers are now disqualified: the session that authored remediations 3
+and 4 and produced the post-remediation rereview, the session that produced the qualifying
+rereview and then authored this fifth remediation under the owner's separate instrument, and the
+session that authored the MIN-P1 provenance correction and this pointer synchronization under the
+owner's later bounded instruments. Accordingly:
 
-- The next rereview **must run in a genuinely new Claude Code session and process** whose
-  `Claude-Session` identifier **differs from BOTH `session_01TSthW3MCDzAmbMAVou376C` and
-  `session_01TAbZvx7ahzG1MonMfs7oMD`**.
-- **A `/clear` inside a session carrying either identifier is expressly NOT sufficient.** Cleared
+- The next audit **must run in a genuinely fresh Claude Fable 5 session and process** whose
+  `Claude-Session` identifier **differs from ALL THREE of `session_01TSthW3MCDzAmbMAVou376C`,
+  `session_01TAbZvx7ahzG1MonMfs7oMD`, and `session_01MbdG6URE7Lu5st21AWdEsc`**.
+- **A `/clear` inside a session carrying any of those identifiers is expressly NOT sufficient.** Cleared
   context makes a session substantively fresh; it does not make it a different session, and the
   independence condition is about session identity, not only about recollection.
 - The reviewer must **disclose its own `Claude-Session` identifier if the environment exposes it**
-  and **prove it differs from both disqualified identifiers before beginning substantive review**. If
+  and **prove it differs from all three disqualified identifiers before beginning substantive
+  review**. If
   the identifier is unavailable to it, it must supply whatever objective fresh-session evidence the
   environment does expose, and **owner adjudication remains required**.
 - The reviewer must have **no prior authored or remediated content for Decision 057** — it may
   neither have written any part of this record nor produced any of the three failing reviews.
-- **Claude Opus 5, maximum effort, exactly one active session, no subagents, no parallel sessions.**
+- **Claude Fable 5, maximum effort, exactly one active session, no subagents, no parallel sessions.**
 - Disclosing a session identifier is a governance-independence check only; **no credential and no
   private operational information may be exposed by it.**
 

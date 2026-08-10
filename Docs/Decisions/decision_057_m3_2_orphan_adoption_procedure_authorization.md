@@ -111,10 +111,10 @@ Recovery remains UNDETERMINED. Live readiness is not claimed.
 That instruction is authority to **prepare this governance candidate and its fresh review**. It is
 **not** authority for operational execution.
 
-**Candidate provenance — three bounded remediations: two before publication, one after.** This
-record has now been corrected **three times**, each time under a bounded owner instrument and each
-time changing **no** executable, test, migration, configuration, contract, runbook, or template byte
-and touching **no** operational state.
+**Candidate provenance — four bounded remediations: two before the first publication, two after.**
+This record has now been corrected **four times**, each time under a bounded owner instrument and
+each time changing **no** executable, test, migration, configuration, contract, runbook, or template
+byte and touching **no** operational state.
 
 1. **First remediation (2026-08-09).** Fixed one owner-identified **MAJOR** omission: the record
    fixed the verifier and the guarded `INSERT` but did not mandate the full persisted row
@@ -133,7 +133,7 @@ and touching **no** operational state.
    (§5 and §5.1 step 6 — the batch must exit and transaction 1 must commit before the rebuild; §5's
    pinned second-limb call shape; §6 rulings 4–5 — the grounding for the zero-row rulings; §7 gate 10
    and §12 clause 9 — what "exactly one invocation" counts).
-3. **Third remediation (2026-08-09) — this one, and the first after publication.** The §16 final
+3. **Third remediation (2026-08-09) — the first after publication.** The §16 final
    fresh independent non-author review was performed against the published record and returned
    **`DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_FAIL`** — **0 BLOCKER, 1 MAJOR, 3 MINOR,
    2 OPTIMIZATION**. It confirmed the central architecture correct in every material
@@ -155,26 +155,64 @@ and touching **no** operational state.
      Closed by the additive §10 case 16.
    - **OPTIMIZATION** ×2 — the §9 state-5 description and the §4.4/§5 grounds for excluding
      `_recover_orphan`. Both applied.
+4. **Fourth remediation (2026-08-09) — this one, and the second after publication.** The
+   post-remediation fresh independent rereview was performed against the published corrected record
+   `103b3d39…` and returned
+   **`DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REVIEW_FAIL`** — **0 BLOCKER, 1 MAJOR,
+   2 MINOR, 2 OPTIMIZATION**. It confirmed the complete underlying architecture **correct** against
+   the frozen code — every one of the record's cited line numbers resolved to the exact construct
+   claimed, with **no** claim contradicted — and confirmed **MAJ-1**, **MIN-3**, **OPT-1**, and
+   **OPT-2** correctly resolved. Its findings again fell entirely in the **traceability,
+   publication-currency, and evidence layers**:
+   - **MAJOR (MAJ-A)** — the corrected record carried the new control set, but the **three companion
+     governance files still described the superseded one** — **every figure in this sentence is the
+     superseded one, quoted only to identify the defect, and none of it is current**: an eleven-item
+     preflight (omitting gates 12 and 13), fifteen synthetic cases (omitting case 16), a
+     fourteen-item evidence contract (omitting item 2's two-reading form and items 15 and 16), and a
+     single-route `_recover_orphan` exclusion — with two files also self-contradicting between their
+     body and their own appended tail. A later packet drafting from the ledger would have rebuilt
+     exactly the pre-remediation control set. **All are now corrected to thirteen gates, sixteen
+     cases, sixteen evidence items, and the two-route exclusion**, synchronized across all four
+     authorized files.
+   - **MINOR (MIN-A)** — §14 and §15 asserted in present tense that *this remediation is itself
+     uncommitted*, inside the very commit that published it: the same defect class as the third
+     remediation's MINOR, one generation later, and the second unrecorded sequence anomaly. Closed
+     in §14 and §15.
+   - **MINOR (MIN-B)** — the new snapshot gate recorded the snapshot's own digest but never bound it
+     to the live pre-write catalog state: no source digest, no equality proof, no snapshot method
+     fixed against a WAL-mode source, and no ordering against the lock recheck. Closed by §7.1,
+     §7.2, the rewritten §7 gates 9 and 13, and §11 item 16.
+   - **OPTIMIZATION ×2** — the residual procedure-artifact path/symlink ambiguity (**OPT-A**, closed
+     by §5.2 and §7 gate 12) and the under-inclusive two-route state-5 exception list (**OPT-B**,
+     closed by §9). The owner ordered both implemented.
 
-**Publication occurred before this review, and is recorded rather than asserted away.** The record
-was committed and pushed as
-`9475eb3d614aa70b3f2a04b061d63bd7ea51c030` (tree `e0b9b12095c181ba974336399f04fc1e44eb4a11`, parent
-`ea0647459ef38069c75f7b8da2873abf0cbccdb1`), under the exact §14-reserved subject
-`Authorize M3.2 orphan-adoption procedure architecture`, touching exactly the §14 four-path envelope
-and **no fifth**, with **no tag**. That publication preceded the passing §16 review §14 named as its
-precondition. **Whether it is ratified is an owner ruling; this record neither ratifies nor voids
-it.** §14 carries the full disposition.
+   The rereview's report also disclosed that its `Claude-Session` identifier matched the third
+   remediation's. The owner accepted the report as valid defect-discovery evidence while ruling that
+   **no eventual `PASS` may rest on that identifier** — see §16.
 
-The **accepted central orphan-adoption architecture is unchanged by all three remediations.** None
-granted execution authority. The prohibition on a **third automatic correction loop** is **intact and
-was honoured**: the §16 review referred every defect to the owner and performed no remediation, and
-this correction proceeds **only** under the owner's separate instruction issued in response to that
-referral — *"Please fix all majors, minors, and make the optimizations."* An owner-instructed
-remediation is not an automatic loop. **No automatic correction loop is permitted at any point**; any
-further defect returns to the owner. **The reviewer who produced the failing verdict authored this
-remediation and is therefore disqualified from reviewing it** — §16 requires a fresh non-author
-session. §2 is preserved **verbatim** as the prior owner determination — its "next action" line is
-historical, and §16 carries the current pointer.
+**Both publications occurred before any qualifying passing review, and both are recorded rather than
+asserted away.** Publication 1 was `9475eb3d614aa70b3f2a04b061d63bd7ea51c030` (tree
+`e0b9b12095c181ba974336399f04fc1e44eb4a11`, parent `ea0647459ef38069c75f7b8da2873abf0cbccdb1`) under
+the exact §14-reserved subject `Authorize M3.2 orphan-adoption procedure architecture`. Publication 2
+was `103b3d3910e11fee43f66d8451f101019487588e` (tree `04bd61ca09be271752d432c82f0c2f6a02eb277c`,
+parent `9475eb3d…`) under the subject `Correct Decision 057 after failed independent review`. Each
+touched exactly the §14 four-path envelope and **no fifth**, with **no tag**. **The owner has ratified
+`103b3d39…` as a matter of publication FACT only — not as execution acceptance** (§14). Whether
+publication 1 is ratified remains an owner ruling; this record neither ratifies nor voids it. §14
+carries the full disposition, including this fourth remediation's own authorized publication.
+
+The **accepted central orphan-adoption architecture is unchanged by all four remediations.** None
+granted execution authority. The prohibition on an **automatic correction loop** is **intact and was
+honoured at every step**: each review referred every defect to the owner and remediated nothing, and
+each correction proceeded **only** under the owner's separate responding instrument — this one under
+the bounded second post-remediation correction packet, which expressly accepted **MAJ-A**, **MIN-A**,
+**MIN-B**, **OPT-A**, and **OPT-B** for remediation and expressly barred redesign of the already
+resolved **MAJ-1**, **MIN-3**, **OPT-1**, and **OPT-2**. An owner-instructed remediation is not an
+automatic loop. **No automatic correction loop is permitted at any point**; any further defect
+returns to the owner. **Every session that has authored or remediated this record is disqualified
+from reviewing it, and §16 now states that requirement in objectively testable form.** §2 is
+preserved **verbatim** as the prior owner determination — its "next action" line is historical, and
+§16 carries the current pointer.
 
 Every source and schema fact recorded below was verified by direct read-only inspection of the
 **committed repository** at that baseline — the packaged migrations, the accepted production source,
@@ -359,6 +397,8 @@ The procedure shape is retained from the Decision 053 precedent and corrected fo
   attach to no particular artifact: a compliant run could validate one file, hash a second, and
   irreversibly execute a third, and §12's bar on retry and re-adoption would make the substitution
   undiscoverable afterwards;
+- be **identified by one canonical resolved path with a proven filesystem identity**, so that the
+  digest binding above attaches to a determinate file rather than to a name. §5.2 fixes this.
 - use the accepted **`_observation_from_intent` unchanged as its sole verifier**
   (`observation_catalog.py:1423`);
 - use **`CatalogWriter`** and **one guarded `INSERT` inside `CatalogWriter.batch`**, thereby taking
@@ -452,6 +492,42 @@ calling `record`.
 the owner** under §12 — never an `UPDATE`, `INSERT OR REPLACE`, `INSERT OR IGNORE`, upsert, delete,
 retry, or replay. **No path in this procedure revises, replaces, or re-writes an existing row.**
 
+### 5.2 The canonical procedure artifact — path and filesystem identity
+
+§5's digest binding proves *which bytes* were validated. This subsection fixes *which file* those
+bytes are, so no residual path or symlink ambiguity can separate the artifact the §10 suite proved
+from the artifact that performs the irreversible `INSERT`. It **strengthens proof identity only** and
+**changes no part of the orphan-adoption architecture**.
+
+1. **One canonical resolved path, resolved once.** The procedure artifact's private absolute path is
+   resolved **exactly once**, before the first digest reading, and that resolved path is **recorded
+   privately**. Every later step — the §10 suite, both digest readings, and the real invocation —
+   refers to **that same recorded resolved path** and never re-resolves, re-derives, or re-globs it.
+2. **Regular file, never a symlink, proven by `lstat` semantics.** At each of the two digest
+   readings the artifact is inspected **without following symbolic links** and must be a **regular
+   file**: `lstat`-equivalent metadata with `S_ISREG` true and `S_ISLNK` false. A symlink appearing
+   at the recorded path — at either reading — is a refusal, not something to follow. The repository
+   already uses exactly these primitives, so this imposes no new mechanism: `_open_no_follow`
+   (`observation_catalog.py:950`, adding `os.O_NOFOLLOW` at `:953`–`:954`), the `S_ISREG` check at
+   `:931`, and the `lstat`-based file-type refusal at `:1018`–`:1021`.
+3. **Filesystem identity recorded where available.** At the first reading the artifact's **device and
+   inode** are recorded privately alongside its size. Where the platform exposes them, they are
+   **re-read and compared** at the second reading. They are corroborating identity, not a substitute
+   for the digest: the SHA-256 comparison of §7 gate 12 remains the binding proof.
+4. **The digest is taken over that exact artifact**, opened without following symlinks at the
+   recorded resolved path — not over a name, a copy, or a re-resolved path.
+5. **The §10 suite runs against that exact artifact** (§7 gate 10), and every case-15
+   mutation-effectiveness variant is a **disposable copy at a distinct path** (§5, §10 preamble).
+6. **The real invocation executes that exact recorded resolved path.** It is not invoked through a
+   symlink, a copy, a re-resolved path, a relative path, or a path reconstructed from a name.
+7. **Any of the following is a `STOP` before any write**, referred to the owner: the recorded
+   resolved path is absent, replaced, or no longer a regular file; a symlink has appeared at it; its
+   file type changed; its device or inode changed where those were recorded; either digest is
+   unavailable; or the two digests differ.
+8. **Private absolute paths, device numbers, and inode numbers stay out of the sanitized report and
+   out of Git.** They are resolved and compared privately; the evidence bundle records only that the
+   comparisons were performed and matched, over safe relative names (§11 items 2 and 12).
+
 ## 6. Ruling 057-C — exact content rulings
 
 | # | Ruling |
@@ -491,7 +567,23 @@ All gates are **conjunctive** and **fail closed**. Any mismatch, ambiguity, or u
    `relative_storage_path`.
 8. Lineage schema, path, request-identity, registry, storage-representation, hash, and size
    verification all pass **through `_observation_from_intent`** — not through a reimplementation.
-9. **No live writer holds the OS lock**, re-verified immediately before the real transaction.
+9. **Writer-lease exclusivity, then unbroken continuity.** Two obligations, in that order.
+   **(a) Exclusivity:** before the lease is taken, **no other live writer holds the OS lock.**
+   **(b) Continuity:** the procedure acquires the accepted process-lifetime writer lease — the
+   ordinary `CatalogWriter.__enter__` path (`catalog.py:107`), whose `_acquire_lease` takes
+   `fcntl.flock(LOCK_EX | LOCK_NB)` on the mode-`0600` lock file — and **holds that same lease
+   continuously and unbroken** across gate 13's snapshot, this recheck, gate 12's digest
+   re-verification, and entry into transaction 1. The lease is **never released and reacquired**
+   across that span, and the `CatalogWriter` context is **not exited and re-entered**.
+   **Re-verified immediately before the real transaction:** the lease is still held by this process
+   and was never dropped — the lock file's recorded `lease_id` and `writer_pid` are unchanged from
+   acquisition. Any lost, released, replaced, or ambiguous lease is a **STOP before any write**.
+   **This is what closes the mutation window** §7.1 exists to eliminate, and the frozen code makes
+   it enforceable rather than merely asserted: while this process holds the descriptor, any other
+   writer's `flock` fails with `SingleWriterViolationError`, and the accepted error text fixes that
+   **"Elapsed time never permits takeover"** — so a `expires_at_utc` that lapses during a long
+   snapshot **cannot** license another writer to seize the lease. Expiry metadata is recorded state,
+   not a takeover licence.
 10. The **§10 synthetic suite passes first**, against disposable fixtures, before the real catalog is
     touched, and **against the recorded artifact itself** (§5) — not against a copy, a variant, or a
     regenerated equivalent. **Counting, stated unambiguously:** that suite runs **before**,
@@ -499,26 +591,142 @@ All gates are **conjunctive** and **fail closed**. Any mismatch, ambiguity, or u
     lineage intent. It is **not** the single real adoption invocation and is **never counted as one**.
     Running it is **not authorized by this record** — like every other limb here, it becomes
     performable only under the later owner execution instrument (§12 clause 9).
-11. The exact procedure's **SHA-256 is recorded privately before the §10 suite runs against it**.
-    This is the **first** of the two required digest readings.
+11. The exact procedure's **SHA-256 is recorded privately before the §10 suite runs against it**,
+    taken over the **canonical resolved path** whose regular-file identity §5.2 requires be proven at
+    the same moment. This is the **first** of the two required digest readings.
 12. That **same SHA-256 is re-read from the recorded artifact and re-verified immediately before the
-    real transaction**, after the suite has passed and after gate 9's lock check. This is the
-    **second** reading. The two must be **identical**. **Any difference, or an unavailable digest at
-    either point, is a STOP before any write.** The gate is stated separately from gate 11 on
-    purpose: recording a digest proves what existed once, while re-verifying it proves that the
-    artifact about to perform the irreversible write is the artifact the §10 suite proved.
-    Gate 11 without gate 12 leaves the proof attached to no particular bytes.
-13. A **same-device pre-adoption snapshot of the operational catalog** is taken and its **SHA-256
-    recorded privately** before the real transaction. It is **accidental-loss and forensic
-    comparison protection only**, consistent with the accepted milestone discipline
-    (`Milestones/contracts/m3_2.md` §20; Decisions 047, 049, and 050). **It grants no restoration
-    authority whatsoever**: §12 clauses 5–8 continue to prohibit every rerun, rollback, restore, and
-    manual incident-row edit, and any restoration remains a **separate owner act** under its own
-    ruling. Its purpose is to give the owner a contemporaneous pre-write image to compare against if
-    the §8 "all other `census_*` and `ops_*` … unchanged" postcondition ever fails.
+    real transaction**, after the suite has passed and after gate 9's exclusivity-and-continuity
+    check. This is the **second** reading. The two must be **identical**, and §5.2's **path and
+    filesystem identity** — same recorded resolved path, still a regular file, still not a symlink,
+    same device and inode where recorded — must be **re-proven at the same moment**. **Any digest
+    difference, any identity change, or an unavailable digest at either point, is a STOP before any
+    write.** The gate is stated separately from gate 11 on purpose: recording a digest proves what
+    existed once, while re-verifying it proves that the artifact about to perform the irreversible
+    write is the artifact the §10 suite proved. Gate 11 without gate 12 leaves the proof attached to
+    no particular bytes; gate 12 without §5.2 leaves it attached to no particular file.
+13. A **source-bound, same-device, SQLite-native pre-adoption snapshot of the operational catalog**
+    is created and **verified** under the continuously held gate-9 lease, **before any governed
+    mutation**, and its identities are recorded privately. §7.2 fixes the mechanism, the
+    source-to-snapshot binding, and the evidence; §7.1 fixes where it sits in the order. It is
+    **accidental-loss and forensic comparison protection only**, consistent with the accepted
+    milestone discipline (`Milestones/contracts/m3_2.md` §20; Decisions 047, 049, and 050). **It
+    grants no restoration authority whatsoever**: §12 clauses 5–8 continue to prohibit every rerun,
+    rollback, restore, and manual incident-row edit, and any restoration remains a **separate owner
+    act** under its own ruling. Its purpose is to give the owner a contemporaneous pre-write image to
+    compare against if the §8 "all other `census_*` and `ops_*` … unchanged" postcondition ever
+    fails — and, because §7.2 binds it to the source, an image whose correspondence to that
+    pre-write state is **proven rather than asserted**.
 
 Private absolute paths, identifiers, identity values, and raw bodies are resolved **without printing
 or committing** them.
+
+### 7.1 Execution order
+
+The thirteen gates above are a **conjunctive checklist**; this subsection is the **sequence**. Where
+a gate's own prose implies a position, **§7.1 controls**. It adds no gate and removes none.
+
+| Step | Action | Gates discharged |
+|---|---|---|
+| **A** | All ordinary **read-only** preflight gates pass, against the accepted baseline and — for the suite — against disposable fixtures only | 1–8, 10, 11 (with §5.2's first identity proof taken at gate 11) |
+| **B** | **Acquire** the accepted process-lifetime writer lease and begin holding it | 9(a), then 9(b) acquisition |
+| **C** | **Create and verify** the source-bound SQLite-native snapshot under that continuously held lease, before any governed mutation | 13, per §7.2 |
+| **D** | **Final lease-continuity recheck** — the same lease, never released or reacquired | 9(b) re-verification |
+| **E** | **Canonical procedure-artifact digest and filesystem-identity re-verification** | 12, with §5.2 |
+| **F** | **Enter transaction 1 immediately thereafter** | §5.1 step 1 |
+
+**The invariant this order exists to enforce:** **no uncontrolled interval may exist between C and F
+in which another writer can mutate the source catalog.** The lease acquired at B is held unbroken
+through F, so the state the snapshot captured at C is the state transaction 1 writes into at F. A
+snapshot taken before the lease, or a lease released and reacquired anywhere across C→F, breaks that
+binding and is a **STOP before any write** — the snapshot would then attest to a state that may no
+longer exist.
+
+Nothing in this order authorizes any step. Every step remains performable **only** under the later
+owner execution instrument (§12 clause 9).
+
+### 7.2 The source-bound snapshot — mechanism, binding, and evidence
+
+#### 7.2.1 Mechanism — SQLite-native, and already accepted in the frozen repository
+
+The snapshot is a **SQLite-native consistent backup**, never an unmanaged filesystem copy. The
+hazard is real and code-confirmed, not theoretical: writer connections set
+`PRAGMA journal_mode = WAL` (`storage/sqlite.py:86`), so the operational catalog **is** a WAL-mode
+database, and a plain `cp` of the main database file can omit committed-but-uncheckpointed content.
+
+**The frozen repository already provides the required mechanism, so no executable-code change is
+needed and none is authorized.** `backup_database(source, destination)`
+(`storage/sqlite.py:601`) performs `origin.backup(target)` at `:609` — the supported SQLite
+online-backup interface — and its accepted docstring already fixes this exact rule: *"A naïve file
+copy of a WAL-mode database is prohibited; this uses the supported online-backup interface
+instead."* The later procedure uses that accepted function, or the same underlying
+`sqlite3.Connection.backup` interface, and **nothing else**.
+
+**Why calling it does not break gate 9's lease.** `backup_database` opens its own source connection
+through `connect(source)` **without** `writer=True`. That path takes **no** writer lease and touches
+**no** lock file (`catalog.py:107`'s `_acquire_lease` is not on it), and it sets no durability pragma
+on the source. Invoking it from **inside** the already-held `CatalogWriter` context therefore leaves
+the lease **unbroken**, which is precisely what §7.1 step C requires. It changes no `census_*` or
+`ops_*` row and no schema. It is also **not** one of §5's prohibited surfaces: it does not migrate,
+seed, prepare, reconcile, quarantine, register, or write to the governed catalog — it reads the
+source and writes the disposable snapshot.
+
+The destination is a **same-device** file in the disposable private scratch area **outside the
+repository**, mode `0600`.
+
+#### 7.2.2 Source-state evidence, recorded before the snapshot
+
+Immediately before snapshot creation, under the held lease and **before any governed write**, record
+privately, for the **live source catalog**:
+
+1. the database file's **SHA-256** and **byte size** — *provenance*;
+2. **schema/migration identity** — the applied migration versions (expected head **`0013`**,
+   contiguous `0001`–`0013`, via the accepted `applied_versions`, `storage/sqlite.py:184`) and
+   `PRAGMA user_version`;
+3. **canonical safe row counts** for **every** `census_*` and `ops_*` table already required by the
+   §11 before-state evidence contract;
+4. a **canonical content digest** for each of those tables.
+
+**Canonical content digest, defined once so source and snapshot are comparable.** For a table: order
+its rows deterministically by the declared primary key, or — where there is no single-column primary
+key — by every column in declared order; serialize each row as a canonical JSON object mapping column
+name to value with sorted keys and no insignificant whitespace; fold the per-row encodings, in that
+order, into one SHA-256. **The identical algorithm is applied to source and snapshot.** This needs
+only the standard library and reads only; it introduces no repository surface.
+
+#### 7.2.3 Snapshot-state evidence, recorded after creation
+
+Over the created snapshot, record privately the **same four classes**: snapshot file SHA-256 and byte
+size (*provenance*), schema/migration identity, canonical safe row counts, and the canonical content
+digest per table.
+
+#### 7.2.4 The binding comparison — logical equality, not byte equality
+
+**Raw-file digest equality is expressly NOT required and must never be demanded.** A SQLite-native
+backup of a WAL-mode source is a freshly written database; its file bytes will ordinarily **differ**
+from the source file's. A packet requiring `source SHA-256 == snapshot SHA-256` would fail every
+correct run and is **refused**.
+
+The **binding proof** that the snapshot corresponds to the exact pre-write catalog state is
+**logical-state equality**, all of which must hold:
+
+- **identical schema/migration identity** — same applied migration versions and same `user_version`;
+- **identical row counts** for every required `census_*` and `ops_*` table;
+- **identical canonical content digests** for every required `census_*` and `ops_*` table;
+- the snapshot's **`quick_check` clean**, **`integrity_check` clean**, and **`foreign_key_check`
+  empty** — via the accepted `integrity_report` (`storage/sqlite.py:593`).
+
+**Any mismatch, ambiguity, or unavailable comparison is a STOP before any write**, referred to the
+owner. The raw digest/size pairs of §7.2.2 item 1 and §7.2.3 are retained as **provenance**; they are
+**not** the binding proof, and their inequality is **never** a failure.
+
+#### 7.2.5 Placement and restoration authority — unchanged and absolute
+
+The snapshot remains **same-device**, **private**, **mode `0600`**, **outside Git and outside the
+repository**, never committed and never publicly indexed, and **forensic and comparative only**. It
+confers **no** rollback, **no** automatic restore, **no** manual restore, **no** retry, **no** replay,
+and **no** re-adoption authority. §12 clauses 5–8 are untouched. **Any restoration remains a separate
+Sol/GPT owner act under its own ruling**, and the existence of a verified snapshot is never evidence
+that one was available or permitted.
 
 ## 8. Ruling 057-E — the correct successful terminal delta
 
@@ -599,18 +807,32 @@ The six interruption points, each classified **fail-closed**:
   `after_rebuild_replace_before_directory_fsync` (`:670`), and
   `after_rebuild_directory_fsync_before_catalog_update` (`:685`), so each is reachable and provable
   in the synthetic suite rather than reasoned about.
-- **State 5's window also carries a durable-but-*incorrect*-projection exception path**, and its
+- **State 5's window also carries durable-but-*incorrect*-projection exception paths**, and its
   description above — "projection durable and correct" — is written for the **interruption** case
-  only. Two committed **exceptions** raise inside the same window, after the directory `fsync` at
-  `:671` and before transaction 3 opens at `:686`: the re-read digest-and-size comparison raising
-  `CatalogWriteError` at `:676`–`:682` when the atomically replaced projection does **not** match the
-  durable temporary, and `_remove_stale_projection_temporaries` at `:683` refusing an ambiguous
-  artifact. In both, the replacement is durable and the projection is **not** correct. **Classification
-  and handling are identical** — the catalog state is exactly state 5, the run stops, and it is
-  referred to the owner under §12 clause 5 — but the report must **not** repeat "durable and correct"
-  where the digest comparison is what failed. §8 forecloses any success claim regardless (the
-  projection must **validate**, and §9 rule 1 makes reaching point 6 necessary but not sufficient),
-  and §11 item 7 records the actual **S0**/**S1** digests, so the owner sees the mismatch directly.
+  only. **At least** the following **three** committed exception routes raise inside the same window,
+  after the directory `fsync` at `:671` and before transaction 3 opens at `:686`:
+  1. **Digest/size comparison failure** — the re-read comparison raises `CatalogWriteError` at
+     `:676`–`:682` because the atomically replaced projection does **not** match the durable
+     temporary.
+  2. **Ambiguous stale-temporary cleanup failure** — `_remove_stale_projection_temporaries` at
+     `:683` refuses an ambiguous artifact, or cannot inspect the parent directory, and raises
+     `CatalogWriteError`.
+  3. **Destination re-read I/O failure** — `_digest_projection_path` (`:993`) itself raises while
+     re-reading the destination at `:676`; it opens the file with `_open_no_follow` and reads it in
+     chunks, so an `OSError` from either step lands in this same window without ever reaching the
+     comparison of route 1.
+
+  **The list is deliberately open, not exhaustive: "at least" is binding.** **Any other exception
+  raised in the same code window receives the same state-5 stop-and-refer classification unless a
+  later accepted record separately governs it.** In every one of these routes the replacement is
+  durable and the projection is **not** correct — or its correctness is **unestablished**, which is
+  handled identically. **Classification and handling are identical throughout** — the catalog state
+  is exactly state 5, the run stops, and it is referred to the owner under §12 clause 5 — but the
+  report must **not** repeat "durable and correct" where the digest comparison failed, could not be
+  performed, or was never reached. §8 forecloses any success claim regardless (the projection must
+  **validate**, and §9 rule 1 makes reaching point 6 necessary but not sufficient), and §11 item 7
+  records the actual **S0**/**S1** digests, so the owner sees the mismatch directly. **This changes no
+  recovery or retry behaviour and creates no mutation authority**: §12 clauses 4–8 apply unchanged.
 
 ## 10. Ruling 057-G — synthetic non-vacuity requirements
 
@@ -685,8 +907,14 @@ Git, over **safe relative names only**, containing at minimum:
    suite ran against the recorded artifact (§7 gate 11) and the digest re-read immediately before the
    real transaction (§7 gate 12) — together with the **explicit assertion that the two were
    identical**. Two values and their comparison, never one value restated twice, and never a
-   requirement restated in place of an observed reading. This is what binds the sixteen-case proof to
-   the bytes that performed the irreversible `INSERT`;
+   requirement restated in place of an observed reading. Recorded alongside them, per **§5.2**: that
+   **one canonical resolved path** was resolved once and used throughout; that at **both** readings
+   the artifact was proven a **regular file and not a symbolic link** under `lstat` semantics; that
+   its **device and inode matched** between the readings where the platform exposed them; and that
+   the **real invocation executed that same recorded resolved path**. Recorded over **safe relative
+   names only** — the private absolute path, device number, and inode number are compared privately
+   and **never** written into the bundle or Git. Together these bind the sixteen-case proof to the
+   exact **file** and the exact **bytes** that performed the irreversible `INSERT`;
 3. **safe before/after counts**;
 4. the incident **`event_id`**;
 5. the incident **`detected_condition`**;
@@ -711,10 +939,27 @@ Git, over **safe relative names only**, containing at minimum:
     **safe** values, never beside a private absolute path or an identity value;
 15. the **§10 case 16 result** — the proof that a `blocked` row on a different `projection_path`
     refuses before any write — recorded alongside the other synthetic case results of item 10;
-16. the **pre-adoption catalog snapshot's SHA-256** (§7 gate 13), recorded over a **safe relative
-    name only**, together with the explicit statement that **the snapshot conferred no restoration
-    authority and no restoration was performed**. Its presence in the bundle is forensic and
-    comparative; it is never evidence that a rollback was available.
+16. the **source-bound pre-adoption catalog snapshot record** (§7 gate 13, §7.2), over **safe
+    relative names only**, containing every one of:
+    - the **live source catalog's SHA-256** and **byte size** (provenance);
+    - the **snapshot's SHA-256** and **byte size** (provenance);
+    - the **source and snapshot schema/migration identity** — applied migration versions and
+      `user_version` — recorded for both and asserted **equal**;
+    - the **canonical content digest per table**, for every required `census_*` and `ops_*` table,
+      recorded for both and asserted **equal**;
+    - the **safe row counts** for those tables, recorded for both and asserted **equal**;
+    - the snapshot's **SQLite validation results** — `quick_check`, `integrity_check`, and
+      `foreign_key_check`;
+    - **continuous writer-lease evidence** — that the gate-9 lease was acquired before the snapshot
+      and held **unbroken**, never released and reacquired, through the snapshot, the continuity
+      recheck, the artifact digest re-verification, and entry into transaction 1 (§7.1 B→F);
+    - the explicit statement that the binding proof is the **logical** comparison, that **raw-file
+      digest inequality between source and snapshot is expected and is not a failure** (§7.2.4);
+    - the explicit statement that **the snapshot conferred no restoration authority, that no
+      restoration was performed, and that none was authorized**.
+
+    Its presence in the bundle is forensic and comparative; it is **never** evidence that a rollback
+    was available.
 
 **Never placed in Git:** private absolute paths, user identity values, `.env` contents, raw SEC
 response bodies, credentials, or the raw object itself.
@@ -796,15 +1041,28 @@ migration; every reason code; the master plan; the `Makefile`; `pyproject.toml`;
 
 **Publication status — corrected, and stated as fact rather than as intent.**
 
-**Preserved as historical (the authoring task's boundary, true when written).** *"Publication is not
-authorized by the authoring task. This record is an uncommitted candidate. Nothing is staged,
-committed, pushed, or tagged."* And of the subject below: *"That subject is reserved, not
-authorized. It becomes usable only under a separate owner publication ruling issued after the §16
-review passes. No publication has occurred."* Those sentences bounded what the **authoring task**
-could do. They were **overtaken by events** and are preserved here in the §3 style rather than
-silently deleted — a governance record must not deny an act the repository can prove.
+**Preserved as historical — two superseded authoring-stage boundaries, each true only when written,
+and each explicitly NOT a statement of current state.**
 
-**Current fact.** **Publication has occurred.** This record was committed and pushed as:
+- *From the original authoring task, before publication 1:* *"Publication is not authorized by the
+  authoring task. This record is an uncommitted candidate. Nothing is staged, committed, pushed, or
+  tagged."* And of the subject below: *"That subject is reserved, not authorized. It becomes usable
+  only under a separate owner publication ruling issued after the §16 review passes. No publication
+  has occurred."*
+- *From the third remediation, before publication 2:* *"This remediation is itself uncommitted.
+  Nothing is staged, committed, pushed, or tagged by the task that produced it. Its publication
+  requires a separate owner ruling issued after the fresh non-author review §16 now names."*
+
+Both quotations bounded what their **authoring task** could do at the moment of writing. Both were
+**overtaken by events** — publication 1 at `9475eb3d…` and publication 2 at `103b3d39…` respectively
+— and both are preserved here in the §3 style rather than silently deleted. **Neither describes the
+current state, and no session may read either as current.** A governance record must not deny an act
+the repository can prove; the post-remediation rereview correctly found the second quotation stated
+as current fact inside the very commit that falsified it, and that defect is corrected here.
+
+**Current fact — publication has occurred twice, and both identities are recorded.**
+
+**Publication 1 — the original candidate.** This record was first committed and pushed as:
 
 ```text
 commit  9475eb3d614aa70b3f2a04b061d63bd7ea51c030
@@ -813,27 +1071,54 @@ parent  ea0647459ef38069c75f7b8da2873abf0cbccdb1
 subject Authorize M3.2 orphan-adoption procedure architecture
 ```
 
-`origin/main` is identical to that commit; there is **no tag**; and the change set is exactly the
-**four authorized paths above and no fifth**. The subject used is exactly the one this section
-reserved.
+There is **no tag**; the change set is exactly the **four authorized paths above and no fifth**; and
+the subject used is exactly the one this section reserved.
 
-**The sequence anomaly, recorded plainly.** That publication **preceded** the passing §16 review this
-section named as its precondition. The §16 review has since been performed against the published
-record and returned **`DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_FAIL`** (§3, remediation 3).
-**This record neither ratifies nor voids that publication.** Whether it is ratified as-published,
-ratified retrospectively after a passing review, or superseded is an **owner ruling**, and no
-session may infer the answer from this text or act on the record as though the question were settled.
+**Publication 2 — the first corrected remediation, owner-ratified as fact.** The third remediation
+(§3) was subsequently committed and pushed as:
+
+```text
+commit  103b3d3910e11fee43f66d8451f101019487588e
+tree    04bd61ca09be271752d432c82f0c2f6a02eb277c
+parent  9475eb3d614aa70b3f2a04b061d63bd7ea51c030
+subject Correct Decision 057 after failed independent review
+```
+
+Again **no tag**, and again exactly the four authorized paths and no fifth.
+**Sol/GPT has ratified `103b3d39…` as the factual historical publication identity of the corrected
+remediation candidate.** That ratification is **publication-fact ratification ONLY**. It does **not**
+mean the post-remediation rereview passed, that the candidate is accepted for operational execution,
+that orphan adoption is authorized, that **M3-L16** may close, or that any later phase is authorized.
+**Factual ratification is not execution acceptance, and no session may read it as such.**
+
+**The sequence anomaly, recorded plainly — it happened twice.** Publication 1 preceded the passing
+§16 review this section named as its precondition; that review was then performed and returned
+**`DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_FAIL`**. Publication 2 then occurred in the same
+order: **`103b3d39…` was published before any qualifying fresh independent `PASS` review existed**,
+and the post-remediation rereview attempted against it returned
+**`DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REVIEW_FAIL`** — 0 BLOCKER, 1 MAJOR, 2 MINOR,
+2 OPTIMIZATION (§3, remediation 4). **Neither publication created any operational authority**, and
+neither is a substitute for the review gate. **This fourth remediation is the correction of that
+failed rereview result.** Whether publication 1 is ratified as-published, ratified retrospectively,
+or superseded remains an **owner ruling**; this record neither ratifies nor voids it.
+
+**This fourth remediation's own publication.** Publication of this correction is **authorized** — by
+the bounded owner instrument that directed it, which permits exactly **one** commit on `main` over
+exactly these four paths, exactly **one** ordinary push, and **no tag**. It is therefore **not** an
+uncommitted candidate awaiting a publication ruling; the ruling exists and the act is part of this
+instrument. A record cannot contain the hash of the commit that contains it, so **this record's own
+commit identity is established by that act and recorded in the owner's post-publication freeze
+record**, not inside these bytes — that is a property of self-reference, never a denial that
+publication occurred. **That new commit becomes the sole frozen target of the next qualifying
+rereview.**
 
 **What follows from this for a later execution packet.** §11 item 1 requires the bundle to carry
-"the accepted Decision 057 commit identity, once published." Until the owner rules, the identity
-above is the **published** identity but **not yet an owner-ratified accepted** one, and the two must
-not be conflated. A later execution packet must bind the identity the owner ratifies — which, if
-this remediation is published, will be a **later commit than `9475eb3d…`**, since the remediated
-bytes differ from the published ones.
-
-**This remediation is itself uncommitted.** Nothing is staged, committed, pushed, or tagged by the
-task that produced it. Its publication requires a separate owner ruling issued after the fresh
-non-author review §16 now names.
+"the accepted Decision 057 commit identity, once published." Published identities now exist —
+`9475eb3d…`, `103b3d39…`, and this correction's commit — but a **published** identity is **not** an
+**owner-ratified accepted** one, and the two must never be conflated. `103b3d39…` is ratified as
+publication **fact** only. A later execution packet must bind the identity the owner ratifies **for
+execution**, which will be the latest published Decision 057 commit at that time and which no
+session may assume in advance.
 
 ## 15. Recorded status
 
@@ -843,11 +1128,14 @@ RECORD_IS_SELF_EXECUTING:                 NO — FIXES REQUIREMENTS, GRANTS NO I
 DISCOVERY_MAJOR_CORRECTION:               CONFIRMED — SINGLE-WRITE CONTRACT REPLACED
 CORRECTED_CONTRACT:                       TWO TABLES, TWO ROWS, THREE TRANSACTIONS
 END_TO_END_ATOMICITY:                     NO — T1 AND T3 LOCALLY ATOMIC ONLY
+STATE_5_EXCEPTION_ROUTES:                 AT LEAST THREE, NOT EXACTLY TWO — DIGEST/SIZE COMPARISON FAILURE AT :676-:682; AMBIGUOUS STALE-TEMPORARY CLEANUP FAILURE AT :683; DESTINATION RE-READ I/O FAILURE IN _digest_projection_path AT :993 REACHED FROM :676. ANY OTHER EXCEPTION IN THE SAME WINDOW TAKES THE SAME STATE-5 STOP-AND-REFER CLASSIFICATION UNLESS SEPARATELY GOVERNED. THE TABLE'S "DURABLE AND CORRECT" WORDING DESCRIBES THE INTERRUPTION CASE ONLY. NO CHANGE TO RECOVERY OR RETRY BEHAVIOUR AND NO NEW MUTATION AUTHORITY
 INCIDENT_ROW_SUPPRESSION:                 NONE AFTER THE ORPHAN INSERT
 BLOCKED_ROW_PREFLIGHT:                    ZERO CATALOG-WIDE — STRONG OWNER RULING
 PROCEDURE_SHAPE:                          ARCHITECTURE C — EPHEMERAL, SHA-256-RECORDED, ONE-TIME
 PROCEDURE_ARTIFACT_IMMUTABILITY:          ONE RECORDED ARTIFACT, BYTE-IMMUTABLE FROM SUITE-PASS THROUGH THE REAL INVOCATION; SHA-256 RECORDED BEFORE THE SUITE RUNS AND RE-VERIFIED IMMEDIATELY BEFORE THE REAL TRANSACTION; ANY DIFFERENCE OR UNAVAILABLE DIGEST IS A STOP BEFORE ANY WRITE; CASE 15 MUTATIONS RUN ON DISPOSABLE COPIES ONLY
-PRE_ADOPTION_CATALOG_SNAPSHOT:            REQUIRED — SAME-DEVICE, SHA-256 RECORDED PRIVATELY, FORENSIC AND COMPARATIVE ONLY; GRANTS NO RESTORATION AUTHORITY; RESTORATION REMAINS A SEPARATE OWNER ACT
+PROCEDURE_ARTIFACT_PATH_IDENTITY:         SECTION 5.2 — ONE CANONICAL RESOLVED PATH RESOLVED ONCE AND RECORDED PRIVATELY; PROVEN A REGULAR FILE AND NOT A SYMLINK UNDER lstat SEMANTICS AT BOTH DIGEST READINGS; DEVICE AND INODE RECORDED AND RECOMPARED WHERE AVAILABLE; THE REAL INVOCATION EXECUTES THAT EXACT RECORDED RESOLVED PATH AND IS NEVER REACHED THROUGH A SYMLINK, COPY, OR RE-RESOLVED PATH; ANY PATH REPLACEMENT, SYMLINK APPEARANCE, FILE-TYPE CHANGE, DEVICE/INODE CHANGE, OR DIGEST MISMATCH IS A STOP BEFORE ANY WRITE; PRIVATE ABSOLUTE PATHS, DEVICE NUMBERS, AND INODES STAY OUT OF THE BUNDLE AND OUT OF GIT
+PRE_ADOPTION_CATALOG_SNAPSHOT:            REQUIRED AND SOURCE-BOUND — SECTION 7.2. SQLITE-NATIVE CONSISTENT BACKUP VIA THE ALREADY-ACCEPTED backup_database (storage/sqlite.py:601, origin.backup(target) AT :609), NEVER AN UNMANAGED FILE COPY, BECAUSE WRITER CONNECTIONS SET journal_mode = WAL AT :86; SAME-DEVICE, PRIVATE, MODE 0600, OUTSIDE GIT AND OUTSIDE THE REPOSITORY; CREATED AND VERIFIED UNDER THE CONTINUOUSLY HELD WRITER LEASE BEFORE ANY GOVERNED MUTATION; BINDING PROOF IS LOGICAL-STATE EQUALITY (SAME APPLIED MIGRATIONS AND user_version, SAME SAFE ROW COUNTS, SAME CANONICAL PER-TABLE CONTENT DIGESTS FOR EVERY census_* AND ops_* TABLE, SNAPSHOT quick_check/integrity_check CLEAN AND foreign_key_check EMPTY) — RAW SOURCE-FILE AND SNAPSHOT-FILE SHA-256 EQUALITY IS EXPRESSLY NOT REQUIRED AND THEIR INEQUALITY IS NEVER A FAILURE, BOTH BEING PROVENANCE ONLY; ANY MISMATCH, AMBIGUITY, OR UNAVAILABLE COMPARISON IS A STOP BEFORE ANY WRITE; FORENSIC AND COMPARATIVE ONLY; GRANTS NO ROLLBACK, AUTOMATIC RESTORE, MANUAL RESTORE, RETRY, REPLAY, OR RE-ADOPTION AUTHORITY; RESTORATION REMAINS A SEPARATE OWNER ACT
+PREFLIGHT_ORDER:                          SECTION 7.1 — A READ-ONLY GATES 1-8, 10, 11; B ACQUIRE THE WRITER LEASE; C CREATE AND VERIFY THE SOURCE-BOUND SNAPSHOT UNDER IT; D FINAL LEASE-CONTINUITY RECHECK; E ARTIFACT DIGEST AND IDENTITY RE-VERIFICATION; F ENTER TRANSACTION 1. THE LEASE IS HELD UNBROKEN FROM B THROUGH F AND IS NEVER RELEASED AND REACQUIRED, SO NO UNCONTROLLED INTERVAL EXISTS IN WHICH ANOTHER WRITER COULD MUTATE THE SOURCE BETWEEN C AND F; THE FROZEN CODE MAKES THIS ENFORCEABLE — ANOTHER WRITER'S flock FAILS WITH SingleWriterViolationError AND THE ACCEPTED TEXT FIXES THAT ELAPSED TIME NEVER PERMITS TAKEOVER; THIRTEEN GATES REMAIN, NONE ADDED AND NONE REMOVED
 SOLE_VERIFIER:                            _observation_from_intent — UNCHANGED
 MANDATORY_SECOND_LIMB:                    rebuild_audit_projection(connection, destination) — SAME PROCESS, AFTER THE BATCH EXITS AND T1 COMMITS, OUTSIDE THE BATCH; NEITHER census_run_id NOR fault_hook SUPPLIED
 OBSERVATION_ROW_SHAPE:                    OBSERVATION_COLUMNS + ObservationRecorder._row — EXACT
@@ -890,11 +1178,11 @@ LIVE_READINESS:                           NOT_CLAIMED
 T6:                                       NOT_AUTHORIZED
 M3_2B:                                    NOT_AUTHORIZED
 GATE_H:                                   NOT_AUTHORIZED
-REMEDIATIONS:                             THREE — TWO PRE-PUBLICATION, ONE POST-PUBLICATION. FIRST FIXED THE ROW-CONSTRUCTION MAJOR OMISSION; SECOND FIXED TWO PROOF-LAYER MAJORS (THE FALSE "NO SECOND GENERATED INSTANT" CLAIM AND THE IMPOSSIBLE ROWCOUNT NON-VACUITY DEMAND) PLUS FOUR RELATED MINORS; THIRD FIXED THE PROOF-TO-ARTIFACT BINDING MAJOR, THE PUBLICATION-STATE MINOR, THE MISSING PRE-ADOPTION SNAPSHOT MINOR, THE MISSING GATE-6 REFUSAL CASE MINOR, AND TWO OPTIMIZATIONS. CENTRAL ARCHITECTURE UNCHANGED BY ALL THREE
-AUTOMATIC_CORRECTION_LOOP:                NONE PERMITTED AT ANY POINT — HONOURED. THE SECTION 16 REVIEW REMEDIATED NOTHING AND REFERRED EVERY DEFECT TO THE OWNER; REMEDIATION 3 PROCEEDS ONLY UNDER THE OWNER'S SEPARATE RESPONDING INSTRUCTION
-SECTION_16_REVIEW_OUTCOME:                DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_FAIL — 0 BLOCKER, 1 MAJOR, 3 MINOR, 2 OPTIMIZATION; ARCHITECTURE CONFIRMED CORRECT WITH NO CLAIM CONTRADICTED; ALL FINDINGS IN THE PROOF, EVIDENCE, AND TRACEABILITY LAYERS; ALL NOW REMEDIATED AND AWAITING A FRESH NON-AUTHOR REVIEW
-RECORD_PUBLICATION:                       OCCURRED — COMMIT 9475eb3d614aa70b3f2a04b061d63bd7ea51c030, TREE e0b9b12095c181ba974336399f04fc1e44eb4a11, EXACT RESERVED SUBJECT, EXACT FOUR-PATH ENVELOPE, PUSHED, NO TAG; IT PRECEDED THE PASSING SECTION 16 REVIEW IT NAMED AS ITS PRECONDITION. RATIFICATION IS AN OWNER RULING — NEITHER RATIFIED NOR VOIDED BY THIS RECORD
-THIS_REMEDIATION_PUBLICATION:             NOT AUTHORIZED BY THE AUTHORING TASK — UNCOMMITTED; NOTHING STAGED, COMMITTED, PUSHED, OR TAGGED
+REMEDIATIONS:                             FOUR — TWO PRE-PUBLICATION, TWO POST-PUBLICATION. FIRST FIXED THE ROW-CONSTRUCTION MAJOR OMISSION; SECOND FIXED TWO PROOF-LAYER MAJORS (THE FALSE "NO SECOND GENERATED INSTANT" CLAIM AND THE IMPOSSIBLE ROWCOUNT NON-VACUITY DEMAND) PLUS FOUR RELATED MINORS; THIRD FIXED THE PROOF-TO-ARTIFACT BINDING MAJOR, THE PUBLICATION-STATE MINOR, THE MISSING PRE-ADOPTION SNAPSHOT MINOR, THE MISSING GATE-6 REFUSAL CASE MINOR, AND TWO OPTIMIZATIONS; FOURTH FIXED THE COMPANION-GOVERNANCE SYNCHRONIZATION MAJOR (MAJ-A), THE SECOND PUBLICATION-CURRENCY MINOR (MIN-A), THE SNAPSHOT SOURCE-BINDING MINOR (MIN-B), AND IMPLEMENTED BOTH ORDERED OPTIMIZATIONS (OPT-A PATH IDENTITY, OPT-B STATE-5 EXCEPTION ROUTES). CENTRAL ARCHITECTURE UNCHANGED BY ALL FOUR
+AUTOMATIC_CORRECTION_LOOP:                NONE PERMITTED AT ANY POINT — HONOURED AT EVERY STEP. EACH REVIEW REMEDIATED NOTHING AND REFERRED EVERY DEFECT TO THE OWNER; REMEDIATIONS 3 AND 4 EACH PROCEEDED ONLY UNDER THE OWNER'S SEPARATE RESPONDING INSTRUMENT
+SECTION_16_REVIEW_OUTCOME:                TWO REVIEWS, BOTH FAIL, BOTH NOW REMEDIATED. (1) DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_FAIL — 0 BLOCKER, 1 MAJOR, 3 MINOR, 2 OPTIMIZATION. (2) DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REVIEW_FAIL — 0 BLOCKER, 1 MAJOR, 2 MINOR, 2 OPTIMIZATION, AGAINST PUBLISHED 103b3d39; IT CONFIRMED THE COMPLETE ARCHITECTURE CORRECT AGAINST THE FROZEN CODE WITH NO CLAIM CONTRADICTED AND EVERY CITED LINE NUMBER RESOLVING EXACTLY, AND CONFIRMED MAJ-1, MIN-3, OPT-1, AND OPT-2 RESOLVED. ALL FINDINGS OF BOTH REVIEWS LAY IN THE PROOF, EVIDENCE, PUBLICATION-CURRENCY, AND TRACEABILITY LAYERS. AWAITING A QUALIFYING FRESH NON-AUTHOR REREVIEW IN A GENUINELY NEW SESSION
+RECORD_PUBLICATION:                       OCCURRED TWICE. PUBLICATION 1 — COMMIT 9475eb3d614aa70b3f2a04b061d63bd7ea51c030, TREE e0b9b12095c181ba974336399f04fc1e44eb4a11, EXACT RESERVED SUBJECT, EXACT FOUR-PATH ENVELOPE, PUSHED, NO TAG; RATIFICATION IS AN OWNER RULING, NEITHER RATIFIED NOR VOIDED BY THIS RECORD. PUBLICATION 2 — COMMIT 103b3d3910e11fee43f66d8451f101019487588e, TREE 04bd61ca09be271752d432c82f0c2f6a02eb277c, PARENT 9475eb3d, SUBJECT "Correct Decision 057 after failed independent review", EXACT FOUR-PATH ENVELOPE, PUSHED, NO TAG; OWNER-RATIFIED AS PUBLICATION FACT ONLY. BOTH PRECEDED ANY QUALIFYING PASSING REVIEW AND NEITHER CREATED ANY OPERATIONAL AUTHORITY. FACTUAL RATIFICATION IS NOT EXECUTION ACCEPTANCE
+THIS_REMEDIATION_PUBLICATION:             AUTHORIZED AND PERFORMED UNDER THE BOUNDED SECOND POST-REMEDIATION CORRECTION PACKET — EXACTLY ONE COMMIT ON main OVER THE FOUR AUTHORIZED PATHS, EXACTLY ONE ORDINARY PUSH, NO TAG. IT IS NOT AN UNCOMMITTED CANDIDATE AWAITING A PUBLICATION RULING; THE RULING EXISTS AND THE ACT IS PART OF THAT INSTRUMENT. A RECORD CANNOT CONTAIN THE HASH OF THE COMMIT THAT CONTAINS IT, SO THIS CORRECTION'S OWN COMMIT IDENTITY IS ESTABLISHED BY THAT ACT AND RECORDED IN THE OWNER'S POST-PUBLICATION FREEZE RECORD — SELF-REFERENCE, NEVER A DENIAL THAT PUBLICATION OCCURRED. THAT NEW COMMIT IS THE SOLE FROZEN TARGET OF THE NEXT QUALIFYING REREVIEW
 TAG:                                      NONE
 M3_2:                                     NOT_COMPLETE
 ```
@@ -907,28 +1195,55 @@ M3_L16: ACTIVE — PROCEDURE ARCHITECTURE ACCEPTED; ADOPTION AND OWNER CLOSURE O
 EXECUTION_AUTHORITY: NONE
 LIVE_READINESS: NOT_CLAIMED
 NETWORK_OR_SEC_AUTHORITY: NONE
-NEXT_AUTHORIZED_ACTION: CLAUDE_M3_2_DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REVIEW_PACKET
+NEXT_AUTHORIZED_ACTION: CLAUDE_M3_2_DECISION_057_FINAL_QUALIFYING_FRESH_INDEPENDENT_REREVIEW_PACKET
 ```
 
-That next action is a **fresh, independent, non-author review of this thrice-remediated record**
-(§3). The prior `CLAUDE_M3_2_DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_PACKET` pointer is
-**discharged**: that review was performed and returned
-`DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_FAIL`, and its findings are the subject of
-remediation 3.
+That next action is a **fresh, independent, non-author rereview of this four-times-remediated
+record** (§3), performed against the commit that publishes this correction. **Two earlier pointers
+are discharged**, each by a review that was performed and returned `FAIL`:
+`CLAUDE_M3_2_DECISION_057_FINAL_FRESH_INDEPENDENT_REVIEW_PACKET` (findings remediated by
+remediation 3) and `CLAUDE_M3_2_DECISION_057_POST_REMEDIATION_FRESH_INDEPENDENT_REVIEW_PACKET`
+(findings remediated by remediation 4). Neither may be cited as the current pointer.
 
-**The non-author requirement is binding and now has a named disqualification.** The session that
-produced the failing §16 verdict **authored this remediation** and is therefore **disqualified** from
-reviewing it. The review must be performed by a session that neither authored nor remediated this
-record — no subagents, no parallel sessions.
+**The non-author requirement is binding, and it is now objectively testable rather than a matter of
+self-assessment.** The previous rereview disclosed that its `Claude-Session` identifier matched the
+identifier of the session that authored the remediation it was reviewing. The owner accepted that
+report as valid defect-discovery and remediation evidence, but ruled that **no eventual `PASS` may
+rest on that identifier**. Accordingly:
+
+- The qualifying rereview **must run in a genuinely new Claude Code session and process** whose
+  `Claude-Session` identifier **differs from `session_01TSthW3MCDzAmbMAVou376C`**.
+- **A `/clear` inside a session carrying that identifier is expressly NOT sufficient.** Cleared
+  context makes a session substantively fresh; it does not make it a different session, and the
+  independence condition is now about session identity, not only about recollection.
+- The reviewer must **disclose its own `Claude-Session` identifier if the environment exposes it**
+  and **prove it differs from the disqualified identifier before beginning substantive review**. If
+  the identifier is unavailable to it, it must supply whatever objective fresh-session evidence the
+  environment does expose, and **owner adjudication remains required**.
+- The reviewer must have **no prior authored or remediated content for Decision 057** — it may
+  neither have written any part of this record nor produced either failing review.
+- **Claude Opus 5, maximum effort, exactly one active session, no subagents, no parallel sessions.**
+- Disclosing a session identifier is a governance-independence check only; **no credential and no
+  private operational information may be exposed by it.**
 
 That review is **read-only and non-self-executing**: it may inspect accepted repository authority and
 this record, but it may **not** open or mutate the real operational catalog, raw object, lineage, or
 private evidence; perform or simulate the adoption; create a checkpoint or receipt; contact the
 network or SEC; publish this record; or authorize its own execution.
 
-**Two questions sit with the owner and not with that review:** whether the publication recorded in
-§14 is ratified, and whether this remediation is published. Neither is settled by this record, and a
-passing review does not settle either.
+**What that rereview must cover.** It must verify **the entire architecture, not only this
+correction** — the write contract, the three-transaction model, the fault boundaries, the one-shot
+bound, and the raw/lineage preservation rule, independently re-derived. Because the owner ordered
+**both** optimizations implemented, it must also confirm **OPT-A** (§5.2 path and filesystem
+identity) and **OPT-B** (§9's at-least-three state-5 exception routes) are correctly implemented and
+**introduce no new defect**. `PASS` still requires **BLOCKER 0, MAJOR 0, MINOR 0**.
+
+**One question sits with the owner and not with that review:** whether publication 1
+(`9475eb3d…`) is ratified. It is not settled by this record, and a passing review does not settle it.
+**Two related questions are now closed and must not be reopened as though pending:** publication 2
+(`103b3d39…`) **is** owner-ratified as publication **fact**, and this fourth remediation's own
+publication **is** authorized and performed (§14). **Neither closure is execution acceptance**, and
+no session may treat factual ratification as authority to adopt the orphan.
 
 **Authorization is not implementation, implementation is not acceptance, and none of them discharges
 M3-L16.**

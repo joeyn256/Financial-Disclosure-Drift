@@ -218,9 +218,11 @@ private evidence, mutates no state, and grants no orphan-adoption, transport-con
 SEC, resume, retry, replacement, clean-run, T6, M3.2B, or Gate H authority. **M3-L14 and M3-L16 remain
 `ACTIVE` — now carrying a selected architecture and implementation authority, and NOT closed — M3-L16
 still blocks every clean-run and live authorization, and M3-L15 is untouched and byte-unchanged.** The
-exact next authorized action is **`CLAUDE_M3_2_DECISION_055_OFFLINE_IMPLEMENTATION_PACKET`** — the
-bounded offline implementation, which does not self-execute and grants no operational-state,
-orphan-adoption, network, SEC, or live authority.
+exact next authorized action **at that stage** was
+**`CLAUDE_M3_2_DECISION_055_OFFLINE_IMPLEMENTATION_PACKET`** — the bounded offline implementation,
+which does not self-execute and grants no operational-state, orphan-adoption, network, SEC, or live
+authority. **That is the position as at accepted Decision 055; the current next authorized action is
+carried by `NEXT_AUTHORIZED_ACTION` in the machine-readable markers below.**
 
 The earlier bounded
 **non-production** stage
@@ -1092,15 +1094,18 @@ is excluded from S5 run identity and from every manifest input. It is never prom
 deleted, or transformed into the S5 joint run (Decision 018 §§6, 27) — a permanently-`running` S4
 draft is expected residue, not an abandoned run. S5.4 read it, wrote it, and changed it in no way.
 
-## Next authorized action
+## Historical next authorized action at this stage
 
+At this stage of the recorded history, the next authorized action was
 **`CLAUDE_M3_2_DECISION_055_OFFLINE_IMPLEMENTATION_PACKET`** — the owner may later issue that exact
 packet. It is the **bounded OFFLINE implementation** of the accepted Decision 055 carry-in architecture
 across the exact **sixteen paths** its §10 fixes, with **no seventeenth path**. **It does not
 self-execute**, no session may begin it or any part of it before it is issued, and it grants **no**
 operational-state, orphan-adoption, transport-construction, network, SEC, or live authority.
 **Authorization is not implementation, implementation is not acceptance, and none of them discharges
-M3-L14 or M3-L16.**
+M3-L14 or M3-L16.** **That is the position as at accepted Decision 055 and is stage-local, not
+current; the current next authorized action is carried by `NEXT_AUTHORIZED_ACTION` in the
+machine-readable markers below.**
 
 **The M3-L16 carry-in architecture is ACCEPTED AND BINDING** (accepted
 [Decision 055](../Docs/Decisions/decision_055_m3_2_carry_in_architecture_and_offline_implementation_authorization.md),
@@ -2610,7 +2615,7 @@ validation, and accepted Decision 055 (2026-08-08,
 `M3_2_CARRY_IN_ARCHITECTURE_ACCEPTED_AND_OFFLINE_IMPLEMENTATION_AUTHORIZED`) adjudicates it.** That
 pointer is therefore **historical** and is deliberately left byte-unchanged;
 `M3_2_CARRY_IN_ARCHITECTURE_STATUS`, `DECISION_055_STATUS`, `CURRENT_STAGE`, `ACTIVE_BLOCKER`,
-`IMPLEMENTATION_AUTHORIZATION`, and `NEXT_AUTHORIZED_ACTION` carry the current position —
+`IMPLEMENTATION_AUTHORIZATION`, and `NEXT_AUTHORIZED_ACTION` carried the position as at that stage —
 `CLAUDE_M3_2_DECISION_055_OFFLINE_IMPLEMENTATION_PACKET`.
 
 **The same rule governs Decision 056 §10's next-action pointer and the

@@ -423,9 +423,17 @@ Before enabling, confirm all of:
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
 
+```bash
+python -m disclosure_drift m3 acquire --show-scope \
+  --evidence-root "$EV_ROOT" \
+  --plan runs/m3_1b_plan_970e050deb06910adcde8588101564beb7d19c74/plan_first.json \
+  --window M3.2A
 ```
-python -m disclosure_drift m3 acquire --show-scope
-```
+
+`--evidence-root`, `--plan`, and `--window` are **mandatory**; omitting any of them is a usage
+failure (exit `2`), not a default. `$EV_ROOT` is the governed external evidence root, supplied
+locally and never written into this file (accepted Decision 061 §6.1). `--show-scope` is mutually
+exclusive with `--live` and constructs no transport.
 
 **Intended interface contract:** read-only; prints the allowed hosts, the allowed method, the exact
 route allowlist, the denylist families, the approved plan hash, the approved ceiling, and the
@@ -450,10 +458,20 @@ First, establish Gate H **pre-run** state (milestone plan §11, Gate H):
 
 Then:
 
+```bash
+python -m disclosure_drift m3 acquire \
+  --config "$WINDOW_LOCAL_CONFIG" \
+  --evidence-root "$EV_ROOT" \
+  --plan <relative-path> --window M3.2A --live --ceiling <INT> \
+  --data-root <relative-path-below-evidence-root> --catalog <relative-path-below-data-root> \
+  --receipt-out <relative-path>
 ```
-python -m disclosure_drift m3 acquire --plan <path> --window M3.2A --live --ceiling <INT> \
-  --receipt-out <private-path>
-```
+
+`--evidence-root`, `--plan`, `--window`, `--live`, `--ceiling`, `--data-root`, `--catalog`, and
+`--receipt-out` are all **mandatory** for a live invocation; omitting any of them is a usage failure
+(exit `2`). `$EV_ROOT` and `$WINDOW_LOCAL_CONFIG` are private, locally supplied values that are never
+written into this file (accepted Decision 061 §6). **For the authorized M3.2A clean carry-in run, use
+step 27a's exact frozen command instead of this general form** — it fixes every value.
 
 **Intended interface contract:**
 
@@ -461,7 +479,7 @@ python -m disclosure_drift m3 acquire --plan <path> --window M3.2A --live --ceil
 |---|---|
 | Purpose | Execute exactly the approved plan, metadata only |
 | Network | **Live, and only here.** Requires `--live`, an enabled configuration, a valid identity, and a matching plan hash |
-| Arguments | `--plan <path>`; `--window {M3.2A,M3.2B}`; `--live` (explicit, no default); `--ceiling <INT>` (must equal **that window's** approved ceiling); `--resume-from <receipt>` (recovery only); `--carry-in-authority <path>` (clean-root consumed baseline only — **never a resume**, and mutually exclusive with `--resume-from`; see step 27a); `--receipt-out <private-path>` |
+| Arguments | Required: `--evidence-root <absolute-external-path>`; `--plan <relative-path>`; `--window {M3.2A,M3.2B}`; `--live` (explicit, no default); `--ceiling <INT>` (must equal **that window's** approved ceiling); `--data-root <relative-path-below-evidence-root>`; `--catalog <relative-path-below-data-root>`; `--receipt-out <relative-path>`. Optional: `--config <path>` (the window-local configuration); `--resume-from <receipt>` (recovery only); `--carry-in-authority <path>` (clean-root consumed baseline only — **never a resume**, and mutually exclusive with `--resume-from`; see step 27a). There is **no `--run-id`**: a carry-in root takes its run id from the authority artifact |
 | Stdout | Progress by route: planned, attempted, succeeded, classified, stored — then the totals |
 | Stop behaviour | **Refuses the attempt that would exceed the ceiling**; halts aggregate traffic on `403` or unqualified `429`; fails closed on blocking schema drift |
 | Side effects | Immutable raw objects; source observations; catalog rows inside their transaction; quarantine entries; one receipt |
@@ -662,10 +680,17 @@ then run `recovery-state` again and require `SAFE`. Inspection itself never repa
 
 Resume only on `SAFE`:
 
-```
-python -m disclosure_drift m3 acquire --plan <relative-path> --live --ceiling <INT> \
+```bash
+python -m disclosure_drift m3 acquire \
+  --config "$WINDOW_LOCAL_CONFIG" \
+  --evidence-root "$EV_ROOT" \
+  --plan <relative-path> --window <M3.2A|M3.2B> --live --ceiling <INT> \
+  --data-root <relative-path-below-evidence-root> --catalog <relative-path-below-data-root> \
   --resume-from <predecessor-receipt> --receipt-out <relative-path>
 ```
+
+`--window`, `--evidence-root`, `--data-root`, and `--catalog` are **mandatory** here too; a resume
+that omits them is a usage failure (exit `2`).
 
 The resumed run carries the consumed count forward against the **same** approved ceiling and names its
 predecessor receipt.
@@ -674,19 +699,43 @@ predecessor receipt.
 
 ### 27a. Carrying an approved consumed baseline into a clean new run
 
-**`PLANNED — NOT YET AUTHORIZED`** · **`MANUAL OWNER APPROVAL`** · **`RECOVERY`**
+**`T5-AUTHORIZED — DECISION 061`** · **`MANUAL OWNER APPROVAL`** · **`RECOVERY`**
 
-**This is not a resume, and it is not currently authorized to run.** A resume continues an exact
-predecessor receipt; a **carry-in root** starts a *clean* run that nonetheless begins from an
-owner-approved non-zero consumed baseline. The two may never be combined, and
-`--carry-in-authority` together with `--resume-from` is refused as a usage error before anything is
-read or created.
+**This is not a resume.** A resume continues an exact predecessor receipt; a **carry-in root** starts
+a *clean* run that nonetheless begins from an owner-approved non-zero consumed baseline. The two may
+never be combined, and `--carry-in-authority` together with `--resume-from` is refused as a usage
+error before anything is read or created.
 
+**T5 authorization is not T6 execution.** Accepted
+[Decision 061](../Decisions/decision_061_m3_2a_clean_carry_in_live_invocation_authorization.md)
+(2026-08-10) authorizes **exactly one** future invocation and freezes the command below, but it is
+**non-self-executing**: the invocation is performed only under the **separate later owner execution
+packet** `OWNER_M3_2_T6_CLEAN_CARRY_IN_CONTROLLED_ACQUISITION_EXECUTION_PACKET`. **Do not run this
+command until that packet is issued.**
+
+The exact frozen invocation (Decision 061 §5) — type it verbatim, adding and removing nothing:
+
+```bash
+python -m disclosure_drift m3 acquire \
+  --config "$WINDOW_LOCAL_CONFIG" \
+  --evidence-root "$EV_ROOT" \
+  --plan runs/m3_1b_plan_970e050deb06910adcde8588101564beb7d19c74/plan_first.json \
+  --window M3.2A \
+  --live \
+  --ceiling 801 \
+  --data-root . \
+  --catalog catalogs/m3_2a_operational.sqlite3 \
+  --receipt-out runs/m3_2a_clean_carry_in/execution_receipt.json \
+  --carry-in-authority runs/m3_2a_clean_carry_in/carry_in_authority.json
 ```
-python -m disclosure_drift m3 acquire --plan <relative-path> --live --window M3.2A \
-  --ceiling 801 --carry-in-authority <relative-path> --receipt-out <relative-path> \
-  --catalog <relative-path> --data-root <relative-path-below-evidence-root>
-```
+
+`$EV_ROOT` and `$WINDOW_LOCAL_CONFIG` are the **only** non-literal tokens. They are private,
+locally supplied values with fixed meanings and mandatory validation (Decision 061 §6), never
+literal paths written into this file: `$EV_ROOT` is the already accepted governed external evidence
+root, and `$WINDOW_LOCAL_CONFIG` is the one-operation temporary configuration of step 16, mode
+`0600`, outside Git and outside the evidence root, carrying no SEC identity, setting only
+`network.enabled: true` and `network.m3_acquire_enabled: true` while leaving CompanyFacts `false`,
+and withdrawn on **every** termination path. There is **no `--run-id`** and **no `--resume-from`**.
 
 The authority is a canonical-JSON artifact under schema `m3-carry-in-authority/1.0`, supplied by a
 **relative path beneath the evidence root** — an absolute or escaping path is refused. It binds, all
@@ -729,12 +778,31 @@ exits `4` before it creates the operational catalog, prepares storage, or constr
 run that silently restarted the consumed count at zero is a recorded stop condition
 (**M3-L16**), and the count already stands at `1` of `801`.
 
-**Preconditions that are not satisfied today.** `m3 acquire --live` remains gated by the accepted
-ladder — both tracked network switches, a valid SEC identity, and a separate per-window owner
-authorization. **In addition, no clean carry-in run may be authorized until the separately
-authorized, offline, one-time, verified orphan adoption has executed and been accepted with zero
-unresolved historical orphan mismatch** (limitations register **M3-L16**). Until then, do not mint a
-carry-in artifact and do not run this command.
+**Preconditions — the historical blockers are discharged; the execution gate is not.** The paragraph
+this replaces recorded that no clean carry-in run could be authorized until the separately
+authorized, offline, one-time, **verified orphan adoption** had executed and been accepted with zero
+unresolved historical orphan mismatch (**M3-L16**), and that no carry-in artifact should be minted
+until then. **That condition is satisfied and is now historical:** the adoption executed exactly once
+on 2026-08-10, was independently verified, and was finally owner-accepted; **M3-L16 is `CLOSED` —
+accepted [Decision 059](../Decisions/decision_059_m3_2_orphan_adoption_final_acceptance_m3_l16_closure_and_governance_synchronization.md)**;
+and accepted [Decision 060](../Decisions/decision_060_m3_2_carry_in_authority_mint.md) has **already
+minted** the one-use authority (schema `m3-carry-in-authority/1.0`, 571 canonical bytes, SHA-256
+`d7aa206b…`), which remains **UNCONSUMED** — 1 use total, 0 consumed, 1 remaining.
+
+**What still gates the command:** `m3 acquire --live` remains gated by the accepted ladder — both
+network switches true in the window-local configuration only, a valid SEC identity, and a per-window
+owner authorization. T5 is now granted by Decision 061; **the remaining gate is the separate T6
+execution packet.** Before it runs, the operator must additionally, under that packet's authority:
+
+1. **materialize the minted authority** at `runs/m3_2a_clean_carry_in/carry_in_authority.json`
+   beneath `$EV_ROOT` — **create-once** (fail if it already exists), mode `0600`, a regular file and
+   not a symlink, the exact canonical bytes of Decision 060 §5.1, then **recompute SHA-256 and
+   require `d7aa206b…`**, then require accepted loader admission and exact binding verification
+   (Decision 061 §8). Any mismatch is a **stop before consumption**;
+2. complete the full frozen preflight of Decision 061 §11, **waiving nothing**.
+
+**Neither the authority nor a replacement is ever regenerated automatically.** A replacement is a new
+owner act.
 
 ## 28. Escalate an unrecognized failure
 
@@ -841,7 +909,7 @@ deleted; every gate green.
 | `m3 show-receipt` | M3.1 | **implemented** | Render a receipt, failing closed on a prohibited field |
 | `m3 acquire --show-scope` | M3.2 | planned | Print the exact network scope; zero requests |
 | `m3 acquire --live` | M3.2 | planned | Execute the approved plan, metadata only |
-| `m3 acquire --carry-in-authority` | M3.2 | planned — **not authorized to run** | Begin a clean run from an owner-approved consumed baseline; consumed exactly once; never a resume (step 27a) |
+| `m3 acquire --carry-in-authority` | M3.2 | **T5-authorized (Decision 061) — T6 execution packet still required before it may run** | Begin a clean run from an owner-approved consumed baseline; consumed exactly once; never a resume (step 27a) |
 | `m3 reconcile-requests` | M3.2 | planned | Planned versus actual, per route and total |
 | `m3 show-drift` | M3.2 | planned | Every drift event, blocking ones separated |
 | `m3 recovery-state` | M3.1 (used by M3.2) | **implemented** | Read-only interruption state and safe-resume determination; never repairs |

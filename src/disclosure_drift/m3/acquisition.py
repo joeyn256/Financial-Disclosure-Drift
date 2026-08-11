@@ -81,7 +81,19 @@ from disclosure_drift.m3.recovery import (
     CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT,
     CARRY_IN_HISTORICAL_ROUTE_ALLOCATION,
     CARRY_IN_REQUEST_PLAN_SHA256,
+    PLAN_TRANSITION_ACQUISITION_WINDOW,
+    PLAN_TRANSITION_APPROVED_REQUEST_CEILING,
+    PLAN_TRANSITION_DECISION_REFERENCE,
+    PLAN_TRANSITION_NEW_URL,
+    PLAN_TRANSITION_OLD_URL,
+    PLAN_TRANSITION_PREDECESSOR_PLAN_SHA256,
+    PLAN_TRANSITION_PREDECESSOR_REGISTRY_VERSION,
+    PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID,
+    PLAN_TRANSITION_SUBSTITUTION_COUNT,
+    PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256,
+    PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION,
     CarryInFixedBindings,
+    PlanTransitionAuthority,
     RecoveryState,
     carry_in_checkpoint_key,
     carry_in_fixed_binding_disagreement,
@@ -127,6 +139,7 @@ from disclosure_drift.sec.request_ceiling import (
 )
 from disclosure_drift.sec.snapshots import SnapshotIndex, SnapshotStore, SourceObservation
 from disclosure_drift.sec.source_registry import (
+    M22_SOURCE_REGISTRY_VERSION,
     SOURCES,
     SourceSpec,
     filing_body_url_is_prohibited,
@@ -2607,6 +2620,11 @@ class RequestReconciliation:
     store_findings: tuple[StoreFinding, ...]
     drift: tuple[DriftListingEntry, ...]
     blocked_recovery_states: int
+    #: Observations that are out of the *successor* plan only because an owner-approved endpoint
+    #: substitution moved their identity (Decision 062 §8). Listed separately from
+    #: :attr:`out_of_plan` rather than removed from it, so the evidence stays visible and countable:
+    #: a superseded identity is reported, kept, and excluded from blocking — never hidden.
+    superseded_out_of_plan: tuple[tuple[str, str], ...] = ()
 
     @property
     def totals(self) -> Mapping[str, int]:
@@ -2700,6 +2718,7 @@ class RequestReconciliation:
             "out_of_plan": [list(pair) for pair in self.out_of_plan],
             "plan_sha256": self.plan_sha256,
             "store_findings": [finding.as_record() for finding in self.store_findings],
+            "superseded_out_of_plan": [list(pair) for pair in self.superseded_out_of_plan],
             "totals": dict(self.totals),
             "window": self.window,
         }
@@ -2831,6 +2850,7 @@ def reconcile_requests(
     reconstruction: CatalogReconstruction,
     storage: StorageBinding,
     in_flight_request_identity: str | None = None,
+    plan_transition: PlanTransitionAuthority | None = None,
 ) -> RequestReconciliation:
     """Reconcile the approved plan against durable catalog and object state. Writes nothing.
 
@@ -2838,6 +2858,11 @@ def reconcile_requests(
     entries are sorted; identical inputs produce a byte-identical serialization. Detection
     never repairs: an orphan, a partial, a missing referent, or blocking drift is *reported*,
     and every mutation belongs to the separately invoked recovery applier.
+
+    ``plan_transition``, when supplied, is a verified Decision 062 authority: the one committed
+    observation whose identity that transition superseded is reported under
+    ``superseded_out_of_plan`` instead of ``out_of_plan``. Every other out-of-plan observation is
+    unaffected.
     """
     requests = derive_logical_requests(plan)
     items = tuple(
@@ -2855,15 +2880,19 @@ def reconcile_requests(
             raise AcquisitionGateError(message)
 
     planned = {(request.source_id, _planned_request_identity(request)) for request in requests}
-    out_of_plan = tuple(
-        sorted(
-            {
-                (observation.source_id, observation.identity)
-                for observation in reconstruction.observations
-                if (observation.source_id, observation.identity) not in planned
-            }
-        )
+    unplanned = sorted(
+        {
+            (observation.source_id, observation.identity)
+            for observation in reconstruction.observations
+            if (observation.source_id, observation.identity) not in planned
+        }
     )
+    superseded = tuple(
+        pair
+        for pair in unplanned
+        if superseded_out_of_plan_observation(plan_transition, pair[0], pair[1])
+    )
+    out_of_plan = tuple(pair for pair in unplanned if pair not in set(superseded))
 
     sweep = observe_recovery_state(
         storage=storage,
@@ -2917,7 +2946,283 @@ def reconcile_requests(
         store_findings=tuple(findings),
         drift=tuple(drift),
         blocked_recovery_states=reconstruction.blocked_recovery_states,
+        superseded_out_of_plan=superseded,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 §7 — the bounded predecessor -> successor plan transition
+# --------------------------------------------------------------------------- #
+class PlanTransitionRefusedError(AcquisitionError):
+    """Raised when a proposed plan transition is not the one Decision 062 authorizes.
+
+    Refusal is the default and every check is literal: this mechanism exists for one external
+    endpoint drift, and any mismatch — a second substitution, a changed route, a changed parameter,
+    a changed ceiling, a changed quarter set, an arbitrary URL, a registry version either receipt
+    does not record — refuses rather than being interpreted charitably.
+    """
+
+
+def verify_plan_transition(
+    *,
+    predecessor_plan: RequestPlan,
+    successor_plan: RequestPlan,
+    predecessor_source_registry_version: str | None,
+) -> PlanTransitionAuthority:
+    """Verify Decision 062 §7's seventeen conditions and return the resulting authority.
+
+    The seventeen are checked here rather than at the point of use because only here are both
+    plans *expanded*: conditions 8, 13, 16, and 17 are statements about the concrete logical request
+    identities two plans authorize, and a plan document names routes and counts, not URLs. Comparing
+    the expansions is what makes "exactly one substitution" a proved fact instead of a description.
+
+    Args:
+        predecessor_plan: the plan the predecessor run executed.
+        successor_plan: the plan the continuation would execute.
+        predecessor_source_registry_version: the registry version the **predecessor receipt**
+            recorded. Read from the receipt, never from the predecessor plan document: condition 14
+            is about what the run recorded at the time, and the pre-Decision-062 plan schema
+            recorded no registry version at all.
+
+    Raises:
+        PlanTransitionRefusedError: any of the seventeen conditions does not hold.
+    """
+    # 1. An explicit accepted owner decision names both plan hashes. The names are the frozen
+    #    constants; the comparison is literal, in both directions, so neither a predecessor that is
+    #    not the retired plan nor a successor that is not the approved one can enter.
+    _require_transition(
+        predecessor_plan.request_plan_sha256 == PLAN_TRANSITION_PREDECESSOR_PLAN_SHA256,
+        f"the predecessor plan is {predecessor_plan.request_plan_sha256}, not the plan "
+        f"{PLAN_TRANSITION_DECISION_REFERENCE} names as the predecessor",
+    )
+    _require_transition(
+        successor_plan.request_plan_sha256 == PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256,
+        f"the successor plan is {successor_plan.request_plan_sha256}, not the plan "
+        f"{PLAN_TRANSITION_DECISION_REFERENCE} names as the successor",
+    )
+
+    # 2. The same M3.2 window, on both sides and against the decision's own binding.
+    for label, plan in (("predecessor", predecessor_plan), ("successor", successor_plan)):
+        _require_transition(
+            plan.acquisition_window == PLAN_TRANSITION_ACQUISITION_WINDOW,
+            f"the {label} plan names window {plan.acquisition_window!r}, not "
+            f"{PLAN_TRANSITION_ACQUISITION_WINDOW!r}",
+        )
+
+    # 3. The same coverage, as-of, calendar, and rate inputs, and the same quarter set.
+    _require_transition(
+        _transition_inputs(predecessor_plan) == _transition_inputs(successor_plan),
+        "the two plans do not share identical coverage, as-of, calendar, rate, and quarter inputs",
+    )
+
+    # 4, 6, 7, 17. The same routes, in the same order, with the same planned counts, the same
+    #    derived A_reachable values, and therefore the same per-route attempt budget. Comparing the
+    #    whole ordered tuple is what refuses an introduced or dropped route: a new route changes the
+    #    tuple even when every shared route still agrees.
+    _require_transition(
+        _transition_routes(predecessor_plan) == _transition_routes(successor_plan),
+        "the two plans do not share identical routes, planned counts, and A_reachable values",
+    )
+    _require_transition(
+        predecessor_plan.maximum_physical_attempts == successor_plan.maximum_physical_attempts,
+        f"the maximum physical attempt budget moves from "
+        f"{predecessor_plan.maximum_physical_attempts} to "
+        f"{successor_plan.maximum_physical_attempts}",
+    )
+
+    # 5. The same approved global ceiling, on both sides and against the decision's own binding.
+    for label, plan in (("predecessor", predecessor_plan), ("successor", successor_plan)):
+        _require_transition(
+            plan.hard_request_ceiling == PLAN_TRANSITION_APPROVED_REQUEST_CEILING,
+            f"the {label} plan's ceiling is {plan.hard_request_ceiling}, not the approved "
+            f"{PLAN_TRANSITION_APPROVED_REQUEST_CEILING}",
+        )
+
+    # 8, 9, 13, 16. The expansions agree everywhere except one substitution.
+    substitution = _verify_single_substitution(predecessor_plan, successor_plan)
+
+    # 10, 11, 12. The substitution is exactly the one named: this route, this old URL, this new URL.
+    source_id, old_url, new_url = substitution
+    _require_transition(
+        source_id == PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID,
+        f"the substituted route is {source_id!r}, not {PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID!r}",
+    )
+    _require_transition(
+        old_url == PLAN_TRANSITION_OLD_URL,
+        f"the substituted route's old URL is {old_url!r}, not the retired path "
+        f"{PLAN_TRANSITION_DECISION_REFERENCE} names",
+    )
+    _require_transition(
+        new_url == PLAN_TRANSITION_NEW_URL,
+        f"the substituted route's new URL is {new_url!r}, not the successor path "
+        f"{PLAN_TRANSITION_DECISION_REFERENCE} names",
+    )
+
+    # 14. The predecessor receipt records the old registry version.
+    _require_transition(
+        predecessor_source_registry_version == PLAN_TRANSITION_PREDECESSOR_REGISTRY_VERSION,
+        f"the predecessor receipt records source registry "
+        f"{predecessor_source_registry_version!r}, not "
+        f"{PLAN_TRANSITION_PREDECESSOR_REGISTRY_VERSION!r}; a transition away from an endpoint "
+        f"presupposes a run that used it",
+    )
+
+    # 15. The successor run records the successor registry version. The receipt does not exist yet,
+    #     so what is checkable now is the binding it will record: the successor plan's own.
+    _require_transition(
+        successor_plan.source_registry_version == PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION,
+        f"the successor plan is bound to source registry "
+        f"{successor_plan.source_registry_version!r}, not "
+        f"{PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION!r}",
+    )
+    _require_transition(
+        M22_SOURCE_REGISTRY_VERSION == PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION,
+        f"the live source registry is {M22_SOURCE_REGISTRY_VERSION!r}, so a successor run would "
+        f"record that rather than {PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION!r}",
+    )
+
+    return PlanTransitionAuthority(
+        predecessor_plan_sha256=predecessor_plan.request_plan_sha256,
+        successor_plan_sha256=successor_plan.request_plan_sha256,
+        substituted_source_id=source_id,
+        old_url=old_url,
+        new_url=new_url,
+    )
+
+
+def _require_transition(held: bool, refusal: str) -> None:  # noqa: FBT001 - a guard, not a flag
+    """Refuse the transition unless the condition holds."""
+    if not held:
+        message = (
+            f"the proposed plan transition is refused: {refusal}. "
+            f"{PLAN_TRANSITION_DECISION_REFERENCE} authorizes exactly one substitution and creates "
+            f"no general capability to resume against another plan."
+        )
+        raise PlanTransitionRefusedError(message)
+
+
+def _transition_inputs(plan: RequestPlan) -> tuple[object, ...]:
+    """Every planning input that must be identical across the transition."""
+    return (
+        plan.coverage_start,
+        plan.coverage_end,
+        plan.as_of_date,
+        plan.include_open_quarter,
+        plan.calendar_year,
+        plan.calendar_evidence_entry_count,
+        plan.requests_per_second,
+        plan.required_index_keys,
+        plan.expected_cache_hits,
+    )
+
+
+def _transition_routes(plan: RequestPlan) -> tuple[tuple[str, str, int, int], ...]:
+    """The ordered route identity, host, planned count, and A_reachable of every route."""
+    return tuple(
+        (route.source_id, route.host, route.planned_unique_logical_requests, route.a_reachable)
+        for route in plan.routes
+    )
+
+
+def _verify_single_substitution(
+    predecessor_plan: RequestPlan,
+    successor_plan: RequestPlan,
+) -> tuple[str, str, str]:
+    """Prove the two expansions differ in exactly one request identity, and return it.
+
+    Both plans are expanded into their concrete logical requests and compared positionally. Position
+    matters: two expansions holding the same identities in a different order would place requests in
+    an order the predecessor's accounting was never built against, so an order change is a
+    difference like any other rather than an equivalence.
+    """
+    before = derive_logical_requests(predecessor_plan)
+    after = derive_logical_requests(successor_plan)
+    _require_transition(
+        len(before) == len(after),
+        f"the predecessor plan expands to {len(before)} logical request(s) and the successor to "
+        f"{len(after)}",
+    )
+
+    differences: list[tuple[str, str, str]] = []
+    for position, (old, new) in enumerate(zip(before, after, strict=True)):
+        _require_transition(
+            old.source_id == new.source_id,
+            f"position {position} changes route from {old.source_id!r} to {new.source_id!r}",
+        )
+        _require_transition(
+            dict(old.parameters) == dict(new.parameters),
+            f"position {position} changes the parameters of {old.source_id!r}",
+        )
+        _require_transition(
+            old.instance_key == new.instance_key,
+            f"position {position} changes the instance key of {old.source_id!r}",
+        )
+        old_url = _transition_url(predecessor_plan, old)
+        new_url = _transition_url(successor_plan, new)
+        if old_url != new_url:
+            differences.append((old.source_id, old_url, new_url))
+
+    _require_transition(
+        len(differences) == PLAN_TRANSITION_SUBSTITUTION_COUNT,
+        f"the two plans differ in {len(differences)} request identit(ies); "
+        f"{PLAN_TRANSITION_DECISION_REFERENCE} authorizes exactly "
+        f"{PLAN_TRANSITION_SUBSTITUTION_COUNT}",
+    )
+    return differences[0]
+
+
+def _transition_url(plan: RequestPlan, request: LogicalRequest) -> str:
+    """One planned request's normalized URL under a plan's own registry binding.
+
+    The predecessor plan is bound to the retired registry and the successor to the live one, but
+    only one registry is importable at a time, so the retired URL cannot be re-derived from the
+    retired registry. It does not need to be: the retired path is a frozen Decision 062 constant,
+    and substituting it for the one route whose identity moved reconstructs exactly the identity the
+    predecessor run actually recorded — which the predecessor receipt and its committed observation
+    both independently corroborate.
+    """
+    if (
+        plan.source_registry_version == PLAN_TRANSITION_PREDECESSOR_REGISTRY_VERSION
+        or plan.source_registry_version is None
+    ) and request.source_id == PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID:
+        return PLAN_TRANSITION_OLD_URL
+    spec = require_registered(request.source_id)
+    return spec.url(**dict(request.parameters))
+
+
+#: How the Decision 062 §8 supersession classifies the one committed observation the endpoint drift
+#: stranded. It is a classification of *evidence*, never a state written anywhere: the failed
+#: old-path observation stays stored, unrewritten, undeleted, and unsatisfying.
+SUPERSEDED_BY_OWNER_APPROVED_ENDPOINT_DRIFT: Final = "SUPERSEDED_BY_OWNER_APPROVED_ENDPOINT_DRIFT"
+
+
+def superseded_out_of_plan_observation(
+    transition: PlanTransitionAuthority | None,
+    source_id: str,
+    request_identity_value: str,
+) -> bool:
+    """Whether one out-of-plan observation is the identity the transition superseded.
+
+    Decision 062 §8: the committed old-path SIC failure is valid immutable historical failure
+    evidence. Under the successor plan its identity is no longer planned, so the ordinary
+    out-of-plan rule would classify it as an arbitrary blocking observation and refuse continuation
+    forever — for evidence the owner explicitly ruled must be kept.
+
+    The exception is deliberately the narrowest thing that resolves that: it applies only with a
+    verified transition present, only to the one route the transition substituted, and only to the
+    exact old identity, reconstructed from the transition's own frozen old URL rather than matched
+    by prefix, suffix, or route alone. Any other out-of-plan observation — including a *different*
+    observation on the same route — remains blocking.
+
+    It changes no state and satisfies nothing. The successor SIC request stays unsatisfied and stays
+    in the continuation remainder; only the blocking classification of the superseded old identity
+    is lifted.
+    """
+    if transition is None:
+        return False
+    if source_id != transition.substituted_source_id:
+        return False
+    return request_identity_value == request_identity(source_id, transition.old_url, {})
 
 
 # --------------------------------------------------------------------------- #
@@ -3213,6 +3518,7 @@ def propose_continuation(
     storage: StorageBinding,
     window: str,
     approved_ceiling: int,
+    plan_transition: PlanTransitionAuthority | None = None,
 ) -> ContinuationProposal:
     """Derive the deterministic continuation proposal for one interrupted window.
 
@@ -3247,6 +3553,7 @@ def propose_continuation(
         receipt_chain_head=receipt_chain_head,
         catalog_path=catalog_path,
         data_root=storage.data_root,
+        plan_transition=plan_transition,
     )
     reconstruction = reconstruct_catalog_state(catalog_path=catalog_path, storage=storage)
     requests = derive_logical_requests(plan)
@@ -3365,6 +3672,7 @@ def propose_continuation(
         reconstruction=reconstruction,
         storage=storage,
         in_flight_request_identity=in_flight_identity,
+        plan_transition=plan_transition,
     )
 
     # The exhaustive continuation-state partition is the single mechanism deciding every

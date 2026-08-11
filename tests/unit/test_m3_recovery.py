@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -40,15 +41,23 @@ from disclosure_drift.m3.recovery import (
     CARRY_IN_HISTORICAL_ROUTE_ALLOCATION,
     CARRY_IN_REQUEST_PLAN_SHA256,
     RECOVERY_DETERMINATIONS,
+    ConditionResult,
     RecoveryInspectionError,
     RecoveryState,
+    _inspect_store,
     carry_in_checkpoint_disagreement,
     carry_in_checkpoint_key,
+    establish_terminal_state,
     inspect_receiptless_first_invocation,
     inspect_recovery_state,
+    read_only_catalog,
     walk_receipt_chain,
 )
-from disclosure_drift.m3.request_plan import RequestPlan, build_m3_2a_request_plan
+from disclosure_drift.m3.request_plan import (
+    LEGACY_UNBOUND_PLAN,
+    RequestPlan,
+    build_m3_2a_request_plan,
+)
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.http_client import FetchResult
 from disclosure_drift.sec.observation_catalog import ObservationRecorder
@@ -1308,6 +1317,7 @@ def frozen_plan() -> RequestPlan:
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
+        source_registry_version=LEGACY_UNBOUND_PLAN,
     )
 
 
@@ -1760,3 +1770,284 @@ def test_a_checkpoint_that_is_not_the_accepted_carry_in_is_undetermined(
     assert not state.resume_authorized
     assert "does not record the accepted Decision 055 carry-in" in state.basis
     assert fragment in state.basis
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 §3 — condition 8.2 over a terminal, non-interrupted failure
+# --------------------------------------------------------------------------- #
+_TERMINAL_RUN_ID = "m3-2-acquisition-000000000000000000000000000000ff"
+
+
+def _terminal_receipt(**overrides: object) -> ExecutionReceipt:
+    """A correctly-written terminal *failed* receipt: no interruption state, and none owed.
+
+    This is the shape the T6 clean carry-in invocation produced. The receipt schema requires
+    `interruption_state` only for `interrupted`, so a `failed` receipt carrying one would be
+    invalid — which is exactly why condition 8.2 could not previously be met by any clean
+    terminal failure, and why Decision 062 generalized the predicate instead of inventing a state.
+    """
+    fields: dict[str, object] = {
+        "completion_status": "failed",
+        "reason_code": "SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",
+        "reason_detail": "the window ended incomplete with one planned request unsatisfied.",
+        "interruption_state": None,
+    }
+    fields.update(overrides)
+    return receipt(**fields)
+
+
+def _register_terminal_run(
+    tree: DataTree,
+    *,
+    job_state: str = "failed",
+    stage: str = "M3.2A",
+    started_at_utc: str = "2026-08-01T12:00:00Z",
+    finished_at_utc: str = "2026-08-01T12:00:09Z",
+    attempts: int = 1,
+    job_id: str = _TERMINAL_RUN_ID,
+) -> None:
+    """Register the run row and pre-send ledger a terminal receipt must agree with."""
+    with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+        writer.insert(
+            "ops_ingestion_jobs",
+            {
+                "job_id": job_id,
+                "job_kind": "m3_2_acquisition",
+                "job_state": job_state,
+                "stage": stage,
+                "started_at_utc": started_at_utc,
+                "finished_at_utc": finished_at_utc,
+                "detail": "incomplete",
+            },
+        )
+        for ordinal in range(attempts):
+            writer.insert(
+                "ops_retrieval_attempts",
+                {
+                    "retrieval_attempt_id": f"{job_id}-attempt-{ordinal}",
+                    "job_id": job_id,
+                    "source_url_canonical": URL,
+                    "logical_role": "ticker_alias",
+                    "attempt_number": ordinal + 1,
+                    "attempt_state": "succeeded",
+                    "started_at_utc": started_at_utc,
+                    "finished_at_utc": finished_at_utc,
+                },
+            )
+
+
+def _condition(state: RecoveryState, number: str) -> ConditionResult:
+    """The one condition row with this number."""
+    (found,) = [item for item in state.conditions if item.number == number]
+    return found
+
+
+def test_a_terminal_failed_receipt_establishes_its_end_state(tmp_path: Path) -> None:
+    """The Decision 062 §3 positive case: every one of the ten conditions holds."""
+    tree = build_catalog(tmp_path)
+    _register_terminal_run(tree)
+    head = write_chain(tmp_path, _terminal_receipt())
+
+    state = inspect(tmp_path, tree, head)
+
+    condition = _condition(state, "8.2")
+    assert condition.status == "MET"
+    assert condition.condition == "The terminal or interruption state is established, not guessed"
+    assert "terminal state established" in condition.detail
+    assert "'failed'" in condition.detail
+    assert state.interruption_state is None
+    assert state.determination == "SAFE"
+
+
+@pytest.mark.parametrize("status", ["stopped_at_ceiling", "stopped_by_gate"])
+def test_the_other_terminal_non_success_statuses_also_establish(
+    tmp_path: Path, status: str
+) -> None:
+    """Gate-stopped and ceiling-stopped are terminal and non-successful in the same way."""
+    tree = build_catalog(tmp_path)
+    _register_terminal_run(tree)
+    overrides: dict[str, object] = {"completion_status": status}
+    if status == "stopped_at_ceiling":
+        overrides["remaining_planned_logical_request_count"] = 6
+    head = write_chain(tmp_path, _terminal_receipt(**overrides))
+
+    assert _condition(inspect(tmp_path, tree, head), "8.2").status == "MET"
+
+
+def test_a_genuinely_interrupted_receipt_is_unchanged(tmp_path: Path) -> None:
+    """Negative control: the interruption path still settles 8.2, and settles it its own way.
+
+    No run row and no pre-send ledger are registered here. If the interruption path had been
+    replaced by the terminal one rather than joined to it, this would fail — so this test is what
+    proves the generalization added a path instead of substituting one.
+    """
+    tree = build_catalog(tmp_path)
+    head = write_chain(tmp_path, receipt())
+
+    state = inspect(tmp_path, tree, head)
+    condition = _condition(state, "8.2")
+
+    assert condition.status == "MET"
+    assert condition.detail == (
+        "interruption state recorded as 'after_catalog_commit' by the receipt schema"
+    )
+    assert state.interruption_state == "after_catalog_commit"
+
+
+def test_a_complete_receipt_does_not_establish_a_terminal_failure(tmp_path: Path) -> None:
+    """`complete` is terminal but successful, so it is not a state to recover from."""
+    tree = build_catalog(tmp_path)
+    _register_terminal_run(tree, job_state="completed")
+    head = write_chain(
+        tmp_path,
+        receipt(
+            completion_status="complete",
+            reason_code=None,
+            reason_detail=None,
+            interruption_state=None,
+        ),
+    )
+
+    condition = _condition(inspect(tmp_path, tree, head), "8.2")
+
+    assert condition.status == "NOT MET"
+    assert "not one of the terminal non-success statuses" in condition.detail
+
+
+def test_a_receiptless_first_invocation_still_cannot_establish_anything(tmp_path: Path) -> None:
+    """Decision 062 §3 is explicit: the terminal path never reaches a receiptless state.
+
+    The run row and the pre-send ledger a terminal establishment would read are both present here.
+    What is absent is the receipt — and that alone must keep 8.2 unmet and the determination
+    `UNDETERMINED`, because everything the terminal path establishes, it establishes *from* a
+    valid receipt.
+    """
+    tree = build_catalog(tmp_path)
+    _register(tree)
+    _register_terminal_run(tree)
+
+    state = _receiptless(tree)
+    condition = _condition(state, "8.2")
+
+    assert condition.status == "NOT MET"
+    assert "no receipt exists" in condition.detail
+    assert "does not extend to a receiptless, crashed, killed, or uncertain state" in (
+        condition.detail
+    )
+    assert state.determination == "UNDETERMINED"
+    assert not state.resume_authorized
+
+
+class TestTerminalEstablishmentMutations:
+    """Non-vacuity: break one required fact at a time and watch 8.2 stop being met.
+
+    Each case leaves every other condition satisfiable, so a `NOT MET` here is attributable to the
+    mutation rather than to the fixture collapsing.
+    """
+
+    def test_no_registered_run_row_refuses(self, tmp_path: Path) -> None:
+        tree = build_catalog(tmp_path)
+        head = write_chain(tmp_path, _terminal_receipt())
+
+        condition = _condition(inspect(tmp_path, tree, head), "8.2")
+
+        assert condition.status == "NOT MET"
+        assert "0 registered acquisition run(s) match" in condition.detail
+
+    def test_two_matching_run_rows_refuse(self, tmp_path: Path) -> None:
+        tree = build_catalog(tmp_path)
+        _register_terminal_run(tree)
+        _register_terminal_run(tree, job_id=f"{_TERMINAL_RUN_ID[:-2]}ee")
+        head = write_chain(tmp_path, _terminal_receipt())
+
+        condition = _condition(inspect(tmp_path, tree, head), "8.2")
+
+        assert condition.status == "NOT MET"
+        assert "2 registered acquisition run(s) match" in condition.detail
+
+    def test_a_run_row_disagreeing_with_the_receipt_refuses(self, tmp_path: Path) -> None:
+        """A `stopped` run beside a `failed` receipt is a disagreement, not a rounding."""
+        tree = build_catalog(tmp_path)
+        _register_terminal_run(tree, job_state="stopped")
+        head = write_chain(tmp_path, _terminal_receipt())
+
+        condition = _condition(inspect(tmp_path, tree, head), "8.2")
+
+        assert condition.status == "NOT MET"
+        assert "neither is edited to match the other" in condition.detail
+
+    def test_a_ledger_disagreeing_with_the_receipt_refuses(self, tmp_path: Path) -> None:
+        tree = build_catalog(tmp_path)
+        _register_terminal_run(tree, attempts=3)
+        head = write_chain(tmp_path, _terminal_receipt())
+
+        condition = _condition(inspect(tmp_path, tree, head), "8.2")
+
+        assert condition.status == "NOT MET"
+        assert "the durable attempt count does not resolve" in condition.detail
+
+    def test_an_unregistered_reason_code_refuses(self, tmp_path: Path) -> None:
+        """Defence in depth, exercised at the predicate.
+
+        A receipt *file* can never carry an unregistered code — the receipt schema refuses one
+        before it is ever written, which is asserted below. The predicate checks the registry
+        anyway, because it reads whatever the chain walk returns rather than re-validating, so the
+        guard is exercised directly on a hand-built accounting.
+        """
+        with pytest.raises(ReceiptValidationError, match="is not registered"):
+            _terminal_receipt(reason_code="MADE_UP_REASON")
+
+        tree = build_catalog(tmp_path)
+        _register_terminal_run(tree)
+        head = write_chain(tmp_path, _terminal_receipt())
+        walk = replace(walk_receipt_chain(head), head_reason_code="MADE_UP_REASON")
+
+        with read_only_catalog(tree.catalog_database) as connection:
+            established, detail = establish_terminal_state(
+                connection, walk, integrity_passed=True, store=_inspect_store(connection, tree)
+            )
+
+        assert not established
+        assert "is not registered" in detail
+
+    def test_a_blocked_recovery_state_refuses(self, tmp_path: Path) -> None:
+        """An unadjudicated mutation is an uncertain commit, so nothing terminal is established."""
+        tree = build_catalog(tmp_path)
+        _register_terminal_run(tree)
+        with CatalogWriter(tree.catalog_database, tree.locks) as writer:
+            writer.insert(
+                "census_recovery_states",
+                {
+                    "census_run_id": _TERMINAL_RUN_ID,
+                    "recovery_state_id": "f" * 32,
+                    "scenario": "t2_4_recovery_action",
+                    "resolution_state": "blocked",
+                    "action_taken": "write_ahead_recorded",
+                    "detail": "a recovery mutation began and awaits adjudication",
+                    "recorded_at_utc": "2026-08-01T12:00:05Z",
+                },
+            )
+        head = write_chain(tmp_path, _terminal_receipt())
+
+        condition = _condition(inspect(tmp_path, tree, head), "8.2")
+
+        assert condition.status == "NOT MET"
+        assert "still uncertain" in condition.detail
+
+    def test_an_unpromoted_partial_beside_a_terminal_receipt_refuses(self, tmp_path: Path) -> None:
+        """Stricter than 8.6 on purpose: a mid-write beside a *terminal* receipt is unexplained."""
+        tree = build_catalog(tmp_path)
+        _register_terminal_run(tree)
+        spool = tree.data_root / "raw" / "sec" / "bulk" / "sec_bulk_submissions-abc.part"
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_bytes(b"partial")
+        head = write_chain(tmp_path, _terminal_receipt())
+
+        state = inspect(tmp_path, tree, head)
+        condition = _condition(state, "8.2")
+
+        assert condition.status == "NOT MET"
+        assert "unpromoted partial file(s) remain beside a terminal receipt" in condition.detail
+        assert _condition(state, "8.6").status == "MET", (
+            "8.6 still treats an unpromoted partial as ordinary; only 8.2 is stricter"
+        )

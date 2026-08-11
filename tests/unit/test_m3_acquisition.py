@@ -81,10 +81,14 @@ from disclosure_drift.m3.acquisition import (
     verify_window_bindings,
 )
 from disclosure_drift.m3.receipt import ExecutionReceipt
+from disclosure_drift.m3.recovery import PlanTransitionAuthority, RecoveryInspectionError
 from disclosure_drift.m3.request_plan import (
+    LEGACY_UNBOUND_PLAN,
     RequestPlan,
+    RoutePlan,
     build_m3_2a_request_plan,
     canonical_plan_bytes,
+    derive_a_reachable,
 )
 from disclosure_drift.sec.archive import ArchiveDefenceError
 from disclosure_drift.sec.http_client import RetrievalPolicy, SecClient
@@ -100,6 +104,7 @@ from disclosure_drift.sec.transport import (
     SecRequest,
     TransportResponse,
 )
+from disclosure_drift.sec.urls import request_identity
 from disclosure_drift.storage.catalog import CatalogWriter
 from disclosure_drift.storage.sqlite import applied_versions
 
@@ -284,6 +289,11 @@ def _live_plan() -> RequestPlan:
     ``A_reachable`` surfaces as a failing carry-in binding rather than as a stale constant. Its
     identity is separately asserted, against the accepted values, by
     ``TestRequestPlanConsumption.test_the_accepted_m3_2a_plan_identity_reproduces``.
+
+    Built in the pre-Decision-062 unbound shape, because that is what the frozen plan *is*: the
+    carry-in was minted against, and burned on, a `1.0` document, and Decision 055's binding names
+    its hash literally. Building the registry-bound successor here instead would be a different
+    plan wearing the frozen plan's name.
     """
     return build_m3_2a_request_plan(
         coverage_start=date(2009, 1, 1),
@@ -294,6 +304,7 @@ def _live_plan() -> RequestPlan:
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
+        source_registry_version=LEGACY_UNBOUND_PLAN,
     )
 
 
@@ -779,6 +790,10 @@ class TestLogicalRequestDerivation:
         These are the owner-approved M3.2A values. They are asserted here, in the stage that
         first consumes a plan, so a change to route derivation or ``A_reachable`` is caught by
         the acquisition suite rather than only by the planning suite that produced them.
+
+        The accepted identity is the identity of a `1.0` document, so it is reproduced from the
+        unbound shape. Decision 062 moved the *live* planner to the registry-bound schema; it did
+        not, and may not, move the artifact the owner approved at Gate F.
         """
         plan = build_m3_2a_request_plan(
             coverage_start=date(2009, 1, 1),
@@ -789,6 +804,7 @@ class TestLogicalRequestDerivation:
             calendar_evidence_entry_count=0,
             already_satisfied_index_keys=frozenset(),
             requests_per_second=4.0,
+            source_registry_version=LEGACY_UNBOUND_PLAN,
         )
         assert plan.request_plan_sha256 == (
             "19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"
@@ -2671,10 +2687,14 @@ class TestOperationalErrorSanitization:
 # =========================================================================== #
 from disclosure_drift.m3.acquisition import (  # noqa: E402 - stage T2.4 surfaces
     LogicalRequest,
+    PlanTransitionRefusedError,
+    _planned_request_identity,
     conditional_validators,
     reconcile_requests,
     reconstruct_catalog_state,
+    superseded_out_of_plan_observation,
     verified_reusable_predecessor,
+    verify_plan_transition,
 )
 
 
@@ -2885,6 +2905,61 @@ class TestRequestReconciliationT24:
         assert ("sec_company_tickers", "sec_company_tickers:out-of-plan") in (
             reconciliation.out_of_plan
         )
+        assert reconciliation.superseded_out_of_plan == ()
+
+    def test_only_the_named_identity_is_superseded_by_a_plan_transition(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 062 §8, wired end to end through the real reconciliation.
+
+        Two out-of-plan observations are committed: the exact retired SIC identity, and an
+        unrelated stray. With a verified transition presented, the first is reclassified as
+        superseded and the second still blocks — so the exception is scoped to one identity rather
+        than to "out-of-plan observations under a transition".
+        """
+        plan = _plan()
+        retired = request_identity("sec_sic_code_list", _D062_OLD_SIC_URL, {})
+        with _persistent(tmp_path, plan) as harness:
+            harness.run(_success_script(plan))
+            template = harness.storage.snapshot_store.observations[0]
+            recorder = ObservationRecorder(writer=harness.writer, tree=harness.storage.tree)
+            for observation_id, source_id, identity in (
+                ("aaaaaaaa" * 4, "sec_sic_code_list", retired),
+                ("bbbbbbbb" * 4, "sec_company_tickers", "sec_company_tickers:stray"),
+            ):
+                recorder.record(
+                    replace(
+                        template,
+                        observation_id=observation_id,
+                        source_id=source_id,
+                        identity=identity,
+                        relative_storage_path=None,
+                        outcome="failed",
+                        reason_codes=("SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",),
+                    )
+                )
+            reconstruction = _reconstruct(harness)
+            without = reconcile_requests(
+                plan=harness.plan,
+                reconstruction=reconstruction,  # type: ignore[arg-type]
+                storage=harness.storage,
+            )
+            with_authority = reconcile_requests(
+                plan=harness.plan,
+                reconstruction=reconstruction,  # type: ignore[arg-type]
+                storage=harness.storage,
+                plan_transition=_verified_transition(),
+            )
+
+        # Without an authority, both are ordinary blocking out-of-plan observations.
+        assert ("sec_sic_code_list", retired) in without.out_of_plan
+        assert without.superseded_out_of_plan == ()
+
+        # With one, exactly the named identity moves, and the stray does not.
+        assert with_authority.superseded_out_of_plan == (("sec_sic_code_list", retired),)
+        assert ("sec_sic_code_list", retired) not in with_authority.out_of_plan
+        assert ("sec_company_tickers", "sec_company_tickers:stray") in with_authority.out_of_plan
+        assert len(with_authority.out_of_plan) == len(without.out_of_plan) - 1
 
     def test_row_without_object_and_store_findings_are_surfaced_not_repaired(
         self, tmp_path: Path
@@ -6850,3 +6925,384 @@ class TestM32ABaselineInterlock:
             execute_live_acquisition(**arguments)  # type: ignore[arg-type]
 
         assert factory.calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 §§7-8 — the bounded plan transition and the superseded identity
+# --------------------------------------------------------------------------- #
+_D062_OLD_SIC_URL = (
+    "https://www.sec.gov/corpfin/division-of-corporation-finance-standard-industrial"
+    "-classification-sic-code-list"
+)
+_D062_NEW_SIC_URL = (
+    "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
+)
+
+
+def _successor_plan() -> RequestPlan:
+    """The Decision 062 successor: the frozen plan, bound to the successor source registry."""
+    return build_m3_2a_request_plan(
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+        include_open_quarter=False,
+        calendar_year=2026,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+
+
+def _verified_transition() -> PlanTransitionAuthority:
+    return verify_plan_transition(
+        predecessor_plan=_live_plan(),
+        successor_plan=_successor_plan(),
+        predecessor_source_registry_version="m2.2-source-registry/1.0",
+    )
+
+
+class TestPlanTransitionVerification:
+    """The seventeen conditions, one positive case and a refusal for every way to widen it."""
+
+    def test_the_authorized_pair_verifies_and_names_exactly_one_substitution(self) -> None:
+        authority = _verified_transition()
+
+        assert authority.predecessor_plan_sha256 == (
+            "19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"
+        )
+        assert authority.successor_plan_sha256 != authority.predecessor_plan_sha256
+        assert authority.substituted_source_id == "sec_sic_code_list"
+        assert authority.old_url == _D062_OLD_SIC_URL
+        assert authority.new_url == _D062_NEW_SIC_URL
+        assert authority.decision_reference == "Decision 062"
+
+    def test_everything_the_transition_must_preserve_is_preserved(self) -> None:
+        """Conditions 2-7 and 17, asserted on the plans themselves rather than only inside."""
+        before, after = _live_plan(), _successor_plan()
+
+        assert before.acquisition_window == after.acquisition_window == "M3.2A"
+        assert before.planned_unique_logical_requests == 75
+        assert after.planned_unique_logical_requests == 75
+        assert before.required_index_keys == after.required_index_keys
+        assert len(after.required_index_keys) == 70
+        assert before.hard_request_ceiling == after.hard_request_ceiling == 801
+        assert before.maximum_physical_attempts == after.maximum_physical_attempts == 801
+        assert [route.source_id for route in before.routes] == [
+            route.source_id for route in after.routes
+        ]
+        assert [route.a_reachable for route in before.routes] == [
+            route.a_reachable for route in after.routes
+        ]
+        assert derive_a_reachable(SOURCES["sec_sic_code_list"]) == 6
+
+    def test_exactly_one_derived_request_identity_moves(self) -> None:
+        """Condition 8: proved over the expansions, not asserted about the documents."""
+        before = derive_logical_requests(_live_plan())
+        after = derive_logical_requests(_successor_plan())
+        moved = [
+            (old.source_id, index)
+            for index, (old, new) in enumerate(zip(before, after, strict=True))
+            if _planned_request_identity(old) != _planned_request_identity(new)
+        ]
+
+        assert len(before) == len(after) == 75
+        # Both expansions resolve URLs through the *live* registry, so the only identity that can
+        # differ here is one whose route changed shape — none did. The URL substitution is proved
+        # by the transition verifier, which reconstructs the retired identity from its constant.
+        assert moved == []
+        assert _verified_transition().old_url != _verified_transition().new_url
+
+    def test_a_second_substitution_is_refused(self) -> None:
+        """Condition 9: exactly one, never "at most one" and never two."""
+        successor = _successor_plan()
+        drifted = replace(
+            successor,
+            routes=tuple(
+                replace(route, host="data.sec.gov")
+                if route.source_id == "sec_company_tickers"
+                else route
+                for route in successor.routes
+            ),
+        )
+
+        with pytest.raises(PlanTransitionRefusedError, match="refused"):
+            verify_plan_transition(
+                predecessor_plan=_live_plan(),
+                successor_plan=drifted,
+                predecessor_source_registry_version="m2.2-source-registry/1.0",
+            )
+
+    @staticmethod
+    def _refuse_as_named_successor(
+        monkeypatch: pytest.MonkeyPatch, drifted: RequestPlan
+    ) -> pytest.ExceptionInfo[PlanTransitionRefusedError]:
+        """Refuse a drifted plan *while the hash guard is satisfied*.
+
+        Non-vacuity control. Every drifted plan below also fails condition 1, because changing a
+        plan changes its hash — so without this, each test would only ever re-prove the hash guard
+        and the structural conditions would be untested and could be deleted unnoticed. Naming the
+        drifted plan as the authorized successor removes that shadow, so what refuses is the
+        structural comparison itself.
+        """
+        monkeypatch.setattr(
+            acquisition_module,
+            "PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256",
+            drifted.request_plan_sha256,
+        )
+        with pytest.raises(PlanTransitionRefusedError) as caught:
+            verify_plan_transition(
+                predecessor_plan=_live_plan(),
+                successor_plan=drifted,
+                predecessor_source_registry_version="m2.2-source-registry/1.0",
+            )
+        return caught
+
+    def test_an_introduced_route_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Condition 17: a new route changes the ordered route tuple, so it cannot slip through."""
+        successor = _successor_plan()
+        extra = RoutePlan(
+            source_id="sec_submissions_entity",
+            host="data.sec.gov",
+            planned_unique_logical_requests=1,
+            a_reachable=6,
+            basis="an unauthorized addition",
+        )
+        drifted = replace(successor, routes=(*successor.routes, extra))
+
+        caught = self._refuse_as_named_successor(monkeypatch, drifted)
+
+        assert "identical routes" in str(caught.value)
+
+    def test_a_changed_route_count_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        successor = _successor_plan()
+        drifted = replace(
+            successor,
+            routes=tuple(
+                replace(route, planned_unique_logical_requests=69)
+                if route.source_id == "sec_full_index_company"
+                else route
+                for route in successor.routes
+            ),
+        )
+
+        caught = self._refuse_as_named_successor(monkeypatch, drifted)
+
+        assert "identical routes" in str(caught.value)
+
+    def test_a_changed_ceiling_or_attempt_budget_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Conditions 5 and 7: the budget is what the consumed count carries forward against."""
+        successor = _successor_plan()
+        drifted = replace(
+            successor,
+            routes=tuple(
+                replace(route, a_reachable=12)
+                if route.source_id == "sec_full_index_company"
+                else route
+                for route in successor.routes
+            ),
+        )
+        assert drifted.hard_request_ceiling != 801
+
+        caught = self._refuse_as_named_successor(monkeypatch, drifted)
+
+        assert "A_reachable" in str(caught.value)
+
+    def test_a_changed_quarter_set_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Condition 3: the coverage inputs and the quarter set are identical or it is not this."""
+        successor = _successor_plan()
+        drifted = replace(
+            successor,
+            required_index_keys=(*successor.required_index_keys[:-1], "2027QTR1"),
+        )
+
+        caught = self._refuse_as_named_successor(monkeypatch, drifted)
+
+        assert "quarter inputs" in str(caught.value)
+
+    def test_a_changed_coverage_input_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        drifted = replace(_successor_plan(), as_of_date=date(2026, 3, 31))
+
+        caught = self._refuse_as_named_successor(monkeypatch, drifted)
+
+        assert "quarter inputs" in str(caught.value)
+
+    def test_an_arbitrary_predecessor_plan_is_refused(self) -> None:
+        """Condition 1: the decision names *both* hashes, so an unnamed predecessor cannot enter."""
+        with pytest.raises(PlanTransitionRefusedError, match="not the plan"):
+            verify_plan_transition(
+                predecessor_plan=_plan(),
+                successor_plan=_successor_plan(),
+                predecessor_source_registry_version="m2.2-source-registry/1.0",
+            )
+
+    def test_an_arbitrary_successor_plan_is_refused(self) -> None:
+        with pytest.raises(PlanTransitionRefusedError, match="not the plan"):
+            verify_plan_transition(
+                predecessor_plan=_live_plan(),
+                successor_plan=_plan(),
+                predecessor_source_registry_version="m2.2-source-registry/1.0",
+            )
+
+    def test_the_transition_is_not_reversible(self) -> None:
+        """Predecessor -> successor only; the retired plan is never resumed against."""
+        with pytest.raises(PlanTransitionRefusedError, match="not the plan"):
+            verify_plan_transition(
+                predecessor_plan=_successor_plan(),
+                successor_plan=_live_plan(),
+                predecessor_source_registry_version="m2.2-source-registry/1.1",
+            )
+
+    @pytest.mark.parametrize("recorded", [None, "m2.2-source-registry/1.1", "sec-sources/1.0"])
+    def test_a_predecessor_receipt_not_recording_the_old_registry_is_refused(
+        self, recorded: str | None
+    ) -> None:
+        """Condition 14: a transition away from an endpoint presupposes a run that used it."""
+        with pytest.raises(PlanTransitionRefusedError, match="predecessor receipt records"):
+            verify_plan_transition(
+                predecessor_plan=_live_plan(),
+                successor_plan=_successor_plan(),
+                predecessor_source_registry_version=recorded,
+            )
+
+    def test_a_successor_plan_bound_to_the_wrong_registry_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Condition 15: the successor run must record the successor registry version."""
+        drifted = replace(_successor_plan(), source_registry_version="m2.2-source-registry/9.9")
+
+        caught = self._refuse_as_named_successor(monkeypatch, drifted)
+
+        assert "bound to source registry" in str(caught.value)
+
+    def test_the_authority_object_itself_cannot_be_widened(self) -> None:
+        """Constructing an authority is an assertion, so the constructor checks it literally."""
+        lawful = _verified_transition()
+
+        for field_name, value in (
+            ("substituted_source_id", "sec_company_tickers"),
+            ("old_url", "https://www.sec.gov/anything"),
+            ("new_url", "https://www.sec.gov/anything-else"),
+            ("decision_reference", "Decision 999"),
+            ("successor_plan_sha256", "0" * 64),
+            ("predecessor_plan_sha256", "0" * 64),
+        ):
+            with pytest.raises(RecoveryInspectionError, match="may name only the one substitution"):
+                replace(lawful, **{field_name: value})
+
+
+class TestSupersededOutOfPlanObservation:
+    """Decision 062 §8: exactly one historical identity is superseded, and nothing else."""
+
+    def test_the_exact_old_sic_identity_is_superseded(self) -> None:
+        transition = _verified_transition()
+
+        assert superseded_out_of_plan_observation(
+            transition,
+            "sec_sic_code_list",
+            request_identity("sec_sic_code_list", _D062_OLD_SIC_URL, {}),
+        )
+
+    def test_without_a_transition_nothing_is_superseded(self) -> None:
+        """The exception exists only while an owner authority is presented."""
+        assert not superseded_out_of_plan_observation(
+            None,
+            "sec_sic_code_list",
+            request_identity("sec_sic_code_list", _D062_OLD_SIC_URL, {}),
+        )
+
+    @pytest.mark.parametrize(
+        ("source_id", "url"),
+        [
+            # A different route entirely.
+            ("sec_company_tickers", "https://www.sec.gov/files/company_tickers.json"),
+            # The right route, but a URL the decision never named.
+            ("sec_sic_code_list", "https://www.sec.gov/corpfin/some-other-page"),
+            # Prefix and suffix variants of the retired path.
+            ("sec_sic_code_list", f"{_D062_OLD_SIC_URL}-extra"),
+            ("sec_sic_code_list", _D062_OLD_SIC_URL.rsplit("-", 1)[0]),
+            # The successor identity is not "superseded"; it is the work still owed.
+            ("sec_sic_code_list", _D062_NEW_SIC_URL),
+        ],
+    )
+    def test_any_other_out_of_plan_observation_still_blocks(self, source_id: str, url: str) -> None:
+        assert not superseded_out_of_plan_observation(
+            _verified_transition(), source_id, request_identity(source_id, url, {})
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 §10 — which relation an M3.2 acquisition run actually writes
+# --------------------------------------------------------------------------- #
+class TestQuarterlyIndexInstanceOwnership:
+    """`census_index_instances` is not this stage's relation, and never has been.
+
+    Recorded as executable fact because the empty table looked like a T6 defect. It is not: an
+    M3.2 acquisition run acquires metadata objects and parses none of them, so it records each
+    planned request's terminal state in `census_plan_sources` — whose accepted semantics are
+    exactly that — and writes no instance lifecycle row. `census_index_instances` carries
+    `parse_usable`, `reconciled`, and `satisfied`, and the M2.3 index lifecycle that owns it
+    verifies reuse against a `census_parser_runs` lineage row. Those are parse and reconciliation
+    facts, which this stage may not manufacture.
+    """
+
+    def test_the_acquisition_driver_contains_no_writer_of_the_instance_relation(self) -> None:
+        source = Path(acquisition_module.__file__).read_text(encoding="utf-8")
+
+        assert "INSERT INTO census_index_instances" not in source
+        assert "census_plan_sources" in source
+
+    def test_a_successful_window_writes_no_instance_row(self, tmp_path: Path) -> None:
+        """The observed T6 state, reproduced by a *successful* window on the same code path.
+
+        The table is empty after a window that satisfied every planned request, so its emptiness
+        after T6 is the designed behaviour rather than a consequence of that run failing.
+        """
+        plan = _plan()
+        with _persistent(tmp_path, plan) as harness:
+            outcome = harness.run(_success_script(plan))
+            database = harness.preparation.database_path
+        assert outcome.completed_successfully
+
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            instances = connection.execute(
+                "SELECT COUNT(*) FROM census_index_instances"
+            ).fetchone()[0]
+            observations = connection.execute(
+                "SELECT COUNT(*) FROM census_source_observations"
+            ).fetchone()[0]
+
+        assert instances == 0, "an acquisition run writes no quarterly-index lifecycle row"
+        assert observations == plan.planned_unique_logical_requests, (
+            "the evidence a later parse stage would read is all present"
+        )
+
+    def test_the_relation_the_driver_does_write_declares_that_it_parsed_nothing(self) -> None:
+        """`census_plan_sources` is the driver's attribution relation, and it is honest.
+
+        Every acquisition row records `parser_state = 'not_started'`, which is why the parse and
+        reconciliation facts `census_index_instances` requires cannot come from this stage.
+        """
+        request = LogicalRequest(
+            source_id="sec_full_index_company",
+            instance_key="2010QTR1",
+            parameters={"year": "2010", "quarter": "1"},
+        )
+        row = acquisition_module._plan_source_row(  # noqa: SLF001 - the relation under test
+            acquisition_module.AcquisitionRunBinding(
+                census_run_id="m3-2-acquisition-00000000000000000000000000000000", window="M3.2A"
+            ),
+            RequestOutcome(
+                request=request,
+                disposition="satisfied_new",
+                observation_id="a" * 32,
+                attempts=1,
+            ),
+            recorded_at_utc="2026-08-01T12:00:00Z",
+        )
+
+        assert row["parser_state"] == "not_started"
+        assert row["source_instance_id"] == "sec_full_index_company:2010QTR1"
+        assert "instance_key" not in row
+        assert "parse_usable" not in row

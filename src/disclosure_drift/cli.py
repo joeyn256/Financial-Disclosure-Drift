@@ -56,6 +56,7 @@ from disclosure_drift.m3.acquisition import (
     require_m3_2a_consumed_baseline,
     validate_acquisition_run,
     verify_carry_in_authority,
+    verify_plan_transition,
     verify_window_bindings,
 )
 from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
@@ -66,13 +67,13 @@ from disclosure_drift.m3.receipt import (
     write_receipt,
 )
 from disclosure_drift.m3.recovery import (
+    PlanTransitionAuthority,
     inspect_receiptless_first_invocation,
     inspect_recovery_state,
     walk_receipt_chain,
 )
 from disclosure_drift.m3.rehearsal import SCENARIO_IDS, RehearsalReport, run_rehearsal
 from disclosure_drift.m3.request_plan import (
-    REQUEST_PLAN_SCHEMA_VERSION,
     RequestPlan,
     build_m3_2a_request_plan,
     canonical_plan_bytes,
@@ -421,8 +422,30 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         metavar="RELATIVE_PATH",
         help="The data root whose raw store is inspected, relative to --evidence-root.",
     )
+    _add_plan_transition_argument(recovery_state)
 
     _add_m3_2_parsers(m3_subparsers)
+
+
+def _add_plan_transition_argument(parser: argparse.ArgumentParser) -> None:
+    """Declare the explicit, bounded predecessor-plan argument (Decision 062 §7).
+
+    Opt-in and never inferred. Without it, the plan hash must be unchanged exactly as before. With
+    it, the named predecessor and the supplied successor go through the full seventeen-condition
+    verification, which refuses every pair but the one an accepted owner decision names — so the
+    flag exposes one authorized substitution rather than a general "resume against another plan".
+    """
+    parser.add_argument(
+        "--plan-transition-predecessor",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help=(
+            "The predecessor request plan a supplied successor plan continues, under an accepted "
+            "owner plan-transition decision. Refused unless the two plans are exactly the pair "
+            "that decision names, differing in exactly its named substitution."
+        ),
+    )
 
 
 def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -542,6 +565,7 @@ def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.Argumen
             "--resume-from, it is consumed exactly once, and it is never reissued automatically."
         ),
     )
+    _add_plan_transition_argument(acquire)
 
     dependent = m3_subparsers.add_parser(
         "derive-dependent-plan",
@@ -1671,7 +1695,7 @@ def _m3_plan_requests_command(
         elapsed_seconds=round((completed - started).total_seconds(), 3),
         source_registry_version=M22_SOURCE_REGISTRY_VERSION,
         index_plan_policy_version=INDEX_PLAN_POLICY_VERSION,
-        request_plan_schema_version=REQUEST_PLAN_SCHEMA_VERSION,
+        request_plan_schema_version=plan.request_plan_schema_version,
         acquisition_window=plan.acquisition_window,
         request_plan_id=plan.request_plan_id,
         request_plan_sha256=plan.request_plan_sha256,
@@ -1789,6 +1813,17 @@ def _m3_recovery_state_command(
                 logger,
                 "recovery-state",
             )
+        # A transition binds to what a predecessor *receipt* recorded, and receiptless mode is
+        # defined by there being none. Refused rather than ignored: silently dropping it would
+        # report a determination the operator believes was reached under an authority.
+        if args.plan_transition_predecessor is not None:
+            return _usage_failure(
+                "--plan-transition-predecessor is not valid with "
+                "--receiptless-first-invocation; a plan transition binds to the registry version "
+                "a predecessor receipt recorded, and a receiptless invocation recorded none",
+                logger,
+                "recovery-state",
+            )
         state = inspect_receiptless_first_invocation(
             plan=plan,
             census_run_id=args.run,
@@ -1805,11 +1840,13 @@ def _m3_recovery_state_command(
                 logger,
                 "recovery-state",
             )
+        head_path = _m3_artifact_path(evidence_root, args.receipt_chain_head)
         state = inspect_recovery_state(
             plan=plan,
-            receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
+            receipt_chain_head=head_path,
             catalog_path=catalog_path,
             data_root=data_root,
+            plan_transition=_resolved_plan_transition(evidence_root, args, plan, head_path),
         )
 
     print("Safe-resume determination (read-only; nothing was repaired).")
@@ -1834,6 +1871,42 @@ def _m3_recovery_state_command(
         return EXIT_GATE_FAILURE
     logger.info("m3 recovery-state: SAFE")
     return EXIT_OK
+
+
+def _resolved_plan_transition(
+    evidence_root: Path,
+    args: argparse.Namespace,
+    successor_plan: RequestPlan,
+    receipt_chain_head: Path,
+) -> PlanTransitionAuthority | None:
+    """Verify an explicitly requested plan transition, or return `None` when none was requested.
+
+    The predecessor's recorded source-registry version is read from the **predecessor receipt**,
+    not from the operator and not from the predecessor plan document: condition 14 asks what the
+    run actually recorded, and the pre-transition plan schema recorded no registry version at all.
+
+    Raises:
+        GateFailureError: the transition was requested but no receipt is available to bind it to.
+        PlanTransitionRefusedError: the two plans are not the authorized pair.
+    """
+    relative = getattr(args, "plan_transition_predecessor", None)
+    if relative is None:
+        return None
+    try:
+        head = inspect_receipt(receipt_chain_head)
+    except (OSError, ReceiptValidationError) as exc:
+        message = (
+            f"a plan transition binds to what the predecessor receipt recorded, and that receipt "
+            f"could not be read: {exc}"
+        )
+        raise GateFailureError(message) from exc
+    recorded = head.get("source_registry_version")
+    predecessor = request_plan_from_document(_read_artifact_bytes(evidence_root, relative))
+    return verify_plan_transition(
+        predecessor_plan=predecessor,
+        successor_plan=successor_plan,
+        predecessor_source_registry_version=None if recorded is None else str(recorded),
+    )
 
 
 def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple[str, ...]:
@@ -2196,6 +2269,16 @@ def _m3_acquire_command(
             logger,
             "acquire",
         )
+    # A plan transition says which predecessor plan the supplied successor continues, so it is
+    # meaningless — and therefore refused — without the resume that continues one. Refused here,
+    # beside the other argument-decidable contradictions, before any durable state is touched.
+    if getattr(args, "plan_transition_predecessor", None) is not None and args.resume_from is None:
+        return _usage_failure(
+            "--plan-transition-predecessor requires --resume-from; a plan transition names the "
+            "predecessor a continuation continues, and there is nothing to continue without one",
+            logger,
+            "acquire",
+        )
     if show_scope:
         return _m3_acquire_show_scope(args, config, logger, evidence_root)
     if not live:
@@ -2479,13 +2562,15 @@ def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate lad
 
     continuation = None
     if args.resume_from is not None:
+        resume_head = _m3_artifact_path(evidence_root, args.resume_from)
         continuation = propose_continuation(
             plan=plan,
-            receipt_chain_head=_m3_artifact_path(evidence_root, args.resume_from),
+            receipt_chain_head=resume_head,
             catalog_path=catalog_path,
             storage=storage,
             window=window,
             approved_ceiling=ceiling,
+            plan_transition=_resolved_plan_transition(evidence_root, args, plan, resume_head),
         )
 
     # SIGTERM is scoped here, after every live gate has passed, so a graceful `kill` of a running
@@ -2691,7 +2776,7 @@ def _live_acquisition_receipt(  # noqa: PLR0913 - the frozen receipt binds many 
         elapsed_seconds=_elapsed_seconds(started_at, completed_at),
         source_registry_version=M22_SOURCE_REGISTRY_VERSION,
         index_plan_policy_version=INDEX_PLAN_POLICY_VERSION,
-        request_plan_schema_version=REQUEST_PLAN_SCHEMA_VERSION,
+        request_plan_schema_version=plan.request_plan_schema_version,
         parser_versions=_route_parser_versions(plan),
         acquisition_window=plan.acquisition_window,
         request_plan_id=plan.request_plan_id,
@@ -2903,7 +2988,7 @@ def _m3_derive_dependent_plan_command(
         elapsed_seconds=round((completed - started).total_seconds(), 3),
         source_registry_version=M22_SOURCE_REGISTRY_VERSION,
         index_plan_policy_version=INDEX_PLAN_POLICY_VERSION,
-        request_plan_schema_version=REQUEST_PLAN_SCHEMA_VERSION,
+        request_plan_schema_version=plan.request_plan_schema_version,
         acquisition_window=plan.acquisition_window,
         request_plan_id=plan.request_plan_id,
         request_plan_sha256=plan.request_plan_sha256,

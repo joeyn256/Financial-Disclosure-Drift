@@ -530,7 +530,7 @@ the accepted registry:
 | `sec_bulk_submissions` | `www.sec.gov` | exact `/Archives/edgar/daily-index/bulkdata/submissions.zip` |
 | `sec_company_tickers_exchange` | `www.sec.gov` | exact `/files/company_tickers_exchange.json` |
 | `sec_company_tickers` | `www.sec.gov` | exact `/files/company_tickers.json` |
-| `sec_sic_code_list` | `www.sec.gov` | exact `/corpfin/division-of-corporation-finance-standard-industrial-classification-sic-code-list` |
+| `sec_sic_code_list` | `www.sec.gov` | exact `/search-filings/standard-industrial-classification-sic-code-list` (Decision 062 §5 replaced the retired `/corpfin/…` path; still one exact path, so `A_reachable` is unchanged at 6) |
 | `sec_edgar_filing_calendar` | `www.sec.gov` | exact `/submit-filings/filer-support-resources/edgar-calendar` and `/edgar/filer-information/calendar` |
 | `sec_edgar_calendar_announcement` | `www.sec.gov`, `data.sec.gov` | manifest-exact only; no arbitrary URL |
 | `sec_full_index_company` | `www.sec.gov` | pattern `^/Archives/edgar/full-index/(?:19[6-9][0-9]\|20[0-9]{2})/QTR[1-4]/company\.idx$` |

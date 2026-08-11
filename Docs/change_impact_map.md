@@ -617,7 +617,7 @@ and needs its own authorization.
 
 | Path | Nearest tests | Why it is listed |
 |---|---|---|
-| `src/disclosure_drift/m3/recovery.py` | `tests/unit/test_m3_recovery.py` | The **read-only** interrupted-run inspector (M3.1). It was inside the Decision 041 ten-path T2.4 maximum and was deliberately left unedited, which the maximum-not-requirement rule permits |
+| `src/disclosure_drift/m3/recovery.py` | `tests/unit/test_m3_recovery.py` | The **read-only** interrupted-run inspector (M3.1). It was inside the Decision 041 ten-path T2.4 maximum and was deliberately left unedited, which the maximum-not-requirement rule permits. **Decision 062** then edited it: condition 8.2's terminal-establishment predicate and the frozen plan-transition bindings. Still read-only — it imports no writer and opens the catalog `query_only` |
 | `src/disclosure_drift/m3/request_plan.py` | `tests/unit/test_m3_request_plan.py` | The deterministic zero-request plan. Its accepted plan hash `19be7bdc…` and the owner-approved ceiling **801** are bound to it; any change must reproduce them |
 | `src/disclosure_drift/m3/receipt.py` | `tests/unit/test_m3_receipt.py` | `m3-execution-receipt/2.0`, frozen for all of T2. Receipt assembly is T2.5–T2.6 work |
 | `src/disclosure_drift/sec/request_ceiling.py` | `tests/unit/test_request_ceiling.py` | The cumulative physical-attempt gate the engine consumes. Ceiling semantics are outside G1 and outside every accepted T2 stage |

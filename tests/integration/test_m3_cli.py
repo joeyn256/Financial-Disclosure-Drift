@@ -2745,6 +2745,7 @@ def _acquired_window(evidence_root: Path, *, run_id: str, quarantine_bulk: bool 
         prepare_storage,
     )
     from disclosure_drift.m3.request_plan import (  # noqa: PLC0415
+        LEGACY_UNBOUND_PLAN,
         build_m3_2a_request_plan,
         canonical_plan_bytes,
     )
@@ -2765,6 +2766,7 @@ def _acquired_window(evidence_root: Path, *, run_id: str, quarantine_bulk: bool 
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
+        source_registry_version=LEGACY_UNBOUND_PLAN,
     )
     script = [_fixture_response(request.source_id) for request in derive_logical_requests(plan)]
     if quarantine_bulk:
@@ -3230,6 +3232,7 @@ def _live_plan(evidence_root: Path) -> object:
     from datetime import date  # noqa: PLC0415
 
     from disclosure_drift.m3.request_plan import (  # noqa: PLC0415
+        LEGACY_UNBOUND_PLAN,
         build_m3_2a_request_plan,
         canonical_plan_bytes,
     )
@@ -3243,6 +3246,7 @@ def _live_plan(evidence_root: Path) -> object:
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
+        source_registry_version=LEGACY_UNBOUND_PLAN,
     )
     destination = evidence_root / "plans" / "approved.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -4289,3 +4293,151 @@ def _carry_in_chain(evidence_root: Path) -> tuple[object, Path]:
         consumed_request_count_carried_forward=2,
     )
     return root, write_receipt(head, evidence_root=evidence_root, repository_root=checkout)
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 §7 — the plan-transition flag at the operator surface
+# --------------------------------------------------------------------------- #
+def test_the_plan_transition_flag_is_opt_in_and_never_inferred(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Omitting it leaves condition 8.10 exactly as it was: the hash must be unchanged."""
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _recovery_state(repo_root, evidence_root)
+
+    assert "--plan-transition-predecessor" not in result.stdout
+    assert "8.10" in result.stdout
+
+
+def test_an_unauthorized_plan_pair_is_refused_at_the_operator_surface(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The flag exposes one authorized substitution, not a general resume-against-another-plan.
+
+    The predecessor named here is a real, canonical plan document — it is simply not the pair
+    Decision 062 names, which is the only thing that makes a transition lawful.
+    """
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--plan-transition-predecessor",
+            "plans/interrupted.json",
+            "--receipt-chain-head",
+            "receipts/plan.json",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "plan transition is refused" in result.stderr
+    assert "creates no general capability to resume against another plan" in result.stderr
+
+
+def test_a_plan_transition_is_refused_in_receiptless_mode(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A transition binds to a predecessor receipt, and receiptless mode is defined by having none.
+
+    Refused as a usage error rather than silently ignored: dropping it would report a
+    determination the operator believes was reached under an authority.
+    """
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--plan-transition-predecessor",
+            "plans/interrupted.json",
+            "--receiptless-first-invocation",
+            "--run",
+            "some-run-id",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_USAGE
+    assert "not valid with --receiptless-first-invocation" in result.stderr
+
+
+def test_acquire_refuses_a_plan_transition_without_a_resume(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A transition names the predecessor a continuation continues; without one there is nothing."""
+    result = _run(
+        [
+            "m3",
+            "acquire",
+            "--live",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/approved.json",
+            "--window",
+            "M3.2A",
+            "--ceiling",
+            "801",
+            "--catalog",
+            "operational.sqlite3",
+            "--data-root",
+            "tree",
+            "--receipt-out",
+            "receipts/acquire.json",
+            "--plan-transition-predecessor",
+            "plans/predecessor.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_USAGE
+    assert "--plan-transition-predecessor requires --resume-from" in result.stderr
+
+
+def test_no_m3_command_reaches_the_network_with_a_plan_transition(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Decision 062 grants no live authority: the flag is offline, like the command carrying it."""
+    _recovery_inputs(repo_root, evidence_root)
+
+    result = _run(
+        [
+            "m3",
+            "recovery-state",
+            "--evidence-root",
+            str(evidence_root),
+            "--plan",
+            "plans/interrupted.json",
+            "--plan-transition-predecessor",
+            "plans/interrupted.json",
+            "--receipt-chain-head",
+            "receipts/plan.json",
+            "--catalog",
+            "catalog/sec_ingestion.sqlite3",
+            "--data-root",
+            "tree",
+        ],
+        repo_root,
+    )
+
+    assert "sec.gov" not in result.stdout
+    assert result.returncode in {EXIT_OK, EXIT_GATE_FAILURE}

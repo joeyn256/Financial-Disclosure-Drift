@@ -26,9 +26,11 @@ from datetime import date
 import pytest
 
 from disclosure_drift.m3.request_plan import (
+    LEGACY_UNBOUND_PLAN,
     M3_2A_BOOTSTRAP_ROUTES,
     M3_2B_DEPENDENT_ROUTES,
     MAX_COOLDOWN_CONTINUES,
+    REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION,
     REQUEST_PLAN_SCHEMA_VERSION,
     RequestPlan,
     RequestPlanInputError,
@@ -41,7 +43,7 @@ from disclosure_drift.m3.request_plan import (
     request_plan_from_document,
 )
 from disclosure_drift.sec.response_policy import MAX_TRANSIENT_RETRIES
-from disclosure_drift.sec.source_registry import SOURCES
+from disclosure_drift.sec.source_registry import M22_SOURCE_REGISTRY_VERSION, SOURCES
 from disclosure_drift.sec.urls import MAX_REDIRECT_DEPTH
 
 # --------------------------------------------------------------------------- #
@@ -325,7 +327,7 @@ def test_the_content_hash_is_sha256_over_the_canonical_bytes() -> None:
 
 def test_the_schema_version_is_inside_the_hashed_payload() -> None:
     document = json.loads(canonical_plan_bytes(build()))
-    assert document["request_plan_schema_version"] == REQUEST_PLAN_SCHEMA_VERSION
+    assert document["request_plan_schema_version"] == REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION
 
 
 def test_the_canonical_payload_carries_no_absolute_path_or_identity() -> None:
@@ -424,7 +426,7 @@ def test_a_reserialized_but_non_canonical_document_is_refused() -> None:
 
 def test_a_document_of_another_schema_version_is_refused() -> None:
     stored = canonical_plan_bytes(build())
-    other = stored.replace(b'"m3-request-plan/1.0"', b'"m3-request-plan/2.0"')
+    other = stored.replace(b'"m3-request-plan/1.1"', b'"m3-request-plan/2.0"')
 
     with pytest.raises(RequestPlanInputError, match="schema"):
         request_plan_from_document(other)
@@ -466,6 +468,7 @@ def _accepted_m3_2a_plan() -> RequestPlan:
         calendar_evidence_entry_count=0,
         already_satisfied_index_keys=frozenset(),
         requests_per_second=4.0,
+        source_registry_version=LEGACY_UNBOUND_PLAN,
     )
 
 
@@ -556,11 +559,19 @@ def test_a_different_dependent_count_moves_the_hash() -> None:
     )
 
 
-def test_the_dependent_plan_uses_the_unchanged_frozen_schema_version() -> None:
-    """A dependent plan is a plan of the same frozen schema, not a new one."""
-    payload = json.loads(canonical_plan_bytes(_dependent_plan()).decode("utf-8"))
+def test_the_dependent_plan_uses_the_same_schema_as_the_bootstrap_plan() -> None:
+    """A dependent plan is a plan of the same schema as its window's bootstrap plan.
 
-    assert payload["request_plan_schema_version"] == REQUEST_PLAN_SCHEMA_VERSION
+    Decision 062 moved both builders to the registry-bound schema together, which is the point:
+    a dependent plan's URLs come from the same registry, so it records the same binding. What must
+    never happen is the two builders drifting onto different schemas.
+    """
+    dependent = json.loads(canonical_plan_bytes(_dependent_plan()).decode("utf-8"))
+    bootstrap = json.loads(canonical_plan_bytes(build()).decode("utf-8"))
+
+    assert dependent["request_plan_schema_version"] == REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION
+    assert dependent["request_plan_schema_version"] == bootstrap["request_plan_schema_version"]
+    assert dependent["source_registry_version"] == bootstrap["source_registry_version"]
 
 
 def test_a_stored_dependent_plan_reconstructs_to_itself_exactly() -> None:
@@ -590,3 +601,107 @@ def test_a_reversed_dependent_coverage_window_is_refused() -> None:
 
 def test_positive_control_the_same_dependent_inputs_build_when_coherent() -> None:
     assert _dependent_plan().planned_unique_logical_requests == 4
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 §6 — the registry-bound plan schema, and the identity it preserves
+# --------------------------------------------------------------------------- #
+def test_a_new_plan_is_bound_to_the_live_source_registry() -> None:
+    """A plan built today records which registry fixes its URLs."""
+    plan = build()
+
+    assert plan.source_registry_version == M22_SOURCE_REGISTRY_VERSION
+    assert plan.request_plan_schema_version == REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION
+    assert json.loads(canonical_plan_bytes(plan))["source_registry_version"] == (
+        M22_SOURCE_REGISTRY_VERSION
+    )
+
+
+def test_the_binding_moves_the_plan_hash() -> None:
+    """The whole point: an endpoint correction can no longer hide inside an unchanged hash."""
+    bound = build()
+    unbound = build(source_registry_version=LEGACY_UNBOUND_PLAN)
+
+    assert bound.request_plan_sha256 != unbound.request_plan_sha256
+    assert bound.planned_unique_logical_requests == unbound.planned_unique_logical_requests
+    assert bound.hard_request_ceiling == unbound.hard_request_ceiling
+    assert [route.as_record() for route in bound.routes] == [
+        route.as_record() for route in unbound.routes
+    ]
+
+
+def test_a_legacy_plan_omits_the_field_rather_than_recording_it_null() -> None:
+    """A `1.0` document is rendered exactly as `1.0` defined it, so its hash is unchanged."""
+    document = json.loads(canonical_plan_bytes(build(source_registry_version=LEGACY_UNBOUND_PLAN)))
+
+    assert "source_registry_version" not in document
+    assert document["request_plan_schema_version"] == REQUEST_PLAN_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("registry", [LEGACY_UNBOUND_PLAN, M22_SOURCE_REGISTRY_VERSION])
+def test_both_schemas_round_trip_exactly(registry: str | None) -> None:
+    plan = build(source_registry_version=registry)
+
+    assert request_plan_from_document(canonical_plan_bytes(plan)) == plan
+
+
+def test_a_legacy_document_carrying_a_registry_version_is_refused() -> None:
+    """The declared schema and the presence of the binding must agree, in this direction..."""
+    document = build(source_registry_version=LEGACY_UNBOUND_PLAN).as_payload()
+    document["source_registry_version"] = M22_SOURCE_REGISTRY_VERSION
+    payload = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    with pytest.raises(RequestPlanInputError, match="belongs to"):
+        request_plan_from_document(payload)
+
+
+def test_a_bound_document_missing_its_registry_version_is_refused() -> None:
+    """...and in this one. A `1.1` document without the binding is not a `1.1` document."""
+    document = build().as_payload()
+    document.pop("source_registry_version")
+    payload = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    with pytest.raises(RequestPlanInputError, match="records no source_registry_version"):
+        request_plan_from_document(payload)
+
+
+def test_the_accepted_gate_f_plan_identity_survives_the_schema_addition() -> None:
+    """Decision 062 §5: historical source-registry `1.0` identity is preserved, not migrated.
+
+    The plan the owner approved at Gate F is a `1.0` document. Adding a `1.1` schema must leave it
+    byte-reproducible and leave its hash exactly where the carry-in authority, the T6 receipt, and
+    the plan-transition constant all already name it.
+    """
+    accepted = _accepted_m3_2a_plan()
+
+    assert accepted.request_plan_sha256 == ACCEPTED_M3_2A_PLAN_SHA256
+    assert accepted.source_registry_version is None
+    assert accepted.request_plan_schema_version == REQUEST_PLAN_SCHEMA_VERSION
+    assert accepted.hard_request_ceiling == ACCEPTED_M3_2A_CEILING
+
+
+def test_the_successor_plan_is_the_accepted_plan_bound_to_the_successor_registry() -> None:
+    """Decision 062 §6: same inputs, same counts, same ceiling — one recorded binding apart."""
+    accepted = _accepted_m3_2a_plan()
+    successor = build_m3_2a_request_plan(
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+        include_open_quarter=False,
+        calendar_year=2026,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+
+    assert successor.request_plan_sha256 != ACCEPTED_M3_2A_PLAN_SHA256
+    assert successor.source_registry_version == "m2.2-source-registry/1.1"
+    assert successor.planned_unique_logical_requests == 75
+    assert len(successor.required_index_keys) == 70
+    assert successor.required_index_keys == accepted.required_index_keys
+    assert successor.hard_request_ceiling == ACCEPTED_M3_2A_CEILING == 801
+    assert successor.maximum_physical_attempts == 801
+    assert [route.as_record() for route in successor.routes] == [
+        route.as_record() for route in accepted.routes
+    ]
+    assert derive_a_reachable(SOURCES["sec_sic_code_list"]) == 6

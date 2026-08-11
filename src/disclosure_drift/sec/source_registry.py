@@ -23,6 +23,7 @@ from disclosure_drift.sec.parsers.versions import PARSER_VERSIONS, parser_versio
 
 __all__ = [
     "M22_SOURCE_REGISTRY_VERSION",
+    "M22_SOURCE_REGISTRY_VERSION_HISTORICAL",
     "SEC_ORIGINS",
     "SOURCES",
     "ContentKind",
@@ -38,7 +39,19 @@ __all__ = [
     "sources_for_category",
 ]
 
-M22_SOURCE_REGISTRY_VERSION: Final = "m2.2-source-registry/1.0"
+#: The historical registry version every artifact produced before Decision 062 recorded. It is
+#: preserved as a named constant rather than deleted: receipts, plans, and observations written
+#: under it remain valid records of the registry that was live when they were written, and nothing
+#: rewrites them to the successor. A surface that must decide whether an artifact predates the
+#: endpoint correction compares against this, never against a remembered string literal.
+M22_SOURCE_REGISTRY_VERSION_HISTORICAL: Final = "m2.2-source-registry/1.0"
+
+#: The live registry version. Incremented to `1.1` by Decision 062 for exactly one substitution: the
+#: `sec_sic_code_list` exact path, which SEC moved out from under the `1.0` identity. Every other
+#: registration — host, method, source class, expected content, parser identity, redirect policy,
+#: retry policy, rate limit, filing-body guards, and the CompanyFacts/Frames prohibitions — is
+#: byte-unchanged, so `1.1` differs from `1.0` in one URL and nothing else.
+M22_SOURCE_REGISTRY_VERSION: Final = "m2.2-source-registry/1.1"
 
 SourceCategory = Literal[
     "registrant_index",
@@ -65,6 +78,7 @@ SourceMutability = Literal["living", "dated_snapshot", "immutable"]
 _D007: Final = "Docs/Decisions/decision_007_sec_universe.md"
 _D010: Final = "Docs/Decisions/decision_010_temporal_availability_and_cohort_assignment.md"
 _D011: Final = "Docs/Decisions/decision_011_edgar_operating_calendar_provenance.md"
+_D062: Final = "Docs/Decisions/decision_062_m3_2_terminal_failure_and_sic_endpoint_remediation.md"
 
 _SEC_WWW: Final = "https://www.sec.gov"
 _SEC_DATA: Final = "https://data.sec.gov"
@@ -213,8 +227,7 @@ _ALL: Final[tuple[SourceSpec, ...]] = (
         source_id="sec_sic_code_list",
         category="sic_reference",
         url_template=(
-            f"{_SEC_WWW}/corpfin/division-of-corporation-finance-standard-industrial"
-            "-classification-sic-code-list"
+            f"{_SEC_WWW}/search-filings/standard-industrial-classification-sic-code-list"
         ),
         purpose=(
             "Official SEC Division of Corporation Finance SIC code list, the only "
@@ -223,10 +236,16 @@ _ALL: Final[tuple[SourceSpec, ...]] = (
         retrieval_method="bulk_document",
         expected_content="html",
         parser_id="sic-code-list",
-        decision_record=_D007,
+        decision_record=_D062,
         is_bulk=True,
         mutability="living",
-        notes="SIC 6000-6999 rows are retained and flagged, never deleted.",
+        notes=(
+            "SIC 6000-6999 rows are retained and flagged, never deleted. Decision 062 "
+            "replaced the retired /corpfin/... exact path with this one after SEC "
+            "redirected it outside the route's structured path policy; the old path is "
+            "replaced, never carried alongside, so the family stays a single exact path "
+            "and the route's derived A_reachable stays 6."
+        ),
     ),
     SourceSpec(
         source_id="sec_edgar_filing_calendar",

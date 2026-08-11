@@ -11,6 +11,7 @@ from dataclasses import replace
 
 import pytest
 
+from disclosure_drift.m3.request_plan import derive_a_reachable
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.http_client import (
     ACCEPTABLE_CONTENT_TYPES,
@@ -23,7 +24,7 @@ from disclosure_drift.sec.request_ceiling import (
     PhysicalAttemptCeiling,
     RequestCeilingExhaustedError,
 )
-from disclosure_drift.sec.source_registry import SOURCES
+from disclosure_drift.sec.source_registry import SOURCES, filing_body_url_is_prohibited
 from disclosure_drift.sec.transport import (
     MAX_IN_MEMORY_BYTES,
     CloseableByteStream,
@@ -1155,3 +1156,202 @@ def test_one_shared_gate_accumulates_across_separate_fetches() -> None:
 
     assert len(transport.requests) == 2
     assert gate.consumed == 2
+
+
+# --------------------------------------------------------------------------- #
+# Decision 062 — the SIC endpoint substitution, at the URL-policy boundary
+# --------------------------------------------------------------------------- #
+#: The exact path Decision 062 authorized, and the one it retired. Written as literals rather than
+#: read from the registry, so a future edit that silently moves the registered path fails these
+#: tests instead of moving with them.
+SIC = "sec_sic_code_list"
+SIC_URL = "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
+RETIRED_SIC_URL = (
+    "https://www.sec.gov/corpfin/division-of-corporation-finance-standard-industrial"
+    "-classification-sic-code-list"
+)
+
+
+def test_the_successor_sic_path_is_the_registered_and_only_authorized_url() -> None:
+    """Security test 1: the new exact path is allowed, and is what the route actually addresses."""
+    assert SOURCES[SIC].url() == SIC_URL
+    assert validate_url(SIC_URL, SOURCES[SIC]) == SIC_URL
+
+
+def test_the_retired_sic_path_is_no_longer_live_authorized() -> None:
+    """Security test 2: replaced, not carried alongside.
+
+    Decision 062 §5 says REPLACE. A registry holding both paths would leave a retired identity
+    live-authorized and would raise the route's derived `A_reachable` from 6 to 7 by admitting a
+    second in-family redirect target, so the retirement is asserted directly.
+    """
+    with pytest.raises(RedirectBoundaryError):
+        validate_url(RETIRED_SIC_URL, SOURCES[SIC])
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.sec.gov/search-filings",
+        "https://www.sec.gov/search-filings/",
+        "https://www.sec.gov/search-filings/edgar-search-assistance",
+        "https://www.sec.gov/search-filings/cgi-bin/browse-edgar",
+        "https://www.sec.gov/search-filings/standard-industrial-classification",
+    ],
+)
+def test_arbitrary_search_filings_siblings_are_refused(url: str) -> None:
+    """Security test 3: the authorization is one exact path, never the `/search-filings` prefix."""
+    with pytest.raises(RedirectBoundaryError):
+        validate_url(url, SOURCES[SIC])
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"{SIC_URL}.backup",
+        f"{SIC_URL}/anything",
+        f"{SIC_URL}%2f..",
+        f"{SIC_URL}%5c..",
+        f"{SIC_URL}%00",
+        f"{SIC_URL}?unexpected=1",
+        f"{SIC_URL}?x=1&x=2",
+        f"{SIC_URL}#fragment",
+        "https://www.sec.gov/search-filings/%2e%2E/standard-industrial-classification-sic-code-list",
+        "https://www.sec.gov/x/search-filings/standard-industrial-classification-sic-code-list",
+        f"{SIC_URL}%2f..%2fArchives%2fedgar%2fdata%2f1%2fdocument.htm",
+    ],
+)
+def test_prefix_and_suffix_variants_of_the_successor_path_are_refused(url: str) -> None:
+    """Security test 4: the same ambiguity defences the other exact-path routes get."""
+    with pytest.raises(RedirectBoundaryError):
+        validate_url(url, SOURCES[SIC])
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://sec.gov/search-filings/standard-industrial-classification-sic-code-list",
+        "https://data.sec.gov/search-filings/standard-industrial-classification-sic-code-list",
+        "https://www.sec.gov.evil.test/search-filings/"
+        "standard-industrial-classification-sic-code-list",
+        "http://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list",
+    ],
+)
+def test_a_non_sec_or_wrong_origin_host_is_refused(url: str) -> None:
+    """Security test 5: the host stays `www.sec.gov` over HTTPS, and nothing else qualifies."""
+    with pytest.raises(RedirectBoundaryError):
+        validate_url(url, SOURCES[SIC])
+
+
+def test_the_sic_route_is_still_a_get_bulk_document_route() -> None:
+    """Security test 6: everything but the URL is unchanged by the substitution.
+
+    "Non-GET refused" is structural rather than a rejected verb: `SecRequest` carries no method,
+    body, or verb field at all, so a SEC retrieval is a GET by construction and there is nothing an
+    endpoint substitution could change. What the substitution *could* have changed — retrieval
+    method, content kind, parser, category, bulk-ness, manifest resolution — is asserted unchanged.
+    """
+    spec = SOURCES[SIC]
+    assert spec.retrieval_method == "bulk_document"
+    assert spec.expected_content == "html"
+    assert spec.parser_id == "sic-code-list"
+    assert spec.category == "sic_reference"
+    assert spec.is_bulk and not spec.is_entity_specific
+    assert not spec.manifest_resolved
+
+    client, transport, _ = build([response(content_type="text/html", body=b"<html></html>")])
+    client.fetch(SIC, purpose="SIC reference evidence")
+
+    assert len(transport.requests) == 1
+    issued = transport.requests[0]
+    assert issued.url == SIC_URL
+    assert not hasattr(issued, "method")
+    assert issued.follow_redirects is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm",
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123-index.htm",
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123.txt",
+    ],
+)
+def test_a_filing_body_route_is_refused_for_the_sic_source(url: str) -> None:
+    """Security test 7: the substitution opens no path toward a filing body."""
+    with pytest.raises(RedirectBoundaryError):
+        validate_url(url, SOURCES[SIC])
+    assert filing_body_url_is_prohibited(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+        "https://data.sec.gov/api/xbrl/frames/us-gaap/Assets/USD/CY2023Q1I.json",
+    ],
+)
+def test_companyfacts_and_frames_remain_refused_for_the_sic_source(url: str) -> None:
+    """Security test 8: the prohibited-source boundary is untouched by the substitution."""
+    with pytest.raises(RedirectBoundaryError):
+        validate_url(url, SOURCES[SIC])
+
+
+def test_a_redirect_away_from_the_successor_sic_path_still_fails_closed() -> None:
+    """Security test 9: the successor path is not privileged; it fails closed like any other.
+
+    This is the exact shape of the T6 failure, replayed against the corrected registry: a `301`
+    whose target leaves the route's structured path policy is refused rather than followed, and it
+    is classified with the same registered reason code the real run recorded.
+    """
+    client, transport, _ = build(
+        [response(status=301, headers={"Location": "https://www.sec.gov/search-filings"})]
+    )
+
+    result = client.fetch(SIC, purpose="SIC reference evidence")
+
+    assert result.outcome == "failed"
+    assert result.reason_code == "SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY"
+    assert len(transport.requests) == 1
+
+
+def test_a_redirect_back_to_the_retired_sic_path_is_refused() -> None:
+    """Security test 10, non-vacuity: the retired path is refused as a *redirect target* too.
+
+    Without this, "the old path is no longer authorized" could hold only for the initially
+    constructed URL while a redirect quietly reached it anyway — which is precisely the direction
+    the real failure came from.
+    """
+    client, transport, _ = build([response(status=301, headers={"Location": RETIRED_SIC_URL})])
+
+    result = client.fetch(SIC, purpose="SIC reference evidence")
+
+    assert result.outcome == "failed"
+    assert result.reason_code == "SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY"
+    assert len(transport.requests) == 1
+
+
+def test_the_original_redirect_negative_controls_remain_non_vacuous() -> None:
+    """Security test 10: a lawful in-family redirect is still followed, on a route that has one.
+
+    If every redirect were refused, the refusals above would prove nothing. The calendar route's
+    family holds two exact paths, so a hop between them is lawful and must still be taken — and the
+    SIC family holds exactly one, which is why no hop is lawful there and why its `A_reachable`
+    stays 6.
+    """
+    client, transport, _ = build(
+        [
+            response(
+                status=301,
+                headers={"Location": "https://www.sec.gov/edgar/filer-information/calendar"},
+            ),
+            response(content_type="text/html", body=b"<html></html>"),
+        ]
+    )
+
+    result = client.fetch("sec_edgar_filing_calendar", purpose="operating calendar evidence")
+
+    assert result.outcome == "retrieved"
+    assert len(transport.requests) == 2, "a lawful in-family hop is still followed"
+    assert derive_a_reachable(SOURCES[SIC]) == 6
+    assert derive_a_reachable(SOURCES["sec_edgar_filing_calendar"]) == 7

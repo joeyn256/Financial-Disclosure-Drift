@@ -93,12 +93,13 @@ _SOURCE_URL_POLICIES: Final[dict[str, _UrlFamilyPolicy]] = {
         _DATA,
         path_pattern=re.compile(r"^/submissions/CIK[0-9]{10}-submissions-[0-9]{3}\.json$"),
     ),
+    # Decision 062 replaced the retired /corpfin/... path with the successor SEC published.
+    # Exactly one exact path, as before: the family admits no second in-family URL, so the route
+    # still reaches zero redirect hops and its derived A_reachable is unchanged at 6. Carrying
+    # both paths would raise it to 7 and would leave a retired identity live-authorized.
     "sec_sic_code_list": _UrlFamilyPolicy(
         _WWW,
-        exact_paths=(
-            "/corpfin/division-of-corporation-finance-standard-industrial"
-            "-classification-sic-code-list",
-        ),
+        exact_paths=("/search-filings/standard-industrial-classification-sic-code-list",),
     ),
     "sec_edgar_filing_calendar": _UrlFamilyPolicy(
         _WWW,

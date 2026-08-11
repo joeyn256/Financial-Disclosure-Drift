@@ -188,7 +188,7 @@ reservation against two owned same-URL segments is `UNDETERMINED`, never a consu
 | # | Condition | Result |
 |---|---|---|
 | 8.1 | The receipt chain resolves completely | `MET` / `NOT MET` |
-| 8.2 | The interruption state is established, not guessed | `MET` / `NOT MET` |
+| 8.2 | The terminal or interruption state is established, not guessed | `MET` / `NOT MET` |
 | 8.3 | The catalog passes quick, integrity, and foreign-key checks | `MET` / `NOT MET` |
 | 8.4 | No row exists without its object | `MET` / `NOT MET` |
 | 8.5 | Every orphan is adopted or quarantined | `MET` / `NOT MET` |
@@ -196,7 +196,7 @@ reservation against two owned same-URL segments is `UNDETERMINED`, never a consu
 | 8.7 | The audit projection is consistent or has been rebuilt from SQLite | `MET` / `NOT MET` |
 | 8.8 | The remainder fits inside the remaining ceiling headroom | `MET` / `NOT MET` |
 | 8.9 | No unresolved schema-drift incident is open | `MET` / `NOT MET` |
-| 8.10 | The plan hash is unchanged | `MET` / `NOT MET` |
+| 8.10 | The plan hash is unchanged, or moves under an explicit owner plan transition | `MET` / `NOT MET` |
 | 8.11 | For a selection: the accepted lifecycle guards leave exactly one lawful next state | `MET` / `NOT MET` / `N/A` |
 | 8.12 | The chain's carry-in root agrees with the catalog's consumption checkpoint | `MET` / `NOT MET` / `N/A` |
 
@@ -215,6 +215,46 @@ reservation against two owned same-URL segments is `UNDETERMINED`, never a consu
 **Explicit receiptless-first-invocation mode can never produce `SAFE` or a continuation
 proposal.** Even an exact consumed count does not substitute for the predecessor receipt Decision
 050 requires. The interrupted initial T5 invocation governed by Decision 051 is never resumed.
+
+**Condition 8.2 covers a terminal end state as well as an interruption (Decision 062 §3).** The
+governing live-failure rule covers interrupted, killed, crashed, failed, gate-stopped,
+ceiling-stopped, uncertain, and otherwise non-successful operations alike. A correctly written
+terminal failure receipt carries **no** `interruption_state` — the receipt schema requires that
+field only for `interrupted`, and one is never added to a receipt to make a condition pass. So the
+condition asks whether the **terminal or interruption state is established, not guessed**, and it
+is satisfied by exactly one of two paths:
+
+- *Interrupted.* A receipt on the chain records an accepted `interruption_state`. Unchanged.
+- *Terminal, non-interrupted.* All ten of the following hold: the receipt is valid and immutable;
+  `completion_status` is terminal and non-successful (`failed`, `stopped_at_ceiling`, or
+  `stopped_by_gate`); a **registered** reason code is present; exactly one registered run row
+  matches the receipt's window and boundary instants and holds the truthful terminal state for that
+  status; both boundary instants are present; the pre-send attempt ledger and the receipt agree
+  exactly on the consumed count; no uncertain commit exists; no orphan, row-without-object, or
+  partial ambiguity exists — including any unpromoted `.part`, which 8.6 tolerates for a running
+  window but which is unexplained beside a terminal receipt; the predecessor chain resolves; and
+  the catalog passes its integrity checks.
+
+This is **not** a relaxation for uncertainty. The terminal path demands more evidence than the
+interruption path, not less, and **`UNDETERMINED` remains a hard stop**: a receiptless, crashed,
+killed, or genuinely uncertain state satisfies none of the ten and gains nothing from this path.
+
+**Condition 8.10 admits one bounded owner-governed plan transition (Decision 062 §7).** The default
+is unchanged — the plan hash must be the one the run consumed. A transition is admitted only when an
+accepted owner decision names **both** plan hashes and the two plans are proved to share the same
+window, coverage and as-of inputs, quarter set, route set and counts, `A_reachable` values, attempt
+budget, and approved ceiling, differing in exactly the finite substitution set that decision names;
+the predecessor receipt must record the pre-substitution source-registry version and the successor
+run the post-substitution one; no satisfied request may change identity and no route may be
+introduced. Any mismatch refuses. This is not a general "resume against another plan" capability,
+and it is never inferred: the operator names the predecessor explicitly.
+
+**A superseded historical identity is kept, not deleted (Decision 062 §8).** Where an approved
+substitution moves a request identity, the committed observation recorded under the old identity
+remains valid immutable historical evidence: it is never rewritten, never deleted, never marked
+successful, and never satisfies the successor request. Under the exact named substitution it is
+classified `SUPERSEDED_BY_OWNER_APPROVED_ENDPOINT_DRIFT` and reported separately rather than as a
+blocking out-of-plan observation. Every other out-of-plan observation still blocks.
 
 **Condition 8.12 is `N/A` unless the chain's root carries a baseline.** Where it does, the root
 receipt and the durable `ops_checkpoints` consumption record must agree exactly. A missing authority

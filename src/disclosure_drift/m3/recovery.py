@@ -52,6 +52,7 @@ from disclosure_drift.m3.receipt import (
 )
 from disclosure_drift.m3.request_plan import RequestPlan, derive_a_reachable
 from disclosure_drift.paths import DataTree
+from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.observation_catalog import load_observations, validate_audit_projection
 from disclosure_drift.sec.source_registry import SOURCES
 from disclosure_drift.storage.catalog import read_only_connection
@@ -65,9 +66,21 @@ __all__ = [
     "CARRY_IN_HISTORICAL_CONSUMED_REQUEST_COUNT",
     "CARRY_IN_HISTORICAL_ROUTE_ALLOCATION",
     "CARRY_IN_REQUEST_PLAN_SHA256",
+    "PLAN_TRANSITION_ACQUISITION_WINDOW",
+    "PLAN_TRANSITION_APPROVED_REQUEST_CEILING",
+    "PLAN_TRANSITION_DECISION_REFERENCE",
+    "PLAN_TRANSITION_NEW_URL",
+    "PLAN_TRANSITION_OLD_URL",
+    "PLAN_TRANSITION_PREDECESSOR_PLAN_SHA256",
+    "PLAN_TRANSITION_PREDECESSOR_REGISTRY_VERSION",
+    "PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID",
+    "PLAN_TRANSITION_SUBSTITUTION_COUNT",
+    "PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256",
+    "PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION",
     "RECOVERY_DETERMINATIONS",
     "CarryInFixedBindings",
     "ConditionResult",
+    "PlanTransitionAuthority",
     "ReceiptChainAccounting",
     "RecoveryInspectionError",
     "RecoveryState",
@@ -232,6 +245,17 @@ class ReceiptChainAccounting:
     #: receipt to populate them.
     root_acquisition_window: str | None = None
     root_approved_request_ceiling: int | None = None
+    #: The **head** receipt's own terminal facts, as it recorded them. They describe how *this*
+    #: invocation ended, which is a different question from the chain's cumulative arithmetic
+    #: above, and they are the evidence condition 8.2 establishes a terminal state from. Each is
+    #: `None` only when the head receipt could not be read at all — in which case the chain is
+    #: already unresolved and 8.1 has stopped the inspection.
+    head_completion_status: str | None = None
+    head_reason_code: str | None = None
+    head_started_at_utc: str | None = None
+    head_completed_at_utc: str | None = None
+    head_actual_physical_attempt_count: int | None = None
+    head_acquisition_window: str | None = None
 
 
 def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
@@ -256,6 +280,9 @@ def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
     recorded_plan_sha256: str | None = None
     current = head_path
     visited: set[str] = set()
+    # The head receipt's own terminal facts, carried into every return so a chain that stops early
+    # still reports what the head recorded. Populated once, on the first iteration.
+    head_facts: dict[str, object] = {}
 
     while True:
         try:
@@ -268,8 +295,11 @@ def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
                 resolved=False,
                 detail=f"a receipt in the chain is missing or unreadable: {exc}",
                 request_plan_sha256=recorded_plan_sha256,
+                **head_facts,  # type: ignore[arg-type]
             )
 
+        if not seen:
+            head_facts = _head_receipt_facts(document)
         if recorded_plan_sha256 is None:
             recorded = document.get("request_plan_sha256")
             recorded_plan_sha256 = None if recorded is None else str(recorded)
@@ -283,6 +313,7 @@ def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
                 resolved=False,
                 detail="the receipt chain loops back on itself and cannot reach a first attempt",
                 request_plan_sha256=recorded_plan_sha256,
+                **head_facts,  # type: ignore[arg-type]
             )
         visited.add(receipt_id)
         seen.append(receipt_id)
@@ -313,8 +344,31 @@ def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
                 root_approved_request_ceiling=(
                     None if root_ceiling is None else _as_count(root_ceiling)
                 ),
+                **head_facts,  # type: ignore[arg-type]
             )
         current = receipts_dir / f"receipt-{predecessor}.json"
+
+
+def _head_receipt_facts(document: Mapping[str, object]) -> dict[str, object]:
+    """The head receipt's own terminal facts, read exactly as recorded.
+
+    Read, never derived: each value is whatever the validated receipt carries, so a field the
+    schema left absent stays `None` rather than acquiring a default that would look like evidence.
+    """
+    attempts = document.get("actual_physical_attempt_count")
+    return {
+        "head_completion_status": _optional_text(document.get("completion_status")),
+        "head_reason_code": _optional_text(document.get("reason_code")),
+        "head_started_at_utc": _optional_text(document.get("started_at_utc")),
+        "head_completed_at_utc": _optional_text(document.get("completed_at_utc")),
+        "head_actual_physical_attempt_count": (None if attempts is None else _as_count(attempts)),
+        "head_acquisition_window": _optional_text(document.get("acquisition_window")),
+    }
+
+
+def _optional_text(value: object) -> str | None:
+    """A receipt field as text, or `None` where the receipt recorded nothing."""
+    return None if value is None else str(value)
 
 
 #: The ``ops_checkpoints`` namespace a consumed carry-in authority burns its single use in. The
@@ -875,6 +929,119 @@ def _carry_in_run_disagreement(
 
 
 # --------------------------------------------------------------------------- #
+# The fixed Decision 062 predecessor -> successor plan transition
+# --------------------------------------------------------------------------- #
+#: Condition 8.10 asks whether the plan hash is **unchanged**, and for every ordinary continuation
+#: it must stay that way: resuming against a different plan would carry a consumed count forward
+#: against a budget nobody approved. Decision 062 §7 opens exactly one bounded exception, for one
+#: external fact — SEC retired the `sec_sic_code_list` exact path mid-window — and the constants
+#: below are what keep it bounded.
+#:
+#: They are written literally, for the same reason the Decision 055 carry-in bindings above are: a
+#: transition validated only for *internal consistency* would admit any pair of plans an author
+#: could arrange to be consistent, which is precisely what "resume with another plan" means. Every
+#: value here is compared by literal equality, so this mechanism can authorize the one substitution
+#: Decision 062 names and nothing else — not a second substitution, not another route, not another
+#: window, not another ceiling, and not an arbitrary URL.
+PLAN_TRANSITION_DECISION_REFERENCE: Final = "Decision 062"
+
+#: The predecessor plan: the frozen M3.2A plan the T6 invocation executed.
+PLAN_TRANSITION_PREDECESSOR_PLAN_SHA256: Final = (
+    "19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"
+)
+
+#: The successor plan: the same window, inputs, quarters, routes, counts, and ceiling, bound to the
+#: successor source registry. It differs from the predecessor in one recorded field, and that field
+#: moves exactly one logical request identity.
+PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256: Final = (
+    "f77e003ccc0ed8f9c0e55065b3c211aa5e33c7abf86cc71cbe66d427611d890a"
+)
+
+#: The one route whose identity Decision 062 substitutes.
+PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID: Final = "sec_sic_code_list"
+
+#: The retired exact URL, and the successor SEC published in its place.
+PLAN_TRANSITION_OLD_URL: Final = (
+    "https://www.sec.gov/corpfin/division-of-corporation-finance-standard-industrial"
+    "-classification-sic-code-list"
+)
+PLAN_TRANSITION_NEW_URL: Final = (
+    "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
+)
+
+#: The exact size of the substitution set. Not a maximum: a transition substituting zero identities
+#: is not this transition, and one substituting two is a capability Decision 062 refused to create.
+PLAN_TRANSITION_SUBSTITUTION_COUNT: Final = 1
+
+#: The window, ceiling, and registry versions the transition is bound to on both sides.
+PLAN_TRANSITION_ACQUISITION_WINDOW: Final = "M3.2A"
+PLAN_TRANSITION_APPROVED_REQUEST_CEILING: Final = 801
+PLAN_TRANSITION_PREDECESSOR_REGISTRY_VERSION: Final = "m2.2-source-registry/1.0"
+PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION: Final = "m2.2-source-registry/1.1"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanTransitionAuthority:
+    """One verified predecessor→successor plan transition.
+
+    Constructing this type **is** the assertion that the transition is Decision 062's, so the
+    constructor validates against the frozen constants rather than trusting its caller. A surface
+    that receives one therefore knows the pair was checked, and a hand-built authority naming any
+    other plan, route, or URL raises here instead of widening condition 8.10.
+
+    The full seventeen-condition check — coverage inputs, route counts, `A_reachable` values,
+    attempt budget, and the derived request-identity comparison — lives with the plan expansion in
+    the acquisition driver and produces this object. This type is the *result* of that check, not a
+    substitute for it.
+    """
+
+    predecessor_plan_sha256: str
+    successor_plan_sha256: str
+    substituted_source_id: str
+    old_url: str
+    new_url: str
+    decision_reference: str = PLAN_TRANSITION_DECISION_REFERENCE
+
+    def __post_init__(self) -> None:
+        """Refuse any transition that is not literally the one Decision 062 authorizes."""
+        expected = (
+            ("decision reference", self.decision_reference, PLAN_TRANSITION_DECISION_REFERENCE),
+            (
+                "predecessor plan",
+                self.predecessor_plan_sha256,
+                PLAN_TRANSITION_PREDECESSOR_PLAN_SHA256,
+            ),
+            ("successor plan", self.successor_plan_sha256, PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256),
+            (
+                "substituted source",
+                self.substituted_source_id,
+                PLAN_TRANSITION_SUBSTITUTED_SOURCE_ID,
+            ),
+            ("old URL", self.old_url, PLAN_TRANSITION_OLD_URL),
+            ("new URL", self.new_url, PLAN_TRANSITION_NEW_URL),
+        )
+        for label, found, required in expected:
+            if found != required:
+                message = (
+                    f"a plan transition may name only the one substitution "
+                    f"{PLAN_TRANSITION_DECISION_REFERENCE} authorizes; its {label} is {found!r}, "
+                    f"not {required!r}"
+                )
+                raise RecoveryInspectionError(message)
+
+    def authorizes(self, chain_plan_sha256: str | None, supplied_plan_sha256: str) -> bool:
+        """Whether this authority covers moving from the chain's plan to the supplied one.
+
+        Directional on purpose: it authorizes predecessor→successor and never the reverse, so a
+        transition cannot be used to resume a successor-plan run against the retired predecessor.
+        """
+        return (
+            chain_plan_sha256 == self.predecessor_plan_sha256
+            and supplied_plan_sha256 == self.successor_plan_sha256
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Filesystem and catalog observation
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
@@ -949,6 +1116,226 @@ def _is_under(path: Path, ancestor: Path) -> bool:
     return ancestor in path.parents
 
 
+# --------------------------------------------------------------------------- #
+# Condition 8.2 — establishing a terminal state that is not an interruption
+# --------------------------------------------------------------------------- #
+#: Completion statuses that end an invocation terminally **without** it being an interruption
+#: (Decision 062 §3). A receipt recording one of these is not incomplete evidence: the run reached a
+#: recorded, non-successful end and said why. `complete` is excluded because a successful window has
+#: nothing to recover, and `interrupted` is excluded because it takes the interruption-state path.
+_TERMINAL_NON_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
+    {"failed", "stopped_at_ceiling", "stopped_by_gate"}
+)
+
+#: The truthful `ops_ingestion_jobs.job_state` for each terminal non-success completion status —
+#: the same mapping the driver applies when it closes a run, restated here as the value the run row
+#: is *required to already hold*. A row in any other state disagrees with the receipt beside it, and
+#: disagreement is never reconciled by preferring one surface.
+_TERMINAL_STATUS_JOB_STATE: Final[Mapping[str, str]] = MappingProxyType(
+    {"failed": "failed", "stopped_at_ceiling": "failed", "stopped_by_gate": "failed"}
+)
+
+#: The `ops_ingestion_jobs.job_kind` an M3.2 acquisition run is registered under.
+_ACQUISITION_JOB_KIND: Final = "m3_2_acquisition"
+
+
+def establish_terminal_state(
+    connection: sqlite3.Connection,
+    walk: ReceiptChainAccounting,
+    integrity_passed: bool,
+    store: _StoreState,
+) -> tuple[bool, str]:
+    """Whether a terminal, non-interrupted end state is **established** by durable evidence.
+
+    Decision 062 §3 generalizes condition 8.2 from "the interruption state is established" to "the
+    terminal *or* interruption state is established, not guessed". The reason is structural: the
+    governing live-failure rule covers interrupted, killed, crashed, failed, gate-stopped,
+    ceiling-stopped, and uncertain operations alike, but the original predicate could only ever be
+    met by an `interruption_state` field — which a correctly-written terminal failure receipt does
+    not carry and must never be given one. Left unchanged, the predicate made safe recovery
+    structurally impossible for exactly the cases that ended most cleanly.
+
+    This is **not** a relaxation. The interruption path is unchanged, and this path demands *more*
+    evidence, not less: all ten conditions below must hold, each read from a durable surface, and
+    the first that does not returns the refusal. A receiptless, crashed, killed, or genuinely
+    uncertain state satisfies none of them and still reaches `UNDETERMINED`.
+
+    Args:
+        connection: the read-only catalog connection.
+        walk: the resolved receipt chain, carrying the head receipt's own terminal facts.
+        integrity_passed: whether the catalog passed quick, integrity, and foreign-key checks.
+        store: the committed-row versus stored-object comparison.
+
+    Returns:
+        ``(established, detail)`` — the detail states what was established, or what refused it.
+    """
+    status = walk.head_completion_status
+    # 1. The receipt is valid and immutable. Validity is proved by the walk: every document on the
+    #    chain came back from `inspect_receipt`, which validates the schema before returning, so a
+    #    head that carries no status could not be read as a receipt at all. Immutability is a
+    #    property of this module — it opens the catalog `query_only` and imports no writer — not a
+    #    claim to re-derive here.
+    if status is None:
+        return False, "the head receipt records no completion status, so nothing is established"
+
+    # 2. The completion status is terminal and non-successful.
+    if status not in _TERMINAL_NON_SUCCESS_STATUSES:
+        return False, (
+            f"the head receipt records completion status {status!r}, which is not one of the "
+            f"terminal non-success statuses {sorted(_TERMINAL_NON_SUCCESS_STATUSES)}"
+        )
+
+    # 3. A registered reason code is present. An unregistered code is prose, not a classification.
+    if walk.head_reason_code is None:
+        return False, (
+            f"the head receipt records completion status {status!r} but no reason code, so why "
+            f"the run ended terminally is not established"
+        )
+    if walk.head_reason_code not in REASON_CODES:
+        return False, (
+            f"the head receipt's reason code {walk.head_reason_code!r} is not registered, so the "
+            f"terminal cause cannot be resolved to an accepted classification"
+        )
+
+    # 5. Both boundary instants are present. Checked before the run-row join, which needs them.
+    if walk.head_started_at_utc is None or walk.head_completed_at_utc is None:
+        return False, (
+            "the head receipt does not carry both a started and a completed instant, so the run "
+            "it describes cannot be identified without guessing"
+        )
+
+    # 4. The run row is terminal and agrees with the receipt. The receipt carries no run id by
+    #    design, so the join is on the facts both surfaces independently recorded: window, start,
+    #    and end. Exactly one row must match — zero means no registered run describes this receipt,
+    #    and two would make "the run" ambiguous, which is not an established state.
+    job_id, detail = _terminal_run_row_agreement(connection, walk, status)
+    if job_id is None:
+        return False, detail
+
+    # 6. The durable attempt count resolves: the pre-send ledger and the receipt agree exactly.
+    attempts_detail = _durable_attempt_count_disagreement(connection, walk, job_id)
+    if attempts_detail is not None:
+        return False, attempts_detail
+
+    # 7. No uncertain commit exists. A recovery state still `blocked` is precisely a mutation whose
+    #    outcome is unadjudicated, so terminality cannot be established over it.
+    unresolved = _unresolved_recovery_states(connection)
+    if unresolved:
+        return False, (
+            f"{unresolved} recovery state(s) remain blocked, so at least one commit's outcome is "
+            f"still uncertain and the terminal state is not established"
+        )
+
+    # 8. No orphan, row-without-object, or partial ambiguity exists. Note this is stricter than
+    #    condition 8.6, which tolerates an unpromoted `.part` as ordinary: for a run still running
+    #    a spool in flight is ordinary, but beside a *terminal* receipt any `.part` is an
+    #    unexplained mid-write and the end state is not established.
+    ambiguity = _store_ambiguity(store)
+    if ambiguity is not None:
+        return False, ambiguity
+
+    # 9. The predecessor chain resolves. Without it the receipt describes an end whose beginning is
+    #    unknown, and the cumulative consumed count with it.
+    if not walk.resolved:
+        return False, f"the receipt chain does not resolve to a first attempt: {walk.detail}"
+
+    # 10. Catalog integrity passes.
+    if not integrity_passed:
+        return False, (
+            "the catalog does not pass its quick, integrity, and foreign-key checks, so no state "
+            "read from it establishes anything"
+        )
+
+    return True, (
+        f"terminal state established: the head receipt records {status!r} with registered reason "
+        f"{walk.head_reason_code!r}, {detail}, the chain resolves, and the catalog carries no "
+        f"uncertain commit, orphan, missing object, or partial"
+    )
+
+
+def _terminal_run_row_agreement(
+    connection: sqlite3.Connection,
+    walk: ReceiptChainAccounting,
+    status: str,
+) -> tuple[str | None, str]:
+    """Match the head receipt to exactly one terminal run row that agrees with it.
+
+    Returns the matched run id and a describing detail, or ``(None, refusal)``.
+    """
+    rows = connection.execute(
+        "SELECT job_id, job_state FROM ops_ingestion_jobs "
+        "WHERE job_kind = ? AND stage = ? AND started_at_utc = ? AND finished_at_utc = ? "
+        "ORDER BY job_id",
+        (
+            _ACQUISITION_JOB_KIND,
+            walk.head_acquisition_window,
+            walk.head_started_at_utc,
+            walk.head_completed_at_utc,
+        ),
+    ).fetchall()
+    if len(rows) != 1:
+        return None, (
+            f"{len(rows)} registered acquisition run(s) match the head receipt's window and "
+            f"boundary instants; exactly one must, or the run the receipt describes is not "
+            f"identified"
+        )
+    job_id, job_state = str(rows[0][0]), str(rows[0][1])
+    expected = _TERMINAL_STATUS_JOB_STATE[status]
+    if job_state != expected:
+        return None, (
+            f"run {job_id} is in state {job_state!r} but its receipt records {status!r}, whose "
+            f"truthful run state is {expected!r}; the two surfaces disagree and neither is edited "
+            f"to match the other"
+        )
+    return job_id, f"run {job_id} is terminal in state {job_state!r} and agrees with the receipt"
+
+
+def _durable_attempt_count_disagreement(
+    connection: sqlite3.Connection,
+    walk: ReceiptChainAccounting,
+    job_id: str,
+) -> str | None:
+    """Why the pre-send attempt ledger and the receipt disagree, or ``None`` when they agree."""
+    if walk.head_actual_physical_attempt_count is None:
+        return "the head receipt records no physical attempt count"
+    row = connection.execute(
+        "SELECT COUNT(*) FROM ops_retrieval_attempts WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    ledger = int(row[0])
+    if ledger != walk.head_actual_physical_attempt_count:
+        return (
+            f"the pre-send ledger records {ledger} attempt(s) for run {job_id} but the receipt "
+            f"records {walk.head_actual_physical_attempt_count}; the durable attempt count does "
+            f"not resolve"
+        )
+    return None
+
+
+def _store_ambiguity(store: _StoreState) -> str | None:
+    """The first store-level ambiguity that prevents establishing a terminal end state."""
+    if store.rows_without_object:
+        return (
+            f"{len(store.rows_without_object)} committed row(s) have no stored object, so what "
+            f"the run persisted before ending is not established"
+        )
+    if store.orphan_object_count:
+        return (
+            f"{store.orphan_object_count} stored object(s) have no committed row, so whether "
+            f"their write completed is not established"
+        )
+    if store.rows_pointing_at_partials:
+        return (
+            f"{len(store.rows_pointing_at_partials)} committed row(s) point at a partial file, so "
+            f"a partial was treated as complete"
+        )
+    if store.partial_file_count:
+        return (
+            f"{store.partial_file_count} unpromoted partial file(s) remain beside a terminal "
+            f"receipt, so a mid-write is unexplained and the end state is not established"
+        )
+    return None
+
+
 def _unresolved_recovery_states(connection: sqlite3.Connection) -> int:
     """Recovery states still marked ``blocked``, i.e. awaiting a ruling."""
     row = connection.execute(
@@ -976,6 +1363,7 @@ def inspect_recovery_state(
     receipt_chain_head: Path,
     catalog_path: Path,
     data_root: Path,
+    plan_transition: PlanTransitionAuthority | None = None,
 ) -> RecoveryState:
     """Determine whether an interrupted run may safely resume. Writes nothing.
 
@@ -984,6 +1372,9 @@ def inspect_recovery_state(
         receipt_chain_head: path to the most recent receipt; predecessors resolve beside it.
         catalog_path: the SQLite catalog to inspect read-only.
         data_root: the data root whose raw store is inspected.
+        plan_transition: a verified Decision 062 predecessor→successor plan transition, where the
+            caller supplies the successor of a plan the chain recorded. Omitted by default, so
+            condition 8.10 asks for an unchanged hash unless an authority is explicitly presented.
 
     Raises:
         RecoveryInspectionError: the catalog or head receipt is absent, so inspection cannot begin.
@@ -1011,6 +1402,14 @@ def inspect_recovery_state(
         unresolved_states = _unresolved_recovery_states(connection)
         selection_runs = _in_flight_selection_runs(connection)
         carry_in_disagreement = carry_in_checkpoint_disagreement(connection, walk)
+        # Condition 8.2's second path. Evaluated only where the first does not already settle it,
+        # so an interrupted chain reaches exactly the predicate it always did and the terminal
+        # path can never quietly satisfy an interruption.
+        terminal_established, terminal_detail = (
+            (False, "")
+            if walk.interruption_state is not None
+            else establish_terminal_state(connection, walk, integrity.passed, store)
+        )
 
     headroom_fits, headroom_detail = _headroom(plan, walk, store)
 
@@ -1023,14 +1422,9 @@ def inspect_recovery_state(
         ),
         ConditionResult(
             "8.2",
-            "The interruption state is established, not guessed",
-            _MET if walk.interruption_state is not None else _NOT_MET,
-            (
-                f"recorded as {walk.interruption_state!r} by the receipt schema"
-                if walk.interruption_state is not None
-                else "no receipt on the chain records an interruption state, so the interruption "
-                "point is not established and would have to be guessed"
-            ),
+            "The terminal or interruption state is established, not guessed",
+            _MET if walk.interruption_state is not None or terminal_established else _NOT_MET,
+            _condition_8_2_detail(walk, terminal_established, terminal_detail),
         ),
         ConditionResult(
             "8.3",
@@ -1088,9 +1482,9 @@ def inspect_recovery_state(
         ),
         ConditionResult(
             "8.10",
-            "The plan hash is unchanged",
-            _plan_hash_status(plan, walk),
-            _plan_hash_detail(plan, walk),
+            "The plan hash is unchanged, or moves under an explicit owner plan transition",
+            _plan_hash_status(plan, walk, plan_transition),
+            _plan_hash_detail(plan, walk, plan_transition),
         ),
         ConditionResult(
             "8.11",
@@ -1142,6 +1536,22 @@ def inspect_recovery_state(
     )
 
 
+def _condition_8_2_detail(
+    walk: ReceiptChainAccounting,
+    terminal_established: bool,
+    terminal_detail: str,
+) -> str:
+    """State which of the two paths settled condition 8.2, or why neither did."""
+    if walk.interruption_state is not None:
+        return f"interruption state recorded as {walk.interruption_state!r} by the receipt schema"
+    if terminal_established:
+        return terminal_detail
+    return (
+        f"no receipt on the chain records an interruption state, and no terminal end state is "
+        f"established either: {terminal_detail}"
+    )
+
+
 def _headroom(
     plan: RequestPlan, walk: ReceiptChainAccounting, store: _StoreState
 ) -> tuple[bool, str]:
@@ -1178,20 +1588,41 @@ def _headroom(
     return fits, detail
 
 
-def _plan_hash_status(plan: RequestPlan, walk: ReceiptChainAccounting) -> str:
+def _plan_hash_status(
+    plan: RequestPlan,
+    walk: ReceiptChainAccounting,
+    transition: PlanTransitionAuthority | None = None,
+) -> str:
     """Whether the supplied plan is the one the interrupted run was executing.
 
     Resuming against a *different* plan than the one the run consumed would carry a consumed count
     forward against a budget nobody approved, so a mismatch is not met. A chain that records no plan
     hash also fails: the condition asks whether the hash is unchanged, and an absent hash cannot
     establish that it is.
+
+    A verified Decision 062 transition is the single exception, and it is not a weakening of the
+    rule: the authority is only constructible for one named pair of plan hashes, and the plans it
+    connects are proved to differ in exactly one request identity before it exists. Everything the
+    condition protects — the same window, ceiling, route counts, and attempt budget — is unchanged
+    across the pair, so the consumed count still carries forward against the budget that was
+    approved.
     """
     if walk.request_plan_sha256 is None:
         return _NOT_MET
-    return _MET if walk.request_plan_sha256 == plan.request_plan_sha256 else _NOT_MET
+    if walk.request_plan_sha256 == plan.request_plan_sha256:
+        return _MET
+    if transition is not None and transition.authorizes(
+        walk.request_plan_sha256, plan.request_plan_sha256
+    ):
+        return _MET
+    return _NOT_MET
 
 
-def _plan_hash_detail(plan: RequestPlan, walk: ReceiptChainAccounting) -> str:
+def _plan_hash_detail(
+    plan: RequestPlan,
+    walk: ReceiptChainAccounting,
+    transition: PlanTransitionAuthority | None = None,
+) -> str:
     """State what was compared, without assuming it matched."""
     if walk.request_plan_sha256 is None:
         return (
@@ -1200,6 +1631,14 @@ def _plan_hash_detail(plan: RequestPlan, walk: ReceiptChainAccounting) -> str:
         )
     if walk.request_plan_sha256 == plan.request_plan_sha256:
         return f"the chain and the supplied plan agree on {plan.request_plan_sha256}"
+    if transition is not None and transition.authorizes(
+        walk.request_plan_sha256, plan.request_plan_sha256
+    ):
+        return (
+            f"the chain recorded plan {walk.request_plan_sha256} and the supplied plan is "
+            f"{plan.request_plan_sha256}; {transition.decision_reference} names exactly this pair "
+            f"and substitutes exactly the {transition.substituted_source_id} URL"
+        )
     return (
         f"the chain recorded plan {walk.request_plan_sha256} but the supplied plan is "
         f"{plan.request_plan_sha256}"
@@ -1846,10 +2285,11 @@ def inspect_receiptless_first_invocation(
         ),
         ConditionResult(
             "8.2",
-            "The interruption state is established, not guessed",
+            "The terminal or interruption state is established, not guessed",
             _NOT_MET,
-            "no receipt records an interruption state, so a receiptless first invocation "
-            "establishes none",
+            "no receipt exists, so neither an interruption state nor a terminal end state is "
+            "established; Decision 062's terminal path is reached only from a valid receipt and "
+            "explicitly does not extend to a receiptless, crashed, killed, or uncertain state",
         ),
         ConditionResult(
             "8.3",

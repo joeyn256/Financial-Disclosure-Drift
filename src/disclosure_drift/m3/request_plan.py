@@ -41,13 +41,19 @@ from disclosure_drift.errors import DisclosureDriftError
 from disclosure_drift.sec import urls
 from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
 from disclosure_drift.sec.response_policy import MAX_TRANSIENT_RETRIES
-from disclosure_drift.sec.source_registry import SOURCES, SourceSpec
+from disclosure_drift.sec.source_registry import (
+    M22_SOURCE_REGISTRY_VERSION,
+    SOURCES,
+    SourceSpec,
+)
 from disclosure_drift.sec.urls import MAX_REDIRECT_DEPTH
 
 __all__ = [
+    "LEGACY_UNBOUND_PLAN",
     "M3_2A_BOOTSTRAP_ROUTES",
     "M3_2B_DEPENDENT_ROUTES",
     "MAX_COOLDOWN_CONTINUES",
+    "REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION",
     "REQUEST_PLAN_SCHEMA_VERSION",
     "RequestPlan",
     "RequestPlanInputError",
@@ -61,9 +67,32 @@ __all__ = [
     "request_plan_from_document",
 ]
 
-#: The plan schema this module implements. A change to the plan's shape or meaning is a version
-#: increment governed by a decision, so this is a constant, not a parameter.
+#: The original plan schema: routes, counts, and coverage inputs, with **no** record of the source
+#: registry the plan's URLs come from. Every plan written before Decision 062 is of this schema,
+#: including the accepted M3.2A plan `19be7bdc…`, and every one of them is still read and rendered
+#: byte-exactly. It is retained rather than migrated: a stored plan is the artifact an owner
+#: approved and a receipt chain recorded a hash of, so its bytes are never rewritten.
 REQUEST_PLAN_SCHEMA_VERSION: Final = "m3-request-plan/1.0"
+
+#: The registry-bound plan schema (Decision 062 §6). It adds exactly one field,
+#: `source_registry_version`, and changes nothing else.
+#:
+#: **Why the field is necessary.** A plan document names routes and counts; it never named URLs. The
+#: concrete logical request identities a plan authorizes — `source_id|normalized_url|parameters` —
+#: are only determined by the plan *together with* a source-registry version, because that is where
+#: the URLs live. Under the original schema an endpoint correction therefore moved every affected
+#: request identity while leaving the plan hash untouched, so two materially different request sets
+#: could claim one approved identity. Recording the registry version closes that: a plan hash now
+#: covers the binding that fixes its URLs, an endpoint correction produces a visibly different plan,
+#: and the predecessor→successor transition has something exact to compare.
+REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION: Final = "m3-request-plan/1.1"
+
+#: Passed as `source_registry_version` to build a plan in the pre-Decision-062 unbound `1.0` shape.
+#: Its only lawful use is reproducing a historical plan identity — notably the accepted M3.2A
+#: `19be7bdc…` — so that the M3.1 Gate F artifact stays byte-reproducible after this change. A new
+#: plan is always built bound to a registry version; an unbound new plan would reintroduce exactly
+#: the ambiguity the `1.1` field exists to remove.
+LEGACY_UNBOUND_PLAN: Final = None
 
 #: The seven bootstrap routes of the M3.2A window, in the master plan §15 order. The two dependent
 #: routes (`sec_submissions_entity`, `sec_submissions_historical`) belong to the M3.2B window, which
@@ -227,6 +256,18 @@ class RequestPlan:
     required_index_keys: tuple[str, ...]
     expected_cache_hits: int
     routes: tuple[RoutePlan, ...]
+    #: The source-registry version whose URLs this plan's request identities resolve against, or
+    #: ``None`` for a pre-Decision-062 plan that recorded none. It is the schema discriminator:
+    #: the presence of the binding *is* what makes a document `1.1` rather than `1.0`, so one
+    #: field carries both the binding and the version rather than two that could disagree.
+    source_registry_version: str | None = None
+
+    @property
+    def request_plan_schema_version(self) -> str:
+        """The schema this plan is a document of, derived from whether it carries a binding."""
+        if self.source_registry_version is None:
+            return REQUEST_PLAN_SCHEMA_VERSION
+        return REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION
 
     @property
     def planned_unique_logical_requests(self) -> int:
@@ -254,9 +295,14 @@ class RequestPlan:
         return max(0, self.maximum_physical_attempts - 1) / self.requests_per_second
 
     def as_payload(self) -> dict[str, object]:
-        """The canonical, hashable representation of the whole plan."""
-        return {
-            "request_plan_schema_version": REQUEST_PLAN_SCHEMA_VERSION,
+        """The canonical, hashable representation of the whole plan.
+
+        A `1.0` plan renders exactly the fields `1.0` defined and **omits**
+        `source_registry_version` entirely — not a `null` for it. That is what keeps every plan
+        written before Decision 062 byte-reproducible, including the accepted `19be7bdc…`.
+        """
+        payload: dict[str, object] = {
+            "request_plan_schema_version": self.request_plan_schema_version,
             "acquisition_window": self.acquisition_window,
             "inputs": {
                 "coverage_start": self.coverage_start.isoformat(),
@@ -278,6 +324,9 @@ class RequestPlan:
                 "rate_limiter_spacing_floor_seconds": self.rate_limiter_spacing_floor_seconds,
             },
         }
+        if self.source_registry_version is not None:
+            payload["source_registry_version"] = self.source_registry_version
+        return payload
 
     @property
     def request_plan_sha256(self) -> str:
@@ -335,6 +384,7 @@ def build_m3_2a_request_plan(
     calendar_evidence_entry_count: int,
     already_satisfied_index_keys: frozenset[str],
     requests_per_second: float,
+    source_registry_version: str | None = M22_SOURCE_REGISTRY_VERSION,
 ) -> RequestPlan:
     """Build the deterministic M3.2A request plan from explicit inputs.
 
@@ -347,6 +397,10 @@ def build_m3_2a_request_plan(
         already_satisfied_index_keys: quarterly index instances already satisfied in the catalog.
             They are excluded before planning and reported as cache hits, never subtracted twice.
         requests_per_second: the configured aggregate rate, for the spacing floor.
+        source_registry_version: the registry version whose URLs this plan's request identities
+            resolve against. Defaults to the live registry, which is what a new plan is always
+            bound to. Pass :data:`LEGACY_UNBOUND_PLAN` only to reproduce a historical `1.0`
+            identity byte-exactly.
 
     Raises:
         RequestPlanInputError: an input cannot describe a coherent zero-request plan.
@@ -407,6 +461,7 @@ def build_m3_2a_request_plan(
         required_index_keys=required_index_keys,
         expected_cache_hits=len(satisfied_in_plan),
         routes=routes,
+        source_registry_version=source_registry_version,
     )
 
 
@@ -421,6 +476,7 @@ def build_m3_2b_dependent_plan(
     entity_instance_count: int,
     historical_instance_count: int,
     requests_per_second: float,
+    source_registry_version: str | None = M22_SOURCE_REGISTRY_VERSION,
 ) -> RequestPlan:
     """Build the deterministic M3.2B dependent plan from explicit reconciled counts.
 
@@ -498,6 +554,7 @@ def build_m3_2b_dependent_plan(
         required_index_keys=(),
         expected_cache_hits=0,
         routes=routes,
+        source_registry_version=source_registry_version,
     )
 
 
@@ -537,10 +594,34 @@ def request_plan_from_document(payload: bytes) -> RequestPlan:
         raise RequestPlanInputError(message)
 
     version = document.get("request_plan_schema_version")
-    if version != REQUEST_PLAN_SCHEMA_VERSION:
+    if version not in {REQUEST_PLAN_SCHEMA_VERSION, REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION}:
         message = (
             f"the stored request plan declares schema {version!r}, not "
-            f"{REQUEST_PLAN_SCHEMA_VERSION!r}; a plan of another schema is not this plan"
+            f"{REQUEST_PLAN_SCHEMA_VERSION!r} or "
+            f"{REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION!r}; a plan of another schema is not "
+            f"this plan"
+        )
+        raise RequestPlanInputError(message)
+
+    # The declared schema and the presence of the binding must agree exactly, in both directions. A
+    # `1.0` document carrying a registry version, or a `1.1` document missing one, is refused rather
+    # than read under whichever reading happens to work: the round-trip check below would catch the
+    # byte difference, but the diagnostic would then blame canonicalization for what is really a
+    # document claiming a schema it is not of.
+    registry_version = document.get("source_registry_version")
+    bound = version == REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION
+    if bound and not isinstance(registry_version, str):
+        message = (
+            f"the stored request plan declares schema "
+            f"{REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION!r} but records no "
+            f"source_registry_version; the binding is what that schema adds"
+        )
+        raise RequestPlanInputError(message)
+    if not bound and registry_version is not None:
+        message = (
+            f"the stored request plan declares schema {REQUEST_PLAN_SCHEMA_VERSION!r} but records "
+            f"a source_registry_version; that field belongs to "
+            f"{REQUEST_PLAN_REGISTRY_BOUND_SCHEMA_VERSION!r} alone"
         )
         raise RequestPlanInputError(message)
 
@@ -572,6 +653,7 @@ def request_plan_from_document(payload: bytes) -> RequestPlan:
                 for route in routes
                 if isinstance(route, dict)
             ),
+            source_registry_version=str(registry_version) if bound else None,
         )
     except (KeyError, TypeError, ValueError) as exc:
         message = (
@@ -637,7 +719,7 @@ def render_budget(plan: RequestPlan) -> Mapping[str, object]:
     """
     return {
         "acquisition_window": plan.acquisition_window,
-        "request_plan_schema_version": REQUEST_PLAN_SCHEMA_VERSION,
+        "request_plan_schema_version": plan.request_plan_schema_version,
         "request_plan_sha256": plan.request_plan_sha256,
         "planned_unique_logical_requests": plan.planned_unique_logical_requests,
         "maximum_physical_attempts": plan.maximum_physical_attempts,

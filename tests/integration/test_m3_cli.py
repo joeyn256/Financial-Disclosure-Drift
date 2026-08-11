@@ -4441,3 +4441,136 @@ def test_no_m3_command_reaches_the_network_with_a_plan_transition(
 
     assert "sec.gov" not in result.stdout
     assert result.returncode in {EXIT_OK, EXIT_GATE_FAILURE}
+
+
+# --------------------------------------------------------------------------- #
+# Cross-namespace receipt chains (Decision 063)
+# --------------------------------------------------------------------------- #
+def _live_receipt(**overrides: object) -> object:
+    """One minimal valid `live` receipt, built through the real constructor."""
+    from disclosure_drift.m3.receipt import ExecutionReceipt
+
+    fields: dict[str, object] = {
+        "command_name": "m3 acquire",
+        "command_version": "m3.2a/1.0",
+        "phase": "M3.2A",
+        "invocation_mode": "live",
+        "configuration_fingerprint": "a" * 64,
+        "migration_chain_head": "0013_m23_manifest_lifecycle_guards",
+        "started_at_utc": "2026-08-01T12:00:00Z",
+        "completed_at_utc": "2026-08-01T12:00:09Z",
+        "elapsed_seconds": 9.0,
+        "source_registry_version": "m2.2-source-registry/1.1",
+        "index_plan_policy_version": "quarterly-index-instances/2.0",
+        "request_plan_schema_version": "m3-request-plan/1.1",
+        "parser_versions": {"sic-code-list": "1.0"},
+        "acquisition_window": "M3.2A",
+        "request_plan_id": "plan-0001",
+        "request_plan_sha256": "b" * 64,
+        "approved_request_ceiling": 801,
+        "planned_logical_request_count": 75,
+        "maximum_physical_attempt_count": 801,
+        "planned_per_route": {"sec_full_index": 75},
+        "actual_logical_request_count": 1,
+        "actual_physical_attempt_count": 1,
+        "actual_per_route": {
+            "sec_full_index": {"logical_request_count": 1, "physical_attempt_count": 1},
+        },
+        "response_classification_totals": {
+            "proceed": 1,
+            "retry": 0,
+            "retry_after": 0,
+            "cooldown": 0,
+            "fail": 0,
+            "quarantine": 0,
+        },
+        "status_code_totals": {"200": 1},
+        "raw_object_count": 1,
+        "duplicate_object_count": 0,
+        "cache_hit_count": 0,
+        "not_modified_count": 0,
+        "quarantined_object_count": 0,
+        "redirect_hop_count": 0,
+        "cooldown_count": 0,
+        "schema_drift_outcome": "none",
+        "schema_drift_event_count": 0,
+        "completion_status": "complete",
+    }
+    fields.update(overrides)
+    return ExecutionReceipt(**fields)
+
+
+def test_show_receipt_resolves_a_chain_across_run_namespaces(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The real T7 shape, driven through the real CLI.
+
+    `--receipt-out` puts each run's receipt in its own namespace, so the continuation's head is in
+    `runs/m3_2_decision_062_sic_continuation/` while the receipt it names is in
+    `runs/m3_2a_clean_carry_in/`. The chain is intact; the command must say so, and must reach
+    length 2 rather than reporting a predecessor that does not resolve.
+    """
+    predecessor = _live_receipt(request_plan_id="plan-predecessor")
+    head = _live_receipt(
+        request_plan_id="plan-successor",
+        recovery_predecessor_receipt_id=predecessor.receipt_id,  # type: ignore[attr-defined]
+        consumed_request_count_carried_forward=1,
+    )
+    for item, namespace in (
+        (predecessor, "m3_2a_clean_carry_in"),
+        (head, "m3_2_decision_062_sic_continuation"),
+    ):
+        path = evidence_root / "runs" / namespace / "execution_receipt.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(item.canonical_bytes())  # type: ignore[attr-defined]
+
+    result = _run(
+        [
+            "m3",
+            "show-receipt",
+            "--evidence-root",
+            str(evidence_root),
+            "--receipt",
+            "runs/m3_2_decision_062_sic_continuation/execution_receipt.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK, result.stderr
+    assert "recovery_chain_length" in result.stdout
+    assert result.stdout.split("recovery_chain_length")[1].split("\n")[0].strip().endswith("2")
+    assert str(evidence_root) not in result.stdout
+    assert str(evidence_root) not in result.stderr
+
+
+def test_show_receipt_still_refuses_a_predecessor_that_exists_nowhere(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Widening where a predecessor may be found never widens what counts as one.
+
+    Same command, same layout, and a recorded identity no accepted receipt location holds: the
+    chain is still refused, and no receipt is invented to close it.
+    """
+    head = _live_receipt(
+        recovery_predecessor_receipt_id="c" * 64,
+        consumed_request_count_carried_forward=1,
+    )
+    path = evidence_root / "runs" / "m3_2_decision_062_sic_continuation" / "execution_receipt.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(head.canonical_bytes())  # type: ignore[attr-defined]
+
+    result = _run(
+        [
+            "m3",
+            "show-receipt",
+            "--evidence-root",
+            str(evidence_root),
+            "--receipt",
+            "runs/m3_2_decision_062_sic_continuation/execution_receipt.json",
+        ],
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE
+    assert "recovery_predecessor_receipt_id" in result.stderr
+    assert str(evidence_root) not in result.stderr

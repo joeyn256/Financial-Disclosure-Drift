@@ -2051,3 +2051,150 @@ class TestTerminalEstablishmentMutations:
         assert _condition(state, "8.6").status == "MET", (
             "8.6 still treats an unpromoted partial as ordinary; only 8.2 is stricter"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Chains that span run namespaces (Decision 063)
+# --------------------------------------------------------------------------- #
+# `--receipt-out` places each run's receipt in its own namespace, so a real continuation's head and
+# its predecessor sit in *different* directories. Walking only beside the head cannot reach the
+# predecessor, and an intact chain is reported as broken — which stops recovery on a defect of the
+# locator rather than of the evidence.
+def _place(item: ExecutionReceipt, path: Path) -> Path:
+    """Write one receipt exactly where ``--receipt-out`` would put it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(item.canonical_bytes())
+    return path
+
+
+def _two_namespace_chain(tmp_path: Path) -> tuple[Path, Path, ExecutionReceipt, ExecutionReceipt]:
+    """The T7 shape: a failed predecessor run, and the continuation that names it.
+
+    Returns the evidence root, the head receipt's path, and both receipts.
+    """
+    evidence = tmp_path / "evidence"
+    predecessor = receipt(request_plan_id="plan-predecessor")
+    head_receipt = receipt(
+        request_plan_id="plan-successor",
+        recovery_predecessor_receipt_id=predecessor.receipt_id,
+        consumed_request_count_carried_forward=1,
+    )
+    _place(predecessor, evidence / "runs" / "m3_2a_clean_carry_in" / "execution_receipt.json")
+    head = _place(
+        head_receipt,
+        evidence / "runs" / "m3_2_decision_062_sic_continuation" / "execution_receipt.json",
+    )
+    return evidence, head, head_receipt, predecessor
+
+
+def test_the_walker_resolves_a_predecessor_in_another_run_namespace(tmp_path: Path) -> None:
+    """The chain reaches its first attempt, and the arithmetic is the ordinary arithmetic."""
+    evidence, head, head_receipt, predecessor = _two_namespace_chain(tmp_path)
+
+    chain = walk_receipt_chain(head, evidence_root=evidence)
+
+    assert chain.resolved
+    assert chain.receipt_ids == (head_receipt.receipt_id, predecessor.receipt_id)
+    assert chain.consumed_physical_attempts == 2  # one attempt in each receipt, no baseline
+    assert chain.root_carried_forward == 0
+
+
+def test_the_same_chain_is_unresolved_without_an_evidence_root(tmp_path: Path) -> None:
+    """Non-vacuity for the fix: identical evidence, and only the search bound withheld.
+
+    This is the state the T7 continuation was actually in — an intact two-receipt chain reported as
+    missing a predecessor, because the predecessor was in the namespace next door.
+    """
+    _, head, head_receipt, _ = _two_namespace_chain(tmp_path)
+
+    chain = walk_receipt_chain(head)
+
+    assert not chain.resolved
+    assert chain.receipt_ids == (head_receipt.receipt_id,)
+    assert "missing or unreadable" in chain.detail
+
+
+def test_a_cross_namespace_chain_reaches_the_normal_recovery_inspection(tmp_path: Path) -> None:
+    """Condition 8.1 is met, so the inspection proceeds to the conditions that are about state.
+
+    The point is not the final determination — that depends on catalog state — but that the chain
+    stops being the reason it cannot be reached.
+    """
+    tree = build_catalog(tmp_path)
+    evidence, head, _, _ = _two_namespace_chain(tmp_path)
+
+    state = inspect_recovery_state(
+        plan=plan(),
+        receipt_chain_head=head,
+        catalog_path=tree.catalog_database,
+        data_root=tree.data_root,
+        evidence_root=evidence,
+    )
+
+    chain_condition = next(item for item in state.conditions if item.number == "8.1")
+    assert chain_condition.status == "MET"
+    assert len(state.receipt_chain) == 2
+    assert state.consumed_physical_attempts == 2
+
+
+def test_the_same_inspection_is_undetermined_without_an_evidence_root(tmp_path: Path) -> None:
+    """The paired negative control: the chain condition is what fails, and it fails alone."""
+    tree = build_catalog(tmp_path)
+    _, head, _, _ = _two_namespace_chain(tmp_path)
+
+    state = inspect_recovery_state(
+        plan=plan(),
+        receipt_chain_head=head,
+        catalog_path=tree.catalog_database,
+        data_root=tree.data_root,
+    )
+
+    chain_condition = next(item for item in state.conditions if item.number == "8.1")
+    assert chain_condition.status == "NOT MET"
+    assert state.determination == "UNDETERMINED"
+
+
+def test_a_receipt_chain_that_loops_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity for the loop guard, which content-derived identity otherwise makes unreachable.
+
+    A `receipt_id` is the digest of a preimage that *includes* `recovery_predecessor_receipt_id`, so
+    two receipts naming each other — or one naming itself — would each have to hash a value derived
+    from the other's hash. No such pair can be written, which is why the guard has to be exercised
+    through the resolver rather than through fixtures. It must report a loop rather than walk
+    forever, and it must never mark a looping chain resolved.
+    """
+    evidence, head, head_receipt, predecessor = _two_namespace_chain(tmp_path)
+    looping = dict(predecessor.as_document())
+    looping["recovery_predecessor_receipt_id"] = head_receipt.receipt_id
+
+    monkeypatch.setattr(
+        recovery_module,
+        "resolve_predecessor_receipt",
+        lambda identifier, **_kwargs: (head, looping),
+    )
+
+    chain = walk_receipt_chain(head, evidence_root=evidence)
+
+    assert not chain.resolved
+    assert "loops back on itself" in chain.detail
+
+
+def test_walking_a_cross_namespace_chain_mutates_no_receipt(tmp_path: Path) -> None:
+    """Receipts are immutable, and the walk is a read: no copy is created to satisfy the walker."""
+    evidence, head, _, _ = _two_namespace_chain(tmp_path)
+    before = {
+        str(path.relative_to(evidence)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted(evidence.rglob("*"))
+        if path.is_file()
+    }
+
+    assert walk_receipt_chain(head, evidence_root=evidence).resolved
+
+    after = {
+        str(path.relative_to(evidence)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted(evidence.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before

@@ -62,8 +62,10 @@ from disclosure_drift.m3.acquisition import (
 from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
 from disclosure_drift.m3.receipt import (
     ExecutionReceipt,
+    ReceiptChainResolutionError,
     ReceiptValidationError,
     inspect_receipt,
+    resolve_predecessor_receipt,
     write_receipt,
 )
 from disclosure_drift.m3.recovery import (
@@ -1762,7 +1764,7 @@ def _m3_show_receipt_command(
     path = _m3_artifact_path(evidence_root, args.receipt)
     try:
         document = inspect_receipt(path)
-        chain = _resolve_receipt_chain(path, document)
+        chain = _resolve_receipt_chain(path, document, evidence_root=evidence_root)
     except ReceiptValidationError as exc:
         print(f"receipt rejected: {exc}", file=sys.stderr)
         logger.error("m3 show-receipt: the receipt failed validation")
@@ -1847,6 +1849,7 @@ def _m3_recovery_state_command(
             catalog_path=catalog_path,
             data_root=data_root,
             plan_transition=_resolved_plan_transition(evidence_root, args, plan, head_path),
+            evidence_root=evidence_root,
         )
 
     print("Safe-resume determination (read-only; nothing was repaired).")
@@ -1909,15 +1912,22 @@ def _resolved_plan_transition(
     )
 
 
-def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple[str, ...]:
+def _resolve_receipt_chain(
+    head_path: Path, head: Mapping[str, object], *, evidence_root: Path | None = None
+) -> tuple[str, ...]:
     """Resolve `recovery_predecessor_receipt_id` back to the first attempt.
 
     Receipt spec §14 requires a present predecessor to resolve to a readable receipt, and §11.4
     makes a broken chain a stop condition. Validating the head alone would let a receipt naming a
     predecessor that was never written pass as intact, which is precisely the case the chain exists
     to detect.
+
+    Location is delegated to :func:`resolve_predecessor_receipt`, which searches the accepted
+    receipt locations beneath ``evidence_root`` rather than only beside the head — a receipt written
+    through `--receipt-out` into its own run namespace is otherwise unreachable from a head in a
+    different one. Validation is unchanged: every candidate is loaded, schema-checked, and required
+    to carry exactly the recorded identity.
     """
-    receipts_dir = head_path.parent
     chain: list[str] = [str(head["receipt_id"])]
     visited = {str(head["receipt_id"])}
     document: Mapping[str, object] = head
@@ -1933,9 +1943,12 @@ def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple
                 f"attempt"
             )
             raise ReceiptValidationError(message)
-        candidate = receipts_dir / f"receipt-{identifier}.json"
         try:
-            document = inspect_receipt(candidate)
+            _, document = resolve_predecessor_receipt(
+                identifier,
+                head_directory=head_path.parent,
+                evidence_root=evidence_root,
+            )
         except OSError as exc:
             # An OSError carries the absolute filename it failed on, which may never be printed.
             message = (
@@ -1943,6 +1956,10 @@ def _resolve_receipt_chain(head_path: Path, head: Mapping[str, object]) -> tuple
                 f"readable receipt ({type(exc).__name__})"
             )
             raise ReceiptValidationError(message) from exc
+        except ReceiptChainResolutionError as exc:
+            # Already phrased against `recovery_predecessor_receipt_id`, and already free of any
+            # absolute path. Re-wrapping would only bury the specific refusal.
+            raise ReceiptValidationError(str(exc)) from exc
         except ReceiptValidationError as exc:
             message = (
                 f"recovery_predecessor_receipt_id {identifier[:12]}… resolves to a receipt that "
@@ -2342,7 +2359,7 @@ def _m3_acquire_show_scope(
         # correct only while every receipt's carried-forward count happens to equal the sum of its
         # predecessors; the walker sums `actual_physical_attempt_count` across the whole chain and
         # adds the single no-predecessor root's carry-in exactly once, which is the definition.
-        chain = walk_receipt_chain(head_path)
+        chain = walk_receipt_chain(head_path, evidence_root=evidence_root)
         if not chain.resolved:
             message = (
                 f"the receipt chain does not resolve to a first attempt, so the consumed-count "
@@ -2571,6 +2588,7 @@ def _m3_acquire_live(  # noqa: PLR0911, PLR0912 - one explicit operator gate lad
             window=window,
             approved_ceiling=ceiling,
             plan_transition=_resolved_plan_transition(evidence_root, args, plan, resume_head),
+            evidence_root=evidence_root,
         )
 
     # SIGTERM is scoped here, after every live gate has passed, so a graceful `kill` of a running
@@ -3210,6 +3228,7 @@ def _m3_recover_command(
         catalog_path=catalog_path,
         storage=storage,
         census_run_id=str(args.run),
+        evidence_root=evidence_root,
     )
 
     print("Recovery action applied (exactly one; a fresh inspection is required next).")

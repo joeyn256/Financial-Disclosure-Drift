@@ -24,25 +24,31 @@ from typing import Any
 
 import pytest
 
+from disclosure_drift.m3 import receipt as receipt_module
 from disclosure_drift.m3.receipt import (
     COMPLETION_STATUSES,
     INTERRUPTION_STATES,
     INVOCATION_MODES,
+    OPERATOR_RECEIPT_FILENAME,
     PHASES,
     READABLE_RECEIPT_SCHEMA_VERSIONS,
     RECEIPT_SCHEMA_VERSION,
     RECEIPT_SCHEMA_VERSION_V2,
     RESPONSE_CLASSIFICATION_BUCKETS,
+    RUN_NAMESPACE_DIRNAME,
     SCHEMA_DRIFT_OUTCOMES,
     ZERO_NETWORK_MODES,
     ExecutionReceipt,
     ProhibitedReceiptContentError,
+    ReceiptChainResolutionError,
     ReceiptValidationError,
     ReceiptWriteError,
     canonical_bytes,
     compute_receipt_id,
+    content_derived_receipt_name,
     inspect_receipt,
     receipts_directory,
+    resolve_predecessor_receipt,
     scan_for_prohibited_content,
     validate_receipt_document,
     write_receipt,
@@ -1353,3 +1359,450 @@ def test_the_exempt_field_is_still_scanned_for_prohibited_values() -> None:
     """Exempting the *name* never exempts the *value* it carries."""
     with pytest.raises(ProhibitedReceiptContentError):
         scan_for_prohibited_content({"carry_in_authority_sha256": "Bearer abc123"})
+
+
+# --------------------------------------------------------------------------- #
+# Predecessor resolution across the accepted receipt locations (Decision 063)
+# --------------------------------------------------------------------------- #
+# A chain head is written where its operator named it. `--receipt-out` has always allowed that, and
+# the accepted M3.2 convention gives every run its own namespace, so a real chain spans two of them:
+# `runs/m3_2_decision_062_sic_continuation/execution_receipt.json` names a predecessor that lives in
+# `runs/m3_2a_clean_carry_in/`. Resolving only beside the head cannot find it, and an intact chain
+# reads as broken. These tests pin what the locator may and may not do about that.
+def _place(receipt: ExecutionReceipt, path: Path) -> Path:
+    """Write one receipt exactly where ``--receipt-out`` would put it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(receipt.canonical_bytes())
+    return path
+
+
+def _evidence_root(tmp_path: Path) -> Path:
+    """A governed evidence root, outside any checkout."""
+    root = tmp_path / "evidence"
+    root.mkdir(exist_ok=True)
+    return root
+
+
+def _successor(predecessor: ExecutionReceipt, **overrides: Any) -> ExecutionReceipt:
+    """A `live` receipt that names ``predecessor`` as the receipt it continues.
+
+    §7.2 requires a resume to state what it inherits, so the carried-forward baseline travels with
+    the predecessor link rather than being repeated at every call site.
+    """
+    fields: dict[str, Any] = {
+        "request_plan_id": "plan-successor",
+        "recovery_predecessor_receipt_id": predecessor.receipt_id,
+        "consumed_request_count_carried_forward": predecessor.actual_physical_attempt_count,
+    }
+    fields.update(overrides)
+    return live(**fields)
+
+
+def _namespace(root: Path, name: str) -> Path:
+    """One run namespace beneath the evidence root."""
+    return root / RUN_NAMESPACE_DIRNAME / name
+
+
+def _tree_state(root: Path) -> dict[str, tuple[bytes, int]]:
+    """Every file beneath ``root``, with its bytes and modification time."""
+    return {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def test_a_predecessor_beside_the_head_still_resolves(tmp_path: Path) -> None:
+    """The accepted same-directory content-derived behaviour, unchanged and tried first.
+
+    Both with and without an evidence root: supplying one may only *add* places to look, never
+    change where a chain that already resolves finds its predecessor.
+    """
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    directory = receipts_directory(root)
+    _place(predecessor, directory / content_derived_receipt_name(predecessor.receipt_id))
+
+    for evidence_root in (None, root):
+        path, document = resolve_predecessor_receipt(
+            predecessor.receipt_id, head_directory=directory, evidence_root=evidence_root
+        )
+        assert document["receipt_id"] == predecessor.receipt_id
+        assert path.name == content_derived_receipt_name(predecessor.receipt_id)
+
+
+def test_a_real_shaped_cross_namespace_chain_resolves(tmp_path: Path) -> None:
+    """The T7 shape: two run namespaces, one `execution_receipt.json` each."""
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    head = _successor(predecessor)
+    _place(predecessor, _namespace(root, "m3_2a_clean_carry_in") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        head, _namespace(root, "m3_2_decision_062_sic_continuation") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    path, document = resolve_predecessor_receipt(
+        predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+    )
+
+    assert document["receipt_id"] == predecessor.receipt_id
+    assert path.parent.name == "m3_2a_clean_carry_in"
+    assert path.name == OPERATOR_RECEIPT_FILENAME
+
+
+def test_the_same_cross_namespace_chain_is_unresolvable_without_an_evidence_root(
+    tmp_path: Path,
+) -> None:
+    """The defect this locator exists to fix, stated as a test.
+
+    Identical fixture to the case above; only the root is withheld. Without it the search is the
+    head's own directory alone, which is exactly where a per-run predecessor never is.
+    """
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    _place(predecessor, _namespace(root, "m3_2a_clean_carry_in") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        _successor(predecessor),
+        _namespace(root, "m3_2_decision_062_sic_continuation") / OPERATOR_RECEIPT_FILENAME,
+    )
+
+    with pytest.raises(ReceiptChainResolutionError, match="no evidence root was supplied"):
+        resolve_predecessor_receipt(
+            predecessor.receipt_id, head_directory=head_path.parent, evidence_root=None
+        )
+
+
+def test_a_predecessor_in_the_dedicated_receipts_directory_resolves(tmp_path: Path) -> None:
+    """§7.1's dedicated directory is searched too, not only the run namespaces."""
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    _place(
+        predecessor,
+        receipts_directory(root) / content_derived_receipt_name(predecessor.receipt_id),
+    )
+    head_path = _place(
+        _successor(predecessor),
+        _namespace(root, "some_run") / OPERATOR_RECEIPT_FILENAME,
+    )
+
+    path, _ = resolve_predecessor_receipt(
+        predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+    )
+
+    assert path.parent == receipts_directory(root)
+
+
+def test_a_candidate_must_carry_exactly_the_requested_identity(tmp_path: Path) -> None:
+    """A file at the content-derived name claims an identity; a document that contradicts it is a
+    defect, and is refused rather than accepted as "close enough"."""
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    impostor = live(request_plan_id="plan-impostor")
+    _place(impostor, receipts_directory(root) / content_derived_receipt_name(wanted.receipt_id))
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptChainResolutionError, match="different receipt_id"):
+        resolve_predecessor_receipt(
+            wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+
+def test_a_predecessor_that_was_never_written_does_not_resolve(tmp_path: Path) -> None:
+    """Nothing is synthesized to close the gap: zero candidates is a refusal."""
+    root = _evidence_root(tmp_path)
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptChainResolutionError, match="does not resolve to a readable receipt"):
+        resolve_predecessor_receipt("d" * 64, head_directory=head_path.parent, evidence_root=root)
+
+
+def test_an_unrelated_receipt_in_another_namespace_is_ignored(tmp_path: Path) -> None:
+    """Non-vacuity for the identity test, and for the search order at the same time.
+
+    The unrelated namespace sorts *first*, so a resolver that returned the first readable receipt it
+    found — rather than the one whose validated identity was asked for — would return it. The
+    assertion is that it does not.
+    """
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    unrelated = live(request_plan_id="plan-unrelated")
+    _place(unrelated, _namespace(root, "aaa_unrelated") / OPERATOR_RECEIPT_FILENAME)
+    _place(wanted, _namespace(root, "zzz_wanted") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "mmm_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    path, document = resolve_predecessor_receipt(
+        wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+    )
+
+    assert path.parent.name == "zzz_wanted"
+    assert document["receipt_id"] == wanted.receipt_id
+
+
+def test_an_unrelated_namespace_alone_cannot_satisfy_a_chain(tmp_path: Path) -> None:
+    """The other half of the same rule: an unrelated receipt is ignored, never substituted."""
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    _place(
+        live(request_plan_id="plan-unrelated"), _namespace(root, "other") / "execution_receipt.json"
+    )
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptChainResolutionError, match="does not resolve to a readable receipt"):
+        resolve_predecessor_receipt(
+            wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+
+def test_a_malformed_receipt_at_the_content_derived_name_is_raised_not_skipped(
+    tmp_path: Path,
+) -> None:
+    """A damaged receipt at the name that claims this identity is that receipt's defect.
+
+    Skipping it and looking elsewhere would let a chain resolve *around* a corrupt receipt, which is
+    the failure the chain check exists to surface.
+    """
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    broken = receipts_directory(root) / content_derived_receipt_name(wanted.receipt_id)
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{not json", encoding="utf-8")
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptValidationError):
+        resolve_predecessor_receipt(
+            wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+
+def test_a_malformed_operator_named_receipt_elsewhere_cannot_block_a_lawful_chain(
+    tmp_path: Path,
+) -> None:
+    """`execution_receipt.json` claims no identity, so a damaged one is another run's problem.
+
+    It can never satisfy the requested identity, and an unrelated damaged file must not decide the
+    fate of a chain that does not reference it.
+    """
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    damaged = _namespace(root, "aaa_damaged") / OPERATOR_RECEIPT_FILENAME
+    damaged.parent.mkdir(parents=True, exist_ok=True)
+    damaged.write_text('{"receipt_schema_version":"m3-execution-receipt/1.0"}\n', encoding="utf-8")
+    _place(wanted, _namespace(root, "zzz_wanted") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "mmm_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    path, _ = resolve_predecessor_receipt(
+        wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+    )
+
+    assert path.parent.name == "zzz_wanted"
+
+
+def test_two_valid_receipts_with_one_identity_are_necessarily_byte_identical() -> None:
+    """Why byte-identical aliases are the *only* reachable multi-candidate outcome.
+
+    §13 makes `receipt_id` the digest of the canonical preimage and §14 re-checks that it recomputes
+    at every inspection. A document that differs anywhere therefore cannot keep the identity, so two
+    files that both validate under one `receipt_id` cannot differ. The alias tolerance below is that
+    fact, not a relaxation invented to make a case pass.
+    """
+    original = live(request_plan_id="plan-a").as_document()
+    altered = dict(original)
+    altered["request_plan_id"] = "plan-b"
+
+    assert compute_receipt_id(altered) != original["receipt_id"]
+    with pytest.raises(ReceiptValidationError, match="recompute"):
+        validate_receipt_document(altered)
+
+
+def test_byte_identical_aliases_resolve_deterministically(tmp_path: Path) -> None:
+    """One receipt at two accepted paths is one receipt, and the search order decides which."""
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    _place(predecessor, _namespace(root, "zzz_copy") / OPERATOR_RECEIPT_FILENAME)
+    _place(
+        predecessor,
+        receipts_directory(root) / content_derived_receipt_name(predecessor.receipt_id),
+    )
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "mmm_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    resolutions = {
+        resolve_predecessor_receipt(
+            predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )[0]
+        for _ in range(3)
+    }
+
+    assert resolutions == {
+        receipts_directory(root) / content_derived_receipt_name(predecessor.receipt_id)
+    }
+
+
+def test_two_distinct_receipts_claiming_one_identity_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity for the ambiguity guard, which validation otherwise makes unreachable.
+
+    Because a valid receipt's identity always recomputes, no pair of files on a real filesystem can
+    reach this branch — which is precisely why it must be tested through the loader rather than
+    through fixtures. The loader is replaced so two candidates validate to *different* documents
+    under one identity; the guard must refuse rather than pick one. If a future change ever weakens
+    identity validation, this is the test that keeps the choice from being made silently.
+    """
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    _place(wanted, _namespace(root, "aaa_first") / OPERATOR_RECEIPT_FILENAME)
+    _place(wanted, _namespace(root, "bbb_second") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "zzz_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    def _forged(path: Path | str) -> dict[str, object]:
+        document = live(request_plan_id=f"plan-{Path(path).parent.name}").as_document()
+        document["receipt_id"] = wanted.receipt_id  # one identity, two different documents
+        return document
+
+    monkeypatch.setattr(receipt_module, "inspect_receipt", _forged)
+
+    with pytest.raises(ReceiptChainResolutionError, match="contents differ"):
+        resolve_predecessor_receipt(
+            wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+
+def test_a_symbolic_link_at_an_accepted_receipt_location_is_refused(tmp_path: Path) -> None:
+    """Refused even though the link's target is a perfectly valid matching receipt.
+
+    A receipt is addressed by a real path. A link is an indirection nobody recorded, and following
+    one would make the resolved chain depend on filesystem state outside the evidence it governs.
+    """
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    real = _place(predecessor, _namespace(root, "real") / OPERATOR_RECEIPT_FILENAME)
+    linked = _namespace(root, "linked") / OPERATOR_RECEIPT_FILENAME
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    linked.symlink_to(real)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "zzz_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    with pytest.raises(ReceiptChainResolutionError, match="symbolic link"):
+        resolve_predecessor_receipt(
+            predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+
+def test_a_symbolic_link_beside_the_head_is_refused(tmp_path: Path) -> None:
+    """The same rule at the same-directory location, which discovery never reaches."""
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    real = _place(predecessor, _namespace(root, "real") / OPERATOR_RECEIPT_FILENAME)
+    head_directory = _namespace(root, "head")
+    head_directory.mkdir(parents=True, exist_ok=True)
+    (head_directory / content_derived_receipt_name(predecessor.receipt_id)).symlink_to(real)
+
+    with pytest.raises(ReceiptChainResolutionError, match="symbolic link"):
+        resolve_predecessor_receipt(
+            predecessor.receipt_id, head_directory=head_directory, evidence_root=root
+        )
+
+
+def test_a_namespace_linked_outside_the_evidence_root_is_refused(tmp_path: Path) -> None:
+    """A path escape: the candidate is lexically inside the root and really outside it."""
+    root = _evidence_root(tmp_path)
+    outside = tmp_path / "outside"
+    predecessor = live(request_plan_id="plan-predecessor")
+    _place(predecessor, outside / OPERATOR_RECEIPT_FILENAME)
+    (root / RUN_NAMESPACE_DIRNAME).mkdir(parents=True, exist_ok=True)
+    (root / RUN_NAMESPACE_DIRNAME / "escape").symlink_to(outside, target_is_directory=True)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "zzz_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    with pytest.raises(
+        ReceiptChainResolutionError, match="symbolic link|outside the evidence root"
+    ):
+        resolve_predecessor_receipt(
+            predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+
+def test_the_root_containment_guard_is_not_vacuous(tmp_path: Path) -> None:
+    """The containment refusal is decided on resolved paths, and it does fire.
+
+    Stated directly against the predicate as well as through a fixture, so the refusal above cannot
+    be passing only because the symlink walk happened to reach it first.
+    """
+    root = _evidence_root(tmp_path)
+    inside = root / RUN_NAMESPACE_DIRNAME / "a" / OPERATOR_RECEIPT_FILENAME
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_text("{}", encoding="utf-8")
+
+    receipt_module._refuse_escaping_candidate(root, inside)  # inside: no refusal
+
+    with pytest.raises(ReceiptChainResolutionError, match="outside the evidence root"):
+        receipt_module._refuse_escaping_candidate(root, tmp_path / "outside" / "receipt.json")
+
+
+def test_the_run_namespace_directory_may_not_itself_be_a_link(tmp_path: Path) -> None:
+    """`runs/` is enumerated, so it is checked before anything under it is read."""
+    root = _evidence_root(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / RUN_NAMESPACE_DIRNAME).symlink_to(elsewhere, target_is_directory=True)
+    head_directory = root / "head"
+    head_directory.mkdir()
+
+    with pytest.raises(ReceiptChainResolutionError, match="symbolic link"):
+        resolve_predecessor_receipt("e" * 64, head_directory=head_directory, evidence_root=root)
+
+
+def test_resolution_mutates_no_receipt_and_creates_no_file(tmp_path: Path) -> None:
+    """Receipts are immutable, and resolution is a read. Proved over the whole tree, twice.
+
+    Both outcomes are covered: a resolution that succeeds and one that refuses. A refusal that
+    "helpfully" materialized a canonical copy to satisfy the old resolver would be caught here.
+    """
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    _place(predecessor, _namespace(root, "m3_2a_clean_carry_in") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        _successor(predecessor),
+        _namespace(root, "m3_2_decision_062_sic_continuation") / OPERATOR_RECEIPT_FILENAME,
+    )
+    before = _tree_state(root)
+
+    resolve_predecessor_receipt(
+        predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+    )
+    with pytest.raises(ReceiptChainResolutionError):
+        resolve_predecessor_receipt("f" * 64, head_directory=head_path.parent, evidence_root=root)
+
+    assert _tree_state(root) == before
+
+
+def test_resolution_constructs_no_network_access(tmp_path: Path) -> None:
+    """Offline by construction: the module imports no transport, and the suite blocks sockets.
+
+    ``tests/conftest.py`` makes every socket call raise for the whole session, so the successful
+    resolution below is itself the proof that no connection was attempted.
+    """
+    assert not {"httpx", "socket", "urllib", "requests", "http"} & set(vars(receipt_module))
+
+    root = _evidence_root(tmp_path)
+    predecessor = live(request_plan_id="plan-predecessor")
+    _place(predecessor, _namespace(root, "predecessor_run") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "head_run") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    _, document = resolve_predecessor_receipt(
+        predecessor.receipt_id, head_directory=head_path.parent, evidence_root=root
+    )
+
+    assert document["receipt_id"] == predecessor.receipt_id

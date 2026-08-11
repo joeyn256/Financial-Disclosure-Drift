@@ -61,6 +61,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -76,22 +77,27 @@ __all__ = [
     "COMPLETION_STATUSES",
     "INTERRUPTION_STATES",
     "INVOCATION_MODES",
+    "OPERATOR_RECEIPT_FILENAME",
     "PHASES",
     "READABLE_RECEIPT_SCHEMA_VERSIONS",
     "RECEIPT_SCHEMA_VERSION",
     "RECEIPT_SCHEMA_VERSION_V2",
     "RESPONSE_CLASSIFICATION_BUCKETS",
+    "RUN_NAMESPACE_DIRNAME",
     "SCHEMA_DRIFT_OUTCOMES",
     "ZERO_NETWORK_MODES",
     "ExecutionReceipt",
     "ProhibitedReceiptContentError",
+    "ReceiptChainResolutionError",
     "ReceiptError",
     "ReceiptValidationError",
     "ReceiptWriteError",
     "canonical_bytes",
     "compute_receipt_id",
+    "content_derived_receipt_name",
     "inspect_receipt",
     "receipts_directory",
+    "resolve_predecessor_receipt",
     "scan_for_prohibited_content",
     "validate_receipt_document",
     "write_receipt",
@@ -1117,3 +1123,237 @@ def inspect_receipt(path: str | Path) -> dict[str, object]:
         )
         raise ReceiptValidationError(message)
     return document
+
+
+# --------------------------------------------------------------------------- #
+# Predecessor location: the accepted receipt artifact locations, and only those
+# --------------------------------------------------------------------------- #
+#: The accepted per-run receipt artifact name. ``--receipt-out`` names a receipt explicitly, and the
+#: accepted M3.2 convention gives each run its own namespace holding one receipt under this fixed
+#: name -- ``runs/m3_2a_clean_carry_in/execution_receipt.json`` (Decision 061 §7.3) and the
+#: Decision 062 continuation namespace beside it. A receipt written this way is **not** reachable by
+#: the content-derived name, which is the whole reason this module has to know the convention.
+OPERATOR_RECEIPT_FILENAME: Final = "execution_receipt.json"
+
+#: The evidence-root directory holding one namespace per run. Discovery descends exactly one level
+#: into it -- never recursively, and never into the raw store -- so the search is bounded and its
+#: cost does not grow with acquired evidence.
+RUN_NAMESPACE_DIRNAME: Final = "runs"
+
+
+class ReceiptChainResolutionError(ReceiptValidationError):
+    """A recorded predecessor did not resolve to exactly one valid receipt.
+
+    Deliberately a :class:`ReceiptValidationError`: every existing caller already treats that as a
+    stop, so a resolution refusal cannot be narrower than the broken-chain condition receipt spec
+    §11.4 makes a stop condition. Refusal is the only outcome -- no receipt is ever synthesized,
+    copied, renamed, or relocated to make a chain resolve.
+    """
+
+
+def content_derived_receipt_name(receipt_id: str) -> str:
+    """The §7.2 content-derived filename for one receipt identity."""
+    return f"receipt-{receipt_id}.json"
+
+
+def _refuse_symlinked_descent(root: Path, candidate: Path) -> None:
+    """Refuse a candidate that is, or is reached through, a symbolic link below ``root``.
+
+    ``root`` is already fully resolved by :func:`require_external_evidence_root`, so every component
+    strictly below it is a real name unless someone placed a link there. The walk is **lexical** on
+    purpose: resolving first would follow every link and leave nothing to detect.
+    """
+    depth = len(root.parts)
+    current = candidate
+    while len(current.parts) > depth and current.parent != current:
+        if current.is_symlink():
+            message = (
+                f"a component of the candidate receipt {candidate.name!r} is a symbolic link; "
+                f"receipts are addressed by real paths only"
+            )
+            raise ReceiptChainResolutionError(message)
+        current = current.parent
+
+
+def _refuse_escaping_candidate(root: Path, candidate: Path) -> None:
+    """Refuse a candidate whose resolved path leaves the governed evidence root.
+
+    Kept independent of :func:`_refuse_symlinked_descent` rather than folded into it. The symlink
+    walk refuses a *mechanism*; this refuses the *outcome*, so a path that escapes by any means the
+    walk does not model is still refused instead of silently read.
+    """
+    resolved_root = Path(os.path.realpath(root))
+    resolved = Path(os.path.realpath(candidate))
+    if resolved != resolved_root and resolved_root not in resolved.parents:
+        message = (
+            f"the candidate receipt {candidate.name!r} resolves outside the evidence root; "
+            f"predecessor resolution never reads a receipt the root does not govern"
+        )
+        raise ReceiptChainResolutionError(message)
+
+
+def _search_directories(evidence_root: Path) -> tuple[Path, ...]:
+    """The accepted receipt directories, in fixed deterministic order.
+
+    Namespaces are sorted by name so the order does not depend on directory iteration order, which
+    is filesystem-dependent and would make an ambiguity refusal depend on which candidate happened
+    to be seen first.
+    """
+    directories = [receipts_directory(evidence_root)]
+    namespaces = evidence_root / RUN_NAMESPACE_DIRNAME
+    if namespaces.is_symlink():
+        message = (
+            f"the {RUN_NAMESPACE_DIRNAME!r} directory of the evidence root is a symbolic link; "
+            f"run namespaces are addressed by real paths only"
+        )
+        raise ReceiptChainResolutionError(message)
+    if namespaces.is_dir():
+        directories.extend(
+            sorted(
+                (child for child in namespaces.iterdir() if child.is_dir()),
+                key=lambda child: child.name,
+            )
+        )
+    return tuple(directories)
+
+
+def _identified_candidate(
+    candidate: Path, receipt_id: str, *, name_asserts_identity: bool
+) -> dict[str, object] | None:
+    """Load one candidate and return it only if it *is* the requested receipt.
+
+    A file at the content-derived name claims an identity, so a document that contradicts it is a
+    defect and refuses. ``execution_receipt.json`` claims nothing, so a document with another
+    identity is simply another run's receipt and is skipped -- that is what keeps an unrelated
+    namespace from blocking a lawful chain.
+    """
+    try:
+        document = inspect_receipt(candidate)
+    except (OSError, ReceiptValidationError):
+        if name_asserts_identity:
+            raise
+        # A malformed operator-named receipt can never satisfy the requested identity, so it is
+        # skipped rather than raised: an unrelated damaged file in another namespace must not
+        # decide the fate of a chain that does not reference it.
+        return None
+
+    if str(document["receipt_id"]) == receipt_id:
+        return document
+    if name_asserts_identity:
+        message = (
+            f"the receipt stored at the content-derived name for "
+            f"{receipt_id[:12]}… records a different receipt_id; a receipt's name and its "
+            f"validated identity may never disagree"
+        )
+        raise ReceiptChainResolutionError(message)
+    return None
+
+
+def resolve_predecessor_receipt(
+    predecessor_receipt_id: str,
+    *,
+    head_directory: Path,
+    evidence_root: Path | None = None,
+) -> tuple[Path, dict[str, object]]:
+    """Locate the one valid receipt whose validated identity is ``predecessor_receipt_id``.
+
+    A chain head is written where its operator named it. ``--receipt-out`` has always allowed that,
+    and the accepted M3.2 convention gives every run its own namespace, so the T7 continuation's
+    predecessor sits in ``runs/m3_2a_clean_carry_in/`` while the head sits in
+    ``runs/m3_2_decision_062_sic_continuation/``. Looking only beside the head therefore cannot find
+    a lawful predecessor, and the chain reads as broken when it is intact.
+
+    Resolution is by **recorded identity**, never by a caller-supplied replacement receipt: every
+    candidate goes through the ordinary loader, schema validation, canonical-form check, and an
+    exact ``receipt_id`` equality test, and a candidate that fails any of them is not the
+    predecessor. The search is confined to the accepted receipt artifact locations beneath the
+    governed evidence root, in this fixed order:
+
+    1. ``<head directory>/receipt-<id>.json`` -- the existing accepted same-directory behaviour,
+       tried first and semantically unchanged, so no chain that resolves today resolves differently;
+    2. ``receipts/`` -- the §7.1 directory dedicated to receipts;
+    3. ``runs/<namespace>/`` -- each run namespace, sorted by name,
+
+    probing only the two accepted receipt filenames in each. Arbitrary JSON is never treated as a
+    receipt, and nothing is copied, moved, renamed, rewritten, or synthesized.
+
+    Args:
+        predecessor_receipt_id: the identity the head receipt recorded.
+        head_directory: the directory holding the chain head, searched first.
+        evidence_root: the resolved governed evidence root that bounds cross-namespace discovery.
+            ``None`` disables discovery entirely and leaves step 1 as the only behaviour, which is
+            what a caller that cannot prove a root must get.
+
+    Returns:
+        The candidate's path and its validated document.
+
+    Raises:
+        ReceiptChainResolutionError: nothing matched, more than one distinct receipt matched, or a
+            candidate was a symbolic link, escaped the root, or contradicted its own name.
+        ReceiptValidationError: the receipt at the content-derived name exists but is not valid.
+    """
+    name = content_derived_receipt_name(predecessor_receipt_id)
+
+    beside = Path(head_directory) / name
+    if beside.is_symlink():
+        message = (
+            f"the receipt beside the chain head at the content-derived name for "
+            f"{predecessor_receipt_id[:12]}… is a symbolic link; receipts are addressed by "
+            f"real paths only"
+        )
+        raise ReceiptChainResolutionError(message)
+    if beside.exists():
+        # Unchanged: a malformed receipt at the name that claims this identity is a defect of that
+        # receipt, never a reason to go looking for a different file that might be more agreeable.
+        document = _identified_candidate(beside, predecessor_receipt_id, name_asserts_identity=True)
+        if document is not None:
+            return beside, document
+
+    if evidence_root is None:
+        message = (
+            f"recovery_predecessor_receipt_id {predecessor_receipt_id[:12]}… does not resolve "
+            f"to a readable receipt beside the chain head, and no evidence root was supplied to "
+            f"search the accepted receipt locations"
+        )
+        raise ReceiptChainResolutionError(message)
+
+    root = Path(evidence_root)
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for directory in _search_directories(root):
+        for filename, asserts in ((name, True), (OPERATOR_RECEIPT_FILENAME, False)):
+            candidate = directory / filename
+            _refuse_symlinked_descent(root, candidate)
+            if not candidate.is_file():
+                continue
+            _refuse_escaping_candidate(root, candidate)
+            if candidate == beside:
+                continue  # already tried above; counting it twice would invent an ambiguity
+            document = _identified_candidate(
+                candidate, predecessor_receipt_id, name_asserts_identity=asserts
+            )
+            if document is not None:
+                matches.append((candidate, document))
+
+    if not matches:
+        message = (
+            f"recovery_predecessor_receipt_id {predecessor_receipt_id[:12]}… does not resolve "
+            f"to a readable receipt in any accepted receipt location beneath the evidence root"
+        )
+        raise ReceiptChainResolutionError(message)
+
+    # Two files carrying the same validated identity are byte-identical: `receipt_id` is the digest
+    # of the canonical preimage and `inspect_receipt` has already proved each file equals the
+    # canonical form of what it parsed to, so equal identity forces equal bytes. Rather than rely on
+    # that argument, the bytes are compared. Byte-identical copies are one receipt at two paths --
+    # exactly the collision §7.2 already resolves by identity when a receipt is rewritten -- and the
+    # first in the fixed search order is returned. Anything else is two different receipts claiming
+    # one identity, which is refused: choosing between them is not this function's to make.
+    payloads = {canonical_bytes(document) for _, document in matches}
+    if len(payloads) > 1:
+        message = (
+            f"recovery_predecessor_receipt_id {predecessor_receipt_id[:12]}… resolves to "
+            f"{len(matches)} candidate receipts whose contents differ; a receipt identity that "
+            f"names more than one distinct receipt is refused, never chosen between"
+        )
+        raise ReceiptChainResolutionError(message)
+    return matches[0]

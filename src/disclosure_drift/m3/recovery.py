@@ -49,6 +49,7 @@ from disclosure_drift.m3.receipt import (
     ReceiptValidationError,
     canonical_bytes,
     inspect_receipt,
+    resolve_predecessor_receipt,
 )
 from disclosure_drift.m3.request_plan import RequestPlan, derive_a_reachable
 from disclosure_drift.paths import DataTree
@@ -258,12 +259,20 @@ class ReceiptChainAccounting:
     head_acquisition_window: str | None = None
 
 
-def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
+def walk_receipt_chain(
+    head_path: Path, *, evidence_root: Path | None = None
+) -> ReceiptChainAccounting:
     """Follow `recovery_predecessor_receipt_id` back toward the first attempt.
 
     A missing or unreadable predecessor stops the walk and marks the chain unresolved. The missing
     receipt is *never* reconstructed: the template says so explicitly, and a reconstructed receipt
     would assert a consumed count nobody recorded.
+
+    ``evidence_root`` bounds where a predecessor may be *found*, not what counts as one. Each
+    receipt is still located by its recorded identity and validated in full; supplying the root only
+    lets :func:`resolve_predecessor_receipt` look in the accepted receipt locations beneath it
+    rather than beside the head alone, which is what a chain spanning two run namespaces needs.
+    Omitting it leaves the same-directory behaviour exactly as it was.
 
     Mixed ``2.0``/``3.0`` chains walk identically. A ``2.0`` root carries no carried-forward
     baseline, so it contributes zero and the arithmetic is unchanged for every chain written before
@@ -273,20 +282,30 @@ def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
     An **unresolved** chain never contributes a carry-in baseline: the walk did not reach a root, so
     there is no root to read one from, and the caller already treats an unresolved chain as a stop.
     """
-    receipts_dir = head_path.parent
+    head_directory = head_path.parent
     seen: list[str] = []
     consumed = 0
     interruption_state: str | None = None
     recorded_plan_sha256: str | None = None
-    current = head_path
+    # `None` means "the head has not been read yet"; every later iteration carries the identity the
+    # previous receipt recorded, which is the only thing a predecessor is ever located by.
+    pending_predecessor: str | None = None
     visited: set[str] = set()
     # The head receipt's own terminal facts, carried into every return so a chain that stops early
     # still reports what the head recorded. Populated once, on the first iteration.
     head_facts: dict[str, object] = {}
 
+    document: dict[str, object]
     while True:
         try:
-            document = inspect_receipt(current)
+            if pending_predecessor is None:
+                document = inspect_receipt(head_path)
+            else:
+                _, document = resolve_predecessor_receipt(
+                    pending_predecessor,
+                    head_directory=head_directory,
+                    evidence_root=evidence_root,
+                )
         except (OSError, ReceiptValidationError) as exc:
             return ReceiptChainAccounting(
                 receipt_ids=tuple(seen),
@@ -346,7 +365,7 @@ def walk_receipt_chain(head_path: Path) -> ReceiptChainAccounting:
                 ),
                 **head_facts,  # type: ignore[arg-type]
             )
-        current = receipts_dir / f"receipt-{predecessor}.json"
+        pending_predecessor = str(predecessor)
 
 
 def _head_receipt_facts(document: Mapping[str, object]) -> dict[str, object]:
@@ -1364,17 +1383,20 @@ def inspect_recovery_state(
     catalog_path: Path,
     data_root: Path,
     plan_transition: PlanTransitionAuthority | None = None,
+    evidence_root: Path | None = None,
 ) -> RecoveryState:
     """Determine whether an interrupted run may safely resume. Writes nothing.
 
     Args:
         plan: the approved request plan the interrupted run was executing.
-        receipt_chain_head: path to the most recent receipt; predecessors resolve beside it.
+        receipt_chain_head: path to the most recent receipt, and the authoritative chain head.
         catalog_path: the SQLite catalog to inspect read-only.
         data_root: the data root whose raw store is inspected.
         plan_transition: a verified Decision 062 predecessor→successor plan transition, where the
             caller supplies the successor of a plan the chain recorded. Omitted by default, so
             condition 8.10 asks for an unchanged hash unless an authority is explicitly presented.
+        evidence_root: the governed evidence root bounding predecessor discovery. Omitted by
+            default, which restricts the walk to receipts beside the head.
 
     Raises:
         RecoveryInspectionError: the catalog or head receipt is absent, so inspection cannot begin.
@@ -1393,7 +1415,7 @@ def inspect_recovery_state(
         raise RecoveryInspectionError(message)
 
     tree = DataTree.from_root(data_root)
-    walk = walk_receipt_chain(Path(receipt_chain_head))
+    walk = walk_receipt_chain(Path(receipt_chain_head), evidence_root=evidence_root)
 
     with read_only_catalog(Path(catalog_path)) as connection:
         integrity = integrity_report(connection)

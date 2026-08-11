@@ -3519,6 +3519,7 @@ def propose_continuation(
     window: str,
     approved_ceiling: int,
     plan_transition: PlanTransitionAuthority | None = None,
+    evidence_root: Path | None = None,
 ) -> ContinuationProposal:
     """Derive the deterministic continuation proposal for one interrupted window.
 
@@ -3554,6 +3555,7 @@ def propose_continuation(
         catalog_path=catalog_path,
         data_root=storage.data_root,
         plan_transition=plan_transition,
+        evidence_root=evidence_root,
     )
     reconstruction = reconstruct_catalog_state(catalog_path=catalog_path, storage=storage)
     requests = derive_logical_requests(plan)
@@ -3910,6 +3912,7 @@ def apply_recovery_action(
     storage: StorageBinding,
     census_run_id: str,
     lock_directory: Path | None = None,
+    evidence_root: Path | None = None,
 ) -> RecoveryActionResult:
     """Apply exactly one explicitly requested, deterministically required recovery action.
 
@@ -3965,6 +3968,7 @@ def apply_recovery_action(
         receipt_chain_head=receipt_chain_head,
         catalog_path=catalog_path,
         data_root=storage.data_root,
+        evidence_root=evidence_root,
     )
     if inspection.determination == "UNDETERMINED":
         reason = (

@@ -92,6 +92,7 @@ from disclosure_drift.m3.recovery import (
     PLAN_TRANSITION_SUBSTITUTION_COUNT,
     PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256,
     PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION,
+    SUCCESSFUL_TERMINAL_COMPLETION_STATUS,
     CarryInFixedBindings,
     PlanTransitionAuthority,
     RecoveryState,
@@ -122,6 +123,7 @@ from disclosure_drift.sec.http_client import (
 from disclosure_drift.sec.index_plan import CoverageWindow, plan_index_instances
 from disclosure_drift.sec.observation_catalog import (
     ObservationRecorder,
+    ProjectionValidation,
     RecoveryEvent,
     load_observations,
     open_recovery_state,
@@ -193,6 +195,7 @@ __all__ = [
     "LogicalRequest",
     "PhysicalResponseLog",
     "PreSendAttemptLedger",
+    "RebuildProjectionEligibility",
     "ReconciliationItem",
     "RecordingTransport",
     "RecoveryActionResult",
@@ -217,10 +220,12 @@ __all__ = [
     "load_approved_plan",
     "load_carry_in_authority",
     "observe_recovery_state",
+    "planned_request_identity",
     "prepare_operational_catalog",
     "prepare_storage",
     "propose_continuation",
     "reconcile_requests",
+    "rebuild_projection_eligibility",
     "reconstruct_catalog_state",
     "register_acquisition_run",
     "require_admitted_carry_in_authority",
@@ -2724,8 +2729,14 @@ class RequestReconciliation:
         }
 
 
-def _planned_request_identity(request: LogicalRequest) -> str:
-    """The normalized request identity the driver records for one planned request."""
+def planned_request_identity(request: LogicalRequest) -> str:
+    """The normalized request identity the driver records for one planned request.
+
+    Public because the read-only recovery inspection derives condition 8.8's identity-level
+    remainder from exactly this function and :func:`derive_logical_requests` (Decision 064 §6). One
+    implementation, one expansion, one identity: the inspection's remainder and the continuation
+    remainder cannot be two different counts of two differently-derived request sets.
+    """
     spec = require_registered(request.source_id)
     url = spec.url(**dict(request.parameters))
     return request_identity(request.source_id, url, dict(request.parameters))
@@ -2772,7 +2783,7 @@ def _item_for(
     in_flight_request_identity: str | None,
 ) -> ReconciliationItem:
     """Derive one planned request's item record from durable state alone."""
-    identity = _planned_request_identity(request)
+    identity = planned_request_identity(request)
     predecessor = verified_reusable_predecessor(reconstruction, request.source_id, identity)
     latest = reconstruction.latest_any(request.source_id, identity)
     conditions: list[str] = []
@@ -2879,7 +2890,7 @@ def reconcile_requests(
             )
             raise AcquisitionGateError(message)
 
-    planned = {(request.source_id, _planned_request_identity(request)) for request in requests}
+    planned = {(request.source_id, planned_request_identity(request)) for request in requests}
     unplanned = sorted(
         {
             (observation.source_id, observation.identity)
@@ -3468,7 +3479,7 @@ def _identify_in_flight(
             "appears possible"
         )
 
-    identities = [_planned_request_identity(request) for request in requests]
+    identities = [planned_request_identity(request) for request in requests]
     unresolved: list[int] = []
     for position, request in enumerate(requests):
         satisfied = (
@@ -3570,6 +3581,20 @@ def propose_continuation(
         head = None
     if head is not None:
         predecessor_receipt_id = str(head["receipt_id"])
+        # Decision 064 §4. A successfully completed window is never a predecessor to continue from,
+        # and this refusal is stated on its own rather than left to emerge from an empty remainder.
+        # The distinction matters: "nothing remains" is a fact about the reconciliation that a plan
+        # change, a superseded identity, or a future counting correction could move, whereas "this
+        # window already completed" is a fact the head receipt recorded and nothing downstream can
+        # rearrange. Read from the receipt itself, so it holds even where the inspection is not
+        # consulted, and it is checked here — before the ceiling arithmetic, before the store sweep,
+        # and long before any caller could reach a transport.
+        if head.get("completion_status") == SUCCESSFUL_TERMINAL_COMPLETION_STATUS:
+            refusals.append(
+                "the predecessor receipt records a completed acquisition; a successful window has "
+                "nothing left to continue and is never resumable, whatever the remainder, the "
+                "headroom, or the recovery determination says"
+            )
         if head.get("invocation_mode") != "live":
             refusals.append(
                 "the predecessor receipt is not a live acquisition receipt; a continuation "
@@ -3833,7 +3858,12 @@ class _RepairSweep:
     staging_partials: tuple[str, ...]
     reconcile_orphans: tuple[str, ...]
     stray_lineage_intents: tuple[str, ...]
-    projection_valid: bool
+    projection: ProjectionValidation
+
+    @property
+    def projection_valid(self) -> bool:
+        """Whether the derived audit projection agrees with SQLite in full."""
+        return self.projection.is_valid
 
 
 def _repair_sweep(catalog_path: Path, storage: StorageBinding) -> _RepairSweep:
@@ -3849,9 +3879,7 @@ def _repair_sweep(catalog_path: Path, storage: StorageBinding) -> _RepairSweep:
     tree = storage.tree
     with read_only_catalog(Path(catalog_path)) as connection:
         observations = load_observations(connection)
-        projection_valid = validate_audit_projection(
-            connection, tree.audit / _PROJECTION_NAME
-        ).is_valid
+        projection = validate_audit_projection(connection, tree.audit / _PROJECTION_NAME)
     recorded = {
         observation.relative_storage_path
         for observation in observations
@@ -3894,12 +3922,283 @@ def _repair_sweep(catalog_path: Path, storage: StorageBinding) -> _RepairSweep:
         staging_partials=tuple(staging_partials),
         reconcile_orphans=tuple(orphans),
         stray_lineage_intents=tuple(stray_intents),
-        projection_valid=projection_valid,
+        projection=projection,
     )
 
 
 def _refuse_repair(reason: str) -> RepairRefusedError:
     return RepairRefusedError(f"the recovery action is refused: {reason}")
+
+
+# --------------------------------------------------------------------------- #
+# Decision 064 §5 — the action-specific `rebuild-projection` eligibility gate
+# --------------------------------------------------------------------------- #
+#: The projection conditions a deterministic rebuild is the accepted repair for. The dividing
+#: question is one thing only: **does the file on disk assert anything the authoritative catalog
+#: contradicts?**
+#:
+#: The conditions below all answer *no*. The file is absent, or empty, or a byte-exact prefix of the
+#: authoritative serialization that stops early; or what disagrees is not the file's bytes at all
+#: but the derived `projected_to_audit` bookkeeping beside them; or what is present is the durable
+#: marker the catalog writes when it detects that a reconstruction is owed. Rebuilding from SQLite
+#: in any of those states loses nothing, because SQLite is the authority and nothing on disk claims
+#: otherwise. `unresolved_recovery_event` in particular has to be here: it is the record that a
+#: rebuild is *needed*, and treating it as a defect would make the repair unreachable from exactly
+#: the state that asks for it -- §8's circularity, reintroduced one level down.
+#:
+#: Every other condition is a **divergence**: a payload whose bytes disagree with the catalog's, a
+#: reordering, a duplicate or unknown identity, a malformed or truncated line, appended garbage, or
+#: a file outside its accepted location. Each means bytes exist that the catalog cannot account for
+#: -- evidence about what wrote to the audit trail -- and reconstructing over them would destroy
+#: precisely what an owner would need to rule on. Those states are referred, not repaired.
+#:
+#: The condition names explain; the proof is the byte-level prefix equality the eligibility gate
+#: checks beside them, so a state is never admitted on the strength of its label alone.
+#:
+#: This is a **narrowing** of what `rebuild-projection` previously accepted, and a deliberate one
+#: (Decision 064 §5.1). The action used to reconstruct over any invalid projection, on the
+#: argument that a derived file holds nothing authoritative. That argument is right about the file's
+#: *content* and wrong about its *existence*: bytes the catalog cannot explain are themselves a
+#: finding. The repair is not lost, only gated -- a separate owner ruling can still authorize it
+#: once the divergence is understood.
+#:
+#: The list is an allow-list rather than a deny-list, so a projection condition introduced later is
+#: refused by default rather than silently admitted.
+_RECONSTRUCTIBLE_PROJECTION_CONDITIONS: Final[frozenset[str]] = frozenset(
+    {
+        "empty_file_with_projected_rows",
+        "missing_observation_identity",
+        "missing_projection_file",
+        "projected_flags_claim_damaged_file",
+        "sqlite_projection_flag_stale",
+        "unresolved_recovery_event",
+        "valid_prefix_only",
+        "wrong_row_count",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildProjectionEligibility:
+    """Whether the `rebuild-projection` action may proceed, condition by condition.
+
+    Read-only and reportable on its own, so the eligibility of the one deterministic repair can be
+    *proved before* it is invoked rather than discovered by invoking it.
+    """
+
+    action: str
+    permitted: bool
+    conditions: tuple[tuple[str, bool, str], ...]
+
+    @property
+    def unmet(self) -> tuple[str, ...]:
+        """The names of every condition that does not hold, in evaluation order."""
+        return tuple(name for name, held, _ in self.conditions if not held)
+
+    @property
+    def refusal(self) -> str | None:
+        """The first unmet condition's detail, or ``None`` when every condition holds."""
+        for _, held, detail in self.conditions:
+            if not held:
+                return detail
+        return None
+
+    def as_record(self) -> Mapping[str, object]:
+        """Deterministic mapping for the evidence record."""
+        return {
+            "action": self.action,
+            "permitted": self.permitted,
+            "conditions": [
+                {"condition": name, "held": held, "detail": detail}
+                for name, held, detail in self.conditions
+            ],
+        }
+
+
+def _projection_lag_is_reconstructible(projection: ProjectionValidation) -> bool:
+    """Whether an invalid projection merely *lags* the catalog rather than diverging from it.
+
+    Two independent things must hold, and the second is the proof rather than the description:
+    every reported condition is on the reconstructible list, **and** the bytes actually present are
+    a byte-exact prefix of the authoritative serialization. A condition name alone could be
+    satisfied by a file whose early lines already disagree; the prefix equality cannot.
+    """
+    if set(projection.conditions) - _RECONSTRUCTIBLE_PROJECTION_CONDITIONS:
+        return False
+    return projection.observed_count is None or (
+        projection.valid_prefix_count == projection.observed_count
+    )
+
+
+def _condition_status(inspection: RecoveryState, number: str) -> str:
+    """One §8 condition's status from a completed inspection, or ``"ABSENT"`` if not evaluated."""
+    for condition in inspection.conditions:
+        if condition.number == number:
+            return condition.status
+    return "ABSENT"
+
+
+def _condition_settled(inspection: RecoveryState, number: str) -> bool:
+    """Whether one §8 condition is met, or lawfully not applicable."""
+    return _condition_status(inspection, number) in {"MET", "N/A"}
+
+
+def _rebuild_projection_eligibility(
+    *,
+    action: str,
+    inspection: RecoveryState,
+    sweep: _RepairSweep,
+    network_disabled: bool,
+) -> RebuildProjectionEligibility:
+    """Evaluate Decision 064 §5's eleven conditions for the projection rebuild.
+
+    **Why this action has its own gate.** The generic applier refuses every action from an
+    ``UNDETERMINED`` inspection, which is correct for the three actions that touch acquired
+    evidence. It was structurally wrong for exactly one: the derived audit projection is part of
+    what the inspection reads, so a projection that has fallen behind SQLite can itself push the
+    determination away from ``SAFE`` — and the only accepted repair for that state was then
+    unreachable from it. The condition the action exists to repair was gating the action.
+
+    The fix is **not** "run any action from any determination". It is a narrower gate for this one
+    action, and it is stricter than the blanket rule in every direction that matters: it demands a
+    resolved chain, an established terminal state, passing integrity, an unambiguous authoritative
+    observation set, no orphan or partial or missing-object uncertainty, no blocked recovery state,
+    resolved carry-in accounting, a disabled network, and — the load-bearing one — a projection
+    mismatch that is a *deterministic reconstruction*, never a divergence. An ``UNDETERMINED``
+    caused by anything other than the projection still refuses, because every one of those causes
+    has its own condition here.
+
+    Condition 8 of the ruling, writer ownership, is discharged by mechanism rather than by a second
+    opinion: the applier opens the exclusive writer lease for its write-ahead block *before* the
+    mutation, and a lease held elsewhere raises there and refuses with nothing written. A read-only
+    probe here would be a second implementation of the lease rule that could disagree with the real
+    one, and the weaker of two disagreeing checks is the one that matters.
+    """
+    projection = sweep.projection
+    divergent = sorted(set(projection.conditions) - _RECONSTRUCTIBLE_PROJECTION_CONDITIONS)
+    conditions: tuple[tuple[str, bool, str], ...] = (
+        (
+            "requested_action_is_rebuild_projection",
+            action == "rebuild-projection",
+            f"this eligibility applies to 'rebuild-projection' alone; {action!r} was requested and "
+            f"no other action inherits it",
+        ),
+        (
+            "receipt_chain_resolves",
+            _condition_settled(inspection, "8.1"),
+            f"condition 8.1 is {_condition_status(inspection, '8.1')}: the receipt chain must "
+            f"resolve to a first attempt before any deterministic repair is applied",
+        ),
+        (
+            "terminal_state_established",
+            _condition_settled(inspection, "8.2"),
+            f"condition 8.2 is {_condition_status(inspection, '8.2')}: the terminal or "
+            f"interruption state must be established, not guessed",
+        ),
+        (
+            "catalog_integrity_passes",
+            _condition_settled(inspection, "8.3"),
+            f"condition 8.3 is {_condition_status(inspection, '8.3')}: the authoritative catalog "
+            f"must pass its quick, integrity, and foreign-key checks before anything is "
+            f"reconstructed from it",
+        ),
+        (
+            "authoritative_observations_unambiguous",
+            _condition_settled(inspection, "8.4") and inspection.rows_without_object_count == 0,
+            f"condition 8.4 is {_condition_status(inspection, '8.4')} with "
+            f"{inspection.rows_without_object_count} committed row(s) lacking their object; a "
+            f"projection is only reconstructible from an observation set that is itself complete",
+        ),
+        (
+            "no_orphan_or_partial_uncertainty",
+            _condition_settled(inspection, "8.5")
+            and _condition_settled(inspection, "8.6")
+            and inspection.orphan_object_count == 0
+            and inspection.partial_file_count == 0,
+            f"conditions 8.5/8.6 are {_condition_status(inspection, '8.5')}/"
+            f"{_condition_status(inspection, '8.6')} with {inspection.orphan_object_count} "
+            f"orphan(s) and {inspection.partial_file_count} partial file(s); unadjudicated store "
+            f"state is not a projection problem and is not repaired by rebuilding one",
+        ),
+        (
+            "no_blocked_recovery_state",
+            _condition_settled(inspection, "8.9"),
+            f"condition 8.9 is {_condition_status(inspection, '8.9')}: a blocked recovery state is "
+            f"an unadjudicated mutation, and no action proceeds over one",
+        ),
+        (
+            "carry_in_accounting_resolves",
+            _condition_settled(inspection, "8.12"),
+            f"condition 8.12 is {_condition_status(inspection, '8.12')}: the chain's carry-in root "
+            f"and the catalog's consumption checkpoint must agree",
+        ),
+        (
+            "projection_mismatch_is_deterministically_reconstructible",
+            not projection.is_valid and _projection_lag_is_reconstructible(projection),
+            (
+                "the audit projection already agrees with SQLite, so there is nothing to rebuild"
+                if projection.is_valid
+                else (
+                    f"the projection diverges from SQLite rather than lagging it "
+                    f"({', '.join(divergent) or 'its bytes are not a valid prefix'}); a divergent "
+                    f"projection is referred for an owner ruling and is never overwritten by this "
+                    f"action"
+                )
+            ),
+        ),
+        (
+            "network_disabled",
+            network_disabled,
+            "the caller did not establish that the network is disabled; deterministic recovery "
+            "runs offline, and an unproved network state is treated exactly like an enabled one",
+        ),
+        (
+            "writer_lease_obtainable",
+            True,
+            "discharged by the exclusive writer lease the write-ahead block acquires before the "
+            "mutation; a lease held elsewhere refuses there, with nothing written",
+        ),
+    )
+    return RebuildProjectionEligibility(
+        action=action,
+        permitted=all(held for _, held, _ in conditions),
+        conditions=conditions,
+    )
+
+
+def rebuild_projection_eligibility(
+    *,
+    action: str,
+    plan: RequestPlan,
+    receipt_chain_head: Path,
+    catalog_path: Path,
+    storage: StorageBinding,
+    network_disabled: bool,
+    evidence_root: Path | None = None,
+) -> RebuildProjectionEligibility:
+    """Report whether `rebuild-projection` may proceed. Writes nothing, mutates nothing.
+
+    The same evaluation :func:`apply_recovery_action` performs, exposed so it can be *proved* before
+    a one-use repair authority is spent. It opens the catalog read-only, walks the receipt chain,
+    sweeps the store, and returns the eleven conditions with their statuses.
+
+    Raises:
+        RecoveryInspectionError: the catalog or the head receipt is absent, so nothing can be
+            established at all.
+    """
+    inspection = inspect_recovery_state(
+        plan=plan,
+        receipt_chain_head=receipt_chain_head,
+        catalog_path=catalog_path,
+        data_root=storage.data_root,
+        evidence_root=evidence_root,
+    )
+    return _rebuild_projection_eligibility(
+        action=action,
+        inspection=inspection,
+        sweep=_repair_sweep(catalog_path, storage),
+        network_disabled=network_disabled,
+    )
 
 
 def apply_recovery_action(
@@ -3913,6 +4212,11 @@ def apply_recovery_action(
     census_run_id: str,
     lock_directory: Path | None = None,
     evidence_root: Path | None = None,
+    # Defaults to "not established", which the projection rebuild's eligibility treats exactly as
+    # it treats an enabled network: it refuses. A caller that has proved the switches are off says
+    # so; one that has not gets a refusal rather than a silent pass. The other three actions do not
+    # read it.
+    network_disabled: bool = False,
 ) -> RecoveryActionResult:
     """Apply exactly one explicitly requested, deterministically required recovery action.
 
@@ -3921,6 +4225,14 @@ def apply_recovery_action(
     multi-action request, an ``UNDETERMINED`` state, a stale or already-resolved target, an
     action that differs from the deterministic recommendation, and a request its one authorized
     primitive cannot be scoped to are all refused before anything mutates.
+
+    ``rebuild-projection`` is the one exception to the ``UNDETERMINED`` rule, and it is a *narrower*
+    gate rather than a wider one: it is held to :func:`_rebuild_projection_eligibility`'s eleven
+    explicit conditions, which include everything the blanket test protected plus a requirement the
+    blanket test never made — that the projection mismatch be a deterministic reconstruction of a
+    lagging file rather than a divergence. See that function for why the blanket test was
+    structurally unable to authorize the repair of a condition it was itself computed from
+    (Decision 064 §5). No other action inherits it.
 
     Every mutation is durably write-ahead protected (Decision 041 §8). The corrected sequence:
     the exact required action and target are recomputed and validated; the caller-supplied,
@@ -3970,14 +4282,34 @@ def apply_recovery_action(
         data_root=storage.data_root,
         evidence_root=evidence_root,
     )
-    if inspection.determination == "UNDETERMINED":
+    sweep = _repair_sweep(catalog_path, storage)
+
+    # Decision 064 §5. Exactly one action has an action-specific eligibility gate, because exactly
+    # one action repairs a condition the determination itself is computed from. `rebuild-projection`
+    # is held to the eleven explicit conditions below instead of the blanket determination test;
+    # every other action keeps the blanket test unchanged, so no action inherits this and
+    # UNDETERMINED for evidence unrelated to the projection still refuses everything.
+    if action == "rebuild-projection":
+        eligibility = _rebuild_projection_eligibility(
+            action=action,
+            inspection=inspection,
+            sweep=sweep,
+            network_disabled=network_disabled,
+        )
+        if not eligibility.permitted:
+            reason = (
+                f"the action-specific rebuild-projection eligibility does not hold "
+                f"({', '.join(eligibility.unmet)}): {eligibility.refusal}"
+            )
+            raise _refuse_repair(reason)
+    elif inspection.determination == "UNDETERMINED":
         reason = (
-            f"the read-only inspection is UNDETERMINED ({inspection.basis}); every action is "
-            "refused from UNDETERMINED and the state is referred to the owner"
+            f"the read-only inspection is UNDETERMINED ({inspection.basis}); every action other "
+            "than the projection rebuild is refused from UNDETERMINED and the state is referred "
+            "to the owner"
         )
         raise _refuse_repair(reason)
 
-    sweep = _repair_sweep(catalog_path, storage)
     required: dict[str, tuple[str, ...]] = {
         "adopt-orphan": sweep.reconcile_orphans,
         "quarantine-partial": sweep.raw_partials,
@@ -4022,11 +4354,27 @@ def apply_recovery_action(
                 "unrelated mutation — resolve it first or refer to the owner"
             )
             raise _refuse_repair(reason)
-        if not sweep.projection_valid:
+        if not sweep.projection_valid and not _projection_lag_is_reconstructible(sweep.projection):
+            # Narrowed from "the projection is valid" to "the projection is not *divergent*", and
+            # the narrowing is what keeps the two guards composable (Decision 064 §5.2).
+            #
+            # The guard exists because the accepted reconciliation primitive persists a projection
+            # incident when it finds one, which would be a mutation the operator did not request.
+            # That reasoning is exact for a diverging projection: the incident would be recording an
+            # unadjudicated corruption, and the adoption would be riding alongside an owner
+            # question. It does not hold for a *lagging* one, where the incident records the
+            # already-known, already-true, idempotent fact that a rebuild is owed — and where the
+            # rebuild is the very next authorized action.
+            #
+            # Left unnarrowed, the two guards deadlock: adoption would require a projection the
+            # rebuild cannot produce while an orphan exists, and the rebuild would require an
+            # absence of orphans that adoption cannot deliver. That state is reachable from an
+            # ordinary interruption between a raw write and its catalog commit, so the deadlock
+            # would not be theoretical. The order that now works is adopt, then rebuild.
             reason = (
-                "the audit projection requires recovery; the accepted reconciliation "
-                "primitive would persist a projection incident alongside the requested "
-                "adoption — rebuild the projection first"
+                "the audit projection diverges from the catalog rather than lagging it; the "
+                "accepted reconciliation primitive would persist an incident for an unadjudicated "
+                "divergence alongside the requested adoption — refer the projection first"
             )
             raise _refuse_repair(reason)
     if action == "remove-stale-part":
@@ -5688,7 +6036,7 @@ def _plan_source_row(
         "census_run_id": run.census_run_id,
         "source_instance_id": outcome.request.identity_label,
         "source_id": outcome.request.source_id,
-        "request_identity": _planned_request_identity(outcome.request),
+        "request_identity": planned_request_identity(outcome.request),
         "required": 1,
         "source_scope": (
             "historical" if outcome.request.source_id == "sec_submissions_historical" else "base"
@@ -6540,6 +6888,17 @@ def _resume_consumption(
         message = (
             "a resume requires an exact predecessor receipt identity; it is never inferred from "
             "ambient state"
+        )
+        raise AcquisitionGateError(message)
+    # Re-asserted adjacent to the construction site, exactly as the operator gate and the carry-in
+    # bindings are, and for the same reason: the proposal surface proves it too, and this is what a
+    # caller several frames away — one that built a proposal object directly — cannot bypass. It
+    # raises here, before the run identity is chosen, before registration, and before
+    # `transport_factory` is reachable, so a complete head constructs no network (Decision 064 §4).
+    if continuation.inspection.head_acquisition_complete:
+        message = (
+            "the continuation's predecessor receipt records a completed acquisition; a successful "
+            "window is never resumed, and this invocation refuses before a transport is constructed"
         )
         raise AcquisitionGateError(message)
     if not continuation.remaining:

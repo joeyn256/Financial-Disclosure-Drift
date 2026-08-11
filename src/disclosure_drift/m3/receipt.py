@@ -1313,13 +1313,20 @@ def resolve_predecessor_receipt(
         message = (
             f"recovery_predecessor_receipt_id {predecessor_receipt_id[:12]}… does not resolve "
             f"to a readable receipt beside the chain head, and no evidence root was supplied to "
-            f"search the accepted receipt locations"
+            f"search the accepted receipt locations "
+            f"[category=no_evidence_root_for_discovery; candidate files examined=1; "
+            f"valid matches=0; search scopes=<head directory>]"
         )
         raise ReceiptChainResolutionError(message)
 
     root = Path(evidence_root)
     matches: list[tuple[Path, dict[str, object]]] = []
+    examined = 0
+    scopes: list[str] = []
     for directory in _search_directories(root):
+        scope = _relative_scope(root, directory)
+        if scope not in scopes:
+            scopes.append(scope)
         for filename, asserts in ((name, True), (OPERATOR_RECEIPT_FILENAME, False)):
             candidate = directory / filename
             _refuse_symlinked_descent(root, candidate)
@@ -1328,6 +1335,7 @@ def resolve_predecessor_receipt(
             _refuse_escaping_candidate(root, candidate)
             if candidate == beside:
                 continue  # already tried above; counting it twice would invent an ambiguity
+            examined += 1
             document = _identified_candidate(
                 candidate, predecessor_receipt_id, name_asserts_identity=asserts
             )
@@ -1335,9 +1343,17 @@ def resolve_predecessor_receipt(
                 matches.append((candidate, document))
 
     if not matches:
+        # Sanitized on purpose, and every element earns its place: an operator staring at a broken
+        # chain needs to know *which* identity failed, that the search actually ran, how much of the
+        # governed tree it covered, and that the answer was zero rather than ambiguous. What it must
+        # never carry is where the evidence root is, so the scopes below are relative names only and
+        # the absolute root never appears. No SEC identity, no header, no response body reaches
+        # here — this function has never seen one.
         message = (
             f"recovery_predecessor_receipt_id {predecessor_receipt_id[:12]}… does not resolve "
-            f"to a readable receipt in any accepted receipt location beneath the evidence root"
+            f"to a readable receipt in any accepted receipt location beneath the evidence root "
+            f"[category=no_candidate_matched; candidate files examined={examined}; "
+            f"valid matches=0; search scopes={', '.join(scopes)}]"
         )
         raise ReceiptChainResolutionError(message)
 
@@ -1353,7 +1369,26 @@ def resolve_predecessor_receipt(
         message = (
             f"recovery_predecessor_receipt_id {predecessor_receipt_id[:12]}… resolves to "
             f"{len(matches)} candidate receipts whose contents differ; a receipt identity that "
-            f"names more than one distinct receipt is refused, never chosen between"
+            f"names more than one distinct receipt is refused, never chosen between "
+            f"[category=ambiguous_distinct_candidates; candidate files examined={examined}; "
+            f"valid matches={len(matches)}; distinct receipts={len(payloads)}; "
+            f"search scopes={', '.join(scopes)}]"
         )
         raise ReceiptChainResolutionError(message)
     return matches[0]
+
+
+def _relative_scope(root: Path, directory: Path) -> str:
+    """One searched directory named relative to the evidence root, never absolutely.
+
+    A diagnostic naming ``receipts/`` or ``runs/<namespace>/`` tells an operator exactly where the
+    search looked; the same diagnostic naming the resolved root would publish the private evidence
+    location into a message that reaches logs and reports. A directory that is somehow not beneath
+    the root is reported as the fixed string below rather than by its path, so no fallback branch
+    can leak one either.
+    """
+    try:
+        relative = directory.relative_to(root)
+    except ValueError:
+        return "<outside the evidence root>"
+    return str(relative) if str(relative) != "." else "<evidence root>"

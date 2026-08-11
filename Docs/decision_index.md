@@ -457,6 +457,25 @@ acceptance decision, which records the outcome rather than the envelope. **Stage
 overall M3.2 T3 implementation acceptance**, which has not occurred; combined T2.5–T2.6 remains
 owner-gated and not begun.
 
+## Milestone 3.2 recovery, continuation, and reconciliation semantics — current rules
+
+The recovery surfaces have been corrected several times as real operation exposed real defects.
+These are the records that state the **current** rule; each supersedes only what it names, and every
+earlier record remains historically accurate about the state it described.
+
+| Question | Controlling record |
+|---|---|
+| Where a predecessor receipt may be found | [Decision 063](Decisions/decision_063_m3_2_cross_namespace_receipt_chain_recovery.md) §5 — by recorded identity, in the accepted receipt locations beneath the governed evidence root |
+| Which receipt condition **8.12** compares the carry-in checkpoint against | [Decision 064](Decisions/decision_064_m3_2_final_recovery_semantics_and_precloseout_hardening.md) §2 — the chain's **root**, never its head |
+| Which receipt condition **8.10** compares the supplied plan against | Decision 064 §2 — the chain's **head**; the two questions are distinct |
+| Whether condition **8.2** can establish a successful `complete` head | Decision 064 §3 — yes, from the same ten durable conditions, with no fabricated interruption state |
+| What `SAFE` means, and whether it permits acquiring again | Decision 064 §4 — evidence certainty only; a `complete` head is **non-resumable** and refuses before any transport is constructed |
+| When `rebuild-projection` may proceed | Decision 064 §5 — an explicit eleven-condition action-specific gate; it repairs a **lagging** projection and refuses a **diverging** one |
+| The order in which store uncertainty and the derived projection are repaired | Decision 064 §5.2 — adjudicate the store, then reconstruct the projection |
+| How condition **8.8**'s remainder is counted | Decision 064 §6 — **per identity**, through the same expansion continuation enforcement uses |
+| How an owner-superseded request identity is reconciled | Decision 064 §7 (with [Decision 062](Decisions/decision_062_m3_2_terminal_failure_and_sic_endpoint_remediation.md) §§7–8) — the same seventeen-condition verifier, paired flags, never inferred |
+| Where a receipt physically lives | Decision 064 §8 — two accepted filename conventions; a receipt is addressed by its recorded identity |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

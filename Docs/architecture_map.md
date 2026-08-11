@@ -51,9 +51,9 @@ None is a module, a migration, a table, a CLI command, or a runtime path, and no
 | [`Milestones/contracts/m3_2.md`](../Milestones/contracts/m3_2.md) | **The active stage contract.** Exact-path bounded M3.2 contract, accepted at T1 (Decision 034). Its §22 cadence was amended by Decisions 035 and 037; **stage progress is recorded in the ledger, never in the contract** |
 | [`Docs/m3/m3_2_t2_implementation_authorization_packet.md`](m3/m3_2_t2_implementation_authorization_packet.md) | The accepted T2 implementation plan (revision v2), preserved byte-identical. It proposes the fifteen-path maximum T2 envelope and declines `sec/census_orchestrator.py` and `sec/index_retrieval.py`. **A packet is mechanics; the decision that cites it is the authority** |
 | [`Milestones/milestone_03_master_plan.md`](../Milestones/milestone_03_master_plan.md) | The five phases, each with 36 specified fields, and their frozen internal subdivisions; the request-volume policy; the two-layer evidence model; the mandatory contents of every future phase contract |
-| [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled `AVAILABLE NOW` or `PLANNED — NOT YET IMPLEMENTED` |
+| [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled by implementation status. Its current-state banner records that M3.2A acquisition is complete at 75/75 successor identities and 77 of 801 attempts, and that no further live SEC request is authorized (Decision 064 §9) |
 | [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **A1–A12 is implemented but has not been run to a passing operational token; E1–E8 remains unimplemented and belongs to M3.3A** |
-| [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The proposed `m3-execution-receipt/2.0` design for dry-run and live commands — permitted fields, prohibited fields, serialization, storage, retention, redaction, replay, recovery, versioning, validation. **Creates no code and no table** |
+| [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The execution-receipt design for dry-run and live commands — permitted fields, prohibited fields, serialization, storage (both accepted filename conventions — Decision 064 §8), retention, redaction, replay, recovery, versioning, validation. Written against `m3-execution-receipt/2.0`; the current writer is `3.0` and readers accept both (Decision 055 §7). **Creates no code and no table** |
 | [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus twelve new Milestone 3 entries. **Closes none** |
 | [`Docs/m3/templates/`](m3/templates/request_budget.md) | The eight frozen operational templates: request budget, Gate F, Gate H, schema-drift incident, interrupted-run recovery, real-snapshot evidence, root-hash approval, and the public evidence index |
 
@@ -392,9 +392,11 @@ and neither is itself authorization.
 - **Source:** [`m3/rehearsal.py`](../src/disclosure_drift/m3/rehearsal.py) (the A1–A12 offline
   rehearsal and its scripted transport), [`m3/request_plan.py`](../src/disclosure_drift/m3/request_plan.py)
   (the deterministic zero-request plan and the derived `A_reachable`),
-  [`m3/receipt.py`](../src/disclosure_drift/m3/receipt.py) (`m3-execution-receipt/2.0`),
-  [`m3/recovery.py`](../src/disclosure_drift/m3/recovery.py) (**read-only** interrupted-run
-  inspection — it imports no writer and opens the catalog `PRAGMA query_only`),
+  [`m3/receipt.py`](../src/disclosure_drift/m3/receipt.py) (writer `m3-execution-receipt/3.0`,
+  readers `2.0` and `3.0`; and the chain resolver that locates a predecessor by recorded identity),
+  [`m3/recovery.py`](../src/disclosure_drift/m3/recovery.py) (**read-only** recovery inspection — it
+  imports no writer and opens the catalog `PRAGMA query_only`; the §8 conditions, the identity-level
+  remainder, and the continuation-permission report live here),
   [`m3/evidence_paths.py`](../src/disclosure_drift/m3/evidence_paths.py) (the evidence-root
   containment boundary), [`sec/request_ceiling.py`](../src/disclosure_drift/sec/request_ceiling.py)
   (the cumulative physical-attempt gate, refusing *before* the attempt that would exceed the
@@ -461,7 +463,8 @@ and neither is itself authorization.
   [041](Decisions/decision_041_m3_2_t2_4_recovery_state_primitive_authority.md), and
   [042](Decisions/decision_042_m3_2_t2_4_acceptance_and_publication.md) (T2.4).
 - **Persistence:** **no new migration** — `NO_NEW_MIGRATION_REQUIRED`, chain still `0001`–`0013` —
-  and **no receipt-schema change**, `m3-execution-receipt/2.0` frozen. Recovery state uses the
+  and **no receipt-schema change at T2.4**, `m3-execution-receipt/2.0` frozen for that stage.
+  Recovery state uses the
   existing `census_recovery_states` / `census_recovery_events` families; the run identity is a
   caller-supplied, already-registered `ops_ingestion_jobs.job_id`, never minted here.
 - **Tests:** `tests/unit/test_m3_acquisition.py`, `tests/unit/test_m3_recover.py`,

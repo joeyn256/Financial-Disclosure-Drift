@@ -660,8 +660,9 @@ with that authority, **Gate F cannot pass** — a request plan that disagrees wi
 coverage cutoff is not a plan a budget can be approved against.
 
 **How the M3.2B counts get resolved.** The separate M3.2 `m3 derive-dependent-plan` command
-(**`PLANNED — NOT YET IMPLEMENTED`**, interface in the operator runbook) runs after M3.2A, over the
-frozen bootstrap objects. It enumerates the historical-file references those objects actually name
+(**`PLANNED — NOT YET IMPLEMENTED`** when this plan was written; **implemented and accepted since**,
+interface in the operator runbook — M3.2B itself remains unauthorized and not begun) runs after
+M3.2A, over the frozen bootstrap objects. It enumerates the historical-file references those objects actually name
 and the explicit reconciliation set the operator supplies, prints the complete per-route table, and
 emits the second request-plan hash — **while making zero requests**. Its output is the second budget
 the owner approves. M3.1's `m3 plan-requests` command plans M3.2A only.

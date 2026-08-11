@@ -735,7 +735,7 @@ Every Milestone 3 phase:
 | Field | Value |
 |---|---|
 | **Origin** | Milestone 3 master planning; [`execution_receipt_spec.md`](execution_receipt_spec.md) §12 |
-| **Description** | The execution-receipt schema is versioned `m3-execution-receipt/2.0` before the first receipt exists. A later version change **during** Milestone 3 would make receipts from different phases non-comparable |
+| **Description** | The execution-receipt schema was versioned `m3-execution-receipt/2.0` before the first receipt existed. A later version change **during** Milestone 3 would make receipts from different phases non-comparable. **That change has since occurred, as designed rather than as a surprise:** accepted Decision 055 §7 moved the writer to `m3-execution-receipt/3.0`, adding one field and restating one condition, with readers accepting **both** versions and every existing `2.0` receipt byte-unchanged, valid, and usable in a mixed-version chain. The limitation stays `ACTIVE` because the comparability concern is real for any *further* version change |
 | **Affected M3 phase** | all |
 | **Status** | `ACTIVE` |
 | **Methodology impact** | **None — receipts enter no governed identity**, so a schema change cannot alter any result |

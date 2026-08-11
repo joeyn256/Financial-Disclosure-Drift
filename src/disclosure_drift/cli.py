@@ -42,6 +42,7 @@ from disclosure_drift.m3.acquisition import (
     LiveOperationAuthorization,
     LiveOperatorGate,
     RequestReconciliation,
+    StorageBinding,
     WindowOutcome,
     apply_recovery_action,
     derive_dependent_plan,
@@ -51,6 +52,7 @@ from disclosure_drift.m3.acquisition import (
     prepare_operational_catalog,
     prepare_storage,
     propose_continuation,
+    rebuild_projection_eligibility,
     reconcile_requests,
     reconstruct_catalog_state,
     require_m3_2a_consumed_baseline,
@@ -620,6 +622,18 @@ def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.Argumen
         reconcile.add_argument(
             name, type=Path, required=True, metavar="RELATIVE_PATH", help=help_text
         )
+    _add_plan_transition_argument(reconcile)
+    reconcile.add_argument(
+        "--plan-transition-predecessor-receipt",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help=(
+            "The receipt of the run that executed the predecessor plan. Required with, and only "
+            "with, --plan-transition-predecessor: the transition's registry-version condition asks "
+            "what the predecessor run actually recorded, and only that run's receipt records it."
+        ),
+    )
 
     drift = m3_subparsers.add_parser(
         "show-drift",
@@ -693,6 +707,15 @@ def _add_m3_2_parsers(m3_subparsers: argparse._SubParsersAction[argparse.Argumen
         help=(
             "The exact target the action addresses, as the deterministic recovery recommendation "
             "names it: a data-root-relative path, or the audit projection filename."
+        ),
+    )
+    recover.add_argument(
+        "--check-only",
+        action="store_true",
+        help=(
+            "Report whether the requested action is eligible and stop. Mutates nothing, opens no "
+            "writer, and consumes no repair authority, so eligibility can be proved before a "
+            "one-use authority is spent. Exits 4 when the action would be refused."
         ),
     )
 
@@ -1852,11 +1875,12 @@ def _m3_recovery_state_command(
             evidence_root=evidence_root,
         )
 
-    print("Safe-resume determination (read-only; nothing was repaired).")
+    print("Recovery determination (read-only; nothing was repaired).")
     for condition in state.conditions:
         print(f"  {condition.number:<5} {condition.status:<8} {condition.condition}")
     for label, value in (
         ("interruption state", str(state.interruption_state)),
+        ("head completion status", str(state.head_completion_status)),
         ("receipt chain length", str(len(state.receipt_chain))),
         ("consumed physical attempts", str(state.consumed_physical_attempts)),
         ("committed observations", str(state.committed_observation_count)),
@@ -1864,6 +1888,14 @@ def _m3_recovery_state_command(
         ("rows without object", str(state.rows_without_object_count)),
         ("partial files", str(state.partial_file_count)),
         ("determination", state.determination),
+        # Reported beside the determination, and separately from it, because they answer a
+        # different question. The determination is about evidence certainty; these are about
+        # permission and outstanding work, and a completed window is `SAFE` with continuation
+        # refused (Decision 064 §4). Both remainders come from the identity-level reconciliation
+        # continuation enforcement uses, so this display and that enforcement cannot disagree.
+        ("continuation permitted", "yes" if state.continuation_permitted else "no"),
+        ("continuation remaining", str(state.remaining_logical_requests)),
+        ("worst-case remaining attempts", str(state.worst_case_remaining_attempts)),
         ("basis", state.basis),
         ("required action", state.required_action),
     ):
@@ -1887,6 +1919,13 @@ def _resolved_plan_transition(
     The predecessor's recorded source-registry version is read from the **predecessor receipt**,
     not from the operator and not from the predecessor plan document: condition 14 asks what the
     run actually recorded, and the pre-transition plan schema recorded no registry version at all.
+
+    ``receipt_chain_head`` is therefore the receipt of the run that executed the *predecessor* plan,
+    and each caller names it explicitly. For a resume and for a recovery inspection that is the
+    chain head, because the run being continued is the predecessor. For a reconciliation performed
+    *after* the successor run completed it is not — the head is the successor's own receipt, which
+    records the successor registry — so that surface takes the predecessor receipt as its own
+    argument rather than assuming the two coincide.
 
     Raises:
         GateFailureError: the transition was requested but no receipt is available to bind it to.
@@ -3054,7 +3093,27 @@ def _m3_reconcile_requests_command(
 
     The report is written on both exits, because the evidence that explains a ``4`` is as
     load-bearing as the evidence that explains a ``0``. It emits no receipt.
+
+    ``--plan-transition-predecessor`` makes this surface transition-aware (Decision 064 §7). It is
+    opt-in and never inferred: without it, a successor plan reconciled against a catalog holding the
+    predecessor's retired identity reports that identity as a blocking out-of-plan observation, and
+    reconciliation can never come clean for a window an owner has already ruled on. With it, the
+    *same* seventeen-condition verifier every other surface uses proves the pair, and the one
+    superseded identity moves to ``superseded_out_of_plan`` — still stored, still visible, still
+    failed historical evidence, still satisfying nothing. Every other out-of-plan observation stays
+    blocking, and an unauthorized pair refuses rather than reconciling.
     """
+    if (args.plan_transition_predecessor is None) != (
+        args.plan_transition_predecessor_receipt is None
+    ):
+        return _usage_failure(
+            "--plan-transition-predecessor and --plan-transition-predecessor-receipt are supplied "
+            "together or not at all; the transition names a plan pair and binds to what the "
+            "predecessor run recorded, and neither half establishes it alone",
+            logger,
+            "reconcile-requests",
+        )
+
     plan = request_plan_from_document(_read_artifact_bytes(evidence_root, args.plan))
     catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
     storage = prepare_storage(
@@ -3062,15 +3121,28 @@ def _m3_reconcile_requests_command(
         data_root_relative=args.data_root,
         repository_root=_repository_root(),
     )
+    transition = (
+        None
+        if args.plan_transition_predecessor is None
+        else _resolved_plan_transition(
+            evidence_root,
+            args,
+            plan,
+            _m3_artifact_path(evidence_root, args.plan_transition_predecessor_receipt),
+        )
+    )
     reconciliation = reconcile_requests(
         plan=plan,
         reconstruction=reconstruct_catalog_state(catalog_path=catalog_path, storage=storage),
         storage=storage,
+        plan_transition=transition,
     )
 
     clean = _reconciliation_is_clean(reconciliation)
     _write_m3_artifact_once(
-        _canonical_json_bytes(_reconciliation_report(reconciliation, clean=clean)),
+        _canonical_json_bytes(
+            _reconciliation_report(reconciliation, clean=clean, transition=transition)
+        ),
         evidence_root=evidence_root,
         relative=args.report_out,
         description="reconciliation report",
@@ -3086,6 +3158,14 @@ def _m3_reconcile_requests_command(
             str(len(reconciliation.absences_without_terminal_reason)),
         ),
         ("out-of-plan observations", str(len(reconciliation.out_of_plan))),
+        (
+            "superseded out-of-plan observations",
+            str(len(reconciliation.superseded_out_of_plan)),
+        ),
+        (
+            "plan transition applied",
+            "none" if transition is None else transition.decision_reference,
+        ),
         ("store findings", str(len(reconciliation.store_findings))),
         ("blocking drift events", str(len(reconciliation.blocking_drift))),
         ("nonblocking drift events", str(len(reconciliation.nonblocking_drift))),
@@ -3122,6 +3202,7 @@ def _reconciliation_report(
     reconciliation: RequestReconciliation,
     *,
     clean: bool,
+    transition: PlanTransitionAuthority | None = None,
 ) -> Mapping[str, object]:
     """The private, deterministic reconciliation report document.
 
@@ -3132,12 +3213,28 @@ def _reconciliation_report(
     drift that explain the exit. It carries **no** raw progress-sink exception text: no field here
     is derived from one, and the reconciliation it renders is built from durable catalog state
     rather than from any in-memory run observable.
+
+    Schema ``1.1`` adds exactly one field, ``plan_transition``, and changes nothing else. It is not
+    decoration: a reconciliation that moves an observation out of the blocking set has to record
+    *under what authority*, or the report states a clean result while silently omitting the reason a
+    stranded identity stopped counting. ``null`` is the ordinary case and means no transition was
+    supplied — which is also the only case a ``1.0`` reader ever saw.
     """
     return {
-        "reconciliation_report_schema_version": "m3-2-reconciliation-report/1.0",
+        "reconciliation_report_schema_version": "m3-2-reconciliation-report/1.1",
         "window": reconciliation.window,
         "plan_sha256": reconciliation.plan_sha256,
         "exit_is_clean": clean,
+        "plan_transition": (
+            None
+            if transition is None
+            else {
+                "decision_reference": transition.decision_reference,
+                "predecessor_plan_sha256": transition.predecessor_plan_sha256,
+                "successor_plan_sha256": transition.successor_plan_sha256,
+                "substituted_source_id": transition.substituted_source_id,
+            }
+        ),
         "absence_enumeration": [item.as_record() for item in reconciliation.absences],
         "absences_without_terminal_reason": [
             item.identity_label for item in reconciliation.absences_without_terminal_reason
@@ -3196,7 +3293,7 @@ def _m3_show_drift_command(
 
 def _m3_recover_command(
     args: argparse.Namespace,
-    config: ProjectConfig,  # noqa: ARG001 - the applier reads only the explicit inputs
+    config: ProjectConfig,
     logger: Logger,
     evidence_root: Path,
 ) -> int:
@@ -3210,6 +3307,10 @@ def _m3_recover_command(
 
     ``--event`` is the operator name for the exact target the action addresses, which is what the
     accepted applier calls its ``target``.
+
+    The configured network switches are read for exactly one purpose: the projection rebuild's
+    action-specific eligibility requires the network to be disabled (Decision 064 §5, condition 10).
+    They authorize nothing here and are never consulted to permit anything.
     """
     catalog_path = _m3_catalog_path(evidence_root, args.data_root, args.catalog)
     validate_acquisition_run(catalog_path, str(args.run))
@@ -3220,15 +3321,31 @@ def _m3_recover_command(
         data_root_relative=args.data_root,
         repository_root=_repository_root(),
     )
+    network_disabled = not (config.network.enabled or config.network.m3_acquire_enabled)
+    receipt_chain_head = _m3_artifact_path(evidence_root, args.receipt_chain_head)
+
+    if args.check_only:
+        return _m3_recover_check_only(
+            args,
+            logger,
+            plan=plan,
+            receipt_chain_head=receipt_chain_head,
+            catalog_path=catalog_path,
+            storage=storage,
+            network_disabled=network_disabled,
+            evidence_root=evidence_root,
+        )
+
     result = apply_recovery_action(
         action=str(args.action),
         target=str(args.event),
         plan=plan,
-        receipt_chain_head=_m3_artifact_path(evidence_root, args.receipt_chain_head),
+        receipt_chain_head=receipt_chain_head,
         catalog_path=catalog_path,
         storage=storage,
         census_run_id=str(args.run),
         evidence_root=evidence_root,
+        network_disabled=network_disabled,
     )
 
     print("Recovery action applied (exactly one; a fresh inspection is required next).")
@@ -3250,4 +3367,60 @@ def _m3_recover_command(
         logger.error("m3 recover: the post-action state is UNDETERMINED")
         return EXIT_GATE_FAILURE
     logger.info("m3 recover: applied %s and resolved its write-ahead state", result.action)
+    return EXIT_OK
+
+
+def _m3_recover_check_only(
+    args: argparse.Namespace,
+    logger: Logger,
+    *,
+    plan: RequestPlan,
+    receipt_chain_head: Path,
+    catalog_path: Path,
+    storage: StorageBinding,
+    network_disabled: bool,
+    evidence_root: Path,
+) -> int:
+    """Report the requested action's eligibility without applying it. Mutates nothing.
+
+    Only ``rebuild-projection`` has an action-specific eligibility gate to report; the other three
+    keep the blanket determination rule, and for those this prints the determination that decides
+    them rather than inventing a per-condition table they do not have.
+    """
+    action = str(args.action)
+    if action != "rebuild-projection":
+        state = inspect_recovery_state(
+            plan=plan,
+            receipt_chain_head=receipt_chain_head,
+            catalog_path=catalog_path,
+            data_root=storage.data_root,
+            evidence_root=evidence_root,
+        )
+        permitted = state.determination != "UNDETERMINED"
+        print(f"Recovery action eligibility — {action} (read-only; nothing was applied).")
+        print(f"  {'determination':<52}: {state.determination}")
+        print(f"  {'eligible':<52}: {'yes' if permitted else 'no'}")
+        print(f"  {'basis':<52}: {state.basis}")
+    else:
+        eligibility = rebuild_projection_eligibility(
+            action=action,
+            plan=plan,
+            receipt_chain_head=receipt_chain_head,
+            catalog_path=catalog_path,
+            storage=storage,
+            network_disabled=network_disabled,
+            evidence_root=evidence_root,
+        )
+        permitted = eligibility.permitted
+        print(f"Recovery action eligibility — {action} (read-only; nothing was applied).")
+        for name, held, detail in eligibility.conditions:
+            print(f"  {'HELD' if held else 'NOT HELD':<9}{name}")
+            if not held:
+                print(f"            {detail}")
+        print(f"  {'eligible':<52}: {'yes' if permitted else 'no'}")
+
+    if not permitted:
+        logger.error("m3 recover --check-only: %s is not eligible", action)
+        return EXIT_GATE_FAILURE
+    logger.info("m3 recover --check-only: %s is eligible", action)
     return EXIT_OK

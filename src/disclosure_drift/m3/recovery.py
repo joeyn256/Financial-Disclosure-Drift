@@ -55,6 +55,7 @@ from disclosure_drift.m3.request_plan import RequestPlan, derive_a_reachable
 from disclosure_drift.paths import DataTree
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.observation_catalog import load_observations, validate_audit_projection
+from disclosure_drift.sec.snapshots import SourceObservation
 from disclosure_drift.sec.source_registry import SOURCES
 from disclosure_drift.storage.catalog import read_only_connection
 from disclosure_drift.storage.sqlite import integrity_report
@@ -79,6 +80,7 @@ __all__ = [
     "PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256",
     "PLAN_TRANSITION_SUCCESSOR_REGISTRY_VERSION",
     "RECOVERY_DETERMINATIONS",
+    "SUCCESSFUL_TERMINAL_COMPLETION_STATUS",
     "CarryInFixedBindings",
     "ConditionResult",
     "PlanTransitionAuthority",
@@ -185,11 +187,51 @@ class RecoveryState:
     orphan_object_count: int
     rows_without_object_count: int
     partial_file_count: int
+    #: The head receipt's own recorded completion status, or ``None`` where no head was read (the
+    #: receiptless forensic mode). Carried so the surfaces below can tell a successful terminal end
+    #: from every other terminal end without re-reading the receipt.
+    head_completion_status: str | None = None
+    #: The identity-level remainder — the two figures condition 8.8 reports, kept as data rather
+    #: than only as prose so a caller does not have to parse the detail string to act on them.
+    remaining_logical_requests: int = 0
+    worst_case_remaining_attempts: int = 0
+
+    @property
+    def head_acquisition_complete(self) -> bool:
+        """Whether the head receipt records a **successful** terminal window."""
+        return self.head_completion_status == SUCCESSFUL_TERMINAL_COMPLETION_STATUS
 
     @property
     def resume_authorized(self) -> bool:
-        """Only `SAFE` authorizes a resume, and only under a separate M3.2 contract."""
+        """Whether the *evidence* is certain enough for a resume to be considered at all.
+
+        `SAFE` describes recovery certainty, not permission to acquire again (Decision 064 §4). It
+        is a necessary precondition and never a sufficient one: a successfully completed window is
+        `SAFE` — its state is fully established and nothing is unresolved — and is still not
+        resumable. :attr:`continuation_permitted` is the permission question; this is the evidence
+        question, and conflating the two is precisely what would let a complete head resume.
+        """
         return self.determination == "SAFE"
+
+    @property
+    def continuation_permitted(self) -> bool:
+        """Whether a live continuation could lawfully be *proposed* from this state.
+
+        Three independent facts must hold, and the second is the one Decision 064 §4 adds: the
+        evidence must be certain (`SAFE`), the head must not record a successful terminal window,
+        and there must be outstanding planned work. A successful head fails the second regardless of
+        the other two, so no rearrangement of the remainder or of the determination can make an
+        already-complete acquisition resumable.
+
+        This is a read-only *report*. Authorization to continue remains a separate owner act, and
+        the continuation proposal re-derives the same refusal independently rather than trusting
+        this property.
+        """
+        return (
+            self.determination == "SAFE"
+            and not self.head_acquisition_complete
+            and self.remaining_logical_requests > 0
+        )
 
     def as_record(self) -> Mapping[str, object]:
         """Non-secret evidence mapping. Carries counts, states, and identifiers only.
@@ -203,6 +245,10 @@ class RecoveryState:
             "required_action": self.required_action,
             "receipt_chain": list(self.receipt_chain),
             "interruption_state": self.interruption_state,
+            "head_completion_status": self.head_completion_status,
+            "continuation_permitted": self.continuation_permitted,
+            "remaining_logical_requests": self.remaining_logical_requests,
+            "worst_case_remaining_attempts": self.worst_case_remaining_attempts,
             "consumed_physical_attempts": self.consumed_physical_attempts,
             "committed_observation_count": self.committed_observation_count,
             "orphan_object_count": self.orphan_object_count,
@@ -237,15 +283,28 @@ class ReceiptChainAccounting:
     interruption_state: str | None
     resolved: bool
     detail: str
+    #: The **head** receipt's recorded plan hash: the plan the most recent invocation executed, and
+    #: therefore the one condition 8.10 asks a supplied plan to match. It is emphatically *not* the
+    #: plan a carry-in authority was minted against — see :attr:`root_request_plan_sha256`.
     request_plan_sha256: str | None = None
     root_carried_forward: int = 0
     root_carry_in_authority_sha256: str | None = None
-    #: The root receipt's own window and ceiling, carried so the carry-in cross-check can compare
-    #: the checkpoint against what the root actually recorded. Both are long-standing `2.0` receipt
-    #: fields (`acquisition_window`, `approved_request_ceiling`); nothing new is required of a
-    #: receipt to populate them.
+    #: The root receipt's own window, ceiling, and plan, carried so the carry-in cross-check can
+    #: compare the checkpoint against what the root actually recorded. All three are long-standing
+    #: receipt fields (`acquisition_window`, `approved_request_ceiling`, `request_plan_sha256`);
+    #: nothing new is required of a receipt to populate them.
     root_acquisition_window: str | None = None
     root_approved_request_ceiling: int | None = None
+    #: The **root** receipt's recorded plan hash: the plan the chain's first attempt executed, and
+    #: therefore the plan the carry-in authority and its consumption checkpoint were bound to.
+    #:
+    #: Head and root are the same value for every chain whose plan never moved, which is why the
+    #: distinction went unnoticed until one lawfully differed. They diverge exactly when an accepted
+    #: owner plan transition moves a later invocation onto a successor plan (Decision 062 §7): the
+    #: carry-in was minted under the predecessor and the head executes the successor, and both facts
+    #: are true at once. A cross-check that reads the head there compares a fact about *now* against
+    #: a record of *then* and refuses a lawful chain.
+    root_request_plan_sha256: str | None = None
     #: The **head** receipt's own terminal facts, as it recorded them. They describe how *this*
     #: invocation ended, which is a different question from the chain's cumulative arithmetic
     #: above, and they are the evidence condition 8.2 establishes a terminal state from. Each is
@@ -350,6 +409,7 @@ def walk_receipt_chain(
             authority = document.get("carry_in_authority_sha256")
             root_window = document.get("acquisition_window")
             root_ceiling = document.get("approved_request_ceiling")
+            root_plan = document.get("request_plan_sha256")
             return ReceiptChainAccounting(
                 receipt_ids=tuple(seen),
                 consumed_physical_attempts=consumed + carried,
@@ -363,6 +423,7 @@ def walk_receipt_chain(
                 root_approved_request_ceiling=(
                     None if root_ceiling is None else _as_count(root_ceiling)
                 ),
+                root_request_plan_sha256=None if root_plan is None else str(root_plan),
                 **head_facts,  # type: ignore[arg-type]
             )
         pending_predecessor = str(predecessor)
@@ -594,6 +655,24 @@ def carry_in_checkpoint_disagreement(
     not implied by the second: a forged root and a checkpoint forged to match it agree with each
     other perfectly. Both surfaces are held against the same constants the artifact gate uses, by
     the same validator.
+
+    **Every comparison here is against the chain's ROOT, never its head** (Decision 064 §2). A
+    carry-in authority is minted, bound, and burned at one moment: the chain's first attempt. Its
+    checkpoint is therefore a record of what was true *then* — that plan, that window, that ceiling,
+    that baseline. The head receipt describes what is true *now*, and an accepted owner plan
+    transition (Decision 062 §7) makes those lawfully different: the M3.2A carry-in was minted under
+    the predecessor plan while the successful head executed the successor. Comparing the head's plan
+    against the checkpoint's would then report a disagreement between two surfaces that never
+    claimed to agree, and turn an intact chain into ``UNDETERMINED``.
+
+    The rule is general, not a carve-out for one pair of hashes: nothing here names, or is reachable
+    only by, the Decision 062 plans. Whichever plan the root recorded is the plan the checkpoint
+    must name, for every chain — including the ordinary single-receipt chain, where root and head
+    are the same receipt and the comparison is exactly what it always was.
+
+    Condition 8.10 is the surface that asks about the **head**'s plan, and it is unchanged: a resume
+    must still supply the plan the last invocation executed, or move under an explicit transition.
+    The two questions are different and are now asked of the receipt each is about.
     """
     if chain.root_carry_in_authority_sha256 is None:
         if chain.root_carried_forward:
@@ -672,13 +751,16 @@ def carry_in_checkpoint_disagreement(
             f"{checkpoint.consumed_request_count_carried_forward} but the chain's root receipt "
             f"records {chain.root_carried_forward}; the catalog and the receipt disagree"
         )
-    if (
-        chain.request_plan_sha256 is not None
-        and chain.request_plan_sha256 != checkpoint.request_plan_sha256
-    ):
+    if chain.root_request_plan_sha256 is None:
         return (
-            "the carry-in consumption checkpoint and the receipt chain name different request "
-            "plans, so the baseline was not carried in under the plan the chain executed"
+            "the receipt chain's root claims a carry-in authority but records no request plan, so "
+            "there is nothing to compare the checkpoint's plan binding against"
+        )
+    if chain.root_request_plan_sha256 != checkpoint.request_plan_sha256:
+        return (
+            "the carry-in consumption checkpoint and the receipt chain's root name different "
+            "request plans, so the baseline was not carried in under the plan the chain's first "
+            "attempt executed"
         )
     if (
         chain.root_acquisition_window is not None
@@ -1073,6 +1155,111 @@ class _StoreState:
     rows_pointing_at_partials: tuple[str, ...]
     orphan_object_count: int
     partial_file_count: int
+    #: Every ``(source_id, request identity)`` whose durable evidence satisfies it — see
+    #: :func:`_satisfied_identities`. Identity-level, never route-level.
+    satisfied_identities: frozenset[tuple[str, str]] = frozenset()
+
+
+#: The observation outcomes whose payload a later reader may use. Mirrors
+#: ``SourceObservation.is_usable``; named here so the satisfaction walk below reads as one rule.
+_USABLE_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"stored_new", "unchanged_content", "superseded", "reused_snapshot"}
+)
+
+#: The outcomes that may *own* a raw object, and the outcomes that may *reuse* one. A reuse chain
+#: is only a chain of reuses ending at an owner; anything else does not resolve.
+_OBJECT_OWNING_OUTCOMES: Final[frozenset[str]] = frozenset({"stored_new", "superseded"})
+_OBJECT_REUSING_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"unchanged_content", "reused_snapshot"}
+)
+
+
+def _evidence_owner(
+    observation: SourceObservation, by_id: Mapping[str, SourceObservation]
+) -> SourceObservation | None:
+    """Follow ``reused_observation_id`` to the observation that owns the raw object, or ``None``.
+
+    The same hop rule the accepted snapshot store applies, read here from the observation graph
+    alone: a reuse row must itself be a reuse outcome, its target must exist, the edge must preserve
+    route and identity, the target must not be newer than the row reusing it, and the walk must
+    terminate at an owning outcome without revisiting a row. Any break returns ``None``, which the
+    caller reads as "this identity's evidence does not resolve" — never as satisfaction.
+    """
+    current = observation
+    visited: set[str] = set()
+    while current.reused_observation_id is not None:
+        if current.observation_id in visited or current.outcome not in _OBJECT_REUSING_OUTCOMES:
+            return None
+        visited.add(current.observation_id)
+        owner = by_id.get(current.reused_observation_id)
+        if owner is None:
+            return None
+        if (
+            owner.source_id != current.source_id
+            or owner.identity != current.identity
+            or owner.relative_storage_path != current.relative_storage_path
+            or owner.logical_sha256 != current.logical_sha256
+            or owner.retrieved_at_utc > current.retrieved_at_utc
+        ):
+            return None
+        current = owner
+    if current.observation_id in visited or current.outcome not in _OBJECT_OWNING_OUTCOMES:
+        return None
+    return current
+
+
+def _satisfied_identities(
+    observations: Sequence[SourceObservation], tree: DataTree
+) -> frozenset[tuple[str, str]]:
+    """Every request identity that durable evidence satisfies, at **identity** granularity.
+
+    This is the correction Decision 064 §6 requires. The remainder was previously counted per
+    *route*: a route planning one logical request and holding one committed row was read as
+    complete, whatever that row was and whatever identity it belonged to. Under an accepted plan
+    transition that is exactly wrong — the retired SIC identity's committed *failure* made the
+    successor SIC identity look satisfied, so condition 8.8 reported ``0`` logical requests and
+    ``0`` worst-case attempts remaining while the continuation surface, which has always counted per
+    identity, reported ``1`` and ``6``. Two numbers describing one state, disagreeing, with the
+    misleading one on the operator's screen.
+
+    The rule here is the identity-level one: for each ``(source_id, identity)``, the **newest**
+    usable observation carrying a payload must resolve through the reuse chain to an owning
+    observation whose object is present on disk. A failed, quarantined, absent, or payload-less row
+    satisfies nothing; a row for a *different* identity on the same route satisfies nothing; an
+    unresolvable reuse chain satisfies nothing.
+
+    "Newest" is decided once per identity and is never backed away from. If the newest usable
+    observation's evidence does not resolve, the identity is **unsatisfied** — the walk does not
+    fall back to an older one that would. That matters because the continuation surface does not
+    fall back either: it asks its snapshot store for the latest usable observation and judges *that*
+    one. A fallback here would report fewer requests remaining than continuation does, which is the
+    wrong direction for a headroom check to be wrong in.
+
+    It is deliberately a **subset** of what the continuation reconciliation calls satisfying: that
+    surface additionally re-hashes the owning object and re-checks archive-member lineage, neither
+    of which this read-only inspection performs. The two therefore agree except where evidence is
+    present but corrupt — and there the reconciliation classifies the item ``hash_mismatch`` or
+    ``archive_lineage_missing_or_invalid``, both blocking states that refuse the whole continuation
+    proposal, so 8.8 is never the condition deciding such a state. Where 8.8 *is* decisive, the two
+    counts are the same number.
+    """
+    by_id = {item.observation_id: item for item in observations}
+    satisfied: set[tuple[str, str]] = set()
+    decided: set[tuple[str, str]] = set()
+    for item in reversed(observations):
+        if item.outcome not in _USABLE_OUTCOMES or item.relative_storage_path is None:
+            continue
+        key = (item.source_id, item.identity)
+        if key in decided:
+            continue
+        decided.add(key)
+        owner = _evidence_owner(item, by_id)
+        if owner is None or owner.relative_storage_path is None:
+            continue
+        if not (tree.data_root / owner.relative_storage_path).is_file():
+            continue
+        satisfied.add(key)
+    return frozenset(satisfied)
 
 
 def _inspect_store(connection: sqlite3.Connection, tree: DataTree) -> _StoreState:
@@ -1127,6 +1314,7 @@ def _inspect_store(connection: sqlite3.Connection, tree: DataTree) -> _StoreStat
         rows_pointing_at_partials=tuple(rows_pointing_at_partials),
         orphan_object_count=orphans,
         partial_file_count=partial_files,
+        satisfied_identities=_satisfied_identities(observations, tree),
     )
 
 
@@ -1138,20 +1326,53 @@ def _is_under(path: Path, ancestor: Path) -> bool:
 # --------------------------------------------------------------------------- #
 # Condition 8.2 — establishing a terminal state that is not an interruption
 # --------------------------------------------------------------------------- #
+#: The completion status of a window that ended **successfully**. Kept as its own constant, never
+#: folded in with the failures below, because everything downstream has to be able to tell the two
+#: apart: they establish a terminal state identically and they authorize continuation oppositely.
+#: Public, so the continuation surfaces refuse a successful head against the same literal this
+#: module establishes a terminal state from, rather than against a second copy of the string.
+SUCCESSFUL_TERMINAL_COMPLETION_STATUS: Final = "complete"
+
 #: Completion statuses that end an invocation terminally **without** it being an interruption
 #: (Decision 062 §3). A receipt recording one of these is not incomplete evidence: the run reached a
-#: recorded, non-successful end and said why. `complete` is excluded because a successful window has
-#: nothing to recover, and `interrupted` is excluded because it takes the interruption-state path.
+#: recorded, non-successful end and said why. `interrupted` is excluded because it takes the
+#: interruption-state path.
 _TERMINAL_NON_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
     {"failed", "stopped_at_ceiling", "stopped_by_gate"}
 )
 
-#: The truthful `ops_ingestion_jobs.job_state` for each terminal non-success completion status —
-#: the same mapping the driver applies when it closes a run, restated here as the value the run row
-#: is *required to already hold*. A row in any other state disagrees with the receipt beside it, and
-#: disagreement is never reconciled by preferring one surface.
+#: Every completion status from which a terminal end state can be **established** (Decision 064 §3).
+#:
+#: `complete` joins the three failures here, and the reason is that condition 8.2 asks a question
+#: about *evidence*, not about permission: "is the terminal or interruption state established, or is
+#: it being guessed?" A validated `complete` receipt whose run row, attempt ledger, chain, and store
+#: all agree is the least ambiguous terminal state this system can produce, and the only way the old
+#: set could report it was as "no terminal end state is established" — which was untrue, and which
+#: forced every post-success deterministic maintenance step to run against a state the inspection
+#: described as unresolved.
+#:
+#: Admitting it here is emphatically **not** admitting it to continuation. A successful head is
+#: proved terminal *and* proved non-resumable, by two separate mechanisms that never share a
+#: predicate — see :attr:`RecoveryState.continuation_permitted` and the successful-head refusal in
+#: the continuation proposal. Nothing here fabricates an interruption state, and nothing here
+#: classifies `complete` as a failure.
+_TERMINAL_STATUSES: Final[frozenset[str]] = _TERMINAL_NON_SUCCESS_STATUSES | {
+    SUCCESSFUL_TERMINAL_COMPLETION_STATUS
+}
+
+#: The truthful `ops_ingestion_jobs.job_state` for each terminal completion status — the same
+#: mapping the driver applies when it closes a run, restated here as the value the run row is
+#: *required to already hold*. A row in any other state disagrees with the receipt beside it, and
+#: disagreement is never reconciled by preferring one surface. `complete` maps to `completed`
+#: exactly as `acquisition_run_job_state` closes a successful window, so a `complete` receipt beside
+#: a `failed` or `stopped` run row establishes nothing and refuses.
 _TERMINAL_STATUS_JOB_STATE: Final[Mapping[str, str]] = MappingProxyType(
-    {"failed": "failed", "stopped_at_ceiling": "failed", "stopped_by_gate": "failed"}
+    {
+        "complete": "completed",
+        "failed": "failed",
+        "stopped_at_ceiling": "failed",
+        "stopped_by_gate": "failed",
+    }
 )
 
 #: The `ops_ingestion_jobs.job_kind` an M3.2 acquisition run is registered under.
@@ -1174,10 +1395,25 @@ def establish_terminal_state(
     not carry and must never be given one. Left unchanged, the predicate made safe recovery
     structurally impossible for exactly the cases that ended most cleanly.
 
-    This is **not** a relaxation. The interruption path is unchanged, and this path demands *more*
-    evidence, not less: all ten conditions below must hold, each read from a durable surface, and
-    the first that does not returns the refusal. A receiptless, crashed, killed, or genuinely
-    uncertain state satisfies none of them and still reaches `UNDETERMINED`.
+    Decision 064 §3 completes that generalization with the one remaining terminal state: a window
+    that ended `complete`. While recovery was synonymous with resume, excluding it was harmless —
+    a successful window had nothing to resume. It stopped being harmless once the accepted
+    lifecycle put deterministic post-success maintenance (the derived-projection rebuild) *before*
+    Gate H: the inspection had to be able to say what state the system was in, and its only
+    vocabulary for a successful head was "no terminal end state is established". That is not a
+    conservative answer, it is a false one, and it left the one deterministic repair the state
+    needed describable only as a repair to an unestablished state.
+
+    This is **not** a relaxation, in either direction. The interruption path is unchanged, and this
+    path demands *more* evidence, not less: all ten conditions below must hold, each read from a
+    durable surface, and the first that does not returns the refusal. A receiptless, crashed,
+    killed, or genuinely uncertain state satisfies none of them and still reaches `UNDETERMINED`.
+    A `complete` receipt is held to every one of the ten, including the run-row agreement that
+    requires the run to be `completed` — so a `complete` receipt beside a failed run, a disagreeing
+    ledger, a blocked recovery state, or an ambiguous store refuses exactly as any other head does.
+
+    Establishing a terminal state says nothing about permission to run again. `complete` is
+    recorded here as what it is, and the continuation surfaces refuse it separately and explicitly.
 
     Args:
         connection: the read-only catalog connection.
@@ -1197,20 +1433,24 @@ def establish_terminal_state(
     if status is None:
         return False, "the head receipt records no completion status, so nothing is established"
 
-    # 2. The completion status is terminal and non-successful.
-    if status not in _TERMINAL_NON_SUCCESS_STATUSES:
+    # 2. The completion status is terminal — a recorded end, successful or not.
+    if status not in _TERMINAL_STATUSES:
         return False, (
             f"the head receipt records completion status {status!r}, which is not one of the "
-            f"terminal non-success statuses {sorted(_TERMINAL_NON_SUCCESS_STATUSES)}"
+            f"terminal statuses {sorted(_TERMINAL_STATUSES)}"
         )
 
-    # 3. A registered reason code is present. An unregistered code is prose, not a classification.
-    if walk.head_reason_code is None:
+    # 3. A registered reason code is present *for a non-success end*. A successful window has no
+    #    terminal cause to classify — the receipt schema does not require a reason code for one, and
+    #    demanding one would refuse every successful head for lacking evidence of a failure that
+    #    did not occur. Where a reason code is present it must still be registered, whatever the
+    #    status, so an unregistered code is never read as a classification.
+    if status in _TERMINAL_NON_SUCCESS_STATUSES and walk.head_reason_code is None:
         return False, (
             f"the head receipt records completion status {status!r} but no reason code, so why "
             f"the run ended terminally is not established"
         )
-    if walk.head_reason_code not in REASON_CODES:
+    if walk.head_reason_code is not None and walk.head_reason_code not in REASON_CODES:
         return False, (
             f"the head receipt's reason code {walk.head_reason_code!r} is not registered, so the "
             f"terminal cause cannot be resolved to an accepted classification"
@@ -1265,10 +1505,15 @@ def establish_terminal_state(
             "read from it establishes anything"
         )
 
+    cause = (
+        "no terminal cause to classify"
+        if walk.head_reason_code is None
+        else f"registered reason {walk.head_reason_code!r}"
+    )
     return True, (
-        f"terminal state established: the head receipt records {status!r} with registered reason "
-        f"{walk.head_reason_code!r}, {detail}, the chain resolves, and the catalog carries no "
-        f"uncertain commit, orphan, missing object, or partial"
+        f"terminal state established: the head receipt records {status!r} with {cause}, {detail}, "
+        f"the chain resolves, and the catalog carries no uncertain commit, orphan, missing object, "
+        f"or partial"
     )
 
 
@@ -1433,7 +1678,7 @@ def inspect_recovery_state(
             else establish_terminal_state(connection, walk, integrity.passed, store)
         )
 
-    headroom_fits, headroom_detail = _headroom(plan, walk, store)
+    headroom = _headroom(plan, walk, store)
 
     conditions = (
         ConditionResult(
@@ -1493,8 +1738,8 @@ def inspect_recovery_state(
         ConditionResult(
             "8.8",
             "The remainder fits inside the remaining ceiling headroom",
-            _MET if headroom_fits else _NOT_MET,
-            headroom_detail,
+            _MET if headroom.fits else _NOT_MET,
+            headroom.detail,
         ),
         ConditionResult(
             "8.9",
@@ -1555,6 +1800,9 @@ def inspect_recovery_state(
         orphan_object_count=store.orphan_object_count,
         rows_without_object_count=len(store.rows_without_object),
         partial_file_count=store.partial_file_count,
+        head_completion_status=walk.head_completion_status,
+        remaining_logical_requests=headroom.remaining_logical,
+        worst_case_remaining_attempts=headroom.worst_case_remaining,
     )
 
 
@@ -1574,40 +1822,72 @@ def _condition_8_2_detail(
     )
 
 
-def _headroom(
-    plan: RequestPlan, walk: ReceiptChainAccounting, store: _StoreState
-) -> tuple[bool, str]:
+@dataclass(frozen=True, slots=True)
+class _Headroom:
+    """The identity-level remainder and the ceiling headroom it has to fit inside."""
+
+    fits: bool
+    remaining_logical: int
+    worst_case_remaining: int
+    remaining_headroom: int
+    detail: str
+
+
+def _headroom(plan: RequestPlan, walk: ReceiptChainAccounting, store: _StoreState) -> _Headroom:
     """Whether the remaining work fits under the ceiling the run has already partly consumed.
 
-    The remainder is bounded **per route**, with each route's own ``A_reachable`` — the same
-    decomposition the ceiling itself was built from. That correspondence is what makes the check
-    meaningful: a run that has completed nothing needs exactly the whole ceiling and fits, and every
-    completed request frees precisely the headroom it was budgeted. Bounding the remainder with a
-    single worst-case multiplier instead would make the check unsatisfiable for any plan containing
-    a route below that maximum, which would refuse every resume rather than judge it.
+    The remainder is bounded per **logical request identity**, each charged its own route's
+    ``A_reachable`` — the same decomposition the ceiling itself was built from. That correspondence
+    is what makes the check meaningful: a run that has completed nothing needs exactly the whole
+    ceiling and fits, and every satisfied request frees precisely the headroom it was budgeted.
+    Bounding the remainder with a single worst-case multiplier instead would make the check
+    unsatisfiable for any plan containing a route below that maximum, which would refuse every
+    resume rather than judge it.
 
-    Completion is counted from committed catalog rows per route, not from the receipt chain, because
-    the catalog is the authority on what actually persisted. A route with more committed rows than
-    planned contributes zero remaining rather than a negative, so extra rows can never manufacture
-    headroom.
+    Satisfaction is read from :attr:`_StoreState.satisfied_identities`, not from a per-route row
+    count, because the catalog is the authority on what actually persisted *for which request*
+    (Decision 064 §6). Counting rows per route made a route's remainder depend only on how many
+    observations it happened to hold, so a committed failure on a retired identity cancelled a
+    genuinely outstanding successor identity on the same route — and the operator saw ``0``
+    remaining beside a continuation surface that said ``1``. Identity-level counting removes that
+    disagreement by construction: both surfaces now ask the same question of the same evidence, and
+    an identity is outstanding until its *own* evidence satisfies it.
+
+    A plan expansion that repeats an identity counts it once, matching the continuation remainder,
+    which places each distinct request once. An unplanned satisfied identity contributes nothing: it
+    is not in the plan, so it was never part of the remainder to begin with.
     """
+    # Local import for the cycle documented in `_registered_run_or_refuse`: the plan expansion lives
+    # with the acquisition driver, which imports this module. Sharing one expansion — rather than
+    # re-deriving identities here — is the point: it is what makes this remainder and the
+    # continuation remainder provably the same count of the same requests.
+    from disclosure_drift.m3.acquisition import derive_logical_requests, planned_request_identity
+
     ceiling = plan.hard_request_ceiling
     remaining_headroom = ceiling - walk.consumed_physical_attempts
 
-    remaining_logical = 0
-    worst_case_remaining = 0
-    for route in plan.routes:
-        completed = store.committed_per_route.get(route.source_id, 0)
-        outstanding = max(0, route.planned_unique_logical_requests - completed)
-        remaining_logical += outstanding
-        worst_case_remaining += outstanding * derive_a_reachable(SOURCES[route.source_id])
+    outstanding: set[tuple[str, str]] = set()
+    for request in derive_logical_requests(plan):
+        key = (request.source_id, planned_request_identity(request))
+        if key not in store.satisfied_identities:
+            outstanding.add(key)
+
+    remaining_logical = len(outstanding)
+    worst_case_remaining = sum(
+        derive_a_reachable(SOURCES[source_id]) for source_id, _ in sorted(outstanding)
+    )
 
     fits = worst_case_remaining <= remaining_headroom
-    detail = (
-        f"{remaining_logical} logical request(s) remain; worst case {worst_case_remaining} "
-        f"attempt(s) against {remaining_headroom} of {ceiling} remaining headroom"
+    return _Headroom(
+        fits=fits,
+        remaining_logical=remaining_logical,
+        worst_case_remaining=worst_case_remaining,
+        remaining_headroom=remaining_headroom,
+        detail=(
+            f"{remaining_logical} logical request(s) remain; worst case {worst_case_remaining} "
+            f"attempt(s) against {remaining_headroom} of {ceiling} remaining headroom"
+        ),
     )
-    return fits, detail
 
 
 def _plan_hash_status(
@@ -1726,6 +2006,21 @@ def _determine(
                 "Stop. A separately authorized Milestone 3.2 repair may apply the deterministic "
                 "action, after which this read-only inspection must run again and return SAFE. "
                 "Inspection itself never repairs."
+            ),
+        )
+    if walk.head_completion_status == SUCCESSFUL_TERMINAL_COMPLETION_STATUS:
+        # `SAFE` here means the evidence is fully resolved, not that anything may be re-run. Saying
+        # so in the required action is the point: this is the state a successful window reaches
+        # after its deterministic maintenance, and an operator reading "SAFE" must not read it as
+        # an invitation to acquire again (Decision 064 §4).
+        return (
+            "SAFE",
+            "every recovery condition is met and the window's terminal state is a successful "
+            "completion; the evidence is fully resolved",
+            (
+                "No continuation. The head receipt records a completed acquisition, so there is no "
+                "unsatisfied request to continue and no resume is authorized by this state; SAFE "
+                "reports recovery certainty, never permission to acquire again."
             ),
         )
     return (
@@ -2284,9 +2579,9 @@ def inspect_receiptless_first_invocation(
     # twice, and the approved ceiling is read from the plan and never reinterpreted.
     consumed = lineage.pre_ledger_attempts + ledger.count
 
-    # The headroom check reuses the same per-route decomposition the receipt-chain mode uses; only
-    # the consumed count's provenance differs. No receipt is walked, so a synthetic unresolved walk
-    # carries the durably derived consumed count into it.
+    # The headroom check reuses the same identity-level decomposition the receipt-chain mode uses;
+    # only the consumed count's provenance differs. No receipt is walked, so a synthetic unresolved
+    # walk carries the durably derived consumed count into it.
     walk = ReceiptChainAccounting(
         receipt_ids=(),
         consumed_physical_attempts=consumed,
@@ -2295,7 +2590,7 @@ def inspect_receiptless_first_invocation(
         detail="receiptless first-invocation inspection: no receipt chain was walked",
         request_plan_sha256=None,
     )
-    headroom_fits, headroom_detail = _headroom(plan, walk, store)
+    headroom = _headroom(plan, walk, store)
 
     conditions = (
         ConditionResult(
@@ -2358,8 +2653,8 @@ def inspect_receiptless_first_invocation(
         ConditionResult(
             "8.8",
             "The remainder fits inside the remaining ceiling headroom",
-            _MET if headroom_fits else _NOT_MET,
-            headroom_detail,
+            _MET if headroom.fits else _NOT_MET,
+            headroom.detail,
         ),
         ConditionResult(
             "8.9",
@@ -2406,6 +2701,9 @@ def inspect_receiptless_first_invocation(
         orphan_object_count=store.orphan_object_count,
         rows_without_object_count=len(store.rows_without_object),
         partial_file_count=store.partial_file_count,
+        head_completion_status=None,
+        remaining_logical_requests=headroom.remaining_logical,
+        worst_case_remaining_attempts=headroom.worst_case_remaining,
     )
 
 

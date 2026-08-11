@@ -1806,3 +1806,89 @@ def test_resolution_constructs_no_network_access(tmp_path: Path) -> None:
     )
 
     assert document["receipt_id"] == predecessor.receipt_id
+
+
+# --------------------------------------------------------------------------- #
+# Decision 064 §8 — sanitized predecessor-resolution diagnostics
+# --------------------------------------------------------------------------- #
+def test_a_zero_candidate_refusal_states_what_the_search_actually_did(tmp_path: Path) -> None:
+    """An operator staring at a broken chain needs the classification, not just the verdict.
+
+    The message must say which identity failed, that a search ran and how much it examined, that
+    the answer was *zero* matches rather than an ambiguity, and which relative scopes were covered.
+    """
+    root = _evidence_root(tmp_path)
+    _place(live(request_plan_id="plan-unrelated"), _namespace(root, "other") / "r.json")
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptChainResolutionError) as raised:
+        resolve_predecessor_receipt("d" * 64, head_directory=head_path.parent, evidence_root=root)
+
+    message = str(raised.value)
+    assert "d" * 12 in message, "the requested identity is named, truncated"
+    assert "category=no_candidate_matched" in message
+    assert "valid matches=0" in message
+    assert "candidate files examined=" in message
+    assert "runs/other" in message and "runs/head" in message
+    assert "receipts" in message
+
+
+def test_a_resolution_refusal_never_prints_the_private_evidence_root(tmp_path: Path) -> None:
+    """Diagnostics are relative. The resolved root is private and never reaches a message."""
+    root = _evidence_root(tmp_path)
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptChainResolutionError) as raised:
+        resolve_predecessor_receipt("d" * 64, head_directory=head_path.parent, evidence_root=root)
+
+    message = str(raised.value)
+    assert str(root) not in message
+    assert str(tmp_path) not in message
+    assert not any(part.startswith("/") for part in message.split()), "no absolute path appears"
+
+
+def test_a_refusal_without_an_evidence_root_states_that_no_search_ran(tmp_path: Path) -> None:
+    """The two zero-match categories are distinguishable: nothing found, versus nothing searched."""
+    root = _evidence_root(tmp_path)
+    head_path = _place(live(request_plan_id="plan-head"), _namespace(root, "head") / "r.json")
+
+    with pytest.raises(ReceiptChainResolutionError) as raised:
+        resolve_predecessor_receipt("d" * 64, head_directory=head_path.parent)
+
+    assert "category=no_evidence_root_for_discovery" in str(raised.value)
+
+
+def test_an_ambiguous_refusal_is_classified_as_ambiguity_not_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two distinct receipts under one identity is a different failure from finding none.
+
+    Reached through the loader for the reason the ambiguity guard's own test documents: identity
+    validation makes the branch unreachable from real files. What is asserted here is only that the
+    refusal *classifies itself* as an ambiguity, so an operator is never left reading a
+    two-candidate collision as an absent predecessor.
+    """
+    root = _evidence_root(tmp_path)
+    wanted = live(request_plan_id="plan-wanted")
+    _place(wanted, _namespace(root, "aaa_first") / OPERATOR_RECEIPT_FILENAME)
+    _place(wanted, _namespace(root, "bbb_second") / OPERATOR_RECEIPT_FILENAME)
+    head_path = _place(
+        live(request_plan_id="plan-head"), _namespace(root, "zzz_head") / OPERATOR_RECEIPT_FILENAME
+    )
+
+    def _forged(path: Path | str) -> dict[str, object]:
+        document = live(request_plan_id=f"plan-{Path(path).parent.name}").as_document()
+        document["receipt_id"] = wanted.receipt_id
+        return document
+
+    monkeypatch.setattr(receipt_module, "inspect_receipt", _forged)
+
+    with pytest.raises(ReceiptChainResolutionError) as raised:
+        resolve_predecessor_receipt(
+            wanted.receipt_id, head_directory=head_path.parent, evidence_root=root
+        )
+
+    message = str(raised.value)
+    assert "category=ambiguous_distinct_candidates" in message
+    assert "distinct receipts=" in message
+    assert str(root) not in message

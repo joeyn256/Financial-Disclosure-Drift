@@ -15,6 +15,13 @@ which registers **one additional permitted `reason_code` value**,
 schema `m3-execution-receipt/2.0`, the field set, every field type, the `completion_status`
 vocabulary, the canonicalization rule, and the `receipt_id` digest preimage are **unchanged**, and
 **no migration is created or authorized**.
+
+> **Current schema authority (accepted Decision 055 §7).** The writer now emits
+> `m3-execution-receipt/3.0`, which adds one field and restates one condition; readers accept
+> **both** `2.0` and `3.0`, and every existing `2.0` receipt remains byte-unchanged, valid,
+> readable, and usable in a mixed-version chain. Where this document says `2.0` below it is
+> describing the schema it was written against; the version dispatch, not this text, is the
+> contract.
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 
 ---
@@ -291,8 +298,26 @@ does **not** make them part of any governed preimage.
 
 1. Receipts are written to the **owner-controlled private evidence root**, outside the repository
    working tree, in a directory dedicated to receipts.
-2. The filename is **content-derived** from `receipt_id`, so two identical receipts collide by
-   identity and two different runs never collide.
+2. **Two accepted filename conventions exist, and both are lawful** (Decision 064 §8):
+
+   - **Operator-selected, create-once.** A live command writes its receipt where the operator named
+     it with `--receipt-out`, and the accepted M3.2 convention gives every run its own namespace —
+     for example `runs/<namespace>/execution_receipt.json`. This is where the real T6 and T7
+     receipts live. The path is chosen once, the file is never overwritten, and the receipt's
+     identity is the `receipt_id` **inside** it, not its filename.
+   - **Content-derived.** The filename is derived from `receipt_id`
+     (`receipt-<receipt_id>.json`), so two identical receipts collide by identity and two different
+     runs never collide. This convention is used where a receipt is filed by identity rather than
+     by run.
+
+   **A receipt is addressed by its recorded identity, never by an assumed path.** This
+   specification does not claim that every receipt physically exists at
+   `receipt-<receipt_id>.json`, because the accepted evidence proves otherwise: the M3.2A chain
+   spans two run namespaces and its receipts carry the operator-selected name. The chain resolver
+   therefore locates a predecessor by validating candidates at **both** accepted filenames in the
+   accepted receipt locations beneath the governed evidence root, requiring exact `receipt_id`
+   equality, and refusing on zero candidates or on two candidates that differ (Decision 063).
+   Nothing is moved, copied, renamed, or synthesized to satisfy either convention.
 3. **Receipts are never committed to Git.** `scripts/check_repo_hygiene.py` already refuses tracked
    artifacts under `data/`, and the private evidence root is outside the repository entirely.
 4. **Only the receipt's type, phase, status, `receipt_id`, and its own SHA-256 reach the public
@@ -527,10 +552,13 @@ It creates **no** runtime code, **no** module, **no** CLI command, **no** databa
 migration, and **no** schema object. It changes no accepted identity, preimage, digest, or
 methodology. It authorizes no implementation.
 
-The receipt described here **does not exist yet**. A bounded M3.1 contract implements it against this
-specification, and until then every command in
-[`operator_runbook.md`](operator_runbook.md) that emits a receipt is labelled
-`PLANNED — NOT YET IMPLEMENTED`.
+**Implementation status (current).** The receipt described here **is implemented**, in
+[`src/disclosure_drift/m3/receipt.py`](../../src/disclosure_drift/m3/receipt.py), and real receipts
+exist — the M3.2A chain's T6 and T7 receipts among them. The sentence this paragraph replaced said
+the receipt did not exist yet and that every receipt-emitting command in
+[`operator_runbook.md`](operator_runbook.md) was `PLANNED — NOT YET IMPLEMENTED`; that was true when
+this specification was written and is no longer true (Decision 064 §9). This document still creates
+no code: it specifies, and the module implements.
 
 ## 16. The rule, one last time
 

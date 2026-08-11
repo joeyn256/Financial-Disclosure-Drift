@@ -8,7 +8,42 @@
 
 This runbook is written for the project owner operating on macOS. It is sequential: work down it, and
 stop at the first step that fails. It is **documentation, not authorization** — following it does not
-authorize any phase, and several steps describe commands that **do not exist yet**.
+authorize any phase.
+
+---
+
+## Current state — read this before running anything (Decision 064 §9)
+
+> **M3.2A SEC acquisition is COMPLETE. No further live SEC request is authorized.**
+>
+> | Fact | Value |
+> |---|---|
+> | Successor request identities satisfied | **75 / 75** |
+> | Cumulative physical attempts | **77 / 801** |
+> | Predecessor identities replayed | **0** |
+> | Network window | **closed**; tracked switches `false` / `false` |
+> | Source registry authority | **`m2.2-source-registry/1.1`** (Decision 062 §5) |
+> | Execution receipt authority | writer **`m3-execution-receipt/3.0`**; readers accept `2.0` and `3.0` |
+> | Request plan | successor `f77e003c…`; predecessor `19be7bdc…` retired |
+> | `sec_sic_code_list` exact path | the successor path SEC published; the retired `/corpfin/…` path is gone |
+> | Gate H | candidate reproduction only; **owner acceptance pending** |
+> | M3.2B, M3.3 | **not begun, not authorized** |
+>
+> **Never**, on the strength of anything in this runbook: re-run the 74 already-satisfied
+> retrievals; invoke another live acquisition; enable a network switch; resume from a `complete`
+> receipt; use source registry `1.0`, receipt schema `2.0`, or the retired SIC URL; or run a
+> reconciliation that is not transition-aware against the successor plan.
+>
+> **The M3.2 recovery lifecycle, as it actually is:**
+>
+> ```text
+> acquisition → network closure → authoritative SQLite verification
+>             → deterministic derived-projection synchronization if needed → Gate H
+> ```
+>
+> `SAFE` from `m3 recovery-state` reports **evidence certainty**, never permission to acquire again.
+> A completed window is `SAFE` with continuation refused, and `m3 acquire --resume-from` against a
+> `complete` receipt refuses before a transport is constructed (Decision 064 §4).
 
 ---
 
@@ -21,13 +56,19 @@ Every command in this runbook carries exactly one label.
 | **`AVAILABLE NOW`** | Implemented and accepted today. Safe to run as written. |
 | **`IMPLEMENTED (M3.1)`** | Exists and runs. Implemented by the bounded Milestone 3.1 contract against the interface stated here. |
 | **`PLANNED — NOT YET IMPLEMENTED (M3.1)`** | Does not exist. Its interface contract is stated so a bounded M3.1 contract implements this interface rather than inventing one. |
-| **`PLANNED — NOT YET IMPLEMENTED (M3.2)`** | Does not exist. Same rule, for M3.2. |
+| **`IMPLEMENTED (M3.2)`** | Exists and runs. Implemented and accepted through the M3.2 stage contract. |
+| **`PLANNED — NOT YET IMPLEMENTED (M3.3)`** | Does not exist. Belongs to a later milestone that has not begun. |
 | **`MANUAL OWNER APPROVAL`** | Not a command. A decision the owner records in a template under [`templates/`](templates/request_budget.md). |
 | **`VERIFICATION`** | A read-only check whose output is compared against an expectation. |
 | **`RECOVERY`** | Run only after an interruption or a failure, never routinely. |
 
 **A `PLANNED` command must never be typed.** It will not exist, and a shell will report it as
 unknown. It is documented so the interface is agreed before it is built.
+
+**An `IMPLEMENTED (M3.2)` command exists — which is not the same as being authorized to run.** The
+M3.2A commands below are implemented and accepted, and the *live* ones are nevertheless exhausted:
+acquisition is complete and no further SEC request is authorized (see the current-state banner
+above). Read-only M3.2 commands are safe to run as written.
 
 ## What this runbook never prints
 
@@ -320,7 +361,7 @@ python -m disclosure_drift m3 plan-requests \
 | Stdout | The per-route table — `source_id`, planned unique logical requests, maximum physical attempts, maximum new raw objects — then the totals and the **request-plan hash** |
 | Side effects | Writes only the named plan file. Touches no catalog |
 | Exit codes | `0` plan produced · `1` configuration error · `2` usage · `3` stage not enabled · `4` gate failure |
-| Receipt | Emits one `m3-execution-receipt/2.0` receipt, `invocation_mode = "dry_run"`, with zero actual request counts, the acquisition window and plan/version fields, and **no** approved ceiling or later gate outcome |
+| Receipt | Emits one execution receipt — writer `m3-execution-receipt/3.0` since Decision 055 §7, readers accepting `2.0` and `3.0` — with `invocation_mode = "dry_run"`, zero actual request counts, the acquisition window and plan/version fields, and **no** approved ceiling or later gate outcome |
 
 **`AVAILABLE NOW` today, and covering a strict subset:**
 
@@ -404,7 +445,7 @@ not an approval; and silence is not an approval.
 
 ## 16. Enable live access only for the authorized acquisition command
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **owner-authorized window only**
+**`IMPLEMENTED (M3.2)`** · **owner-authorized window only** · **exhausted for M3.2A — historical reference**
 
 Network is enabled by configuration, for one named command, for one window. The M3.2 contract names
 the exact configuration path and the exact command; **this runbook does not authorize the change and
@@ -421,7 +462,7 @@ Before enabling, confirm all of:
 
 ## 17. Confirm the command's exact network scope
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
+**`IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
 
 ```bash
 python -m disclosure_drift m3 acquire --show-scope \
@@ -444,7 +485,8 @@ the plan hash.
 
 ## 18. Start controlled acquisition
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`**
+**`IMPLEMENTED (M3.2)`** · **exhausted for M3.2A — historical reference; no further live invocation
+is authorized**
 
 First, establish Gate H **pre-run** state (milestone plan §11, Gate H):
 
@@ -491,7 +533,7 @@ the allowlist, zero filing-body URLs, and the classification totals.
 
 ## 18a. Between the windows — freeze, derive, and obtain the second approval
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · then **`MANUAL OWNER APPROVAL`**
+**`IMPLEMENTED (M3.2)`** · then **`MANUAL OWNER APPROVAL`** · **M3.2B is not begun and is not authorized**
 
 **M3.2A acquires only the bootstrap sources. M3.2B acquires only the dependent requests derived from
 what M3.2A actually retrieved.** Between them, in this exact order:
@@ -520,7 +562,7 @@ enabled, or if the owner declines the second budget. **M3.2B may not run under M
 
 ## 19. Stop safely after any gate failure
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **`RECOVERY`**
+**`IMPLEMENTED (M3.2)`** · **`RECOVERY`**
 
 If the command exits `4`, or if you need to stop it, press `Ctrl-C` **once** and wait. The accepted
 rollback order applies and must be allowed to complete:
@@ -588,15 +630,36 @@ python -m disclosure_drift m3 show-receipt --receipt <relative-path>
 
 ## 23. Confirm actual request totals
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
+**`IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
 
-```
-python -m disclosure_drift m3 reconcile-requests --plan <relative-path> --receipt <relative-path>
+```bash
+python -m disclosure_drift m3 reconcile-requests \
+  --evidence-root "$EV_ROOT" \
+  --plan <relative-path> \
+  --data-root <relative-path-below-evidence-root> \
+  --catalog <relative-path-below-data-root> \
+  --report-out <relative-path>
 ```
 
-**Intended interface contract:** read-only; prints planned versus actual per route and in total, for
-logical requests, physical attempts, response classifications, and raw objects; flags every
-divergence. Exit `0` only when every divergence is accounted for by the plan's own rules.
+**Interface:** read-only apart from the deterministic report it writes; prints the per-state item
+totals, the required absences, out-of-plan and superseded-out-of-plan observations, store findings,
+drift, and blocked recovery states. Exit `0` only when every divergence is accounted for by the
+plan's own rules.
+
+**Reconciling a window whose plan lawfully moved.** Where an accepted owner decision substituted an
+endpoint mid-window, the predecessor's retired identity is out of the *successor* plan and would
+otherwise block reconciliation forever. Add **both** halves of the explicit binding — never one:
+
+```bash
+  --plan-transition-predecessor <relative-path-to-predecessor-plan> \
+  --plan-transition-predecessor-receipt <relative-path-to-predecessor-receipt>
+```
+
+The pair goes through the same seventeen-condition verifier every other surface uses. With it, the
+one superseded identity is reported under `superseded_out_of_plan` — still stored, still visible,
+still failed historical evidence, satisfying nothing. Without it, that identity is an ordinary
+blocking out-of-plan observation. Any *other* out-of-plan observation stays blocking either way, and
+an unauthorized plan pair is refused. A transition is never inferred (Decision 064 §7).
 
 Transcribe the result into [`templates/gate_h_checklist.md`](templates/gate_h_checklist.md), **per
 window** — M3.2A and M3.2B are reconciled separately and integrated there.
@@ -608,7 +671,7 @@ exactly at its ceiling.
 
 ## 24. Confirm no unresolved schema drift
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
+**`IMPLEMENTED (M3.2)`** · **`VERIFICATION`**
 
 ```
 python -m disclosure_drift m3 show-drift --run <run-id>
@@ -640,7 +703,7 @@ Nothing under `data/` is ever committed except `data/README.md`.
 
 ## 26. Disable the network again after acquisition
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)`** then **`AVAILABLE NOW`** to verify
+**`IMPLEMENTED (M3.2)`** then **`AVAILABLE NOW`** to verify
 
 Revert the configuration change from step 16, then verify. **Do this at the end of *each* window** —
 after M3.2A before the derivation step 18a, and again after M3.2B before Gate H:
@@ -656,7 +719,7 @@ begin while it is.** Record both verifications in the Gate H checklist.
 
 ## 27. Resume after an interrupted acquisition
 
-**`IMPLEMENTED (M3.1 read-only inspector)`** · **`PLANNED — NOT YET IMPLEMENTED (M3.2 repair/resume)`** · **`RECOVERY`**
+**`IMPLEMENTED (M3.1 read-only inspector)`** · **`IMPLEMENTED (M3.2 repair)`** · **`RECOVERY`**
 
 Work through [`templates/interrupted_run_recovery.md`](templates/interrupted_run_recovery.md) **before**
 resuming anything:
@@ -675,10 +738,40 @@ raw-store state, partial-file state, the consumed request count, and a
 rebuilds, reconciles, resumes, or calls `observation_catalog.reconcile()`. Exit `0` only for `SAFE`.
 There is no `--run` shortcut and no repair flag.
 
+It also reports, beside the determination and separately from it: the head receipt's own completion
+status, whether continuation is **permitted**, the identity-level logical remainder, and the
+worst-case attempt remainder. Those last three come from the same reconciliation continuation
+enforcement uses, so the screen and the enforcement cannot disagree (Decision 064 §6).
+
+**`SAFE` is evidence certainty, not permission (Decision 064 §4).** A window that finished
+successfully is `SAFE` — its state is fully established — with `continuation permitted: no` and
+`continuation remaining: 0`. Resuming from it is refused before a transport is constructed. Read the
+two lines together, never the determination alone.
+
 On `UNSAFE`, stop. A separately authorized M3.2 repair command may apply the deterministic action;
 then run `recovery-state` again and require `SAFE`. Inspection itself never repairs.
 
-Resume only on `SAFE`:
+**Before spending a one-use repair authority, prove the action is eligible.** `m3 recover
+--check-only` runs the same evaluation the applier runs, mutates nothing, opens no writer, and exits
+`4` when the action would be refused:
+
+```bash
+python -m disclosure_drift m3 recover --check-only \
+  --config "$OFFLINE_CONFIG" --evidence-root "$EV_ROOT" \
+  --plan <relative-path> --receipt-chain-head <relative-path> \
+  --catalog <relative-path-below-data-root> \
+  --data-root <relative-path-below-evidence-root> \
+  --run <census-run-id> --action rebuild-projection --event census_source_observations.jsonl
+```
+
+**`rebuild-projection` runs offline, over an adjudicated store.** Its eleven-condition eligibility
+requires a resolved chain, an established terminal state, passing integrity, an unambiguous
+observation set, no orphan or partial uncertainty, no blocked recovery state, resolved carry-in
+accounting, a **disabled** network, and a projection that *lags* authoritative SQLite rather than
+*diverging* from it. Adjudicate store uncertainty first, then reconstruct the projection; a
+divergent projection is referred for an owner ruling and is never overwritten (Decision 064 §5).
+
+Resume only on `SAFE`, and only where continuation is permitted:
 
 ```bash
 python -m disclosure_drift m3 acquire \
@@ -824,7 +917,7 @@ rule 12).
 
 ## 29. Freeze the real snapshot only after Gate H
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.2)` → M3.3**
+**`PLANNED — NOT YET IMPLEMENTED (M3.3)`**
 
 The snapshot-freeze command belongs to M3.3 and is documented in the M3.3 contract when it is
 written. **Do not freeze a snapshot until all of:**
@@ -896,24 +989,26 @@ deleted; every gate green.
 
 ## Appendix B — the Milestone 3 command surface
 
-**The six Milestone 3.1 commands exist and run.** Every command marked M3.2 is
-`PLANNED — NOT YET IMPLEMENTED`; none of those exists, and typing one does nothing.
+**Every command below exists and runs.** What varies is *authority*, not existence: the M3.2A live
+paths are implemented and their grants are **exhausted**, so no further SEC request may be placed on
+the strength of any published record (Decision 064 §9).
 
 | Command | Phase | Status | Purpose |
 |---|---|---|---|
 | `m3 rehearse` | M3.1 | **implemented** | Run the **acquisition** rehearsal A1–A12, no socket |
 | `m3 rehearse-report` | M3.1 | **implemented** | Render the acquisition-rehearsal evidence matrix |
 | `m3 plan-requests` | M3.1 | **implemented** | The zero-request plan for one window, and its hash |
-| `m3 derive-dependent-plan` | M3.2 | planned | Derive the M3.2B plan from the frozen M3.2A objects; zero requests |
+| `m3 derive-dependent-plan` | M3.2 | **implemented** — M3.2B unauthorized | Derive the M3.2B plan from the frozen M3.2A objects; zero requests |
 | `m3 show-budget` | M3.1 | **implemented** | Render the derived budget quantities and the ceiling |
 | `m3 show-receipt` | M3.1 | **implemented** | Render a receipt, failing closed on a prohibited field |
-| `m3 acquire --show-scope` | M3.2 | planned | Print the exact network scope; zero requests |
-| `m3 acquire --live` | M3.2 | planned | Execute the approved plan, metadata only |
-| `m3 acquire --carry-in-authority` | M3.2 | **T5-authorized (Decision 061) — T6 execution packet still required before it may run** | Begin a clean run from an owner-approved consumed baseline; consumed exactly once; never a resume (step 27a) |
-| `m3 reconcile-requests` | M3.2 | planned | Planned versus actual, per route and total |
-| `m3 show-drift` | M3.2 | planned | Every drift event, blocking ones separated |
-| `m3 recovery-state` | M3.1 (used by M3.2) | **implemented** | Read-only interruption state and safe-resume determination; never repairs |
-| `m3 recover` | M3.2 | planned | Apply a separately authorized deterministic repair before a fresh read-only inspection |
+| `m3 acquire --show-scope` | M3.2 | **implemented** | Print the exact network scope; zero requests |
+| `m3 acquire --live` | M3.2 | **implemented — live grant exhausted; no further SEC request is authorized** | Execute the approved plan, metadata only |
+| `m3 acquire --carry-in-authority` | M3.2 | **implemented — the one carry-in authority is permanently consumed** | Begin a clean run from an owner-approved consumed baseline; consumed exactly once; never a resume (step 27a) |
+| `m3 acquire --resume-from` | M3.2 | **implemented — refuses a `complete` predecessor before any transport** | Continue an unfinished window from its exact predecessor receipt |
+| `m3 reconcile-requests` | M3.2 | **implemented**, transition-aware | Planned versus actual, per route and total; `--plan-transition-predecessor` with `--plan-transition-predecessor-receipt` reports the owner-superseded identity separately from blocking out-of-plan observations |
+| `m3 show-drift` | M3.2 | **implemented** | Every drift event, blocking ones separated |
+| `m3 recovery-state` | M3.1 (used by M3.2) | **implemented** | Read-only recovery determination, continuation permission, and the identity-level remainder; never repairs |
+| `m3 recover` | M3.2 | **implemented** | Apply one separately authorized deterministic repair before a fresh read-only inspection; `--check-only` reports eligibility and mutates nothing |
 
 **Exit codes for every command above follow the accepted convention:** `0` success, `1`
 configuration error, `2` usage, `3` stage not enabled, `4` gate failure.

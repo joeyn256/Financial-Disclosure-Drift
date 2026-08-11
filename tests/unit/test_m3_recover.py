@@ -45,13 +45,18 @@ from disclosure_drift.m3.acquisition import (
     prepare_operational_catalog,
     prepare_storage,
     propose_continuation,
+    rebuild_projection_eligibility,
     reconcile_requests,
     reconstruct_catalog_state,
     verified_reusable_predecessor,
 )
 from disclosure_drift.m3.receipt import ExecutionReceipt, write_receipt
 from disclosure_drift.m3.recovery import inspect_recovery_state
-from disclosure_drift.m3.request_plan import RequestPlan, build_m3_2a_request_plan
+from disclosure_drift.m3.request_plan import (
+    RequestPlan,
+    build_m3_2a_request_plan,
+    derive_a_reachable,
+)
 from disclosure_drift.sec.http_client import RetrievalPolicy, SecClient
 from disclosure_drift.sec.observation_catalog import (
     ObservationRecorder,
@@ -764,7 +769,11 @@ def _apply(
     target: str,
     *,
     census_run_id: str = _RUN,
+    network_disabled: bool = True,
 ) -> RecoveryActionResult:
+    # `network_disabled=True` is a statement of fact about this harness, not a convenience: every
+    # test here runs entirely offline against a temporary evidence root, so the tracked switches
+    # are genuinely off. The projection rebuild's eligibility reads it; the other three ignore it.
     return apply_recovery_action(
         action=action,
         target=target,
@@ -773,6 +782,7 @@ def _apply(
         catalog_path=harness.catalog_path,
         storage=harness.storage,
         census_run_id=census_run_id,
+        network_disabled=network_disabled,
     )
 
 
@@ -948,12 +958,19 @@ class TestRecoveryApplier:
             assert second.exists(), "a refusal mutates nothing"
 
     def test_rebuild_projection_uses_the_accepted_primitive(self, tmp_path: Path) -> None:
+        """A projection that *lags* SQLite is reconstructed through the accepted primitive.
+
+        The lag is produced the way a real one occurs — the last committed row never reached the
+        derived file — so what is repaired here is a byte-exact prefix of the authoritative
+        serialization, which is the condition Decision 064 §5 authorizes the rebuild for.
+        """
         with _harness(tmp_path) as harness:
             harness.run(_success_script(harness.plan), headroom=3)
             harness.flush_projection()
             projection = harness.storage.tree.audit / _PROJECTION
-            with projection.open("ab") as handle:
-                handle.write(b"{broken\n")
+            lines = projection.read_bytes().splitlines(keepends=True)
+            assert len(lines) > 1, "the fixture needs more than one projected row to truncate one"
+            projection.write_bytes(b"".join(lines[:-1]))
             head = _write_receipts(tmp_path, _receipt(harness.plan))
             harness.release()
             assert _inspect(harness, head).determination == "UNSAFE"
@@ -963,6 +980,82 @@ class TestRecoveryApplier:
             assert result.action_taken == "projection_rebuilt"
             assert result.event_recorded is True
             assert _inspect(harness, head).determination == "SAFE"
+
+    def test_rebuild_projection_refuses_a_divergent_projection(self, tmp_path: Path) -> None:
+        """Decision 064 §5.1: the rebuild repairs a lagging projection, never a diverging one.
+
+        Bytes the authoritative catalog cannot account for are unadjudicated evidence about what
+        wrote to the audit trail. Reconstructing over them would destroy exactly the evidence an
+        owner needs, so the action refuses and the damaged file is left untouched for a ruling.
+        """
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan), headroom=3)
+            harness.flush_projection()
+            projection = harness.storage.tree.audit / _PROJECTION
+            with projection.open("ab") as handle:
+                handle.write(b"{broken\n")
+            damaged = projection.read_bytes()
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            with pytest.raises(
+                RepairRefusedError, match="diverges from SQLite rather than lagging"
+            ):
+                _apply(harness, head, "rebuild-projection", _PROJECTION)
+
+            assert projection.read_bytes() == damaged, "a refusal mutates nothing"
+            assert _state_rows(harness) == [], "a refusal opens no write-ahead state"
+
+    def test_rebuild_projection_refuses_an_unproved_network_state(self, tmp_path: Path) -> None:
+        """Condition 10 fails closed: an unestablished network state is treated as an open one."""
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan), headroom=3)
+            harness.flush_projection()
+            projection = harness.storage.tree.audit / _PROJECTION
+            lines = projection.read_bytes().splitlines(keepends=True)
+            projection.write_bytes(b"".join(lines[:-1]))
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            with pytest.raises(RepairRefusedError, match="network is disabled"):
+                _apply(harness, head, "rebuild-projection", _PROJECTION, network_disabled=False)
+
+            assert _state_rows(harness) == [], "a refusal opens no write-ahead state"
+
+    def test_no_other_action_inherits_the_rebuild_eligibility(self, tmp_path: Path) -> None:
+        """Decision 064 §5: the action-specific gate is for `rebuild-projection` alone.
+
+        The same UNDETERMINED state that the projection rebuild may proceed from — here produced by
+        a committed row with no object, which is unrelated to the projection — still refuses every
+        other action, exactly as the blanket rule always did.
+        """
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan), headroom=3)
+            harness.flush_projection()
+            _, relative = _singleton_observation_id(harness, _requests(harness.plan)[1])
+            (harness.storage.tree.data_root / relative).unlink()
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+            assert _inspect(harness, head).determination == "UNDETERMINED"
+
+            for action, target in (
+                ("adopt-orphan", relative),
+                ("quarantine-partial", relative),
+                ("remove-stale-part", relative),
+            ):
+                with pytest.raises(RepairRefusedError, match="UNDETERMINED"):
+                    _apply(harness, head, action, target)
+
+            eligibility = rebuild_projection_eligibility(
+                action="rebuild-projection",
+                plan=harness.plan,
+                receipt_chain_head=head,
+                catalog_path=harness.catalog_path,
+                storage=harness.storage,
+                network_disabled=True,
+            )
+            assert not eligibility.permitted
+            assert "authoritative_observations_unambiguous" in eligibility.unmet
 
     def test_orphan_adoption_is_scoped_to_exactly_one_event(self, tmp_path: Path) -> None:
         with _harness(tmp_path) as harness:
@@ -1952,7 +2045,7 @@ class TestContinuationStatePartition:
             harness.flush_projection()
             requests = derive_logical_requests(harness.plan)
             sic = next(request for request in requests if request.source_id == "sec_sic_code_list")
-            identity = acquisition_module._planned_request_identity(sic)
+            identity = acquisition_module.planned_request_identity(sic)
             reconstruction = reconstruct_catalog_state(
                 catalog_path=harness.catalog_path, storage=harness.storage
             )
@@ -2283,3 +2376,318 @@ class TestAccountingAndRefusalSemantics:
         assert any(
             "the read-only inspection is UNSAFE" in reason for reason in proposal.refusal_reasons
         )
+
+
+_TERMINAL_RUN: Final = "m3-2-terminal-fixture-run-0001"
+
+
+def _condition(state: object, number: str) -> object:
+    """One §8 condition from a completed inspection, by its number."""
+    return next(item for item in state.conditions if item.number == number)
+
+
+def _register_terminal_run(
+    harness: _Harness,
+    *,
+    job_state: str = "completed",
+    attempts: int = 3,
+    started_at_utc: str = "2026-08-01T12:00:00Z",
+    finished_at_utc: str = _RECEIPT_COMPLETED,
+) -> None:
+    """The durable run row and pre-send ledger a terminal receipt must agree with.
+
+    The receipt carries no run identity by design, so the terminal path joins on the facts both
+    surfaces recorded independently — window, start, and end — and then reconciles the attempt
+    count against the ledger. Both are written here so the fixture is a state a real invocation
+    could have left, not a row shaped to satisfy one comparison.
+    """
+    connection = harness.writer.connection
+    with transaction(connection) as open_connection:
+        open_connection.execute(
+            "INSERT INTO ops_ingestion_jobs "
+            "(job_id, job_kind, job_state, stage, started_at_utc, finished_at_utc) "
+            "VALUES (?, 'm3_2_acquisition', ?, 'M3.2A', ?, ?)",
+            (_TERMINAL_RUN, job_state, started_at_utc, finished_at_utc),
+        )
+        for ordinal in range(attempts):
+            open_connection.execute(
+                "INSERT INTO ops_retrieval_attempts "
+                "(retrieval_attempt_id, job_id, source_url_canonical, logical_role, "
+                "attempt_number, attempt_state, started_at_utc) "
+                "VALUES (?, ?, ?, 'acquire', ?, 'started', ?)",
+                (
+                    f"attempt-{ordinal}",
+                    _TERMINAL_RUN,
+                    f"https://www.sec.gov/fixture/{ordinal}",
+                    ordinal + 1,
+                    started_at_utc,
+                ),
+            )
+
+
+def _set_outcome(harness: _Harness, observation_id: str, outcome: str) -> None:
+    """Restate one committed observation's outcome, leaving the row and its object in place."""
+    connection = harness.writer.connection
+    connection.execute(
+        "UPDATE census_source_observations SET outcome = ? WHERE observation_id = ?",
+        (outcome, observation_id),
+    )
+    connection.commit()
+    rebuild_audit_projection(connection, harness.storage.tree.audit / _PROJECTION)
+
+
+def _restate_identity(harness: _Harness, observation_id: str, url: str) -> None:
+    """Move one committed row onto a different request identity of the same route.
+
+    This is the shape an owner-approved endpoint substitution leaves behind: the route still holds
+    a committed row, but it belongs to an identity the current plan no longer contains, so the
+    planned identity is genuinely unsatisfied.
+    """
+    connection = harness.writer.connection
+    connection.execute(
+        "UPDATE census_source_observations SET request_identity = ?, requested_url = ? "
+        "WHERE observation_id = ?",
+        (url, url, observation_id),
+    )
+    connection.commit()
+    rebuild_audit_projection(connection, harness.storage.tree.audit / _PROJECTION)
+
+
+# =========================================================================== #
+# Decision 064 §§3-4 — a successful terminal head is established, and is never resumable
+# =========================================================================== #
+def _complete_receipt(plan: RequestPlan, **overrides: object) -> ExecutionReceipt:
+    """A live receipt recording a window that finished successfully."""
+    fields: dict[str, object] = {
+        "completion_status": "complete",
+        "reason_code": None,
+        "reason_detail": None,
+        "interruption_state": None,
+    }
+    fields.update(overrides)
+    return _receipt(plan, **fields)
+
+
+class TestSuccessfulTerminalHead:
+    """Establishing a terminal state and authorizing a resume are separate questions.
+
+    The whole point of Decision 064 §4 is that making the first answerable for a `complete` head
+    must not make the second answerable too. Every test here asserts both halves.
+    """
+
+    def test_a_complete_head_establishes_its_terminal_state(self, tmp_path: Path) -> None:
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness)
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert _condition(state, "8.2").status == "MET"
+            assert state.head_completion_status == "complete"
+            assert state.interruption_state is None
+            assert state.determination == "SAFE"
+
+    def test_a_complete_head_is_never_classified_as_a_failure(self, tmp_path: Path) -> None:
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness)
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert state.head_acquisition_complete is True
+            assert "failed" not in _condition(state, "8.2").detail
+            assert state.interruption_state is None, "no interruption state is fabricated"
+
+    def test_a_complete_head_refuses_a_continuation_proposal(self, tmp_path: Path) -> None:
+        """The refusal is explicit and stated on its own, not inherited from an empty remainder."""
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness)
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            proposal = _propose(harness, head)
+
+            assert proposal.permitted is False
+            assert any(
+                "records a completed acquisition" in reason for reason in proposal.refusal_reasons
+            )
+            assert proposal.inspection.continuation_permitted is False
+
+    def test_a_complete_head_beside_a_disagreeing_run_establishes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """Every one of the ten terminal conditions still applies to a successful head."""
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness, job_state="failed")
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert _condition(state, "8.2").status == "NOT MET"
+            assert "the two surfaces disagree" in _condition(state, "8.2").detail
+
+    def test_a_complete_head_over_an_ambiguous_store_establishes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness)
+            _, relative = _singleton_observation_id(harness, _requests(harness.plan)[1])
+            (harness.storage.tree.data_root / relative).unlink()
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert _condition(state, "8.2").status == "NOT MET"
+            assert "no stored object" in _condition(state, "8.2").detail
+            assert state.determination == "UNDETERMINED"
+
+    def test_a_complete_head_over_a_blocked_recovery_state_establishes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness)
+            open_recovery_state(
+                harness.writer,
+                census_run_id=_RUN,
+                recovery_state_id="blocked-state-01",
+                scenario="t2_4_recovery_action",
+                action_taken="adopt-orphan",
+                detail="an unadjudicated mutation",
+                relative_path="raw/bulk/example",
+            )
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert _condition(state, "8.2").status == "NOT MET"
+            assert "remain blocked" in _condition(state, "8.2").detail
+
+
+# =========================================================================== #
+# Decision 064 §6 — condition 8.8 counts per identity, never per route
+# =========================================================================== #
+class TestIdentityLevelHeadroom:
+    def test_an_outstanding_identity_is_counted_even_when_its_route_holds_a_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """The pre-correction defect, stated as its own test.
+
+        One route, one planned identity, and one committed row for a *different* identity on that
+        route. Route-level counting read the row as completion and reported nothing remaining;
+        identity-level counting reports the one request that is genuinely still owed, charged its
+        own route's `A_reachable`.
+        """
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            source_id = _requests(harness.plan)[1]
+            observation_id, _ = _singleton_observation_id(harness, source_id)
+            _restate_identity(harness, observation_id, "https://www.sec.gov/retired-path")
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert state.remaining_logical_requests == 1
+            assert state.worst_case_remaining_attempts == derive_a_reachable(SOURCES[source_id])
+            assert "1 logical request(s) remain" in _condition(state, "8.8").detail
+
+    def test_a_fully_satisfied_plan_leaves_nothing_remaining(self, tmp_path: Path) -> None:
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            _register_terminal_run(harness)
+            head = _write_receipts(tmp_path, _complete_receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert state.remaining_logical_requests == 0
+            assert state.worst_case_remaining_attempts == 0
+            assert _condition(state, "8.8").status == "MET"
+            assert state.continuation_permitted is False
+
+    def test_a_failed_row_never_counts_as_satisfaction(self, tmp_path: Path) -> None:
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            source_id = _requests(harness.plan)[1]
+            observation_id, _ = _singleton_observation_id(harness, source_id)
+            _set_outcome(harness, observation_id, "failed")
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert state.remaining_logical_requests == 1
+            assert state.worst_case_remaining_attempts == derive_a_reachable(SOURCES[source_id])
+
+    def test_the_inspection_and_the_continuation_agree_on_the_remainder(
+        self, tmp_path: Path
+    ) -> None:
+        """The two counts are the same count. That is the property §10 actually asks for."""
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan)[:3], headroom=3)
+            harness.flush_projection()
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+            proposal = _propose(harness, head)
+
+            assert state.remaining_logical_requests == len(proposal.remaining)
+            assert state.worst_case_remaining_attempts == proposal.worst_case_remaining_attempts
+
+    def test_a_remainder_beyond_the_ceiling_is_still_refused(self, tmp_path: Path) -> None:
+        """The ceiling semantics are untouched: a remainder that does not fit is not met."""
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan)[:1], headroom=1)
+            harness.flush_projection()
+            head = _write_receipts(
+                tmp_path,
+                _receipt(
+                    harness.plan,
+                    actual_logical_request_count=53,
+                    actual_physical_attempt_count=53,
+                    actual_per_route={
+                        "sec_bulk_submissions": {
+                            "logical_request_count": 53,
+                            "physical_attempt_count": 53,
+                        },
+                    },
+                    response_classification_totals={
+                        "proceed": 53,
+                        "retry": 0,
+                        "retry_after": 0,
+                        "cooldown": 0,
+                        "fail": 0,
+                        "quarantine": 0,
+                    },
+                    status_code_totals={"200": 53},
+                    raw_object_count=53,
+                ),
+            )
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert _condition(state, "8.8").status == "NOT MET"
+            assert state.consumed_physical_attempts == 53
+            assert state.remaining_logical_requests > 0

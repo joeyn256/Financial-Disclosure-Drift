@@ -42,6 +42,7 @@ from disclosure_drift.m3.recovery import (
     CARRY_IN_REQUEST_PLAN_SHA256,
     RECOVERY_DETERMINATIONS,
     ConditionResult,
+    ReceiptChainAccounting,
     RecoveryInspectionError,
     RecoveryState,
     _inspect_store,
@@ -1894,10 +1895,47 @@ def test_a_genuinely_interrupted_receipt_is_unchanged(tmp_path: Path) -> None:
     assert state.interruption_state == "after_catalog_commit"
 
 
-def test_a_complete_receipt_does_not_establish_a_terminal_failure(tmp_path: Path) -> None:
-    """`complete` is terminal but successful, so it is not a state to recover from."""
+def test_a_complete_receipt_establishes_a_successful_terminal_state(tmp_path: Path) -> None:
+    """Decision 064 §3: `complete` is terminal, and 8.2 asks whether that is established.
+
+    The state is reported as what it is — a successful completion — rather than as a failure or as
+    an unestablished state. It is recorded without an interruption state and without being called a
+    failure, and the head's own completion status is carried on the finding so the surfaces that
+    decide continuation can see it.
+    """
     tree = build_catalog(tmp_path)
     _register_terminal_run(tree, job_state="completed")
+    head = write_chain(
+        tmp_path,
+        receipt(
+            completion_status="complete",
+            reason_code=None,
+            reason_detail=None,
+            interruption_state=None,
+        ),
+    )
+
+    state = inspect(tmp_path, tree, head)
+    condition = _condition(state, "8.2")
+
+    assert condition.status == "MET"
+    assert "terminal state established" in condition.detail
+    assert "'complete'" in condition.detail
+    assert "no terminal cause to classify" in condition.detail
+    assert state.interruption_state is None, "no interruption state is ever fabricated"
+    assert state.head_completion_status == "complete"
+    assert state.head_acquisition_complete is True
+    assert "fail" not in condition.detail.lower(), "a complete window is never described as failed"
+
+
+def test_a_complete_receipt_beside_a_disagreeing_run_establishes_nothing(tmp_path: Path) -> None:
+    """The `complete` path is held to the same run-row agreement every other terminal head is.
+
+    A receipt claiming success beside a run row that records a failure is two surfaces disagreeing,
+    and neither is preferred over the other.
+    """
+    tree = build_catalog(tmp_path)
+    _register_terminal_run(tree, job_state="failed")
     head = write_chain(
         tmp_path,
         receipt(
@@ -1911,7 +1949,30 @@ def test_a_complete_receipt_does_not_establish_a_terminal_failure(tmp_path: Path
     condition = _condition(inspect(tmp_path, tree, head), "8.2")
 
     assert condition.status == "NOT MET"
-    assert "not one of the terminal non-success statuses" in condition.detail
+    assert "the two surfaces disagree" in condition.detail
+
+
+def test_a_complete_head_is_safe_but_never_authorizes_continuation(tmp_path: Path) -> None:
+    """Decision 064 §4: SAFE reports evidence certainty, never permission to acquire again."""
+    tree = build_catalog(tmp_path)
+    _register_terminal_run(tree, job_state="completed")
+    head = write_chain(
+        tmp_path,
+        receipt(
+            completion_status="complete",
+            reason_code=None,
+            reason_detail=None,
+            interruption_state=None,
+        ),
+    )
+
+    state = inspect(tmp_path, tree, head)
+
+    assert state.determination == "SAFE"
+    assert state.resume_authorized is True, "the evidence predicate is met"
+    assert state.continuation_permitted is False, "permission is a separate question, and is no"
+    assert "No continuation" in state.required_action
+    assert state.as_record()["continuation_permitted"] is False
 
 
 def test_a_receiptless_first_invocation_still_cannot_establish_anything(tmp_path: Path) -> None:
@@ -2198,3 +2259,185 @@ def test_walking_a_cross_namespace_chain_mutates_no_receipt(tmp_path: Path) -> N
         if path.is_file()
     }
     assert after == before
+
+
+# --------------------------------------------------------------------------- #
+# Decision 064 §2 — condition 8.12 compares against the chain's ROOT
+# --------------------------------------------------------------------------- #
+#: A successor plan hash that is lawfully different from the frozen carry-in plan. It is an
+#: arbitrary value on purpose: the root-versus-head rule is general, and nothing in these tests may
+#: depend on the particular pair one accepted decision happens to name.
+_SUCCESSOR_PLAN_SHA = "5" * 64
+
+
+def _root_and_successor_head(tmp_path: Path, **head_overrides: object) -> tuple[Path, str]:
+    """A two-receipt chain whose root carries the carry-in and whose head moved plan lawfully.
+
+    This is the shape the whole §5 correction is about: the root recorded the plan its carry-in
+    authority was minted under, and a later invocation in the same chain executed a different one.
+    Both facts are true at once, and neither surface is edited to agree with the other.
+    """
+    root = _carry_in_root()
+    head = receipt(
+        recovery_predecessor_receipt_id=root.receipt_id,
+        consumed_request_count_carried_forward=2,
+        request_plan_sha256=_SUCCESSOR_PLAN_SHA,
+        **head_overrides,
+    )
+    return write_chain(tmp_path, root, head), root.receipt_id
+
+
+def test_the_chain_carries_the_root_plan_separately_from_the_head_plan(tmp_path: Path) -> None:
+    """Two different questions, two different fields, each read from the receipt it is about."""
+    head_path, _ = _root_and_successor_head(tmp_path)
+
+    chain = walk_receipt_chain(head_path)
+
+    assert chain.resolved
+    assert chain.request_plan_sha256 == _SUCCESSOR_PLAN_SHA, "the head's own plan"
+    assert chain.root_request_plan_sha256 == CARRY_IN_REQUEST_PLAN_SHA256, "the root's own plan"
+    assert chain.root_request_plan_sha256 != chain.request_plan_sha256, "the fixture is non-vacuous"
+
+
+def test_8_12_is_met_when_the_checkpoint_agrees_with_the_root_despite_a_moved_head(
+    tmp_path: Path,
+) -> None:
+    """Decision 064 §2: the carry-in cross-check asks what the *root* was bound to."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    head_path, _ = _root_and_successor_head(tmp_path)
+
+    state = _carry_in_inspect(tmp_path, tree, head_path)
+    condition = _condition(state, "8.12")
+
+    assert condition.status == "MET"
+    assert state.determination != "UNDETERMINED"
+
+
+def test_the_head_plan_never_substitutes_for_the_root_in_8_12(tmp_path: Path) -> None:
+    """The head's hash must not be what the checkpoint is held against.
+
+    Non-vacuity control: the checkpoint is written naming the **head's** plan, which is exactly what
+    a head-based comparison would accept. It must refuse, because the checkpoint records what the
+    carry-in was bound to and the head's plan is not that.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, request_plan_sha256=_SUCCESSOR_PLAN_SHA)
+    head_path, _ = _root_and_successor_head(tmp_path)
+
+    state = _carry_in_inspect(tmp_path, tree, head_path)
+    condition = _condition(state, "8.12")
+
+    assert condition.status == "NOT MET"
+    assert "root name different request plans" in condition.detail
+    assert state.determination == "UNDETERMINED"
+
+
+def test_8_12_refuses_a_checkpoint_whose_plan_disagrees_with_the_root(tmp_path: Path) -> None:
+    """A root plan the checkpoint does not name is a baseline carried in under another plan."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    root = _carry_in_root(request_plan_sha256="7" * 64)
+    head_path = write_chain(
+        tmp_path,
+        root,
+        receipt(
+            recovery_predecessor_receipt_id=root.receipt_id,
+            consumed_request_count_carried_forward=2,
+            request_plan_sha256=_SUCCESSOR_PLAN_SHA,
+        ),
+    )
+
+    condition = _condition(_carry_in_inspect(tmp_path, tree, head_path), "8.12")
+
+    assert condition.status == "NOT MET"
+    assert "root name different request plans" in condition.detail
+
+
+def test_8_12_refuses_a_root_that_records_no_plan_at_all(tmp_path: Path) -> None:
+    """A carry-in root with nothing to compare establishes nothing, rather than passing silently."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    chain = ReceiptChainAccounting(
+        receipt_ids=("a" * 64,),
+        consumed_physical_attempts=2,
+        interruption_state=None,
+        resolved=True,
+        detail="fixture",
+        request_plan_sha256=_SUCCESSOR_PLAN_SHA,
+        root_carried_forward=1,
+        root_carry_in_authority_sha256=_AUTHORITY_SHA,
+        root_acquisition_window=CARRY_IN_ACQUISITION_WINDOW,
+        root_approved_request_ceiling=CARRY_IN_APPROVED_REQUEST_CEILING,
+        root_request_plan_sha256=None,
+    )
+
+    with read_only_catalog(tree.catalog_database) as connection:
+        disagreement = carry_in_checkpoint_disagreement(connection, chain)
+
+    assert disagreement is not None
+    assert "records no request plan" in disagreement
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"acquisition_window": "M3.2B"}, "different acquisition windows"),
+        ({"approved_request_ceiling": 802}, "different approved ceilings"),
+        (
+            # Internally coherent on purpose: the allocation sums to the baseline it declares, so
+            # the self-contradiction check cannot fire and the root comparison is what refuses.
+            {
+                "carried_forward": 2,
+                "historical_route_allocation": {"sec_bulk_submissions": 2},
+            },
+            "the catalog and the receipt disagree",
+        ),
+    ],
+)
+def test_8_12_still_refuses_every_other_root_fact_mismatch(
+    tmp_path: Path, overrides: dict[str, object], expected: str
+) -> None:
+    """The window, ceiling, and carried-forward comparisons are root-based and still load-bearing.
+
+    Each fixture keeps the root plan agreeing, so the only thing that can refuse is the fact under
+    test — which is what makes each case a control on the others rather than three ways of failing
+    the same comparison.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree, **overrides)
+    head_path, _ = _root_and_successor_head(tmp_path)
+
+    condition = _condition(_carry_in_inspect(tmp_path, tree, head_path), "8.12")
+
+    assert condition.status == "NOT MET"
+    assert expected in condition.detail
+
+
+def test_a_single_receipt_chain_whose_plan_never_moved_is_unchanged(tmp_path: Path) -> None:
+    """The ordinary case: root and head are one receipt, and the comparison is unchanged."""
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    head_path = write_chain(tmp_path, _carry_in_root())
+
+    chain = walk_receipt_chain(head_path)
+    condition = _condition(_carry_in_inspect(tmp_path, tree, head_path), "8.12")
+
+    assert chain.root_request_plan_sha256 == chain.request_plan_sha256
+    assert condition.status == "MET"
+
+
+def test_no_decision_062_hash_is_special_cased_in_the_carry_in_cross_check(tmp_path: Path) -> None:
+    """The rule is general: an arbitrary successor hash the codebase never names works identically.
+
+    ``_SUCCESSOR_PLAN_SHA`` is not any accepted plan's hash, so a comparison that happened to be
+    written around the one authorized pair would not admit this chain. It does, which is what
+    "general for any future valid receipt chain" means.
+    """
+    tree = build_catalog(tmp_path)
+    _burn_authority(tree)
+    head_path, _ = _root_and_successor_head(tmp_path)
+
+    assert _SUCCESSOR_PLAN_SHA != recovery_module.PLAN_TRANSITION_SUCCESSOR_PLAN_SHA256
+    assert _SUCCESSOR_PLAN_SHA != recovery_module.PLAN_TRANSITION_PREDECESSOR_PLAN_SHA256
+    assert _condition(_carry_in_inspect(tmp_path, tree, head_path), "8.12").status == "MET"

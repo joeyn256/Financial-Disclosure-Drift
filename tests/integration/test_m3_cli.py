@@ -1323,14 +1323,20 @@ def test_recovery_state_reports_a_determination_and_every_condition(
     result = _recovery_state(repo_root, evidence_root)
 
     normalized = " ".join(result.stdout.split())
-    assert "Safe-resume determination" in normalized
+    assert "Recovery determination" in normalized
     assert "nothing was repaired" in normalized
     for label in (
         "interruption state",
+        "head completion status",
         "consumed physical attempts",
         "orphan objects",
         "partial files",
         "determination",
+        # Decision 064 §4: reported beside the determination and separately from it, so an operator
+        # can never read evidence certainty as permission to acquire again.
+        "continuation permitted",
+        "continuation remaining",
+        "worst-case remaining attempts",
         "required action",
     ):
         assert label in normalized
@@ -3543,6 +3549,13 @@ def test_a_real_interruption_recovers_to_safe_and_resumes_through_the_real_cli(
     first_run = jobs[0]["job_id"]
 
     # ---- the accepted recovery path ---------------------------------------------------- #
+    # Recovery runs with the network window closed (Decision 064 §5, condition 10). That is the
+    # operator discipline the rule encodes rather than an artefact of the harness: reconstructing
+    # the derived projection while an acquisition path is open would produce a snapshot that is
+    # stale the moment a further row commits. The projection rebuild refuses under the live
+    # configuration and proceeds under the offline one, and the resume below reopens the window
+    # under its own authority.
+    offline = _config_with_network(tmp_path, repo_root, enabled=False, acquire=False)
     assert main(_recovery_state_argv(evidence_root)) == EXIT_GATE_FAILURE, (
         "an interrupted run is not SAFE until its bounded recovery actions have run"
     )
@@ -3556,32 +3569,48 @@ def test_a_real_interruption_recovers_to_safe_and_resumes_through_the_real_cli(
                 event=_PROJECTION_TARGET,
             )
         )
-        == EXIT_OK
-    )
+        == EXIT_GATE_FAILURE
+    ), "the projection rebuild refuses while a tracked acquisition switch is open"
+
+    # Store uncertainty is adjudicated before the derived projection is reconstructed from the
+    # catalog: an orphan means the authoritative observation set is still about to change, and the
+    # rebuild refuses over one (Decision 064 §5, condition 6). The two guards compose in exactly
+    # one order — adopt, then rebuild — and neither state is unreachable from the other.
     if expected["adopt_orphan"]:
         orphan = _live_orphans(evidence_root)[0]
         assert (
             main(
                 _recover_argv(
-                    evidence_root, config, run_id=first_run, action="adopt-orphan", event=orphan
-                )
-            )
-            == EXIT_OK
-        )
-        # Adoption commits a row, which makes the derived projection stale again.
-        assert (
-            main(
-                _recover_argv(
                     evidence_root,
-                    config,
+                    offline,
                     run_id=first_run,
                     action="rebuild-projection",
                     event=_PROJECTION_TARGET,
                 )
             )
+            == EXIT_GATE_FAILURE
+        ), "the projection rebuild refuses while an orphan remains unadjudicated"
+        assert (
+            main(
+                _recover_argv(
+                    evidence_root, offline, run_id=first_run, action="adopt-orphan", event=orphan
+                )
+            )
             == EXIT_OK
         )
         assert _live_orphans(evidence_root) == [], "the orphan is reconciled, never deleted"
+    assert (
+        main(
+            _recover_argv(
+                evidence_root,
+                offline,
+                run_id=first_run,
+                action="rebuild-projection",
+                event=_PROJECTION_TARGET,
+            )
+        )
+        == EXIT_OK
+    )
 
     assert main(_recovery_state_argv(evidence_root)) == EXIT_OK, "the inspection now reports SAFE"
 
@@ -4574,3 +4603,360 @@ def test_show_receipt_still_refuses_a_predecessor_that_exists_nowhere(
     assert result.returncode == EXIT_GATE_FAILURE
     assert "recovery_predecessor_receipt_id" in result.stderr
     assert str(evidence_root) not in result.stderr
+
+
+# =========================================================================== #
+# Decision 064 §7 — transition-aware `m3 reconcile-requests`
+# =========================================================================== #
+def _successor_plan_artifact(evidence_root: Path) -> Path:
+    """Write the Decision 062 successor plan document and return its relative path.
+
+    Identical to the predecessor in every input; the only difference is the source registry it is
+    bound to, which is what moves exactly one request identity.
+    """
+    from datetime import date  # noqa: PLC0415
+
+    from disclosure_drift.m3.request_plan import (  # noqa: PLC0415
+        build_m3_2a_request_plan,
+        canonical_plan_bytes,
+    )
+
+    plan = build_m3_2a_request_plan(
+        coverage_start=date(2009, 1, 1),
+        coverage_end=date(2026, 6, 30),
+        as_of_date=date(2026, 6, 30),
+        include_open_quarter=False,
+        calendar_year=2026,
+        calendar_evidence_entry_count=0,
+        already_satisfied_index_keys=frozenset(),
+        requests_per_second=4.0,
+    )
+    destination = evidence_root / "plans" / "successor.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(canonical_plan_bytes(plan))
+    return Path("plans/successor.json")
+
+
+def _predecessor_receipt_artifact(
+    evidence_root: Path, *, source_registry_version: str = "m2.2-source-registry/1.0"
+) -> Path:
+    """A minimal valid live receipt recording what the predecessor run was bound to.
+
+    The transition's registry-version condition asks what the predecessor *run recorded*, so the
+    receipt is the only surface that can answer it. Nothing else about this receipt is load-bearing.
+    """
+    from disclosure_drift.m3.receipt import ExecutionReceipt, write_receipt  # noqa: PLC0415
+
+    receipt = ExecutionReceipt(
+        command_name="m3 acquire",
+        command_version="m3.2a/1.0",
+        phase="M3.2A",
+        invocation_mode="live",
+        configuration_fingerprint="a" * 64,
+        migration_chain_head="0013_m23_manifest_lifecycle_guards",
+        started_at_utc="2026-08-04T00:00:00Z",
+        completed_at_utc="2026-08-04T00:00:09Z",
+        elapsed_seconds=9.0,
+        source_registry_version=source_registry_version,
+        index_plan_policy_version="quarterly-index-instances/2.0",
+        request_plan_schema_version="m3-request-plan/1.0",
+        parser_versions={"company-tickers": "1.0"},
+        acquisition_window="M3.2A",
+        request_plan_id="plan-predecessor",
+        request_plan_sha256=("19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"),
+        approved_request_ceiling=801,
+        planned_logical_request_count=75,
+        maximum_physical_attempt_count=801,
+        planned_per_route={"sec_company_tickers": 75},
+        actual_logical_request_count=1,
+        actual_physical_attempt_count=1,
+        actual_per_route={
+            "sec_company_tickers": {"logical_request_count": 1, "physical_attempt_count": 1},
+        },
+        response_classification_totals={
+            "proceed": 1,
+            "retry": 0,
+            "retry_after": 0,
+            "cooldown": 0,
+            "fail": 0,
+            "quarantine": 0,
+        },
+        status_code_totals={"200": 1},
+        raw_object_count=1,
+        duplicate_object_count=0,
+        cache_hit_count=0,
+        not_modified_count=0,
+        quarantined_object_count=0,
+        redirect_hop_count=0,
+        cooldown_count=0,
+        schema_drift_outcome="none",
+        schema_drift_event_count=0,
+        completion_status="failed",
+        reason_code="SEC_ACQUISITION_INTERRUPTED",
+        reason_detail="the predecessor run ended terminally.",
+    )
+    checkout = evidence_root.parent / "predecessor-receipt-checkout"
+    checkout.mkdir(parents=True, exist_ok=True)
+    written = write_receipt(receipt, evidence_root=evidence_root, repository_root=checkout)
+    return written.relative_to(evidence_root)
+
+
+def _record_retired_sic_failure(evidence_root: Path) -> str:
+    """Commit the one stranded observation the endpoint drift left behind, and return its identity.
+
+    A fixture acquisition cannot produce this row: the driver always resolves URLs through the live
+    source registry, so it retrieves the *successor* path whatever a plan document says it is bound
+    to. The retired identity therefore has to be written directly, exactly as the real predecessor
+    run committed it — a failed retrieval of the old exact path, with no stored object.
+    """
+    from disclosure_drift.m3.acquisition import (  # noqa: PLC0415
+        PLAN_TRANSITION_OLD_URL,
+        prepare_operational_catalog,
+        prepare_storage,
+    )
+    from disclosure_drift.sec.observation_catalog import ObservationRecorder  # noqa: PLC0415
+    from disclosure_drift.sec.snapshots import SourceObservation  # noqa: PLC0415
+    from disclosure_drift.sec.urls import request_identity  # noqa: PLC0415
+    from disclosure_drift.storage.catalog import CatalogWriter  # noqa: PLC0415
+
+    preparation = prepare_operational_catalog(
+        evidence_root=evidence_root, relative_path=_FIXTURE_CATALOG
+    )
+    storage = prepare_storage(evidence_root=evidence_root, data_root_relative=_FIXTURE_DATA_ROOT)
+    identity = request_identity("sec_sic_code_list", PLAN_TRANSITION_OLD_URL, {})
+    with CatalogWriter(preparation.database_path, preparation.lock_directory) as writer:
+        ObservationRecorder(writer=writer, tree=storage.tree).record(
+            SourceObservation(
+                observation_id="retired" + "0" * 25,
+                source_id="sec_sic_code_list",
+                requested_url=PLAN_TRANSITION_OLD_URL,
+                purpose="acquire the approved Milestone 3.2 metadata object",
+                retrieved_at_utc="2026-08-04T00:00:00Z",
+                outcome="failed",
+                identity=identity,
+                http_status=301,
+                attempts=1,
+                reason_codes=("SEC_REDIRECT_OUTSIDE_SOURCE_BOUNDARY",),
+                detail="the retired exact path redirected outside the source boundary",
+            )
+        )
+    return identity
+
+
+def _reconcile_argv(
+    evidence_root: Path, plan_relative: Path, *, report: str, extra: list[str] | None = None
+) -> list[str]:
+    return [
+        "m3",
+        "reconcile-requests",
+        "--evidence-root",
+        str(evidence_root),
+        "--plan",
+        str(plan_relative),
+        *_catalog_arguments(),
+        "--report-out",
+        report,
+        *(extra or []),
+    ]
+
+
+def test_reconcile_requests_refuses_half_a_plan_transition(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Neither half of the binding establishes a transition, so neither is accepted alone."""
+    plan_relative = _acquired_window(evidence_root, run_id="run-half-transition")
+    successor = _successor_plan_artifact(evidence_root)
+    receipt_relative = _predecessor_receipt_artifact(evidence_root)
+
+    only_plan = _run(
+        _reconcile_argv(
+            evidence_root,
+            successor,
+            report="reports/half-a.json",
+            extra=["--plan-transition-predecessor", str(plan_relative)],
+        ),
+        repo_root,
+    )
+    only_receipt = _run(
+        _reconcile_argv(
+            evidence_root,
+            successor,
+            report="reports/half-b.json",
+            extra=["--plan-transition-predecessor-receipt", str(receipt_relative)],
+        ),
+        repo_root,
+    )
+
+    assert only_plan.returncode == EXIT_USAGE, only_plan.stdout
+    assert only_receipt.returncode == EXIT_USAGE, only_receipt.stdout
+    assert not (evidence_root / "reports" / "half-a.json").exists(), (
+        "a usage failure writes nothing"
+    )
+    assert not (evidence_root / "reports" / "half-b.json").exists()
+
+
+def test_reconcile_requests_refuses_an_unauthorized_plan_pair(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """A transition is never inferred: only the pair an accepted decision names is admitted."""
+    plan_relative = _acquired_window(evidence_root, run_id="run-wrong-pair")
+    receipt_relative = _predecessor_receipt_artifact(evidence_root)
+
+    result = _run(
+        _reconcile_argv(
+            evidence_root,
+            plan_relative,
+            report="reports/wrong-pair.json",
+            extra=[
+                "--plan-transition-predecessor",
+                str(plan_relative),
+                "--plan-transition-predecessor-receipt",
+                str(receipt_relative),
+            ],
+        ),
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE, result.stdout
+    assert "plan transition is refused" in result.stderr
+    assert not (evidence_root / "reports" / "wrong-pair.json").exists(), (
+        "a refused transition never writes a report that could read as a clean reconciliation"
+    )
+
+
+def test_reconcile_requests_refuses_a_predecessor_receipt_recording_the_wrong_registry(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Condition 14 binds to what the predecessor run recorded, and it is checked literally."""
+    _acquired_window(evidence_root, run_id="run-wrong-registry")
+    predecessor = Path("plans/acquired.json")
+    successor = _successor_plan_artifact(evidence_root)
+    receipt_relative = _predecessor_receipt_artifact(
+        evidence_root, source_registry_version="m2.2-source-registry/1.1"
+    )
+
+    result = _run(
+        _reconcile_argv(
+            evidence_root,
+            successor,
+            report="reports/wrong-registry.json",
+            extra=[
+                "--plan-transition-predecessor",
+                str(predecessor),
+                "--plan-transition-predecessor-receipt",
+                str(receipt_relative),
+            ],
+        ),
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE, result.stdout
+    assert "source registry" in result.stderr
+
+
+def test_the_authorized_transition_supersedes_exactly_the_retired_identity(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """The whole point of the flag, end to end through the real command surface.
+
+    The catalog holds the retired SIC identity and not the successor's. Reconciled against the
+    successor plan **without** the flag, that identity is an ordinary blocking out-of-plan
+    observation and the window can never come clean. **With** the authorized pair, it moves to
+    `superseded_out_of_plan` — still listed, still visible, still satisfying nothing — and every
+    other observation is untouched.
+    """
+    _acquired_window(evidence_root, run_id="run-transition")
+    retired = _record_retired_sic_failure(evidence_root)
+    predecessor = Path("plans/acquired.json")
+    successor = _successor_plan_artifact(evidence_root)
+    receipt_relative = _predecessor_receipt_artifact(evidence_root)
+
+    without = _run(
+        _reconcile_argv(evidence_root, successor, report="reports/without.json"), repo_root
+    )
+    with_authority = _run(
+        _reconcile_argv(
+            evidence_root,
+            successor,
+            report="reports/with.json",
+            extra=[
+                "--plan-transition-predecessor",
+                str(predecessor),
+                "--plan-transition-predecessor-receipt",
+                str(receipt_relative),
+            ],
+        ),
+        repo_root,
+    )
+
+    assert without.returncode == EXIT_GATE_FAILURE, without.stdout
+    blocked = json.loads((evidence_root / "reports" / "without.json").read_text(encoding="utf-8"))
+    assert blocked["plan_transition"] is None
+    assert blocked["reconciliation"]["out_of_plan"], "the retired identity blocks without authority"
+    assert blocked["reconciliation"]["superseded_out_of_plan"] == []
+
+    assert with_authority.returncode == EXIT_OK, with_authority.stdout
+    document = json.loads((evidence_root / "reports" / "with.json").read_text(encoding="utf-8"))
+    assert document["reconciliation"]["out_of_plan"] == []
+    superseded = document["reconciliation"]["superseded_out_of_plan"]
+    assert len(superseded) == 1
+    assert superseded == [["sec_sic_code_list", retired]]
+    assert document["plan_transition"] == {
+        "decision_reference": "Decision 062",
+        "predecessor_plan_sha256": (
+            "19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68"
+        ),
+        "successor_plan_sha256": (
+            "f77e003ccc0ed8f9c0e55065b3c211aa5e33c7abf86cc71cbe66d427611d890a"
+        ),
+        "substituted_source_id": "sec_sic_code_list",
+    }
+    assert "superseded out-of-plan observations : 1" in " ".join(with_authority.stdout.split())
+    assert "plan transition applied" in with_authority.stdout
+
+
+def test_a_transition_aware_reconciliation_writes_only_its_report(
+    repo_root: Path, evidence_root: Path
+) -> None:
+    """Read-only except the accepted report artifact, and zero network."""
+    _acquired_window(evidence_root, run_id="run-transition-readonly")
+    _record_retired_sic_failure(evidence_root)
+    predecessor = Path("plans/acquired.json")
+    successor = _successor_plan_artifact(evidence_root)
+    receipt_relative = _predecessor_receipt_artifact(evidence_root)
+
+    def _durable() -> dict[str, bytes]:
+        # SQLite's `-wal` and `-shm` sidecars and the writer lease are process-lifetime artefacts
+        # that appear and vanish around any connection, including a read-only one. What the claim
+        # is about is durable evidence: the catalog itself, the raw objects, the plans, and the
+        # receipts.
+        transient = ("-wal", "-shm", ".lease")
+        return {
+            str(path.relative_to(evidence_root)): path.read_bytes()
+            for path in sorted(evidence_root.rglob("*"))
+            if path.is_file() and not path.name.endswith(transient)
+        }
+
+    before = _durable()
+
+    result = _run(
+        _reconcile_argv(
+            evidence_root,
+            successor,
+            report="reports/readonly.json",
+            extra=[
+                "--plan-transition-predecessor",
+                str(predecessor),
+                "--plan-transition-predecessor-receipt",
+                str(receipt_relative),
+            ],
+        ),
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK, result.stdout
+    after = _durable()
+    assert sorted(set(after) - set(before)) == ["reports/readonly.json"], (
+        "the report is the only artifact written"
+    )
+    assert {name: after[name] for name in before} == before, "nothing existing was modified"

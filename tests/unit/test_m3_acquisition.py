@@ -2688,8 +2688,8 @@ class TestOperationalErrorSanitization:
 from disclosure_drift.m3.acquisition import (  # noqa: E402 - stage T2.4 surfaces
     LogicalRequest,
     PlanTransitionRefusedError,
-    _planned_request_identity,
     conditional_validators,
+    planned_request_identity,
     reconcile_requests,
     reconstruct_catalog_state,
     superseded_out_of_plan_observation,
@@ -4140,6 +4140,7 @@ def _continuation(
     predecessor_receipt_id: str | None = "predecessor-receipt-identity",
     consumed: int = 0,
     remaining_count: int = 2,
+    head_completion_status: str | None = None,
 ) -> object:
     """A continuation proposal with controlled fixture values.
 
@@ -4211,6 +4212,9 @@ def _continuation(
             orphan_object_count=0,
             rows_without_object_count=0,
             partial_file_count=0,
+            head_completion_status=head_completion_status,
+            remaining_logical_requests=remaining_count,
+            worst_case_remaining_attempts=0,
         ),
     )
 
@@ -4235,6 +4239,28 @@ class TestResumeIntegration:
         assert result.predecessor_receipt_id == "predecessor-receipt-identity"  # type: ignore[attr-defined]
         rows = _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs ORDER BY job_id")
         assert [row["job_id"] for row in rows] == ["run-first", "run-resumed"]
+
+    def test_a_complete_predecessor_refuses_the_resume_before_any_transport(
+        self, tmp_path: Path
+    ) -> None:
+        """Decision 064 §4: a successfully completed window is never resumed, and never dialled.
+
+        The proposal handed in is marked permitted, SAFE, with a non-empty remainder — every field
+        the driver's other resume guards read is satisfied. The only thing wrong with it is that
+        its predecessor receipt records a completed acquisition, and that alone must refuse, before
+        the run identity is chosen and before the transport factory is reachable.
+        """
+        plan = _live_plan()
+        factory = _CountingTransportFactory(_success_script(plan))
+        arguments = _live_arguments(tmp_path, plan, factory)
+        arguments["carry_in"] = None
+        arguments["continuation"] = _continuation(plan, head_completion_status="complete")
+
+        with pytest.raises(AcquisitionGateError, match="records a completed acquisition"):
+            execute_live_acquisition(**arguments)  # type: ignore[arg-type]
+        assert factory.calls == 0
+        rows = _catalog_rows(tmp_path, "SELECT job_id FROM ops_ingestion_jobs")
+        assert rows == [], "a refused resume registers no run"
 
     def test_a_refused_proposal_refuses_the_resume_before_any_transport(
         self, tmp_path: Path
@@ -7002,7 +7028,7 @@ class TestPlanTransitionVerification:
         moved = [
             (old.source_id, index)
             for index, (old, new) in enumerate(zip(before, after, strict=True))
-            if _planned_request_identity(old) != _planned_request_identity(new)
+            if planned_request_identity(old) != planned_request_identity(new)
         ]
 
         assert len(before) == len(after) == 75

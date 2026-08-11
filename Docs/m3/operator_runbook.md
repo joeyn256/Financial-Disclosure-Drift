@@ -22,11 +22,12 @@ authorize any phase.
 > | Cumulative physical attempts | **77 / 801** |
 > | Predecessor identities replayed | **0** |
 > | Network window | **closed**; tracked switches `false` / `false` |
+> | Audit projection | **77 / 77** — an exact deterministic reconstruction of the authoritative SQLite rows |
 > | Source registry authority | **`m2.2-source-registry/1.1`** (Decision 062 §5) |
 > | Execution receipt authority | writer **`m3-execution-receipt/3.0`**; readers accept `2.0` and `3.0` |
 > | Request plan | successor `f77e003c…`; predecessor `19be7bdc…` retired |
 > | `sec_sic_code_list` exact path | the successor path SEC published; the retired `/corpfin/…` path is gone |
-> | Gate H | candidate reproduction only; **owner acceptance pending** |
+> | Gate H | **candidate PASS** (30 of 30 applicable items, reproduced offline 2026-08-11); **owner final acceptance pending and not claimed** |
 > | M3.2B, M3.3 | **not begun, not authorized** |
 >
 > **Never**, on the strength of anything in this runbook: re-run the 74 already-satisfied

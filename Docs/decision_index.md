@@ -491,8 +491,15 @@ earlier record remains historically accurate about the state it described.
 ## Milestone 3.2 — final acceptance and closeout — current rules
 
 [Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md)
-(`ACCEPTED — OWNER FINAL M3.2 CLOSEOUT 2026-08-13`) is the **last M3.2 record**. It closes the
-milestone on the fresh independent final acceptance review's `PASS` at BLOCKER 0 / MAJOR 0 / MINOR 0.
+(`ACCEPTED — OWNER FINAL M3.2 CLOSEOUT 2026-08-13`) is the **last M3.2 acceptance record**. It closes
+the milestone on the fresh independent final acceptance review's `PASS` at BLOCKER 0 / MAJOR 0 /
+MINOR 0.
+
+[Decision 066](Decisions/decision_066_m3_2_postcloseout_readonly_reconciliation_ci_correction.md)
+(`ACCEPTED — OWNER POST-CLOSEOUT CI CORRECTION AUTHORIZATION 2026-08-13`) is a later
+**post-closeout maintenance** record, not a second acceptance. It changes no accepted M3.2 fact and
+moves no tag; it restores the already-accepted read-only reconciliation invariant that GitHub Actions
+CI found broken on the closeout commit.
 
 | Question | Controlling record |
 |---|---|
@@ -503,6 +510,9 @@ milestone on the fresh independent final acceptance review's `PASS` at BLOCKER 0
 | Which commit carries the `m3.2-complete` tag, and who authorized it | Decision 065 §9 — the **governance closeout commit**, not the accepted implementation baseline `5c4c875e…`; authorized by `M3_2_CLOSEOUT_AND_TAG_OWNER_AUTHORIZED` |
 | Is M3.3 begun or authorized | Decision 065 §11 — **neither**; it requires its own separate owner packet and accepted stage contract |
 | What happened to OPT-1 and OPT-2 | Decision 065 §10 — both **DEFERRED**; neither is a blocker |
+| May `m3 reconcile-requests` change a durable artifact | Decision 066 §4 R1 — **no**. It creates exactly its authorized report and leaves every pre-existing durable artifact, the main SQLite catalog included, byte-identical; transient `-wal` / `-shm` sidecars and the governed lease never licence a change to the main database bytes |
+| Which record governs the read-only byte-comparison CI test | Decision 066 §4 R2 — that test is **normative**. It may be strengthened or refactored, never weakened, excluded, skipped, or dropped from the `[dev,sec]` suite |
+| Did the post-closeout correction move `m3.2-complete` or change an accepted M3.2 fact | Decision 066 §§3, 4 R3 — **neither**. The tag, the closeout commit `2185f583…`, and the accepted implementation baseline `5c4c875e…` all stand; the correction commit becomes only the current software baseline proposed for M3.3 entry |
 
 ## Deviation register — where deviations are recorded
 

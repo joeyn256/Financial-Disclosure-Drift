@@ -44,6 +44,7 @@ __all__ = [
     "CatalogWriter",
     "WriterLease",
     "read_only_connection",
+    "strictly_read_only_connection",
 ]
 
 DEFAULT_LEASE_SECONDS: Final = 900
@@ -83,6 +84,20 @@ class WriterLease:
 def read_only_connection(database_path: Path) -> AbstractContextManager[sqlite3.Connection]:
     """Return a read-only connection context manager for non-writer callers."""
     return connect(database_path, writer=False)
+
+
+def strictly_read_only_connection(
+    database_path: Path,
+) -> AbstractContextManager[sqlite3.Connection]:
+    """Return a connection whose operating-system handle cannot write at all.
+
+    :func:`read_only_connection` is read-only by convention: it takes no writer lease and its
+    callers issue no mutating statement. That is not enough for a caller that must leave the
+    database file byte-identical, because SQLite writes on its own account — closing the last
+    read-write handle to a WAL-mode database checkpoints the pending log into the main file.
+    ``SQLITE_OPEN_READONLY`` removes that capability rather than trusting nobody exercises it.
+    """
+    return connect(database_path, read_only=True)
 
 
 class CatalogWriter:

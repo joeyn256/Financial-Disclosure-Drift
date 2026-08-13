@@ -65,18 +65,43 @@ def require_sqlite_version(minimum: tuple[int, int] = REQUIRED_SQLITE_VERSION) -
 
 
 @contextmanager
-def connect(path: Path, *, writer: bool = False) -> Iterator[sqlite3.Connection]:
+def connect(
+    path: Path, *, writer: bool = False, read_only: bool = False
+) -> Iterator[sqlite3.Connection]:
     """Open a catalog connection with the required pragmas.
 
     Args:
         path: Database path. Parent directories are created for a writer.
         writer: Whether this connection may write. Writers set WAL and
             ``synchronous = FULL``; readers do not change durability settings.
+        read_only: Whether to open the operating-system handle itself read-only
+            (``SQLITE_OPEN_READONLY``, through a ``mode=ro`` URI). Not merely stricter
+            bookkeeping: a read-write handle to a WAL-mode database checkpoints the pending
+            log into the main file when the last connection closes, which rewrites durable
+            bytes even though no statement wrote anything. An inspection that must leave the
+            file byte-identical needs the handle refused at the operating system, not a
+            convention. A missing database is then an error rather than a new empty file,
+            which is the correct answer for a reader. Mutually exclusive with ``writer``.
+
+    Raises:
+        GateFailureError: both ``writer`` and ``read_only`` were requested.
     """
     require_sqlite_version()
+    if writer and read_only:
+        message = "a connection is either the writer or strictly read-only, never both"
+        raise GateFailureError(message)
     if writer:
         path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000)
+    connection = (
+        sqlite3.connect(
+            f"{path.absolute().as_uri()}?mode=ro",
+            uri=True,
+            isolation_level=None,
+            timeout=_BUSY_TIMEOUT_MS / 1000,
+        )
+        if read_only
+        else sqlite3.connect(path, isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000)
+    )
     try:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")

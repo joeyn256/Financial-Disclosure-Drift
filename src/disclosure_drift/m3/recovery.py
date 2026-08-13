@@ -13,10 +13,13 @@ independent things supply that proof:
 1. **Nothing writable is imported.** `reconcile`, `record_recovery_events`,
    `rebuild_audit_projection`, `ObservationRecorder`, `CatalogWriter`, and `RawStore` are absent
    from this module's namespace, so no accidental call is reachable — a test asserts it.
-2. **The connection refuses writes.** :func:`read_only_catalog` opens the catalog through the
-   non-writer helper *and* sets ``PRAGMA query_only``, so a write fails closed at SQLite rather than
-   relying on the convention that all writes route through ``CatalogWriter``. A read-only connection
-   also takes no writer lease, so inspecting never contends with, or masquerades as, a writer.
+2. **The connection refuses writes.** :func:`read_only_catalog` opens the catalog on a
+   ``SQLITE_OPEN_READONLY`` handle *and* sets ``PRAGMA query_only``, so a write fails closed at the
+   operating system and again at SQLite, rather than relying on the convention that all writes route
+   through ``CatalogWriter``. The read-only handle also rules out the write no statement asks for:
+   SQLite checkpoints a WAL-mode database when the last read-write connection closes, which would
+   rewrite durable bytes during an inspection. A read-only connection takes no writer lease either,
+   so inspecting never contends with, or masquerades as, a writer.
 3. **Everything is compared, nothing is acted on.** Orphans, partial files, and projection drift are
    counted and reported; the deterministic corrective action is *named* for a separately authorized
    M3.2 repair to perform.
@@ -57,7 +60,7 @@ from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.observation_catalog import load_observations, validate_audit_projection
 from disclosure_drift.sec.snapshots import SourceObservation
 from disclosure_drift.sec.source_registry import SOURCES
-from disclosure_drift.storage.catalog import read_only_connection
+from disclosure_drift.storage.catalog import strictly_read_only_connection
 from disclosure_drift.storage.sqlite import integrity_report
 
 __all__ = [
@@ -138,12 +141,19 @@ def _as_count(value: object) -> int:
 def read_only_catalog(catalog_path: Path) -> Iterator[sqlite3.Connection]:
     """Open the catalog so that a write is impossible, not merely unintended.
 
-    ``read_only_connection`` takes no writer lease, and ``PRAGMA query_only`` makes SQLite itself
-    reject any statement that would mutate the database. That upgrade matters: without it,
-    "read-only" rests on the convention that writes route through ``CatalogWriter``, and a
-    convention is not the proof the contract asks for.
+    Two independent guarantees, because either one alone leaves a real write path open. The handle
+    is opened ``SQLITE_OPEN_READONLY``, so the operating system refuses a write regardless of what
+    SQLite decides to do on its own account, and ``PRAGMA query_only`` makes SQLite reject any
+    statement that would mutate the database. Neither takes a writer lease, so inspecting never
+    contends with, or masquerades as, a writer.
+
+    The first guarantee is the one a statement-level check cannot supply. ``query_only`` governs
+    statements; SQLite also writes unprompted, and closing the last *read-write* handle to a
+    WAL-mode database checkpoints the pending log into the main file. That rewrites durable bytes
+    during an inspection that issued nothing but ``SELECT``s — which is precisely what an
+    inspection must never do (Decision 066 §4, R1).
     """
-    with read_only_connection(catalog_path) as connection:
+    with strictly_read_only_connection(catalog_path) as connection:
         connection.execute("PRAGMA query_only = TRUE")
         yield connection
 

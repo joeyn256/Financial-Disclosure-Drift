@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -289,6 +290,32 @@ def test_the_inspection_connection_refuses_writes_at_the_sqlite_level(tmp_path: 
         with pytest.raises(sqlite3.OperationalError):
             connection.execute("DELETE FROM census_source_observations")
         assert connection.execute("SELECT COUNT(*) FROM census_source_observations").fetchone()
+
+
+def test_the_inspection_connection_never_checkpoints_a_pending_log(
+    tmp_path: Path, stage_pending_wal: Callable[[Path], None]
+) -> None:
+    """The write no statement asks for: a WAL checkpoint folded in when the handle closes.
+
+    `PRAGMA query_only` governs statements. SQLite also writes on its own account — closing the
+    last *read-write* connection to a WAL-mode database copies the pending log into the main file,
+    changing durable bytes during an inspection that issued nothing but `SELECT`s. The handle is
+    therefore opened `SQLITE_OPEN_READONLY`, which removes the capability rather than trusting it
+    goes unexercised (Decision 066 §4, R1).
+    """
+    tree = build_catalog(tmp_path)
+    stage_pending_wal(tree.catalog_database)
+    before = tree.catalog_database.read_bytes()
+
+    with recovery_module.read_only_catalog(tree.catalog_database) as connection:
+        observations = connection.execute(
+            "SELECT COUNT(*) FROM census_source_observations"
+        ).fetchone()[0]
+
+    assert observations == 1, "the inspection still reads the catalog through the pending log"
+    assert tree.catalog_database.read_bytes() == before, (
+        "closing the inspection connection folded the pending log into the durable catalog"
+    )
 
 
 def test_inspection_changes_no_row_and_no_byte(tmp_path: Path) -> None:

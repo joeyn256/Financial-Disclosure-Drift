@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -94,6 +96,49 @@ def _block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "socket", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
     monkeypatch.setattr(socket, "getaddrinfo", _blocked)
+
+
+#: Staged in a subprocess that exits through ``os._exit``: the writing connection never gets its
+#: close-time checkpoint, so the committed log stays pending exactly as an interrupted writer
+#: leaves it. ``user_version`` is written because nothing in the project reads it, so the staged
+#: transaction is a real committed write that carries no domain meaning of its own.
+_PENDING_WAL_WRITER = """
+import os
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1], isolation_level=None)
+connection.execute("PRAGMA journal_mode = WAL")
+connection.execute("BEGIN IMMEDIATE")
+connection.execute("PRAGMA user_version = 66")
+connection.execute("COMMIT")
+os._exit(0)
+"""
+
+
+@pytest.fixture
+def stage_pending_wal() -> Callable[[Path], None]:
+    """Return a helper that leaves a committed, un-checkpointed WAL beside a SQLite catalog.
+
+    The subprocess matters twice over. It denies SQLite the close-time checkpoint that would fold
+    the log into the main database file, *and* it leaves no connection alive in the test process —
+    which is what makes the resulting state prove anything. A live connection anywhere stops every
+    other reader from checkpointing, so an assertion made in its shadow would hold no matter how
+    the code under test opened the database.
+    """
+
+    def _stage(catalog: Path) -> None:
+        staged = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", _PENDING_WAL_WRITER, str(catalog)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert staged.returncode == 0, staged.stderr
+        log = catalog.with_name(f"{catalog.name}-wal")
+        assert log.is_file() and log.stat().st_size > 0, "no pending log was staged"
+
+    return _stage
 
 
 @pytest.fixture

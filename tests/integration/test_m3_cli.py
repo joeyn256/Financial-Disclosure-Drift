@@ -15,7 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -1351,24 +1351,30 @@ def test_recovery_state_reports_a_determination_and_every_condition(
 
 
 def test_recovery_state_writes_nothing_it_inspected(repo_root: Path, evidence_root: Path) -> None:
-    """§11 and stop condition 10: inspection never writes. Proven by byte comparison."""
+    """§11 and stop condition 10: inspection never writes. Proven by byte comparison.
+
+    SQLite's `-wal` and `-shm` sidecars are process-lifetime artefacts that appear and vanish
+    around any connection, and a *strictly* read-only one leaves them behind because removing them
+    would itself be a write — the same accepted treatment the transition-aware read-only test
+    already applies (Decision 066 §4, R1). Everything else stays in scope, the writer lease
+    included: what the claim is about is durable evidence — the catalog, the raw objects, the
+    plans, and the receipts — and none of it may be added to, removed, or altered.
+    """
     import hashlib
 
+    def _durable() -> dict[Path, str]:
+        return {
+            path: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(evidence_root.rglob("*"))
+            if path.is_file() and not path.name.endswith(("-wal", "-shm"))
+        }
+
     _recovery_inputs(repo_root, evidence_root)
-    before = {
-        path: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(evidence_root.rglob("*"))
-        if path.is_file()
-    }
+    before = _durable()
 
     _recovery_state(repo_root, evidence_root)
 
-    after = {
-        path: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(evidence_root.rglob("*"))
-        if path.is_file()
-    }
-    assert after == before
+    assert _durable() == before
 
 
 def test_recovery_state_takes_no_run_or_repair_flag(repo_root: Path, evidence_root: Path) -> None:
@@ -4960,3 +4966,52 @@ def test_a_transition_aware_reconciliation_writes_only_its_report(
         "the report is the only artifact written"
     )
     assert {name: after[name] for name in before} == before, "nothing existing was modified"
+
+
+def test_a_reconciliation_never_checkpoints_a_pending_write_ahead_log(
+    repo_root: Path, evidence_root: Path, stage_pending_wal: Callable[[Path], None]
+) -> None:
+    """The read-only claim has to cover the write no statement asks for.
+
+    A read-*write* handle to a WAL-mode database checkpoints the pending log into the main file
+    when the last connection closes. The catalog's durable bytes change, and every statement the
+    command issued was a `SELECT` — so `PRAGMA query_only` sees nothing to refuse and the claim
+    fails anyway. That is the defect Decision 066 R1 corrects, and it is invisible unless a
+    pending log is actually staged, which is why this test stages one rather than hoping the
+    fixture leaves one behind.
+    """
+    _acquired_window(evidence_root, run_id="run-pending-wal")
+    retired = _record_retired_sic_failure(evidence_root)
+    predecessor = Path("plans/acquired.json")
+    successor = _successor_plan_artifact(evidence_root)
+    receipt_relative = _predecessor_receipt_artifact(evidence_root)
+
+    catalog = evidence_root / _FIXTURE_CATALOG
+    stage_pending_wal(catalog)
+    before = catalog.read_bytes()
+
+    result = _run(
+        _reconcile_argv(
+            evidence_root,
+            successor,
+            report="reports/pending-wal.json",
+            extra=[
+                "--plan-transition-predecessor",
+                str(predecessor),
+                "--plan-transition-predecessor-receipt",
+                str(receipt_relative),
+            ],
+        ),
+        repo_root,
+    )
+
+    assert result.returncode == EXIT_OK, result.stdout
+    assert catalog.read_bytes() == before, (
+        "the pending log was folded into the durable catalog by a read-only command"
+    )
+    # And it reconciled properly *through* that pending log rather than by failing to read it.
+    document = json.loads(
+        (evidence_root / "reports" / "pending-wal.json").read_text(encoding="utf-8")
+    )
+    assert document["reconciliation"]["out_of_plan"] == []
+    assert document["reconciliation"]["superseded_out_of_plan"] == [["sec_sic_code_list", retired]]

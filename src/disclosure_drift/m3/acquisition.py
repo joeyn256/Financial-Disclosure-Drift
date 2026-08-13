@@ -675,11 +675,19 @@ def _refuse_inconsistent_recorded_chain(database_path: Path) -> None:
     initialized catalog is never repaired here — and leaves every consequential decision to the
     accepted migrator. A database this cannot read is passed through untouched: deciding it is
     unreadable is the migrator's job, not this function's.
+
+    The connection is **closed**, not merely committed. ``sqlite3.Connection`` used as a context
+    manager governs the transaction and leaves the connection open, and a read-only handle that
+    outlives this pre-flight cannot checkpoint yet still pins a WAL-mode catalog's ``-wal`` and
+    ``-shm`` sidecars open for as long as it survives (Decision 066 §5).
     """
     try:
-        with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        try:
             connection.row_factory = sqlite3.Row
             recorded = applied_versions(connection)
+        finally:
+            connection.close()
     except sqlite3.Error:
         return  # Not readable as SQLite; the accepted migrator issues the refusal.
 

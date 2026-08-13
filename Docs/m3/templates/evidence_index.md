@@ -202,3 +202,27 @@ cryptographic, or third-party digital signature.
 readiness token was recorded later the same day under the owner's separate step-13 authorization.
 The current token state is carried by the governance ledger (`Milestones/STATUS.md`), not by this
 index: the index vocabulary defines no readiness-token artifact type, so no token row is added.
+
+**Ledger-not-index practice, and its M3.2 disposition (accepted
+[Decision 065](../../Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §8,
+2026-08-13).** The treatment above is this repository's general practice, not a one-off: where an
+artifact's identity is already bound by SHA-256 through an accepted decision record, that decision
+is the durable public binding and no index row is added. The same treatment was applied to the T4
+preflight attestation, which has no `operational_preflight_attestation` type (see §4).
+
+**M3.2 follows that practice, deliberately.** This index therefore carries **no M3.2 rows**, and the
+§5 expected-coverage rows for `M3.2A` and `M3.2B` are **not** an outstanding obligation:
+
+- **M3.2A private evidence identity and provenance are discoverable** through accepted
+  [Decision 062](../../Decisions/decision_062_m3_2_terminal_failure_and_sic_endpoint_remediation.md),
+  [Decision 063](../../Decisions/decision_063_m3_2_cross_namespace_receipt_chain_recovery.md),
+  [Decision 064](../../Decisions/decision_064_m3_2_final_recovery_semantics_and_precloseout_hardening.md),
+  Decision 065, and the accepted M3.2 contract — which between them bind the run identities, the
+  receipt identities, the plan hashes, the carry-in authority digest, and the object and attempt
+  counts, without publishing any artifact's contents.
+- **M3.2B was not executed and is not required** for the accepted M3.2 completion state
+  (Decision 065 §4), so it produced no artifact to index.
+
+**No competing indexing convention is created by this note**, no row is added, edited, deleted, or
+superseded, the append-only rule (§6) is untouched, and nothing above discloses a private path, an
+SEC identity, a credential, a response body, or any prohibited content.

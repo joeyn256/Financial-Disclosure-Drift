@@ -372,7 +372,7 @@ already used for non-pilot releases, and (b) the pilot-specific manifest Stage S
   [`Docs/change_impact_map.md`](change_impact_map.md) for the full test-selection map.
 - **Status:** accepted; both CI jobs green at the accepted baseline commit.
 
-## 10. Milestone 3 operational surfaces — M3.1 accepted, M3.2 stages T2.1–T2.4 accepted
+## 10. Milestone 3 operational surfaces — M3.1 accepted; M3.2 complete and owner-accepted
 
 Added under [Decision 043](Decisions/decision_043_m3_2_g1_navigation_workflow_repair_authorization.md)
 §7, at navigation-level granularity. **This section redesigns nothing and refactors nothing**; it
@@ -470,11 +470,23 @@ and neither is itself authorization.
 - **Tests:** `tests/unit/test_m3_acquisition.py`, `tests/unit/test_m3_recover.py`,
   `tests/unit/test_observation_catalog.py`, `tests/unit/test_reasons.py`;
   `tests/integration/test_m3_cli.py`.
-- **Status:** both stages accepted and published (Decisions 039 and 042); both grants exhausted.
-  **Combined T2.5–T2.6 — operator surfaces and the integrated implementation candidate — is
-  owner-gated, unauthorized, and not begun**, and its commit is the implementation-freeze candidate
-  for the independent T3 review. **No real operational catalog, raw object, receipt, request,
-  attempt, or SEC contact exists or has occurred**, ceiling 801 is unused, and no Gate H has passed.
+- **Status (as at Decision 042 — historical):** both stages accepted and published (Decisions 039
+  and 042); both grants exhausted. **Combined T2.5–T2.6 — operator surfaces and the integrated
+  implementation candidate — is owner-gated, unauthorized, and not begun**, and its commit is the
+  implementation-freeze candidate for the independent T3 review. **No real operational catalog, raw
+  object, receipt, request, attempt, or SEC contact exists or has occurred**, ceiling 801 is unused,
+  and no Gate H has passed.
+- **Status (current):** combined T2.5–T2.6 was authorized (Decision 045), implemented, independently
+  rereviewed `PASS`, and **accepted and published as T3** (Decision 046, 2026-08-07); T4 through T7
+  then ran and were accepted (Decisions 049, 051–064). **M3.2A live acquisition is complete** — 75 of
+  75 successor request identities satisfied, **77 of 801** cumulative physical attempts consumed —
+  with the real catalog, raw objects, and receipts held as **private** evidence outside the
+  repository. **Gate H is passed and owner-accepted, and Milestone 3.2 is complete and
+  owner-accepted** (accepted
+  [Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), 2026-08-13);
+  **M3.2B is closed as not executed / not required**, and **no further SEC acquisition or network
+  authority exists**. Tracked network switches remain `false` / `false`; no module, migration,
+  table, or runtime path in this map changed at closeout.
 
 ## Lifecycle notes: S4 drafts, the planned S5 joint run, and the S6 manifest boundary
 

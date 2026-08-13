@@ -12,9 +12,13 @@ authorize any phase.
 
 ---
 
-## Current state — read this before running anything (Decision 064 §9)
+## Current state — read this before running anything (Decision 064 §9; Decision 065)
 
-> **M3.2A SEC acquisition is COMPLETE. No further live SEC request is authorized.**
+> **Milestone 3.2 is COMPLETE and OWNER-ACCEPTED** (accepted
+> [Decision 065](../Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), 2026-08-13,
+> `M3_2_FINAL_OWNER_ACCEPTANCE`), on the fresh independent final milestone acceptance review's
+> `PASS` at **BLOCKER 0 / MAJOR 0 / MINOR 0**. **M3.2A SEC acquisition is COMPLETE. No further live
+> SEC request is authorized.**
 >
 > | Fact | Value |
 > |---|---|
@@ -27,8 +31,10 @@ authorize any phase.
 > | Execution receipt authority | writer **`m3-execution-receipt/3.0`**; readers accept `2.0` and `3.0` |
 > | Request plan | successor `f77e003c…`; predecessor `19be7bdc…` retired |
 > | `sec_sic_code_list` exact path | the successor path SEC published; the retired `/corpfin/…` path is gone |
-> | Gate H | **candidate PASS** (30 of 30 applicable items, reproduced offline 2026-08-11); **owner final acceptance pending and not claimed** |
-> | M3.2B, M3.3 | **not begun, not authorized** |
+> | Gate H | **PASSED and owner-accepted** (Decision 065 §3), on the 30-of-30 applicable-item candidate `PASS` reproduced offline 2026-08-11 and the independent final audit |
+> | Milestone 3.2 | **complete and owner-accepted**; annotated `m3.2-complete` tag created on the governance closeout commit |
+> | M3.2B | **not executed / not required for accepted M3.2 completion — closed by Decision 065 §4**; not pending, no latent acquisition or network authority, never resurrectable from a historical M3.2 authorization |
+> | M3.3 | **not begun, not authorized** — a separate owner packet and its own accepted contract are required |
 >
 > **Never**, on the strength of anything in this runbook: re-run the 74 already-satisfied
 > retrievals; invoke another live acquisition; enable a network switch; resume from a `complete`
@@ -106,15 +112,19 @@ runs that cannot be re-run.
 
 **`IMPLEMENTED (M3.1, Decision 028 §11)`**
 
-Every M3 evidence-output command *will* resolve its evidence root before writing and refuse a root
-equal to, inside, or containing the checkout, so that symlinks cannot bypass the check. The
-repository-root `.m3-private-evidence/` path *will* be matched by a reserved `.gitignore` rule
+Every M3 evidence-output command resolves its evidence root before writing and refuses a root equal
+to, inside, or containing the checkout, so that symlinks cannot bypass the check. The
+repository-root `.m3-private-evidence/` path is matched by a reserved `.gitignore` rule
 `/.m3-private-evidence` and explicitly rejected by repository hygiene; it is never a lawful
 operational evidence root.
 
-None of these three protections exists yet: the `.gitignore` rule, the repository-hygiene refusal,
-and the resolved-path CLI check are all future M3.1 contract requirements, and no M3 evidence-output
-command exists. See limitations register **M3-L11**.
+**All three protections exist and are accepted**, and M3 evidence-output commands exist and run:
+the `.gitignore` rule is in `.gitignore`, the repository-hygiene refusal is in
+[`scripts/check_repo_hygiene.py`](../../scripts/check_repo_hygiene.py), and the resolved-path check
+is in [`src/disclosure_drift/m3/evidence_paths.py`](../../src/disclosure_drift/m3/evidence_paths.py).
+Limitations register entry **M3-L11** is `CLOSED` (2026-08-03). Corrected under accepted
+[Decision 065](../Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §5 — documentary
+only; no command, argument, exit code, or label changed.
 
 ---
 
@@ -535,6 +545,14 @@ the allowlist, zero filing-body URLs, and the classification totals.
 ## 18a. Between the windows — freeze, derive, and obtain the second approval
 
 **`IMPLEMENTED (M3.2)`** · then **`MANUAL OWNER APPROVAL`** · **M3.2B is not begun and is not authorized**
+
+> **Disposition: NOT EXECUTED / NOT REQUIRED FOR ACCEPTED M3.2 COMPLETION — accepted
+> [Decision 065](../Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §4.** This step is
+> preserved as the planned between-windows procedure. **Do not run it as a pending action.** M3.2 is
+> complete and owner-accepted, Gate H passed on the completed M3.2A evidence state, and M3.2B was
+> not executed, is not pending, and carries no latent acquisition or network authority. Nothing
+> here — including the `m3 derive-dependent-plan` command below — authorizes work; a new explicit
+> owner authorization is required for any future acquisition resembling it.
 
 **M3.2A acquires only the bootstrap sources. M3.2B acquires only the dependent requests derived from
 what M3.2A actually retrieved.** Between them, in this exact order:

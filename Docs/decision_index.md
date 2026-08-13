@@ -368,12 +368,21 @@ only, granting no Milestone 3 implementation authority**. Formal outcome:
 | Real-snapshot evidence packet | [`Docs/m3/templates/real_snapshot_evidence_packet.md`](m3/templates/real_snapshot_evidence_packet.md) |
 | Root-hash approval packet | [`Docs/m3/templates/root_hash_approval_packet.md`](m3/templates/root_hash_approval_packet.md) |
 
-**What the planning pack does not claim.** No Gate F has passed. **Neither offline rehearsal has been
-run.** No live acquisition occurred. No Gate H has passed. No real snapshot, selection, manifest, or
-approval exists. **The M3.1 contract is accepted with `IMPLEMENTATION_AUTHORIZATION: YES`, and its
-implementation exists in the tree without being accepted; Decision 029 code remediation is
-implemented and the disposable-clone validation run on the corrected tree is complete, and a frozen
-commit and the first durable §17 review remain outstanding.**
+**What the planning pack did not claim, as at Decision 028 — historical.** No Gate F has passed.
+**Neither offline rehearsal has been run.** No live acquisition occurred. No Gate H has passed. No
+real snapshot, selection, manifest, or approval exists. **The M3.1 contract is accepted with
+`IMPLEMENTATION_AUTHORIZATION: YES`, and its implementation exists in the tree without being
+accepted; Decision 029 code remediation is implemented and the disposable-clone validation run on
+the corrected tree is complete, and a frozen commit and the first durable §17 review remain
+outstanding.**
+
+**Current state.** Every clause in that paragraph except the last sentence has since been overtaken:
+M3.1 is accepted and complete (Decision 031), Gate F passed, the A1–A12 rehearsal ran and passed,
+M3.2A live acquisition completed, **Gate H is passed and owner-accepted**, and Milestone 3.2 is
+complete and owner-accepted
+([Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), 2026-08-13). What
+still holds: **no real snapshot, selection, manifest, or approval exists**, the M3.3A execution
+rehearsal (E1–E8) has not been run, and **M3.3 has not begun and is not authorized**.
 
 **D023-O1 remains the sole unresolved owner-ruling condition** and is referred only if a real run
 reaches it. Accepted Decision 028 records the owner rulings for **M3-L11** and **M3-L12**, preserving
@@ -454,8 +463,11 @@ contract itself, [`Milestones/contracts/m3_2.md`](../Milestones/contracts/m3_2.m
 034 for its acceptance. For *what a stage was allowed to touch* read the authorizing decision
 (035 for T2.1; 035 as amended by 038 for T2.2–T2.3; 040 as amended by 041 for T2.4) — never the
 acceptance decision, which records the outcome rather than the envelope. **Stage acceptance is not
-overall M3.2 T3 implementation acceptance**, which has not occurred; combined T2.5–T2.6 remains
-owner-gated and not begun.
+overall M3.2 T3 implementation acceptance** — a distinction that was live while the stages ran.
+**Both have since occurred:** combined T2.5–T2.6 was authorized (Decision 045) and its corrected
+freeze candidate was accepted and published as T3 (Decision 046, 2026-08-07), and Milestone 3.2 as a
+whole is now complete and owner-accepted
+([Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), 2026-08-13).
 
 ## Milestone 3.2 recovery, continuation, and reconciliation semantics — current rules
 
@@ -475,6 +487,22 @@ earlier record remains historically accurate about the state it described.
 | How condition **8.8**'s remainder is counted | Decision 064 §6 — **per identity**, through the same expansion continuation enforcement uses |
 | How an owner-superseded request identity is reconciled | Decision 064 §7 (with [Decision 062](Decisions/decision_062_m3_2_terminal_failure_and_sic_endpoint_remediation.md) §§7–8) — the same seventeen-condition verifier, paired flags, never inferred |
 | Where a receipt physically lives | Decision 064 §8 — two accepted filename conventions; a receipt is addressed by its recorded identity |
+
+## Milestone 3.2 — final acceptance and closeout — current rules
+
+[Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md)
+(`ACCEPTED — OWNER FINAL M3.2 CLOSEOUT 2026-08-13`) is the **last M3.2 record**. It closes the
+milestone on the fresh independent final acceptance review's `PASS` at BLOCKER 0 / MAJOR 0 / MINOR 0.
+
+| Question | Controlling record |
+|---|---|
+| Is Milestone 3.2 complete | Decision 065 §3 — **yes**, `M3_2_FINAL_OWNER_ACCEPTANCE`, complete and owner-accepted |
+| Is Gate H passed | Decision 065 §3 — **yes**, passed and **owner-accepted**, on the 30-of-30 offline candidate `PASS` (Decision 064) and the independent final audit |
+| Is M3.2B required, pending, or authorized | Decision 065 §4 — **no** to all three. **CLOSED AS NOT EXECUTED / NOT REQUIRED**; it carries no latent acquisition or network authority and is never resurrectable from a historical M3.2 authorization |
+| Does any further M3.2 SEC acquisition or network authority exist | Decision 065 §§3, 11 — **none**; every live grant and one-shot authority is permanently spent, and tracked switches remain `false` / `false` |
+| Which commit carries the `m3.2-complete` tag, and who authorized it | Decision 065 §9 — the **governance closeout commit**, not the accepted implementation baseline `5c4c875e…`; authorized by `M3_2_CLOSEOUT_AND_TAG_OWNER_AUTHORIZED` |
+| Is M3.3 begun or authorized | Decision 065 §11 — **neither**; it requires its own separate owner packet and accepted stage contract |
+| What happened to OPT-1 and OPT-2 | Decision 065 §10 — both **DEFERRED**; neither is a blocker |
 
 ## Deviation register — where deviations are recorded
 

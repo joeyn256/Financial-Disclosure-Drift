@@ -632,9 +632,19 @@ later decision has released either — their rows earlier in this map describe t
 surfaces, which is the only capacity in which they may be changed.
 
 **What no accepted T2 stage has produced:** no real operational catalog, no raw object, no receipt,
-no evidence artifact, no request, no attempt, no SEC contact. Both tracked network switches are
-`false`, ceiling 801 is unused, and no Gate H has passed. A validation run that appears to need any
-of those is a stop condition.
+no evidence artifact, no request, no attempt, no SEC contact. **T2 built the surfaces; it never ran
+them.** That statement is scoped to the implementation stages and stays true.
+
+**Current state, which the T2-stage statement above does not describe.** The later authorized live
+windows did run: M3.2A acquisition is complete at **75 of 75** successor request identities and
+**77 of 801** cumulative physical attempts, real objects and receipts exist as **private** evidence
+outside the repository, **Gate H is passed and owner-accepted**, and Milestone 3.2 is complete and
+owner-accepted (accepted
+[Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), 2026-08-13). Both
+tracked network switches remain `false`, and **no further SEC acquisition or network authority
+exists**. **A validation run that appears to need a network switch, a real catalog, a real raw
+object, an SEC contact, or any private evidence is still a stop condition** — tests use temporary
+paths and fixtures only.
 
 ## Notes on reading this table
 

@@ -164,6 +164,18 @@ These hold in **every** Milestone 3 phase, and no phase contract may weaken one.
 and no new phase, and the Decision 024 §5.1 map M3.1–M3.5 is unchanged** (Decision 027 §6). **Only a
 phase takes a tag; an internal part never does.**
 
+**M3.2B — Disposition: NOT EXECUTED / NOT REQUIRED FOR ACCEPTED M3.2 COMPLETION — accepted
+[Decision 065](../Docs/Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §4
+(2026-08-13).** The M3.2B row above is the **planned** architecture and stays on record as written.
+As current state: M3.2A completed its acquisition (75 of 75 successor request identities satisfied at
+77 of 801 cumulative physical attempts), Decisions 063 and 064 established the applicable Gate H
+mechanism over that completed evidence state, Gate H is **passed and owner-accepted**, and
+**Milestone 3.2 is complete and owner-accepted** with the annotated `m3.2-complete` tag created.
+M3.2B was **not executed**, **is not pending**, **is not a prerequisite** of that completion, and
+**carries no latent acquisition or network authority**; it may **not** be resurrected from this row,
+from §14, or from any other historical M3.2 authorization. **M3.3 has not begun and is not
+authorized.**
+
 **The rule that produced these subdivisions, and that governs any future one:** the second part
 depends on something the first part must build, freeze, or prove, and **no scenario may be placed in
 a phase that lacks the production path it exercises.**
@@ -978,6 +990,12 @@ schema drift and fail closed; survive interruption and resume without duplicate 
 emit one execution receipt per live command; and **disable the network again** at the window's end.
 
 **After M3.2B:** run Gate H over both windows together and produce its evidence.
+
+> **Disposition: NOT EXECUTED / NOT REQUIRED FOR ACCEPTED M3.2 COMPLETION — Decision 065 §4.** The
+> M3.2B sequence above is preserved as the planned architecture. As current state, Gate H did **not**
+> wait on a second window: Decisions 063 and 064 established the applicable Gate H mechanism over the
+> completed M3.2A evidence state, and Gate H is **passed and owner-accepted** (Decision 065 §3). No
+> further SEC acquisition or network authority exists.
 
 ### 3. Explicit non-scope
 

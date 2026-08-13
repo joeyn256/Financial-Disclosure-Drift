@@ -87,7 +87,17 @@ completed contract authorizes nothing further (see the rule above). **The M3.1 c
 `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed at the annotated `m3.1-complete` tag, so its stage
 shipped, the header authorization lines it still carries are the historical grant that stage
 exercised, and — per the completed-contract rule above — it authorizes nothing further; reopening
-M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) is ACCEPTED at T1, its stage T2.1 is complete and
+M3.1 requires a new explicit owner authorization. **The M3.2 contract [`m3_2.md`](m3_2.md) is now
+likewise complete**: Milestone 3.2 is owner-accepted (accepted
+[Decision 065](../../Docs/Decisions/decision_065_m3_2_final_acceptance_and_closeout.md),
+2026-08-13, `M3_2_FINAL_OWNER_ACCEPTANCE`) with **Gate H passed and owner-accepted**, checkpointed at
+the annotated `m3.2-complete` tag, so — per the completed-contract rule above — it authorizes nothing
+further; **M3.2B is closed as not executed / not required** (Decision 065 §4) and is never
+resurrectable from a historical M3.2 authorization; **no further M3.2 SEC acquisition or network
+authority exists**; and reopening M3.2 requires a new explicit owner authorization. **The paragraph
+that follows is the stage-era record of how that contract got there, preserved as written.**
+
+**The M3.2 contract [`m3_2.md`](m3_2.md) is ACCEPTED at T1, its stage T2.1 is complete and
 published, and its remaining stages are consolidated —
 `ACCEPTED (T1, DECISION 034) — T2 STAGED IMPLEMENTATION AUTHORIZED (DECISION 035); STAGE T2.1
 COMPLETE AND PUBLISHED (DECISION 036); REMAINING STAGES CONSOLIDATED (DECISION 037, 2026-08-04)`,
@@ -225,6 +235,14 @@ of Decision 024 §8's five entry conditions and never grants implementation auth
 Every Milestone 3 phase gets its own contract in this directory, written to the required-sections
 shape above and to the master plan's §16 additions.
 
+**Current state (accepted
+[Decision 065](../../Docs/Decisions/decision_065_m3_2_final_acceptance_and_closeout.md),
+2026-08-13).** Gate F ran, M3.2A live acquisition completed (75 of 75 successor request identities
+satisfied at 77 of 801 cumulative physical attempts), **Gate H is passed and owner-accepted**, and
+**Milestone 3.2 is complete and owner-accepted**. **No real snapshot, selection, manifest, or
+approval exists**, the M3.3A execution rehearsal (E1–E8) has not been run, and **M3.3 has not begun
+and is not authorized**. The paragraph below is the pre-acquisition record, preserved as written.
+
 **Gate F readiness is recorded and Gate F execution has not begun; no live acquisition occurred;
 no Gate H has passed; and no real snapshot, selection, manifest, or approval exists.** Both M3.1
 tokens are durably recorded and record readiness only; the M3.2A budget and hard ceiling 801 are
@@ -238,9 +256,13 @@ M3-L11 protection) is implemented in the frozen accepted tree. The fresh indepen
 rereview of the corrected M3.2 contract completed 2026-08-04
 (`M3_2_CORRECTED_CONTRACT_INDEPENDENT_REREVIEW: PASS`) and the owner accepted the contract
 unchanged at T1 (accepted
-[Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md)). The next step is
-preparation and owner review of the bounded M3.2 T2 implementation-authorization packet —
-preparing it authorizes nothing.
+[Decision 034](../../Docs/Decisions/decision_034_m3_2_contract_acceptance.md)). The next step at
+that stage was preparation and owner review of the bounded M3.2 T2 implementation-authorization
+packet — preparing it authorized nothing. **That is historical: the packet was prepared and
+accepted, every T2 stage and T3 through T7 completed and was accepted, and Milestone 3.2 is now
+complete and owner-accepted (Decision 065). The current next authorized action is carried by
+`NEXT_AUTHORIZED_ACTION` in [`Milestones/STATUS.md`](../STATUS.md) — the owner M3.3 entry and
+contract packet.**
 
 - [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F. **Complete.** The
   stage is owner-accepted (accepted Decision 031, `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed

@@ -2436,6 +2436,65 @@ def _set_outcome(harness: _Harness, observation_id: str, outcome: str) -> None:
     rebuild_audit_projection(connection, harness.storage.tree.audit / _PROJECTION)
 
 
+_SHADOW_INSTANT: Final = "2099-01-01T00:00:00Z"
+
+
+def _shadow_row(
+    harness: _Harness, observation_id: str, shadow_id: str, **overrides: object
+) -> None:
+    """Copy one committed observation into a strictly newer row for the same identity.
+
+    Every column is copied from a row the recorder itself wrote, so the shadow differs from real
+    evidence only in what ``overrides`` names. That is what makes the tests below able to isolate
+    one rule at a time: the identity, the route, and the provenance are unchanged, and the newest
+    row for that identity is the shadow.
+    """
+    connection = harness.writer.connection
+    columns = [
+        row[1]
+        for row in connection.execute("PRAGMA table_info(census_source_observations)").fetchall()
+    ]
+    assignable = ", ".join(name for name in columns if name != "observation_id")
+    connection.execute(
+        f"INSERT INTO census_source_observations (observation_id, {assignable}) "  # noqa: S608
+        f"SELECT ?, {assignable} FROM census_source_observations WHERE observation_id = ?",
+        (shadow_id, observation_id),
+    )
+    fields = {"retrieved_at_utc": _SHADOW_INSTANT, "projected_to_audit": 0, **overrides}
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    connection.execute(
+        f"UPDATE census_source_observations SET {assignments} "  # noqa: S608
+        f"WHERE observation_id = ?",
+        (*fields.values(), shadow_id),
+    )
+    connection.commit()
+    rebuild_audit_projection(connection, harness.storage.tree.audit / _PROJECTION)
+
+
+def _shadow_with_a_newer_unresolvable_row(harness: _Harness, observation_id: str) -> None:
+    """Give one identity a newer *usable* row whose object is absent, keeping the older good one.
+
+    This is the state that separates "judge the newest" from "keep looking until something
+    satisfies": the identity's most recent evidence does not resolve, and an earlier row for the
+    same identity does.
+    """
+    _shadow_row(
+        harness,
+        observation_id,
+        "shadow" + "0" * 26,
+        relative_storage_path="raw/sec/bulk/never-promoted.json",
+    )
+
+
+def _shadow_with_a_newer_unusable_row(harness: _Harness, observation_id: str) -> None:
+    """Give one identity a newer **non-usable** row that still names the good object's path.
+
+    A quarantined observation keeps a storage path, so it is not filtered out by the payload
+    check — only by the usable-outcome rule. That makes this the fixture that isolates that rule.
+    """
+    _shadow_row(harness, observation_id, "quarantined" + "0" * 21, outcome="quarantined")
+
+
 def _restate_identity(harness: _Harness, observation_id: str, url: str) -> None:
     """Move one committed row onto a different request identity of the same route.
 
@@ -2638,6 +2697,75 @@ class TestIdentityLevelHeadroom:
 
             assert state.remaining_logical_requests == 1
             assert state.worst_case_remaining_attempts == derive_a_reachable(SOURCES[source_id])
+
+    def test_an_identity_is_judged_on_its_newest_evidence_and_never_on_an_older_row(
+        self, tmp_path: Path
+    ) -> None:
+        """The identity is decided once, on its newest usable row, with no fallback.
+
+        Non-vacuity for the decided-once guard: the identity here has an older row that *would*
+        satisfy it, and the walk must not reach for it. Falling back would report the identity
+        satisfied on evidence that has been superseded by evidence which does not resolve, and
+        under-counting the remainder is the wrong direction for a headroom check to be wrong in.
+
+        The continuation surface judges the same identity the same way and reaches a *stricter*
+        conclusion: a committed row whose object is absent is persistence-uncertain, so the whole
+        proposal is `UNDETERMINED` and the transport remainder is deliberately empty. That is not
+        the two surfaces disagreeing about the evidence — it is the difference between "how many
+        planned identities are unsatisfied" and "what may lawfully be re-requested", and nothing
+        may be re-requested from an uncertain state. The agreement property between the two
+        remainders is asserted where it is meaningful, in the test below this one.
+        """
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            source_id = _requests(harness.plan)[1]
+            observation_id, _ = _singleton_observation_id(harness, source_id)
+            _shadow_with_a_newer_unresolvable_row(harness, observation_id)
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert state.remaining_logical_requests == 1, "the newest evidence does not resolve"
+            assert state.worst_case_remaining_attempts == derive_a_reachable(SOURCES[source_id])
+            assert state.determination == "UNDETERMINED"
+            assert state.continuation_permitted is False
+
+            proposal = _propose(harness, head)
+
+            assert proposal.permitted is False
+            assert proposal.determination == "UNDETERMINED"
+            assert proposal.remaining == (), "nothing is re-requested from an uncertain state"
+
+    def test_a_later_unusable_row_never_unsatisfies_an_identity_its_object_still_satisfies(
+        self, tmp_path: Path
+    ) -> None:
+        """A quarantined retry after a good retrieval does not take the identity back.
+
+        The newest row here is not usable, and it names the *same* stored object as the good row
+        beneath it — so only the usable-outcome rule can exclude it. Excluding it is what the
+        accepted snapshot store does when it looks for the latest usable observation, and the two
+        surfaces have to agree: the object is still present and still satisfies the request, so the
+        identity is satisfied and nothing is owed.
+        """
+        with _harness(tmp_path) as harness:
+            harness.run(_success_script(harness.plan))
+            harness.flush_projection()
+            source_id = _requests(harness.plan)[1]
+            observation_id, _ = _singleton_observation_id(harness, source_id)
+            _shadow_with_a_newer_unusable_row(harness, observation_id)
+            head = _write_receipts(tmp_path, _receipt(harness.plan))
+            harness.release()
+
+            state = _inspect(harness, head)
+
+            assert state.remaining_logical_requests == 0, "the good object still satisfies it"
+            assert state.worst_case_remaining_attempts == 0
+            proposal = _propose(harness, head)
+            assert len(proposal.remaining) == 0, (
+                "the continuation surface reaches the same conclusion from the same evidence"
+            )
 
     def test_the_inspection_and_the_continuation_agree_on_the_remainder(
         self, tmp_path: Path

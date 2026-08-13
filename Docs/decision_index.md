@@ -520,9 +520,17 @@ CI found broken on the closeout commit.
 (`ACCEPTED — OWNER M3.3 GOVERNANCE RULINGS 2026-08-13`) is the **first M3.3 record**. It is a
 **governance authority record and is not implementation authorization**: it resolves the two
 entry-blocking owner rulings and issues four more, and it **accepts no contract**, enables no
-network, and starts no work. The corrected
+network, and starts no work.
+[Decision 068](Decisions/decision_068_m3_3_e0_contract_correction.md)
+(`ACCEPTED — OWNER BOUNDED CONTRACT CORRECTION 2026-08-13`) is the **second M3.3 record**: after
+the fresh independent review of the 067-corrected contract returned **FAIL** (BLOCKER 0 / MAJOR 1 /
+MINOR 1 — artifact
+[`Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md`](m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md),
+immutable), it adopts those findings and issues **R17**, **R18**, and clarification **R16-C1** —
+likewise governance-only, accepting no contract and starting no work. The corrected
 [`Milestones/contracts/m3_3.md`](../Milestones/contracts/m3_3.md) is
-`CORRECTED — PENDING FRESH INDEPENDENT CONTRACT REVIEW AND OWNER ACCEPTANCE`.
+`CORRECTED — DECISIONS 067–068 OWNER RULINGS RECORDED — PENDING FRESH INDEPENDENT REREVIEW AND
+OWNER ACCEPTANCE`.
 
 | Question | Controlling record |
 |---|---|
@@ -536,7 +544,10 @@ network, and starts no work. The corrected
 | `coverage_policy_version`'s value | Decision 067 §8 — **`pilot-coverage/1.0`**. Its executable home is an **open implementation-packet path question** (contract §20), not resolved by that record |
 | The persisted evidence-role vocabulary | Decision 067 §8 — **`winning` / `competing` / `supporting`**, migration `0009`'s vocabulary; Decision 016 §4's wording is illustrative and historical |
 | Whether the real offline parse may be run | Decision 067 §11 — **not yet**. **M3.3-E0** is a separate owner gate, it requires an independent read-only verification before **M3.3-E1**, and **there is no automatic E0 → E1 progression** |
-| Whether Decision 067 accepts the M3.3 contract or authorizes implementation | Decision 067 §12 — **neither.** The next act is a **fresh independent contract review** by a non-author session |
+| The exact E0 durable write set | **Decision 068 §3 Ruling R17** — exactly **fifteen tables** (the nine parse-layer tables plus the six companion tables the reusable accepted persistence path legitimately writes), mechanically verified; `census_qa_metrics` and all four index-side tables excluded; no second writer implementation |
+| What "E0 completeness" means per planned source | **Decision 068 §4 Ruling R18** — exactly one **report-level** disposition per planned source: `E0_REQUIRED_PARSE`, `E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE`, or `E0_NOT_REQUIRED_VALIDATION_OR_PROVENANCE_ONLY`; the 70 quarterly full-index sources are category C, deliberately untouched, with no `parser_state` mutation |
+| Which evidence rows a candidate resolution digest binds | **Decision 068 §8 Clarification R16-C1** — exactly the persisted rows the accepted deterministic resolution procedure actually uses; substantive, mechanical, independently recomputable, I/R-exposed and I/R-tested; an undeterminable set stops and refers |
+| Whether Decision 067 or 068 accepts the M3.3 contract or authorizes implementation | Decision 067 §12; Decision 068 §10 — **neither.** The next act is a **fresh independent rereview** by a new non-author epoch |
 
 ## Deviation register — where deviations are recorded
 

@@ -34,12 +34,12 @@ authorize any phase.
 > | Gate H | **PASSED and owner-accepted** (Decision 065 §3), on the 30-of-30 applicable-item candidate `PASS` reproduced offline 2026-08-11 and the independent final audit |
 > | Milestone 3.2 | **complete and owner-accepted**; annotated `m3.2-complete` tag created on the governance closeout commit |
 > | M3.2B | **not executed / not required for accepted M3.2 completion — closed by Decision 065 §4**; not pending, no latent acquisition or network authority, never resurrectable from a historical M3.2 authorization |
-> | M3.3 | **not begun, not authorized** — a separate owner packet and its own accepted contract are required. Its contract is **corrected, not accepted** (accepted Decision 067, 2026-08-13): OR-1 and OR-2 are ruled and R13–R16 are issued, and the next act is a **fresh independent contract review** |
+> | M3.3 | **not begun, not authorized** — a separate owner packet and its own accepted contract are required. Its contract is **corrected twice, not accepted** (accepted Decisions 067 and 068, both 2026-08-13): OR-1 and OR-2 are ruled, R13–R16 are issued, the fresh independent review of the 067-corrected text **FAILED** (B0/M1/MIN1), and Decision 068 issued **R17** (fifteen-table E0 write footprint), **R18** (per-planned-source E0 dispositions), and **R16-C1**. The next act is a **fresh independent rereview by a new non-author epoch** |
 > | Census parse layer | **EMPTY**; `parser_state` `not_started` for all 76 plan sources. **M3.3 Owner Ruling R13** makes a bounded **offline** metadata parse the prerequisite for a real snapshot — **not** a reason to reacquire. Real execution is the separately owner-gated **M3.3-E0** (step 28a) |
 >
 > **A separate owner gate sits on each side of M3.3-E0.** One authorization to run the real offline
 > parse, an independent read-only verification of it, then a **separate** authorization to freeze a
-> real candidate snapshot. **E0 never authorizes E1.**
+> real candidate snapshot. **M3.3-E0 never authorizes M3.3-E1.**
 >
 > **Never**, on the strength of anything in this runbook: re-run the 74 already-satisfied
 > retrievals; invoke another live acquisition; enable a network switch; resume from a `complete`
@@ -955,6 +955,17 @@ re-retrieval**, touches **no filing body, no CompanyFacts, and no Frames**, **ad
 evidence**, and **never fabricates** a missing object or observation. A source accepted as failed or
 unavailable **stays** failed or unavailable.
 
+**Its durable write set is fixed by Owner Ruling R17** (accepted
+[Decision 068](../Decisions/decision_068_m3_3_e0_contract_correction.md) §3; contract §10.2
+item 2): **exactly fifteen tables** — the nine census parse-layer tables plus the six companion
+tables the reusable accepted persistence path legitimately writes — plus the
+`census_plan_sources.parser_state` transition for category-A sources. `census_qa_metrics` and every
+index-side table stay unwritten. **Every planned source receives exactly one report-level R18
+disposition** (Decision 068 §4): `E0_REQUIRED_PARSE`, `E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE`, or
+`E0_NOT_REQUIRED_VALIDATION_OR_PROVENANCE_ONLY` — the 70 quarterly full-index sources are the
+third category and are **deliberately untouched**, with no fabricated parser run and no
+`parser_state` mutation merely to complete a ledger.
+
 **Do not run E0 until all of:**
 
 - an **accepted** M3.3 contract;
@@ -965,9 +976,9 @@ unavailable **stays** failed or unavailable.
   rehearsal is not it, and a green suite is not it.
 
 **After E0, before anything else:** an **independent read-only verification** to the **R3** standard.
-**There is no automatic progression from E0 to E1.** A partial or interrupted E0 is
+**There is no automatic progression from M3.3-E0 to M3.3-E1.** A partial or interrupted E0 is
 **nonauthoritative**, **blocks**, and returns to the owner — it is never automatically resumed,
-completed, repaired, or promoted, and it **never silently authorizes E1**.
+completed, repaired, or promoted, and it **never silently authorizes M3.3-E1**.
 
 ## 29. Freeze the real snapshot only after Gate H and E0
 

@@ -30,6 +30,21 @@ offline metadata parse the prerequisite, with real execution separately gated at
 authority remains `NONE`, and **no limitation is closed** — one is added, **D067-L1**. §F and §G
 below are updated for navigation only; the decision and the contract control.
 
+**Updated a third time 2026-08-13 under accepted
+[Decision 068](../Decisions/decision_068_m3_3_e0_contract_correction.md).** The fresh independent
+review of the Decision-067-corrected contract (frozen target `c8acfef…`) returned
+`M3_3_CORRECTED_CONTRACT_FRESH_INDEPENDENT_REVIEW_FAILED` — BLOCKER 0 / **MAJOR 1** / **MINOR 1** /
+OBSERVATION 5 ([review artifact](reviews/m3_3_corrected_contract_independent_review_c8acfef.md),
+immutable). The owner adopted its findings and Decision 068 corrected the contract: **R17** fixes
+the E0 permitted persistence footprint at exactly **fifteen tables** (the mechanically verified
+write set of the reusable accepted parser-and-`CensusCatalog` path, `census_qa_metrics` and every
+index-side table excluded), **R18** fixes the report-level per-planned-source E0 dispositions
+(A/B/C, the 70 full-index sources category C, no `parser_state` mutation for category C), and
+**R16-C1** clarifies resolution contributor membership. The contract is now
+`CORRECTED — DECISIONS 067–068 OWNER RULINGS RECORDED — PENDING FRESH INDEPENDENT REREVIEW AND
+OWNER ACCEPTANCE`; implementation, E0, and E1 remain unauthorized, and the next act is a **fresh
+independent rereview by a new non-author epoch**.
+
 **What this document is.** A compact map from each M3.3 requirement to the accepted record that
 governs it, the code that already implements it, and what remains. It exists so that the owner can
 rule on the open methodology questions without re-deriving the corpus, and so that the M3.3 stage
@@ -310,8 +325,8 @@ current statement; the questions below are retained as the record of what was as
 | **OR-3** | **RULED — R3** (durable-byte equality; true OS-level strictly-read-only connections; no writer lease; fail closed) | contract §1.1, §14 |
 | **OR-4** | **RULED — R4** (Decision 065 §3 + the current STATUS record substitute; no token is emitted) | contract §1.1, §22 |
 | **OR-5** | **RULED — R5** (one atomic construct-and-freeze transaction; a surviving `building` row blocks; no automatic recovery across an authoritative boundary) | contract §1.1, §11, §17, §32 |
-| **OR-6** | **DEFERRED** to E2 authorization; values stay caller-supplied | contract §1.2, §16 |
-| **OR-7** | **DEFERRED** to after I/R evidence and A1 acceptance, before E1 | contract §1.2, §12 |
+| **OR-6** | **DEFERRED** to M3.3-E2 authorization; values stay caller-supplied | contract §1.2, §16 |
+| **OR-7** | **DEFERRED** to after I/R evidence and A1 acceptance, before M3.3-E1 | contract §1.2, §12 |
 | **OR-8** | **RULED — R8** (narrow hardening of actually-used paths only; no repository-wide cleanup) | contract §1.1, §14, §20 |
 | **OR-9** | **DEFERRED** to Sol/GPT after a fresh A1 rehearsal acceptance | contract §1.2, §2 |
 | **OR-10** | **RULED — R10** (fail closed; `infeasible_or_unproven` is never relabelled proven infeasibility) | contract §1.1, §12 |
@@ -320,7 +335,10 @@ current statement; the questions below are retained as the record of what was as
 | **R13** | **RULED**, Decision 067 §4 — bounded offline metadata parse prerequisite; `census_plan_sources.observation_id` binding; complete non-acquisition prohibition list. **Real execution separately gated at M3.3-E0** | Decision 067 §§4, 11; contract §1.1, §10.2 |
 | **R14** | **RULED**, Decision 067 §5 — structural fingerprint non-vacuity; the parse must precede snapshot construction; a failed source is never a fabricated empty parse | Decision 067 §5; contract §1.1, §10.2 |
 | **R15** | **RULED**, Decision 067 §6 — **ALT-3**, Decision 016 §4 retained exactly; bounded cross-reacquisition limitation **D067-L1** recorded, not repaired | Decision 067 §6; contract §1.1, §25; register **D067-L1** |
-| **R16** | **RULED**, Decision 067 §7 — `evidence_sha256` call shape and the eight candidate `*_resolution_sha256` derivations; tie-break hashes unchanged | Decision 067 §7; contract §1.1, §10.1 |
+| **R16** | **RULED**, Decision 067 §7 — `evidence_sha256` call shape and the eight candidate `*_resolution_sha256` derivations; tie-break hashes unchanged; contributor membership clarified by **R16-C1** | Decision 067 §7; Decision 068 §8; contract §1.1, §10.1 |
+| **R16-C1** | **CLARIFIED**, Decision 068 §8 — contributor membership is substantive, mechanical, independently recomputable, and exposed by I/R through one explicit deterministic membership selection; an undeterminable set stops and refers | Decision 068 §8; contract §1.1, §26 item 3 |
+| **R17** | **RULED**, Decision 068 §3 (adopting review finding MAJ-1) — the E0 permitted persistence footprint is exactly fifteen tables, mechanically verified against the reusable persistence path; `census_qa_metrics` and every index-side table excluded; no second writer | Decision 068 §3; contract §1.1, §10.2 item 2, §19 |
+| **R18** | **RULED**, Decision 068 §4 — report-level per-planned-source E0 dispositions A/B/C; the 70 full-index sources are category C; no fabricated parse and no `parser_state` mutation for category C; no schema enum, no migration | Decision 068 §4; contract §1.1, §10.2 items 6 and 14 |
 | **OQ-3 / OQ-4 / OQ-6 / OQ-8** | **PREVIOUSLY FROZEN BY THE OWNER; first recorded in the repository by Decision 067 §8** — fail closed on a same-catalog `snapshot_id` collision; `snapshot_id` excluded from the seven family digests; `coverage_policy_version` = `pilot-coverage/1.0`; evidence roles `winning` / `competing` / `supporting` | Decision 067 §8; contract §10.1 |
 
 **The OR-1 and OR-2 proposal** is

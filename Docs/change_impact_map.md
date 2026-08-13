@@ -685,6 +685,37 @@ their own test modules, and the impact set is the one the corrected contract §�
 `test_m3_cli` / `test_no_network` suites, plus the new modules' own tests. **Neither module exists
 today, and neither is authorized.**
 
+## Decision 068 — M3.3 E0 write-set and contract-consistency correction (governance only, zero impact)
+
+[Decision 068](Decisions/decision_068_m3_3_e0_contract_correction.md)
+(`ACCEPTED — OWNER BOUNDED CONTRACT CORRECTION 2026-08-13`) adopts the failed fresh independent
+review's findings (verdict `M3_3_CORRECTED_CONTRACT_FRESH_INDEPENDENT_REVIEW_FAILED`, B0/M1/MIN1 —
+artifact `Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md`, immutable), issues
+**R17** (the exact fifteen-table E0 persistence footprint, mechanically verified against
+`sec/census.py`) and **R18** (report-level per-planned-source E0 dispositions), clarifies
+**R16-C1** (resolution contributor membership), and applies the MIN-1 and OBS-A–E consistency
+fixes. **It changes no executable source, test, migration, configuration, or CI byte**, authorizes
+nothing, and the contract remains **not accepted**, pending a fresh independent rereview.
+
+| Surface touched | Change | Checks |
+|---|---|---|
+| `Docs/Decisions/decision_068_m3_3_e0_contract_correction.md` | **new** — the record itself | Markdown link-check only |
+| `Milestones/contracts/m3_3.md` | corrected — §1.1 gains R17/R18/R16-C1 and the MIN-1 §10.1 pointer fix; §10.2 items 2, 6, 12 corrected and item 14 added; §19, §21, §26 items 2–3, §29, §30, §36 synchronized; gate names M3.3-E0/E1/E2 disambiguated from rehearsal-scenario labels | Markdown link-check only |
+| `Docs/m3/m3_3_snapshot_authority_adjudication_proposal.md` | OBS-E erratum note in §B.2; **body preserved as historical proposal evidence** | Markdown link-check only |
+| `Docs/m3/m3_3_governance_foundation_inventory.md` | current-state banner and §G dispositions updated | Markdown link-check only |
+| `Docs/m3/operator_runbook.md` | §28a gains the R17 write-footprint and R18 disposition statements | Markdown link-check; command-status label check |
+| `Docs/Decisions/decision_registry.md` | row `068`; controlling-record row updated | Markdown link-check; table-structure check |
+| `Docs/decision_index.md` | M3.3 topic section updated for R17/R18/R16-C1 | Markdown link-check only |
+| `Docs/architecture_map.md` | §0 Milestone 3 row's next-act clause updated | Markdown link-check only |
+| `Milestones/STATUS.md` | Decision 068 markers and the new `NEXT_AUTHORIZED_ACTION` | Markdown link-check; marker-format check |
+| `Milestones/milestone_03_master_plan.md` | M3.3 §5 item 1 status, §9 driver category (OBS-D), §26 R17/R18 synchronization | Markdown link-check only |
+| `Milestones/contracts/README.md` | `m3_3.md` index entry and next-action pointer | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+
+**Which tests to run for it: none of the code suites** — documentation-only, same rule as the
+Decision 067 section above. The review artifact itself is **not modified** by this or any later
+correction.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

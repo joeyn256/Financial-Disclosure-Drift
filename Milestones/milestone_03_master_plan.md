@@ -1414,8 +1414,8 @@ phase in which the production paths they exercise exist.
 passes:
 
 Run the **real offline metadata parse at the M3.3-E0 gate**, under its own separate owner
-authorization, and have it **independently, read-only verified** before anything else — **E0 never
-authorizes E1**, and a partial or interrupted E0 blocks and returns to the owner.
+authorization, and have it **independently, read-only verified** before anything else — **M3.3-E0
+never authorizes M3.3-E1**, and a partial or interrupted E0 blocks and returns to the owner.
 
 Disable transport. Freeze the real candidate snapshot and compute its identity. Execute the accepted
 joint entity–accession selector, reserve construction, and disposition handling — unchanged. Persist
@@ -1461,8 +1461,11 @@ snapshot-freeze validation obligations**;
 1. **The bounded M3.3 contract**, with exact authorized paths, covering M3.3A and M3.3B.
    **Status:** drafted, then **corrected under accepted
    [Decision 067](../Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)**
-   (2026-08-13) — **still not accepted**, pending a fresh independent contract review by a non-author
-   session and a separate owner acceptance act.
+   (2026-08-13); the fresh independent review of that corrected text **FAILED** (BLOCKER 0 /
+   MAJOR 1 / MINOR 1), and its findings were owner-adopted and corrected under **accepted
+   [Decision 068](../Docs/Decisions/decision_068_m3_3_e0_contract_correction.md)** (2026-08-13,
+   rulings **R17**, **R18**, clarification **R16-C1**) — **still not accepted**, pending a fresh
+   independent rereview by a new non-author epoch and a separate owner acceptance act.
 2. **Authorization to proceed from M3.3A to M3.3B**, after the M3.3A independent review — separate
    from 1, and not implied by the builder working. **Still open** (**OR-9**).
 2a. **Authorization to run the real offline metadata parse — the M3.3-E0 gate.** Separate from 1 and
@@ -1551,7 +1554,11 @@ reference identifier in the evidence index — **never the root, and never a sub
 ### 9. Authorized future path categories
 
 - A new candidate-snapshot builder module and its tests (**M3.3A**).
-- A new execution-rehearsal harness for E1–E8 and its fixtures (**M3.3A**).
+- A new **bounded offline metadata-parse driver / entry point** module and its tests (**M3.3A** —
+  R13; contract §6 item 2, §10.2; added by accepted Decision 068 §7, OBS-D, for consistency with
+  Decision 067 §4.3 and this plan's own §2; **descriptive only** — it grants no implementation, E0,
+  private-mutation, or network authority).
+- A new execution-rehearsal harness for rehearsal scenarios E1–E8 and its fixtures (**M3.3A**).
 - A new or extended CLI subcommand delivering the deferred S6 output, with its tests.
 - Receipt emission for M3.3 commands.
 - `Docs/m3/` evidence records; `Docs/sec_data_dictionary.md` in the same pass if schema is
@@ -1691,12 +1698,13 @@ the **M3.3-E0** gate; the two originally specified are unchanged.
   §9 obligation, does the offline parse driver satisfy R13's prohibition list and R14's non-vacuity
   rule, and does the execution rehearsal actually exercise the production paths — not stubs — across
   E1–E8 including O1 behaviour?*
-- **After the real M3.3-E0 offline parse, before E1.** Read-only, to the **R3** standard. Its
+- **After the real M3.3-E0 offline parse, before M3.3-E1.** Read-only, to the **R3** standard. Its
   question: *did the parse consume only accepted stored objects, bind every source through
-  `census_plan_sources.observation_id`, write only the permitted parse-layer tables, make no request
-  and construct no transport, add no observation or stored object, leave every accepted failed or
-  unavailable source unchanged, and preserve catalog integrity?* **It is a precondition of E1 and is
-  never merged into the M3.3A review.**
+  `census_plan_sources.observation_id`, write only the permitted **fifteen R17 tables** (contract
+  §10.2 item 2), give every planned source exactly one **R18** disposition with every category-C
+  source untouched, make no request and construct no transport, add no observation or stored
+  object, leave every accepted failed or unavailable source unchanged, and preserve catalog
+  integrity?* **It is a precondition of M3.3-E1 and is never merged into the M3.3A review.**
 - **After M3.3B.** Its question: *does every identity recompute from persisted rows, does replay
   write nothing, is every crosswalk item bound, and is the root an output rather than an approval?*
 

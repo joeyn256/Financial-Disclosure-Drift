@@ -462,6 +462,14 @@ The twelve transitively included are the five coverage-window fields and the thr
 the seven child-table `snapshot_id` scope keys, every `recorded_at_utc`, every child `detail`, and
 both `evidence_id` columns.
 
+> **ERRATUM / OWNER DISPOSITION (accepted Decision 068 §7, OBS-E, 2026-08-13).** The phrase "the
+> four snapshot timestamps" above should read "the **three** snapshot timestamps" —
+> `pilot_candidate_snapshots` carries exactly `created_at_utc`, `frozen_at_utc`, and
+> `invalidated_at_utc` (migration `0009`), and this section's own per-table tally
+> (7/3/3/2/3/3/3/3 = 27) balances only with three. **The underlying inclusion/exclusion tally and
+> every per-column disposition remain unchanged.** The historical sentence above is preserved
+> verbatim; this document remains historical proposal evidence with no authority.
+
 **No column is both directly included and transitively included through a *different* rule.** The two
 cases that come closest are deliberate redundancy under one rule, not two derivations:
 `evidence_sha256` alongside its own fields (§A.4–A.10 note), and `entity_count`/`accession_count`

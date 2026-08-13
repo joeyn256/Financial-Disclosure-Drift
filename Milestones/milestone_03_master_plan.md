@@ -1394,8 +1394,14 @@ producing the exact `root_manifest_sha256` as an **output**, never as an approva
 
 ### 2. Exact scope
 
-**M3.3A — builder and execution rehearsal.** Implement the **candidate-snapshot builder** under this
-phase's bounded contract. Then run the **execution rehearsal** specified in
+**M3.3A — builder, offline parse driver, and execution rehearsal.** Implement the
+**candidate-snapshot builder** under this phase's bounded contract, at the identity and mapping rules
+accepted [Decision 067](../Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)
+§§9–10 fix. Implement the **bounded offline metadata parse driver** the same record's **Ruling R13**
+requires — an offline seam over the accepted M3.2 stored objects, binding every source through
+`census_plan_sources.observation_id`, constructing no transport and making no request — and exercise
+it **on fixtures or disposable isolated copies only**, never against the accepted real private
+catalog. Then run the **execution rehearsal** specified in
 [`Docs/m3/offline_rehearsal_spec.md`](../Docs/m3/offline_rehearsal_spec.md) §6 — scenarios E1–E8,
 against synthetic or real-shaped fixtures, offline — covering snapshot construction and freeze; every
 Decision 019 §9 snapshot-validation obligation; plain/dashed accession disagreement; feasible and
@@ -1404,7 +1410,12 @@ selection-result sealing; S6 manifest construction; file/database atomicity; ide
 and Decision 023 **O1** behaviour. **This is where those scenarios belong** — M3.3A is the first
 phase in which the production paths they exercise exist.
 
-**M3.3B — real freeze and deterministic real execution.** Only after M3.3A passes:
+**M3.3B — real offline parse, real freeze, and deterministic real execution.** Only after M3.3A
+passes:
+
+Run the **real offline metadata parse at the M3.3-E0 gate**, under its own separate owner
+authorization, and have it **independently, read-only verified** before anything else — **E0 never
+authorizes E1**, and a partial or interrupted E0 blocks and returns to the owner.
 
 Disable transport. Freeze the real candidate snapshot and compute its identity. Execute the accepted
 joint entity–accession selector, reserve construction, and disposition handling — unchanged. Persist
@@ -1448,14 +1459,31 @@ snapshot-freeze validation obligations**;
 ### 5. Required owner decisions
 
 1. **The bounded M3.3 contract**, with exact authorized paths, covering M3.3A and M3.3B.
+   **Status:** drafted, then **corrected under accepted
+   [Decision 067](../Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)**
+   (2026-08-13) — **still not accepted**, pending a fresh independent contract review by a non-author
+   session and a separate owner acceptance act.
 2. **Authorization to proceed from M3.3A to M3.3B**, after the M3.3A independent review — separate
-   from 1, and not implied by the builder working.
+   from 1, and not implied by the builder working. **Still open** (**OR-9**).
+2a. **Authorization to run the real offline metadata parse — the M3.3-E0 gate.** Separate from 1 and
+   from 2, required before any real parse against the accepted private catalog, and followed by an
+   **independent read-only verification** before **M3.3-E1**. **There is no automatic E0 → E1
+   progression.** **Still open** (Decision 067 §11).
 3. **A governance record for the candidate-snapshot builder** if its construction would fix any
    identity, mapping, or classification not already frozen by Decisions 013, 014, 016, or 019.
+   **SUPPLIED — accepted Decision 067** (2026-08-13): **OR-1** fixes every candidate-snapshot
+   identity preimage (§9), **OR-2** fixes the M3.2→candidate read set and mapping (§10), **R16**
+   fixes the `evidence_sha256` call shape and the eight candidate `*_resolution_sha256` derivations
+   (§7), and **R13**/**R14** fix the offline parse prerequisite that makes the mapping non-vacuous
+   (§§4–5). **That record is governance authority and is not implementation authorization.** One
+   consequence remains open and is **not** resolved by it: `coverage_policy_version` is fixed as
+   `pilot-coverage/1.0` but has **no authorized executable home**, which is an implementation-packet
+   path question (contract §20).
 4. **A ruling on Decision 023 O1** if the M3.3A rehearsal or the real M3.3B run reaches an empty
-   sole-carrier crosswalk family.
+   sole-carrier crosswalk family. **Still deferred** (**OR-11**; Decision 023 retained exactly).
 5. **A ruling on any infeasibility** — if the real candidate universe cannot satisfy the frozen
    design, M3.3B **fails closed** and reports the binding constraints; it does not relax a quota.
+   **Ruled** (**R10**).
 
 The owner decision on the root is **not** taken in this phase.
 
@@ -1478,9 +1506,15 @@ The owner decision on the root is **not** taken in this phase.
 - Gate H complete, every item `PASS`, owner-signed, integrating both M3.2 windows.
 - The acquired raw-object set complete, verified, and fully provenanced.
 - Catalog at migration `0013`, integrity and foreign-key checks passing.
-- **M3.3B additionally requires:** the candidate-snapshot builder implemented; the M3.3A execution
-  rehearsal passed across E1–E8; the M3.3A independent review passed; and explicit owner
-  authorization to freeze a real candidate snapshot.
+- **M3.3B additionally requires:** the candidate-snapshot builder and the offline parse driver
+  implemented; the M3.3A execution rehearsal passed across E1–E8; the M3.3A independent review
+  passed; **the real offline metadata parse completed at the M3.3-E0 gate under its own separate
+  owner authorization and independently, read-only verified**; and explicit owner authorization to
+  freeze a real candidate snapshot, separate from the E0 authorization.
+- **The census parse layer is empty** — `parser_state` `not_started` for all 76 plan sources
+  (Decision 067 §2.1). **R13** makes the bounded offline parse the prerequisite, and **R14** forbids
+  substituting a uniformly empty structural fingerprint for it. **Neither is an acquisition
+  authority**, and no further metadata acquisition is authorized in either part.
 
 ### 7. Exact inputs
 
@@ -1648,11 +1682,21 @@ catalog integrity report, the manifest verification result, and the write-free r
 
 ### 26. Independent-review requirement
 
-**Two required reviews, both consequential, both by a session that constructed none of the artifacts.**
+**Three required reviews, all consequential, all by a session that constructed none of the
+artifacts.** The middle one was added by accepted
+[Decision 067](../Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) §11 with
+the **M3.3-E0** gate; the two originally specified are unchanged.
 
 - **After M3.3A**, before any real freeze. Its question: *does the builder satisfy every Decision 019
-  §9 obligation, and does the execution rehearsal actually exercise the production paths — not
-  stubs — across E1–E8 including O1 behaviour?*
+  §9 obligation, does the offline parse driver satisfy R13's prohibition list and R14's non-vacuity
+  rule, and does the execution rehearsal actually exercise the production paths — not stubs — across
+  E1–E8 including O1 behaviour?*
+- **After the real M3.3-E0 offline parse, before E1.** Read-only, to the **R3** standard. Its
+  question: *did the parse consume only accepted stored objects, bind every source through
+  `census_plan_sources.observation_id`, write only the permitted parse-layer tables, make no request
+  and construct no transport, add no observation or stored object, leave every accepted failed or
+  unavailable source unchanged, and preserve catalog integrity?* **It is a precondition of E1 and is
+  never merged into the M3.3A review.**
 - **After M3.3B.** Its question: *does every identity recompute from persisted rows, does replay
   write nothing, is every crosswalk item bound, and is the root an output rather than an approval?*
 
@@ -1727,11 +1771,12 @@ root-hash approval packet.
 ### 36. Conditions preventing progression
 
 M3.4 may not begin while any of these holds: the M3.3A rehearsal has not passed; the M3.3A review has
-not passed; any identity fails to recompute from persisted rows; the re-serialization is not
-byte-identical; replay performed a write; any crosswalk item is unbound; the run is not
-manifest-eligible; O1 is reached and unruled; the design is infeasible against the real universe; any
-operational value reached a governed identity; the evidence packet is incomplete; or the independent
-M3.3B review has not passed.
+not passed; **the real offline metadata parse has not completed at the M3.3-E0 gate under its own
+owner authorization**; **the independent read-only verification of that parse has not passed**; any
+identity fails to recompute from persisted rows; the re-serialization is not byte-identical; replay
+performed a write; any crosswalk item is unbound; the run is not manifest-eligible; O1 is reached and
+unruled; the design is infeasible against the real universe; any operational value reached a governed
+identity; the evidence packet is incomplete; or the independent M3.3B review has not passed.
 
 ---
 

@@ -1,8 +1,56 @@
 # M3.3 — Snapshot Authority Adjudication Proposal (OR-1 and OR-2)
 
 ```text
-STATUS: PROPOSAL — NO AUTHORITY — PENDING SOL/GPT OWNER RULING
+STATUS: PROPOSAL — OWNER-DISPOSED BY ACCEPTED DECISION 067 (2026-08-13) —
+        HISTORICAL PROPOSAL EVIDENCE, NO AUTHORITY
 ```
+
+> ## Owner disposition — read this before any table below
+>
+> **The owner ruled on 2026-08-13. Accepted
+> [Decision 067](../Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) is the
+> authority; this document is not, and never was.** The rulings are recorded in that decision and in
+> the corrected [M3.3 contract](../../Milestones/contracts/m3_3.md) §§8.1, 10.1, 10.2. **A session
+> cites Decision 067 or the contract — never this proposal — as the reason for anything.**
+>
+> **This document is preserved as historical proposal evidence and is not rewritten as though it had
+> always been authority.** Its body below is the text as proposed. Where the owner corrected a
+> proposition, an annotation marks the correction **without** editing the historical claim.
+>
+> | Proposal item | Owner disposition |
+> |---|---|
+> | **§§A–C** — the eleven-digest preimage matrix | **ADOPTED as the normative OR-1 basis**, subject to every correction below — Decision 067 §9 |
+> | **§§D–F** — the 135-column source→candidate mapping | **ADOPTED as the normative OR-2 basis**, subject to eight mandatory GV2 corrections — Decision 067 §10 |
+> | **§A.2.1** — `input_observation_set_sha256` ≡ `source_observation_set_sha256` | **ADOPTED.** Definitionally identical, computed twice and required to agree, fail-closed on mismatch |
+> | **§A.12** — `evidence_sha256` call shape and the eight resolution digests | **ADOPTED and expanded into OR-1** — Ruling **R16**, Decision 067 §7 |
+> | **OQ-1** — is the parse layer populated? | **ANSWERED: it is EMPTY.** Ruling **R13** makes a bounded **offline metadata parse** the prerequisite — option (a), under a complete prohibition list — rather than a fail-closed refusal. Real execution is separately gated at **M3.3-E0** |
+> | **OQ-2** — uniformly empty `schema_fingerprint_sha256` | **ANSWERED: not acceptable on that basis.** Ruling **R14** — the parse must precede snapshot construction; only a *legitimate* zero-row parse result may use the empty-row-set digest |
+> | **OQ-3** — same-catalog `snapshot_id` collision | **ANSWERED: FAIL CLOSED.** Never `INSERT OR REPLACE`, `INSERT OR IGNORE`, or a silent recognize-and-return |
+> | **OQ-4** — parent-key convention | **ANSWERED: this proposal's line.** `snapshot_id` **excluded** from the seven family digests |
+> | **OQ-5** — `source_observation_id` / `parsed_record_id` inside `evidence_sha256` | **ANSWERED: ALT-3 — retained.** Ruling **R15**, on the corrected premise **GR-C2** below |
+> | **OQ-6** — `coverage_policy_version` | **ANSWERED: `pilot-coverage/1.0`.** Its executable home remains an open implementation-packet path question — contract §20 |
+> | **OQ-7** — widen OR-1 to the §A.12 families? | **ANSWERED: yes, widened** — Ruling **R16** |
+> | **OQ-8** — evidence-role vocabulary | **ANSWERED: `winning` / `competing` / `supporting`**, migration `0009`'s vocabulary. Decision 016 §4's wording is illustrative and historical |
+>
+> **Two propositions in this document are CORRECTED and must not be relied on.**
+>
+> - **GR-C1** — *"parsing is coupled to retrieval and cannot be run offline over stored objects"* is
+>   **overstated**. Retrieval and parsing are coupled **only at the orchestration entry points**; the
+>   parsers operate on already-materialized stored content, and payload loading, archive traversal,
+>   and `CensusCatalog` persistence are **already offline-capable**. The missing capability is an
+>   **offline entry point / driver** (Decision 067 §3.1).
+> - **GR-C2** — *"an identical re-retrieval **or** reparse changes candidate evidence identities"* is
+>   **wrong on the reparse branch**. A reparse of the **same** accepted observation row is
+>   **deterministic**; only **re-retrieval** creates a new uuid4 `source_observation_id`. M3.3 forbids
+>   reacquisition, so only the deterministic branch is reachable (Decision 067 §3.2).
+>
+> **What did not change.** This document still authorizes nothing, freezes nothing, and closes no
+> limitation. **D021-L2 remains `ACTIVE`** — OR-1 being ruled supplies the missing derivation but does
+> not close the entry, which needs the implemented recomputation-and-comparison step, reviewed.
+> **Decision 067 is a governance authority record and is not implementation authorization**; the
+> corrected contract is **not accepted**, and no M3.3 work may begin.
+
+---
 
 **Date:** 2026-08-13
 **Produced under:** the owner's M3.3-GR governance packet of 2026-08-13, which authorized preparing
@@ -18,6 +66,10 @@ and authorizes no implementation. Where it and a decision record, a migration, o
 the decision, migration, or module controls (CLAUDE.md authority rules). **OR-1 and OR-2 remain
 unresolved until the owner rules.**
 
+> **Historical as at 2026-08-13.** The owner has since ruled; see the disposition block above. The
+> paragraph immediately above states the position as at this document's own production, and is
+> deliberately left byte-unchanged.
+
 **Executive finding, stated first because it conditions everything below.** Section G records a
 repository-verified fact that bounds the whole of OR-2: **no code path authorized or executed under
 Milestone 3.2 writes the census *parse* layer.** `census_parser_runs`, `census_parsed_records`,
@@ -31,6 +83,17 @@ retrieval. M3.2A's acquisition path (`m3/acquisition.py` → `sec/observation_ca
 else in the census family. **Unless the owner rules otherwise, the substantive source tables the
 candidate builder would read do not exist in populated form**, and the majority of the OR-2 matrix is
 `UNAVAILABLE / FAIL CLOSED`. This is **OQ-1**, and it is the largest open question in this document.
+
+> **CORRECTED — GR-C1, and OQ-1 ANSWERED (accepted Decision 067 §§3.1, 4).** The finding that the
+> parse layer is unwritten is **confirmed**: M3.3-GV2 verified it **empty**, with `parser_state`
+> `not_started` for all 76 plan sources. But *"whose parse step is coupled to retrieval"* overstates
+> the coupling — it holds **only at the orchestration entry points**. The parsers are **pure over
+> already-materialized content**, and loading, archive traversal, and `CensusCatalog` persistence are
+> **already offline-capable**; what is missing is an **offline entry point / driver**. The owner
+> therefore ruled **option (a)**: a bounded, network-free **offline metadata parse** over the
+> already-stored objects (**R13**), after which those columns become available. **The OR-2 matrix is
+> therefore not permanently `UNAVAILABLE / FAIL CLOSED`.** Real execution is separately gated at
+> **M3.3-E0**.
 
 ---
 
@@ -411,7 +474,7 @@ alongside the trigger that validates them (§A.11 note).
 | **Circular hashes** | **None.** §B.1 |
 | **Unhashed substantive fields** | **None in the candidate family.** Every non-operational column of all eight tables appears in exactly one family digest. The audit is column-by-column against migration `0009`, not by column-name inference |
 | **Double-counted provenance** | **Two deliberate redundancies**, both under D021 §7.4's accepted rule, both single-derivation (§B.2). **One to watch:** `source_observation_id` is bound twice by *different* digests — inside `evidence_sha256` (candidate layer) and, as the cited *set*, inside `input_observation_set_sha256`. These commit different facts (*which observation this row cites* versus *what that observation's content was*) and are not a double count; but see **OQ-5** |
-| **Random-ID contamination** | **One channel closed, one channel open.** Closed: `evidence_id` and `census_run_id` are excluded everywhere. **Open by accepted authority:** `source_observation_id` and `parsed_record_id` sit inside `evidence_sha256` per D016 §4, so an identical re-retrieval or an identical reparse **would** change the candidate digests — while D021 §8.1 deliberately makes `source_observation_set_sha256` immune to exactly that. The asymmetry is real, is authorized, and is **OQ-5** |
+| **Random-ID contamination** | **One channel closed, one channel open.** Closed: `evidence_id` and `census_run_id` are excluded everywhere. **Open by accepted authority:** `source_observation_id` and `parsed_record_id` sit inside `evidence_sha256` per D016 §4, so an identical re-retrieval or an identical reparse **would** change the candidate digests — while D021 §8.1 deliberately makes `source_observation_set_sha256` immune to exactly that. The asymmetry is real, is authorized, and is **OQ-5**. **CORRECTED — GR-C2 (Decision 067 §3.2):** the reparse half is **wrong**. An offline reparse of the **same** accepted observation row is **deterministic** and reproduces `parser_run_id` / `parsed_record_id`; **only re-retrieval** creates a new uuid4 `source_observation_id`, and M3.3 forbids reacquisition. **OQ-5 is answered ALT-3** — the fields are **retained** (**R15**) — and the residual cross-reacquisition asymmetry is recorded as limitation **D067-L1**, not repaired |
 | **Timestamp contamination** | **None.** Every `recorded_at_utc`, `created_at_utc`, `frozen_at_utc`, `invalidated_at_utc`, and `retrieved_at_utc` is excluded at every layer. `acceptance_audit_date` is included as a calendar date and a classification input, per D019 §10 — the one deliberate inclusion, not an exception |
 | **Alternative derivations for one field** | **None proposed.** Each of the 135 columns has exactly one proposed derivation or an explicit fail-closed gap (§D, §G) |
 | **Source fields with no accepted authority** | **`coverage_policy_version`** — OQ-6. No Python constant, no `reference_policy_versions` seed row, no decision fixes a value |
@@ -426,7 +489,10 @@ alongside the trigger that validates them (§A.11 note).
    publication field can affect **any** of the eleven.
 3. Two retrievals of identical content under the same request identity are the same content to
    `input_observation_set_sha256` (D021 §8.1) — **but not, under D016 §4, to the candidate evidence
-   digests** (OQ-5).
+   digests** (OQ-5). **CORRECTED — GR-C2:** this is true of **re-retrieval** only. A **reparse** of
+   the same accepted observation is deterministic and changes nothing, and M3.3 forbids
+   reacquisition, so the asymmetry is unreachable inside M3.3 (Decision 067 §3.2; **R15**;
+   **D067-L1**).
 4. Every one of the eleven is recomputable from persisted rows alone, with no caller-supplied value
    other than the frozen policy constants and the coverage window.
 
@@ -733,6 +799,13 @@ is a frozen constant, an operational field, a scope key, or a digest over the ot
 the builder can construct a **structurally valid but substantively empty** snapshot today, and
 nothing more.
 
+> **CORRECTED as a statement of the future, accurate as a statement of the present (Decision 067
+> §10.1).** The count and the tracing stand, and the conclusion is correct **as at M3.2's accepted
+> state** — which is why a real snapshot may not be built from it. It is **not** a permanent
+> property: those 71 columns become available **after the governed R13 offline parse succeeds**, and
+> the accepted mapping in §D is then live rather than vacuous. A structurally valid but substantively
+> empty snapshot is **never** an acceptable substitute (**R14**).
+
 ---
 
 ## G. Unavailable / fail-closed fields, and the evidence for the finding
@@ -744,7 +817,7 @@ nothing more.
 | Only `sec/census.py` and `sec/census_orchestrator.py` write the parse layer | `grep` for `INTO <table>` across `src/`, excluding `storage/migrations/`, for all seventeen census tables |
 | Their sole entry point is `cli.py`'s `sec census` command | `grep` for importers of `census_orchestrator` and `CensusCatalog` across `src/` and `tests/` |
 | `sec census` is network-gated | `cli.py`: `network_commands = {"census", "ingest-pilot"}`, refused when `config.network.enabled` is false |
-| Parsing is coupled to retrieval and cannot be run offline over stored objects | `census_orchestrator` builds an `HttpxTransport` and calls `_retrieve_and_parse(client, …)` per source |
+| ~~Parsing is coupled to retrieval and cannot be run offline over stored objects~~ **CORRECTED — GR-C1** | `census_orchestrator` builds an `HttpxTransport` and calls `_retrieve_and_parse(client, …)` per source. **The evidence supports only the narrower claim**: the coupling is at the **orchestration entry point**. M3.3-GV2 verified that the parsers themselves are **pure over materialized content** and that loading, archive traversal, and `CensusCatalog` persistence are **already offline-capable** — the missing piece is an **offline entry point / driver**, a `SMALL_EXTENSION` (Decision 067 §§2.1, 3.1; **R13**) |
 | M3.2A's acquisition path never invokes it | `m3/acquisition.py` imports `sec.observation_catalog`, `sec.raw_store`, `sec.archive`; it imports nothing from `sec.census` or `sec.census_orchestrator` — its single mention of the latter is a docstring cross-reference, not a call — and it contains no reference to `census_structural_observations` |
 | Tracked network switches are `false` / `false` | `Milestones/STATUS.md`; contract §2 |
 | `census_index_instances` is empty | written only by `census_orchestrator._persist_index_instances`; consistent with `Milestones/STATUS.md`'s "empty by design" |
@@ -753,6 +826,13 @@ nothing more.
 the real catalog — no private evidence was opened, as the packet requires. **The owner must verify
 against the private evidence**, read-only and under **R3**, whether the parse layer is in fact empty.
 If it is populated by some path this analysis did not find, OQ-1 dissolves and §D stands as written.
+
+> **DISCHARGED 2026-08-13.** That verification was performed as **M3.3-GV2**, strictly read-only,
+> with the main database's durable SHA-256 unchanged before and after, no network, no parser
+> execution, and no private mutation. **The parse layer is EMPTY**, and `parser_state` is
+> `not_started` for all 76 plan sources. The owner accepted those findings
+> (`M3_3_GV2_PARSE_AND_IDENTITY_VERIFICATION_OWNER_ACCEPTED`) and ruled **R13** — see the disposition
+> block at the head of this document. Decision 067 §2.1 carries the accepted finding list.
 
 ### G.2 Fields marked `UNAVAILABLE / FAIL CLOSED`
 
@@ -777,6 +857,11 @@ condition, never a licence to reopen the network** (master plan M3.3 §3; contra
 ## H. Exact remaining owner questions
 
 **None of these is answered here.** Each changes what the builder does, and each is an owner act.
+
+> **ALL EIGHT ARE NOW ANSWERED — accepted Decision 067, 2026-08-13.** The table below is the record
+> of what was **asked**, preserved unchanged. The answers are in the disposition block at the head of
+> this document, in Decision 067 §§4–8, and in the corrected contract §§8.1, 10.1, 10.2. **Reading a
+> row below as still open is a misreading of this document.**
 
 | ID | Question | Bears on | If unanswered |
 |---|---|---|---|
@@ -825,7 +910,8 @@ Proposed only. Each is stated so that it fails for its own reason and cannot pas
 13. **`census_index_instances` untouched.** A test asserting the builder issues no read that depends
     on it and no write to it.
 14. **`inventory_*` untouched.** A test asserting no builder query names an `inventory_*` table.
-15. **The unchanged S4, S5, and S6 regression suites**, run without edits (contract §26 item 10).
+15. **The unchanged S4, S5, and S6 regression suites**, run without edits (contract §26 item **14**;
+    it was item 10 when this was written, before the corrected contract added four categories).
 
 ## J. Proposed rehearsal obligations (E1–E8 additions)
 
@@ -852,3 +938,13 @@ network. It resolves neither OR-1 nor OR-2, and it closes no limitation — **D0
 remains `ACTIVE` and blocking until the owner rules. A future session may not read any table above as
 a ruling: the governing record each row cites is the authority, and where no record is cited, the
 entry is a **proposal awaiting one**.
+
+> **This section still stands, in the only sense that matters: this document is still not an
+> authority.** What changed on 2026-08-13 is that the owner **has** ruled, by accepted
+> [Decision 067](../Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md), and that
+> record — not this one — carries the rulings. **The entries above that no accepted record then
+> supported are now supported by Decision 067, and must be cited to it.**
+>
+> **D021-L2 remains `ACTIVE`** and is **not** closed by the ruling: OR-1 supplies the derivation that
+> was missing, and closure additionally requires the implemented recomputation-and-comparison step,
+> reviewed. **No limitation is closed by Decision 067**, and one is added — **D067-L1**.

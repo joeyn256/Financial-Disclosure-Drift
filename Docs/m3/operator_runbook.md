@@ -34,7 +34,12 @@ authorize any phase.
 > | Gate H | **PASSED and owner-accepted** (Decision 065 §3), on the 30-of-30 applicable-item candidate `PASS` reproduced offline 2026-08-11 and the independent final audit |
 > | Milestone 3.2 | **complete and owner-accepted**; annotated `m3.2-complete` tag created on the governance closeout commit |
 > | M3.2B | **not executed / not required for accepted M3.2 completion — closed by Decision 065 §4**; not pending, no latent acquisition or network authority, never resurrectable from a historical M3.2 authorization |
-> | M3.3 | **not begun, not authorized** — a separate owner packet and its own accepted contract are required |
+> | M3.3 | **not begun, not authorized** — a separate owner packet and its own accepted contract are required. Its contract is **corrected, not accepted** (accepted Decision 067, 2026-08-13): OR-1 and OR-2 are ruled and R13–R16 are issued, and the next act is a **fresh independent contract review** |
+> | Census parse layer | **EMPTY**; `parser_state` `not_started` for all 76 plan sources. **M3.3 Owner Ruling R13** makes a bounded **offline** metadata parse the prerequisite for a real snapshot — **not** a reason to reacquire. Real execution is the separately owner-gated **M3.3-E0** (step 28a) |
+>
+> **A separate owner gate sits on each side of M3.3-E0.** One authorization to run the real offline
+> parse, an independent read-only verification of it, then a **separate** authorization to freeze a
+> real candidate snapshot. **E0 never authorizes E1.**
 >
 > **Never**, on the strength of anything in this runbook: re-run the 74 already-satisfied
 > retrievals; invoke another live acquisition; enable a network switch; resume from a `complete`
@@ -934,7 +939,37 @@ If a failure does not match any documented stop condition:
 **Never work around a failing invariant, relax a threshold, or drop failing rows** (CLAUDE.md
 rule 12).
 
-## 29. Freeze the real snapshot only after Gate H
+## 28a. The real offline metadata parse — M3.3-E0
+
+**`PLANNED — NOT YET IMPLEMENTED (M3.3)`** · **`SEPARATE OWNER GATE`**
+
+**The census parse layer is empty.** M3.2 acquired and stored the objects; it parsed none of them,
+and `parser_state` is `not_started` for all 76 plan sources. **M3.3 Owner Ruling R13** (accepted
+[Decision 067](../Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) §4) makes a
+**bounded offline metadata parse** the prerequisite for any real candidate snapshot, and **M3.3-E0**
+is the gate at which that parse runs against the accepted real private catalog.
+
+**This is not an acquisition step.** The parse reads only already-accepted stored objects. It
+constructs **no HTTP client and no transport**, makes **no request**, performs **no reacquisition or
+re-retrieval**, touches **no filing body, no CompanyFacts, and no Frames**, **adds no new source
+evidence**, and **never fabricates** a missing object or observation. A source accepted as failed or
+unavailable **stays** failed or unavailable.
+
+**Do not run E0 until all of:**
+
+- an **accepted** M3.3 contract;
+- the offline parse driver implemented and rehearsed **on fixtures or disposable isolated copies
+  only**, with the accepted real private catalog untouched;
+- the M3.3A independent review passed;
+- **separate, explicit Sol/GPT authorization naming E0** — contract acceptance is not it, a passing
+  rehearsal is not it, and a green suite is not it.
+
+**After E0, before anything else:** an **independent read-only verification** to the **R3** standard.
+**There is no automatic progression from E0 to E1.** A partial or interrupted E0 is
+**nonauthoritative**, **blocks**, and returns to the owner — it is never automatically resumed,
+completed, repaired, or promoted, and it **never silently authorizes E1**.
+
+## 29. Freeze the real snapshot only after Gate H and E0
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.3)`**
 
@@ -951,8 +986,11 @@ written. **Do not freeze a snapshot until all of:**
   **never emitted**, no code path emits one, and it **is not retroactively emitted, fabricated, or
   backfilled**;
 - independent M3.2 review passed and `m3.2-complete` created;
+- **the real offline metadata parse completed at the M3.3-E0 gate and independently, read-only
+  verified** (step 28a; **R13**, **R14**). A structurally valid but substantively empty snapshot is
+  **never** an acceptable substitute for parsing;
 - **network verified disabled again**;
-- owner authorization to freeze a real candidate snapshot;
+- owner authorization to freeze a real candidate snapshot — **separate from the E0 authorization**;
 - an accepted M3.3 contract.
 
 A snapshot frozen early is not a shortcut — it is an unfrozen snapshot with a hash on it.
@@ -1037,6 +1075,14 @@ the strength of any published record (Decision 064 §9).
 
 **Exit codes for every command above follow the accepted convention:** `0` success, `1`
 configuration error, `2` usage, `3` stage not enabled, `4` gate failure.
+
+**Planned and not yet existing.** The M3.3 command surface — the **offline metadata parse** command
+(**R13**; step 28a), the snapshot builder/freeze command, the E1–E8 rehearsal command, the execution
+command, and the manifest output command Decision 021 §16 deferred — is specified in the corrected
+[M3.3 contract](../../Milestones/contracts/m3_3.md) §19 and **does not exist**. **None may be
+typed**, and none becomes typeable on the strength of the corrected contract, which is **not
+accepted**. The offline parse command, when it exists, **constructs no transport on any code path**
+and is never admitted to the network-gated command set.
 
 ## Appendix C — the stop rule
 

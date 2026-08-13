@@ -646,6 +646,45 @@ exists**. **A validation run that appears to need a network switch, a real catal
 object, an SEC contact, or any private evidence is still a stop condition** — tests use temporary
 paths and fixtures only.
 
+## Decision 067 — M3.3 snapshot authority and the offline parse prerequisite (governance only, zero impact)
+
+[Decision 067](Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)
+(`ACCEPTED — OWNER M3.3 GOVERNANCE RULINGS 2026-08-13`) resolves **OR-1** and **OR-2**, issues
+**R13**–**R16**, records the OQ-3/OQ-4/OQ-6/OQ-8 dispositions, corrects the M3.3-GR proposal at
+**GR-C1** and **GR-C2**, and fixes the **M3.3-E0** real-offline-parse boundary.
+
+**Its impact set is empty.** It changed **no** executable source, test, migration, configuration, or
+CI file, read and mutated **no** private evidence, and made no request. It is a **governance
+authority record and is not implementation authorization**; the M3.3 contract is **corrected and not
+accepted**.
+
+| Path | Kind | Gates it triggers |
+|---|---|---|
+| `Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md` | **new** — the record itself | Markdown link-check only |
+| `Milestones/contracts/m3_3.md` | corrected — §1.1 gains R13–R16; §8.1 and §10.1 carry the resolved OR-2 and OR-1; new §10.2 fixes the offline parse and the M3.3-E0 gate; §§2, 4, 6, 7, 9, 19, 20, 21, 23, 26, 29–34, 36 synchronized | Markdown link-check only |
+| `Docs/m3/m3_3_snapshot_authority_adjudication_proposal.md` | owner-disposition banner and inline GR-C1/GR-C2 annotations; **body preserved as historical proposal evidence** | Markdown link-check only |
+| `Docs/m3/m3_3_governance_foundation_inventory.md` | §§B, F, G, H updated for the dispositions | Markdown link-check only |
+| `Docs/m3/limitations_register.md` | **D067-L1** added (Group 8); **D021-L2** annotated and left `ACTIVE`; register summary recount | Markdown link-check only |
+| `Docs/m3/operator_runbook.md` | new step **28a** (M3.3-E0); §29 gains the E0 prerequisite; banner and Appendix B updated | Markdown link-check; command-status label check |
+| `Docs/Decisions/decision_registry.md` | row `067`; new controlling-record row | Markdown link-check; table-structure check |
+| `Docs/decision_index.md` | new M3.3 topic section | Markdown link-check only |
+| `Docs/architecture_map.md` | §0 Milestone 3 row; §2 current-state note; §4 candidate-snapshot status and prerequisite | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+| `Milestones/STATUS.md` | Decision 067 markers and the new `NEXT_AUTHORIZED_ACTION` | Markdown link-check; marker-format check |
+| `Milestones/milestone_03_master_plan.md` | M3.3 §§2, 5, 6 synchronized with R13 and the E0 gate | Markdown link-check only |
+| `Milestones/contracts/README.md` | `m3_3.md` index entry; corrected next-action pointer | Markdown link-check only |
+
+**Which tests to run for it: none of the code suites.** No module changed, so no module's direct or
+integration tests are implicated. **Documentation-only changes never justify a full `pytest` run**,
+and this map does not turn a governance record into a test trigger.
+
+**What it implies for future work, and does not yet trigger.** When M3.3-I/R is separately
+authorized, the new **candidate-snapshot builder** and **offline metadata parse driver** arrive with
+their own test modules, and the impact set is the one the corrected contract §§26–27 names — the
+`pilot_manifest`, `pilot_schema`, accession- and entity-selector, reserve, migration-provenance, and
+`test_m3_cli` / `test_no_network` suites, plus the new modules' own tests. **Neither module exists
+today, and neither is authorized.**
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

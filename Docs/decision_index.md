@@ -514,6 +514,30 @@ CI found broken on the closeout commit.
 | Which record governs the read-only byte-comparison CI test | Decision 066 §4 R2 — that test is **normative**. It may be strengthened or refactored, never weakened, excluded, skipped, or dropped from the `[dev,sec]` suite |
 | Did the post-closeout correction move `m3.2-complete` or change an accepted M3.2 fact | Decision 066 §§3, 4 R3 — **neither**. The tag, the closeout commit `2185f583…`, and the accepted implementation baseline `5c4c875e…` all stand; the correction commit becomes only the current software baseline proposed for M3.3 entry |
 
+## Milestone 3.3 — snapshot authority and the offline parse prerequisite — current rules
+
+[Decision 067](Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)
+(`ACCEPTED — OWNER M3.3 GOVERNANCE RULINGS 2026-08-13`) is the **first M3.3 record**. It is a
+**governance authority record and is not implementation authorization**: it resolves the two
+entry-blocking owner rulings and issues four more, and it **accepts no contract**, enables no
+network, and starts no work. The corrected
+[`Milestones/contracts/m3_3.md`](../Milestones/contracts/m3_3.md) is
+`CORRECTED — PENDING FRESH INDEPENDENT CONTRACT REVIEW AND OWNER ACCEPTANCE`.
+
+| Question | Controlling record |
+|---|---|
+| The exact candidate-snapshot identity preimages (**OR-1**) | Decision 067 §9 — the M3.3-GR eleven-digest matrix as the normative basis, subject to OQ-3/OQ-4/OQ-5/OQ-6/OQ-7/OQ-8 and the R16 expansion |
+| Whether `input_observation_set_sha256` is the same digest as Decision 021 §8.1's `source_observation_set_sha256` | Decision 067 §9.1 — **definitionally identical**; computed before `INSERT` **and** independently recomputed from persisted evidence in the same authoritative transaction; **fail closed / roll back** on mismatch |
+| The M3.2 → candidate read set and mapping (**OR-2**) | Decision 067 §10 — the 135-column mapping as the normative basis, with eight mandatory GV2 corrections |
+| Whether the census parse layer is populated, and what M3.3 does about it | Decision 067 §2.1 (GV2-5/GV2-6) — **it is empty**, `parser_state` `not_started` for all 76 plan sources — and **§4 Ruling R13**: a **bounded offline metadata parse** is the prerequisite, binding every source through `census_plan_sources.observation_id`. **Not** an acquisition authority |
+| Whether a uniformly empty `schema_fingerprint_sha256` may be used instead of parsing | Decision 067 §5 **Ruling R14** — **no**. Only a *legitimate* zero-structural-row result may use the accepted empty-row-set digest; a failed source is never a fabricated empty parse |
+| Whether `evidence_sha256` keeps `source_observation_id` and `parsed_record_id` | Decision 067 §6 **Ruling R15** — **yes, ALT-3**; Decision 016 §4 retained exactly. Reparse is deterministic; only re-retrieval is not, and M3.3 forbids it. Limitation **D067-L1** records the bounded residue |
+| The `evidence_sha256` call shape and the eight candidate `*_resolution_sha256` derivations | Decision 067 §7 **Ruling R16** — accepted `hash_table` only, no second hashing implementation, and a **candidate-layer** resolution digest that never reuses the census accession `resolution_sha256` |
+| `coverage_policy_version`'s value | Decision 067 §8 — **`pilot-coverage/1.0`**. Its executable home is an **open implementation-packet path question** (contract §20), not resolved by that record |
+| The persisted evidence-role vocabulary | Decision 067 §8 — **`winning` / `competing` / `supporting`**, migration `0009`'s vocabulary; Decision 016 §4's wording is illustrative and historical |
+| Whether the real offline parse may be run | Decision 067 §11 — **not yet**. **M3.3-E0** is a separate owner gate, it requires an independent read-only verification before **M3.3-E1**, and **there is no automatic E0 → E1 progression** |
+| Whether Decision 067 accepts the M3.3 contract or authorizes implementation | Decision 067 §12 — **neither.** The next act is a **fresh independent contract review** by a non-author session |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

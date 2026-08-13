@@ -261,8 +261,35 @@ that stage was preparation and owner review of the bounded M3.2 T2 implementatio
 packet — preparing it authorized nothing. **That is historical: the packet was prepared and
 accepted, every T2 stage and T3 through T7 completed and was accepted, and Milestone 3.2 is now
 complete and owner-accepted (Decision 065). The current next authorized action is carried by
-`NEXT_AUTHORIZED_ACTION` in [`Milestones/STATUS.md`](../STATUS.md) — the owner M3.3 entry and
-contract packet.**
+`NEXT_AUTHORIZED_ACTION` in [`Milestones/STATUS.md`](../STATUS.md).**
+
+**Updated 2026-08-13.** The M3.3 entry and contract packets have been issued (M3.3-G, M3.3-GR), the
+M3.3-GV2 evidence verification is owner-accepted, and accepted
+[Decision 067](../../Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)
+resolved **OR-1** and **OR-2** and issued **R13**–**R16**. **The next authorized action is a fresh
+independent review of the corrected `m3_3.md` contract**, by a session that authored neither it nor
+Decision 067. **No M3.3 implementation, offline parse, snapshot, selection, or manifest work may
+begin**, and nothing in this directory supplies that authority.
+
+- [`m3_3.md`](m3_3.md) — Milestone 3.3 candidate-snapshot builder, offline execution rehearsal, and
+  the exact real pilot manifest. **Corrected, and NOT accepted.**
+  `STATUS: CORRECTED — DECISION 067 OWNER RULINGS RECORDED — PENDING FRESH INDEPENDENT CONTRACT
+  REVIEW AND OWNER ACCEPTANCE`, `CONTRACT_ACCEPTANCE: NO`, `IMPLEMENTATION_AUTHORIZATION: NO`,
+  `REAL_PRIVATE_PARSE_AUTHORIZATION: NO`, `REAL_SNAPSHOT_AUTHORIZATION: NO`,
+  `NETWORK_AUTHORIZATION: NONE`, `REQUEST_CEILING: 0`, `MIGRATION_AUTHORIZED: none`. Drafted under
+  the owner's M3.3-G packet (2026-08-13), refined under M3.3-GR (rulings **R3**, **R4**, **R5**,
+  **R8**, **R10**, **R12**), and **corrected under accepted
+  [Decision 067](../../Docs/Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md)**
+  (2026-08-13), which **resolved OR-1 and OR-2**, issued **R13**–**R16**, recorded the
+  OQ-3/OQ-4/OQ-6/OQ-8 dispositions, corrected the M3.3-GR proposal at **GR-C1** and **GR-C2**, and
+  fixed the **M3.3-E0** real-offline-parse gate. **No owner ruling is open**; four inputs stay
+  deferred to named owner gates (**OR-6**, **OR-7**, **OR-9**, **OR-11**). **A corrected contract is
+  not an accepted contract**, and per the rule at the head of this file **a draft or corrected
+  contract is not the active stage contract** — `ACTIVE_STAGE_CONTRACT` is unchanged. Active
+  blocker: **a fresh independent contract review by a session that authored neither the contract nor
+  Decision 067**, then owner adoption of any corrections, a fresh rereview, and owner acceptance. **No
+  network access is authorized**, no builder or offline parse driver exists, and no snapshot,
+  selection, manifest, or root exists.
 
 - [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F. **Complete.** The
   stage is owner-accepted (accepted Decision 031, `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed

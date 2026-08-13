@@ -23,7 +23,7 @@ invents none for a future milestone.
 | **Milestone 0** | The research and governance foundation: research question and framing, the novelty review and its prohibited-claims boundary, the approved preregistration, the frozen cohorts and outcome cutoffs, bootstrap seed `20260725`, the leakage register, the deviation register and D001, and Decisions 001–006. It owns no source module; the frozen definitions it fixed are executed by `cohorts.py` in §1 below | **Formally closed** (Decision 026 §6). Its frozen research definitions remain frozen — closure does not unfreeze one, and changing any still requires an approved decision record plus a reviewed code change (CLAUDE.md rule 3) |
 | **Milestone 1** | Foundational configuration, frozen cohort definitions, CLI and exit-code boundary, logging, packaging, and the offline safety baseline — §§1 and 9 below | **Formally closed** (Decision 026 §7). Implemented, accepted, and in production use since Milestone 1 |
 | **Milestone 2** | SEC source policy and the offline census (§2); raw-object, inventory, and catalog layers (§3); the candidate/selection/manifest schema (§4); entity selection (§5); joint accession selection (§6); reserve packages (§7); and pilot-manifest construction, terminal result identity, lifecycle enforcement, verification, and atomicity (§8) | **Formally closed** (Decision 026 §§8–10) — the deterministic **offline** SEC, storage, selection, replay, and manifest architecture through accepted Stage M2.3 S6, checkpointed at `m2.3-s6-complete`. **No live SEC pilot has been executed**: S6 creates only a `proposed` manifest, over fixtures |
-| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** acquisition-path rehearsal and Gate F; **M3.2** controlled metadata-only SEC acquisition in **two sequential windows** and Gate H; **M3.3** the candidate-snapshot builder and execution rehearsal, then the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** the accepted approval entry point, then explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **M3.1 is owner-accepted and complete** ([Decision 031](Decisions/decision_031_m3_1_acceptance.md), `M3_1_ACCEPTED_AND_COMPLETE`), frozen at `970e050d…` and checkpointed `m3.1-complete`; **Gate F has since been signed and its readiness token emitted**. **Milestone 3.2 is complete and owner-accepted** ([Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), `M3_2_FINAL_OWNER_ACCEPTANCE`), on a fresh independent final acceptance review at BLOCKER 0 / MAJOR 0 / MINOR 0, and checkpointed `m3.2-complete`: **Gate H is passed and owner-accepted**, controlled live metadata acquisition **has occurred** (77 physical attempts of 801; 76 of 76 stored raw objects hash-valid; 70 of 70 quarterly full-index objects present and hash-valid; audit projection 77 of 77), a real operational catalog and real receipts exist, and **M3.2B is closed as not executed / not required**. See §10. **No further SEC request, network use, or acquisition authority exists** — every live grant is exhausted — and both tracked network switches remain `false`. No Milestone 3 migration or table exists; the chain is still `0001`–`0013`. **No real candidate snapshot, real selection, real manifest, approved root, or publication path exists**, and **M3.3 has not begun and is not authorized**: its contract is a draft with two entry-blocking owner rulings open. Later phases are neither implemented nor authorized |
+| **Milestone 3** | Controlled live execution and exact-root approval: **M3.1** acquisition-path rehearsal and Gate F; **M3.2** controlled metadata-only SEC acquisition in **two sequential windows** and Gate H; **M3.3** the candidate-snapshot builder and execution rehearsal, then the frozen real pilot snapshot, deterministic execution, the exact real-data manifest, and the CLI output deferred from S6; **M3.4** the accepted approval entry point, then explicit owner approval of the exact root hash; **M3.5** integrated real-pilot acceptance and Milestone 3 closeout | **M3.1 is owner-accepted and complete** ([Decision 031](Decisions/decision_031_m3_1_acceptance.md), `M3_1_ACCEPTED_AND_COMPLETE`), frozen at `970e050d…` and checkpointed `m3.1-complete`; **Gate F has since been signed and its readiness token emitted**. **Milestone 3.2 is complete and owner-accepted** ([Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), `M3_2_FINAL_OWNER_ACCEPTANCE`), on a fresh independent final acceptance review at BLOCKER 0 / MAJOR 0 / MINOR 0, and checkpointed `m3.2-complete`: **Gate H is passed and owner-accepted**, controlled live metadata acquisition **has occurred** (77 physical attempts of 801; 76 of 76 stored raw objects hash-valid; 70 of 70 quarterly full-index objects present and hash-valid; audit projection 77 of 77), a real operational catalog and real receipts exist, and **M3.2B is closed as not executed / not required**. See §10. **No further SEC request, network use, or acquisition authority exists** — every live grant is exhausted — and both tracked network switches remain `false`. No Milestone 3 migration or table exists; the chain is still `0001`–`0013`. **No real candidate snapshot, real selection, real manifest, approved root, or publication path exists**, and **M3.3 has not begun and is not authorized**: its contract is **corrected and still not accepted** — accepted [Decision 067](Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) (2026-08-13) resolved the two entry-blocking owner rulings **OR-1** and **OR-2**, issued **R13**–**R16**, and fixed the **M3.3-E0** real-offline-parse gate, but it is a governance authority record and **not implementation authorization**; the next act is a **fresh independent contract review**. The census parse layer is **empty**, and R13 makes a bounded **offline** metadata parse the prerequisite for any real snapshot — never a reason to reacquire. Later phases are neither implemented nor authorized |
 
 **Assignment to Milestone 3 is not authorization to begin it** (Decision 024 §8), and **planning a
 phase is not authorization to begin it either** (Decision 027 §20). Every Milestone 3 phase
@@ -54,7 +54,7 @@ None is a module, a migration, a table, a CLI command, or a runtime path, and no
 | [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled by implementation status. Its current-state banner records that M3.2A acquisition is complete at 75/75 successor identities and 77 of 801 attempts, and that no further live SEC request is authorized (Decision 064 §9) |
 | [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **A1–A12 is implemented but has not been run to a passing operational token; E1–E8 remains unimplemented and belongs to M3.3A** |
 | [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The execution-receipt design for dry-run and live commands — permitted fields, prohibited fields, serialization, storage (both accepted filename conventions — Decision 064 §8), retention, redaction, replay, recovery, versioning, validation. Written against `m3-execution-receipt/2.0`; the current writer is `3.0` and readers accept both (Decision 055 §7). **Creates no code and no table** |
-| [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus twelve new Milestone 3 entries. **Closes none** |
+| [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus the Milestone 3 entries — **M3-L01**–**M3-L16** from planning through the post-T5 remediation, and **D067-L1** new at the M3.3 snapshot-authority rulings. **Closes none**; read its own register summary for the live counts |
 | [`Docs/m3/templates/`](m3/templates/request_budget.md) | The eight frozen operational templates: request budget, Gate F, Gate H, schema-drift incident, interrupted-run recovery, real-snapshot evidence, root-hash approval, and the public evidence index |
 
 **Two rules these artifacts add to this map.**
@@ -134,6 +134,17 @@ and orchestrate the read-only metadata census (Stage M2.2).
   `test_r2_index_retrieval.py`, `test_operating_calendar.py`,
   `test_operating_calendar_evidence.py`, `tests/integration/test_r2_census_end_to_end.py`.
 - **Status:** accepted, in production use since Stage M2.2.
+- **Current-state note (2026-08-13).** M3.2 acquisition ran through
+  `m3/acquisition.py` → `sec/observation_catalog.py`, which writes `census_source_observations`,
+  `census_observation_reasons`, and `census_archive_members` — **not** the census **parse** layer.
+  That layer is written only by `census.py` / `census_orchestrator.py`, whose sole entry point is the
+  network-gated `sec census` command, and it is **empty**: `parser_state` is `not_started` for all 76
+  plan sources. **The coupling is at the orchestration entry point only** — the parsers under
+  `parsers/` are **pure over materialized content**, and loading, archive traversal, and
+  `CensusCatalog` persistence are already offline-capable. Accepted
+  [Decision 067](Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) §§3.1, 4
+  (**R13**) authorizes a bounded **offline** parse driver in M3.3's contract scope to close that
+  seam. **No implementation is authorized, and none of this is an acquisition or network authority.**
 
 ## 3. Raw-object and inventory/catalog layers
 
@@ -176,12 +187,24 @@ metadata before any selection runs, per Decision 013 §2 (D2).
   that exists ahead of its writer, not an implemented snapshot builder.
 - **Decisions:** [013](Decisions/decision_013_pilot_selection_mechanics.md) §2 (D2),
   [016](Decisions/decision_016_m23_schema_and_artifact_architecture.md) §3–§4 (table family,
-  evidence normalization).
+  evidence normalization),
+  [067](Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) §§4–11 (the identity
+  preimages, the source→candidate mapping, the offline parse prerequisite, and the M3.3-E0 gate).
 - **Persistence:** `0009_m23_pilot_schema.sql`.
 - **Tests:** `test_m23_pilot_schema.py` (schema/integrity/reconstruction only — no snapshot-builder
   tests exist because no builder exists).
 - **Status:** schema accepted and implemented (Stage S3); snapshot-writing logic **not
-  implemented**.
+  implemented**. Its **methodology is now fixed** — accepted Decision 067 rules the identity
+  preimages (**OR-1**), the source→candidate mapping (**OR-2**), and the `evidence_sha256` and
+  candidate `*_resolution_sha256` derivations (**R16**) — but **no builder is authorized**: that
+  record is governance authority, not implementation authorization, and the M3.3 contract is
+  corrected and **not accepted**.
+- **Prerequisite that does not yet exist:** the census **parse** layer is **empty** (`parser_state`
+  `not_started` for all 76 plan sources), so the substantive sources this family would read are
+  unpopulated. **Ruling R13** makes a bounded, network-free **offline metadata parse** over the
+  already-accepted stored objects the prerequisite, binding every source through
+  `census_plan_sources.observation_id`. Its **real** execution is the separately owner-gated
+  **M3.3-E0**, and **R14** forbids substituting a uniformly empty structural fingerprint for it.
 
 ## 5. Entity selection
 

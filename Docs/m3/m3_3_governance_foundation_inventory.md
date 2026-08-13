@@ -14,6 +14,22 @@ which decides nothing — is in
 [`m3_3_snapshot_authority_adjudication_proposal.md`](m3_3_snapshot_authority_adjudication_proposal.md).
 This document remains a navigation index and gains no authority from either change.
 
+**Updated again 2026-08-13 under accepted
+[Decision 067](../Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) — the
+paragraph above is historical as at the M3.3-GR packet.** **No owner-ruling request is open.**
+**OR-1** and **OR-2** are **RESOLVED — OWNER RULED** (Decision 067 §§9, 10), and four further rulings
+were issued: **R13** offline parse prerequisite and source binding, **R14** structural fingerprint
+non-vacuity, **R15** evidence provenance identity retained (ALT-3), and **R16** candidate evidence
+and resolution identity. The owner also recorded four previously frozen dispositions for the first
+time — **OQ-3** fail closed on a same-catalog `snapshot_id` collision, **OQ-4** `snapshot_id`
+excluded from the seven family digests, **OQ-6** `coverage_policy_version` = `pilot-coverage/1.0`,
+and **OQ-8** evidence roles `winning` / `competing` / `supporting` — and corrected the proposal at
+**GR-C1** and **GR-C2**. The census parse layer is verified **EMPTY**, and **R13** makes a bounded
+offline metadata parse the prerequisite, with real execution separately gated at **M3.3-E0**.
+**The contract is CORRECTED and still NOT ACCEPTED**, implementation remains unauthorized, network
+authority remains `NONE`, and **no limitation is closed** — one is added, **D067-L1**. §F and §G
+below are updated for navigation only; the decision and the contract control.
+
 **What this document is.** A compact map from each M3.3 requirement to the accepted record that
 governs it, the code that already implements it, and what remains. It exists so that the owner can
 rule on the open methodology questions without re-deriving the corpus, and so that the M3.3 stage
@@ -135,6 +151,7 @@ Classification: `REUSE AS-IS`, `EXTEND`, `NEW`, `NOT SUITABLE`, `OWNER QUESTION`
 | **T. Limitations handling** | `Docs/m3/limitations_register.md` | 36 open, 6 closed; register is read at phase start and never closes an inherited entry on its own | REUSE AS-IS |
 | **CLI output deferred from S6** | none | Decision 021 §16 defers it to this phase; `cli.py` has no pilot-manifest subcommand | **NEW** |
 | **E1–E8 rehearsal harness** | none | `Docs/m3/offline_rehearsal_spec.md` Part II specifies it; nothing implements it | **NEW** |
+| **Offline metadata parse driver** | the **pure parsers**, `SnapshotStore` local loading and verification, archive iteration, and `CensusCatalog` persistence — **all already offline-capable** (M3.3-GV2) | **The seam is missing, not the machinery.** Retrieval and parsing are coupled **only at the orchestration entry points** (`sec/census_orchestrator.py`, whose sole entry is the network-gated `sec census`); no offline entry point exists. The census parse layer is **EMPTY**, `parser_state` `not_started` for all 76 plan sources. Owner Ruling **R13** makes a bounded offline parse the prerequisite; real execution is separately gated at **M3.3-E0** | **NEW — SMALL_EXTENSION; RULED (R13, R14)** |
 
 ### Proof that exactly one accepted selector exists
 
@@ -245,7 +262,8 @@ Classification: `BLOCKING M3.3 ENTRY`, `BLOCKING REAL SNAPSHOT`, `BLOCKING REAL 
 |---|---|---|---|
 | D020-L1 … D020-L5 | `ACTIVE` | NONBLOCKING CARRY-FORWARD | Methodological consequences of the accepted reserve architecture; each changes which rows exist, and M3.3 hashes rows as persisted (Decision 021 §19.1) |
 | D021-L1 | `ACTIVE` | NONBLOCKING CARRY-FORWARD | Carries the six S5-era limitations forward unchanged |
-| **D021-L2** | `ACTIVE` | **BLOCKING REAL SNAPSHOT** | It records precisely the gap OR-1 names: `candidate_tables_sha256` binds declared digests because no accepted derivation exists. A real freeze cannot declare digests whose preimages are unfrozen |
+| **D021-L2** | `ACTIVE` | **BLOCKING REAL SNAPSHOT** | It records precisely the gap OR-1 names: `candidate_tables_sha256` binds declared digests because no accepted derivation exists. A real freeze cannot declare digests whose preimages are unfrozen. **Updated 2026-08-13:** accepted Decision 067 §9 **rules OR-1** and supplies the derivation, answering the entry's "Required owner action". The entry stays **`ACTIVE`** — closure additionally requires the implemented recomputation-and-comparison step, reviewed, which is unauthorized M3.3A work |
+| **D067-L1** | `ACTIVE` | **NONBLOCKING CARRY-FORWARD** | New at Decision 067 §6.2 (**R15**). Candidate evidence and family digests are deterministic for the accepted **frozen** observation set, but Decision-016 candidate evidence identity is **not cross-reacquisition invariant**. Unreachable inside M3.3, which forbids reacquisition; **not repaired here**, and it grants **no** acquisition authority |
 | D021-L3, D021-L4, D021-L5 | `ACTIVE` | NONBLOCKING CARRY-FORWARD | Deliberate defensive/diamond properties of accepted preimages |
 | D021-L6 | `ACTIVE` | NONBLOCKING CARRY-FORWARD | A sealed run without a manifest is not a publication — reinforces the M3.3/M3.4 separation |
 | **D021-L7** | `ACTIVE` | **BLOCKING MANIFEST/ROOT** *(as an owner input, not a defect)* | The six Decision 021 §8.4 arguments are asserted, never verified. The real root cannot be constructed until the owner supplies them (OR-6) |
@@ -275,19 +293,20 @@ Classification: `BLOCKING M3.3 ENTRY`, `BLOCKING REAL SNAPSHOT`, `BLOCKING REAL 
 
 ## G. Owner-ruling requests
 
-Each is stated as a question. **None was answered by this inventory.** Ten have since been disposed of
-by the owner's M3.3-GR packet of 2026-08-13 — **six ruled** (R3, R4, R5, R8, R10, R12) and **four
-deliberately deferred to named owner gates** (OR-6, OR-7, OR-9, OR-11). **OR-1 and OR-2 remain open
-and entry-blocking.** The dispositions are recorded in
+Each is stated as a question. **None was answered by this inventory.** All twelve have since been
+disposed of — **eight ruled** and **four deliberately deferred to named owner gates** (OR-6, OR-7,
+OR-9, OR-11) — and accepted
+[Decision 067](../Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) added **four
+further rulings**, R13–R16. **No owner ruling is open.** The dispositions are recorded in
 [`Milestones/contracts/m3_3.md`](../../Milestones/contracts/m3_3.md) §1.1 and §1.2, which are the
 current statement; the questions below are retained as the record of what was asked.
 
-**Disposition, as at 2026-08-13:**
+**Disposition, as at 2026-08-13 (after Decision 067):**
 
 | ID | Disposition | Where the current statement lives |
 |---|---|---|
-| **OR-1** | **OPEN — ENTRY-BLOCKING** | contract §10, §21; proposal §§A–C |
-| **OR-2** | **OPEN — ENTRY-BLOCKING** | contract §8, §21; proposal §§D–H |
+| **OR-1** | **RESOLVED — OWNER RULED**, Decision 067 §9. The proposal's eleven-digest matrix adopted as the normative basis, with OQ-3/OQ-4/OQ-5/OQ-6/OQ-7/OQ-8 applied and expanded by R16 | Decision 067 §9; contract §10.1, §21 |
+| **OR-2** | **RESOLVED — OWNER RULED**, Decision 067 §10. The proposal's 135-column mapping adopted as the normative basis, with eight mandatory GV2 corrections | Decision 067 §10; contract §8.1, §21 |
 | **OR-3** | **RULED — R3** (durable-byte equality; true OS-level strictly-read-only connections; no writer lease; fail closed) | contract §1.1, §14 |
 | **OR-4** | **RULED — R4** (Decision 065 §3 + the current STATUS record substitute; no token is emitted) | contract §1.1, §22 |
 | **OR-5** | **RULED — R5** (one atomic construct-and-freeze transaction; a surviving `building` row blocks; no automatic recovery across an authoritative boundary) | contract §1.1, §11, §17, §32 |
@@ -298,10 +317,18 @@ current statement; the questions below are retained as the record of what was as
 | **OR-10** | **RULED — R10** (fail closed; `infeasible_or_unproven` is never relabelled proven infeasibility) | contract §1.1, §12 |
 | **OR-11** | **DEFERRED, Decision 023 retained exactly**; rehearsal must trigger it, real execution stops and returns | contract §1.2, §25 |
 | **OR-12** | **RULED — R12; correction applied 2026-08-13** | contract §1.1; `Docs/architecture_map.md` §0, §10.1 |
+| **R13** | **RULED**, Decision 067 §4 — bounded offline metadata parse prerequisite; `census_plan_sources.observation_id` binding; complete non-acquisition prohibition list. **Real execution separately gated at M3.3-E0** | Decision 067 §§4, 11; contract §1.1, §10.2 |
+| **R14** | **RULED**, Decision 067 §5 — structural fingerprint non-vacuity; the parse must precede snapshot construction; a failed source is never a fabricated empty parse | Decision 067 §5; contract §1.1, §10.2 |
+| **R15** | **RULED**, Decision 067 §6 — **ALT-3**, Decision 016 §4 retained exactly; bounded cross-reacquisition limitation **D067-L1** recorded, not repaired | Decision 067 §6; contract §1.1, §25; register **D067-L1** |
+| **R16** | **RULED**, Decision 067 §7 — `evidence_sha256` call shape and the eight candidate `*_resolution_sha256` derivations; tie-break hashes unchanged | Decision 067 §7; contract §1.1, §10.1 |
+| **OQ-3 / OQ-4 / OQ-6 / OQ-8** | **PREVIOUSLY FROZEN BY THE OWNER; first recorded in the repository by Decision 067 §8** — fail closed on a same-catalog `snapshot_id` collision; `snapshot_id` excluded from the seven family digests; `coverage_policy_version` = `pilot-coverage/1.0`; evidence roles `winning` / `competing` / `supporting` | Decision 067 §8; contract §10.1 |
 
-**An exact proposal for OR-1 and OR-2** — not a ruling — is in
+**The OR-1 and OR-2 proposal** is
 [`m3_3_snapshot_authority_adjudication_proposal.md`](m3_3_snapshot_authority_adjudication_proposal.md),
-`PROPOSAL — NO AUTHORITY — PENDING SOL/GPT OWNER RULING`.
+now `PROPOSAL — OWNER-DISPOSED BY ACCEPTED DECISION 067 — HISTORICAL PROPOSAL EVIDENCE, NO
+AUTHORITY`. Its matrices were **adopted as the normative bases**, subject to the owner's corrections;
+**it is still not itself an authority**, and a session cites Decision 067 or the contract, never the
+proposal.
 
 | ID | Question | Why existing authority does not settle it | Blocks |
 |---|---|---|---|
@@ -324,7 +351,9 @@ current statement; the questions below are retained as the record of what was as
 
 | # | Interaction | Resolution as it stands |
 |---|---|---|
-| H1 | **Snapshot declared digests versus recomputed candidate content.** `candidate_tables_sha256` binds *declared* digests (Decision 021 §8.2); `selection_input_sha256` binds *actual* row content and is re-derived at reconstruction | Row content is proven by the second path, not trusted by the first. But OR-1 must fix the first, because migration `0009` refuses a freeze without those nine columns |
+| H1 | **Snapshot declared digests versus recomputed candidate content.** `candidate_tables_sha256` binds *declared* digests (Decision 021 §8.2); `selection_input_sha256` binds *actual* row content and is re-derived at reconstruction | Row content is proven by the second path, not trusted by the first. **OR-1 has since fixed the first** (accepted Decision 067 §9; contract §10.1), which is what migration `0009` needs to permit a freeze at all. **D021-L2 stays `ACTIVE`** until the recomputation-and-comparison step is implemented and reviewed |
+| H15 | **The candidate mapping depends on a parse layer that is empty.** Decision 067 §2.1 records `census_structural_observations` and the whole census parse family as **empty**, with `parser_state` `not_started` for all 76 plan sources | Owner Ruling **R13** — a bounded **offline metadata parse** over the already-accepted stored objects is the **prerequisite**, binding every source through `census_plan_sources.observation_id`, with no network, no transport, no reacquisition, and no fabrication. **R14** forbids skipping it and using a uniformly empty structural fingerprint instead. **This is not an acquisition authority**, and the *real* parse is separately gated at **M3.3-E0** with an owner gate on each side |
+| H16 | **Evidence identity binds uuid4 provenance, yet M3.3 must be deterministic** | **GR-C2 / R15.** A **reparse** of the same accepted observation is deterministic; only **re-retrieval** mints a new `source_observation_id`, and M3.3 forbids reacquisition — so the accepted M3.2 values are frozen provenance constants here. The residual cross-reacquisition asymmetry is recorded as **D067-L1** and **not repaired** |
 | H2 | **`acceptance_audit_date` is inside identity while every timestamp is outside it** | Decision 019 §10 states which side of Decision 016 §8 the column falls on; it is a calendar date and a classification input, not a timestamp. No conflict |
 | H3 | **Plain accession is FK identity; dashed accession is canonical for hashing and presentation** | Decision 018 §5.1; both must agree and disagreement fails closed (§5.3). E2 exercises it |
 | H4 | **Amendment family identity is diagnostic, not identifying** | Decision 018 §10.3 keeps it out of the tie-break and out of `selected_order`, so a later M2.5 parentage correction cannot move a frozen manifest hash. Parentage still enters candidate content hashing |

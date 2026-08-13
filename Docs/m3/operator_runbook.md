@@ -943,7 +943,13 @@ written. **Do not freeze a snapshot until all of:**
 
 - [`templates/gate_h_checklist.md`](templates/gate_h_checklist.md) complete, every item `PASS`,
   owner-signed;
-- `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` recorded;
+- **Milestone 3.2 complete and owner-accepted, with Gate H passed and owner-accepted** — proven by
+  [Decision 065](../Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §3 together with
+  the current `Milestones/STATUS.md` `M3_2_GATE_H_STATUS` record. **M3.3 Owner Ruling R4**
+  (2026-08-13) fixes that durable proof as the operative precondition, in place of the phase token
+  `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` this list previously named. That token was
+  **never emitted**, no code path emits one, and it **is not retroactively emitted, fabricated, or
+  backfilled**;
 - independent M3.2 review passed and `m3.2-complete` created;
 - **network verified disabled again**;
 - owner authorization to freeze a real candidate snapshot;

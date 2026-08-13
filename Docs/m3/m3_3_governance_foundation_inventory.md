@@ -5,6 +5,15 @@
 **Status:** `INVENTORY — INPUT TO OWNER REVIEW`. It authorizes nothing, accepts nothing, and
 freezes nothing.
 
+**Updated 2026-08-13 under the owner's M3.3-GR packet.** Ten of the twelve owner-ruling requests in
+§G have been disposed of — six ruled (R3, R4, R5, R8, R10, R12) and four deferred to named owner
+gates (OR-6, OR-7, OR-9, OR-11). **OR-1 and OR-2 remain open and entry-blocking.** The dispositions
+are stated in [`Milestones/contracts/m3_3.md`](../../Milestones/contracts/m3_3.md) §1.1 and §1.2,
+which control; §G below records them for navigation only. An exact **proposal** for OR-1 and OR-2 —
+which decides nothing — is in
+[`m3_3_snapshot_authority_adjudication_proposal.md`](m3_3_snapshot_authority_adjudication_proposal.md).
+This document remains a navigation index and gains no authority from either change.
+
 **What this document is.** A compact map from each M3.3 requirement to the accepted record that
 governs it, the code that already implements it, and what remains. It exists so that the owner can
 rule on the open methodology questions without re-deriving the corpus, and so that the M3.3 stage
@@ -51,7 +60,7 @@ baseline** and which replaces neither of the first two as historical fact (Decis
 | A6 | Candidate-snapshot **representation** obligations | Decision 019 | §§5–8 | none — no builder exists | REUSE (as obligations) |
 | A7 | Candidate-snapshot **freeze validation** obligations | Decision 019 | §9 | partially, at read time, in `sec/accession_selection_store.py` | EXTEND |
 | A8 | Candidate-builder boundary — the builder does not exist and is unauthorized | Decision 019 | §9.1 | confirmed true at `e3e58f9` | NEW (needs authorization) |
-| A9 | Exact candidate-snapshot **identity preimages** (`snapshot_id`, `coverage_window_sha256`, `input_observation_set_sha256`, the seven `candidate_*_sha256`, `candidate_snapshot_sha256`) | Decision 016 §1 names inputs **in prose only**; Decision 021 §8.2 binds declared digests without recomputing them; limitation **D021-L2** records the absence | D016 §1; D021 §8.2; D021-L2 | none | **OWNER RULING REQUIRED** (OR-1) |
+| A9 | Exact candidate-snapshot **identity preimages** — still unresolved; an exact proposal is at proposal §§A–C (`snapshot_id`, `coverage_window_sha256`, `input_observation_set_sha256`, the seven `candidate_*_sha256`, `candidate_snapshot_sha256`) | Decision 016 §1 names inputs **in prose only**; Decision 021 §8.2 binds declared digests without recomputing them; limitation **D021-L2** records the absence | D016 §1; D021 §8.2; D021-L2 | none | **OWNER RULING REQUIRED** (OR-1) |
 | A10 | Derivation of candidate rows from accepted M3.2 evidence | no accepted record fixes it | — | none | **OWNER RULING REQUIRED** (OR-2) |
 | A11 | S5 run identity (`selection_run_id`, `selection_input_sha256`) | Decision 019 §10; Decision 018 §26 | D019 §10; D018 §26 | `build_joint_selection_run_identity`, `accession_selection_store.py:1540` | REUSE |
 | A12 | Joint objective and its term order | Decision 013 §5; Decision 018 §3 | D018 §§3.1–3.4 | `solve_joint_selection`, `accession_selector.py:2554` | REUSE |
@@ -65,7 +74,7 @@ baseline** and which replaces neither of the first two as historical fact (Decis
 | A20 | Difficult-or-nonstandard package quota — deferred, `unproven`/`unavailable` | Decision 018 | §14 | quota persistence in `accession_selection_store.py` | REUSE |
 | A21 | 2009 support / 2010 target pairs; pre-study provenance | Decision 018 §15; Decision 019 §7 | D018 §15; D019 §§7.1–7.6 | `_cohort_mapping`, `accession_selection_store.py:860` | REUSE |
 | A22 | Hard / deferred / measurable quota dispositions | Decision 018 | §16 | quota diagnostics in `accession_selector.py` | REUSE |
-| A23 | Node limit as an explicit run input; failure semantics | Decision 018 | §17 | `execute_and_persist_joint_selection(node_limit=…)` | REUSE — but the **real value** is an owner input (OR-7) |
+| A23 | Node limit as an explicit run input; failure semantics | Decision 018 §17; unsuccessful-outcome handling fixed by **Owner Ruling R10** | D018 §17; contract §1.1, §12 | `execute_and_persist_joint_selection(node_limit=…)` | REUSE — the **real value** is a deferred owner input (OR-7, §1.2); R10 forbids relabelling node-limit exhaustion as proven infeasibility |
 | A24 | No automatic retry; no retry entry point | Decision 018 | §18 | enforced in `accession_selection_store.py` | REUSE |
 | A25 | Pure core versus persistence adapter; no second methodological implementation | Decision 018 | §19 | `accession_selector.py` (pure) / `accession_selection_store.py` (adapter) | REUSE |
 | A26 | Reserve methodology, single rank 1, eligible pool, tie-break, signature | Decision 020 | §7 | `sec/reserve_selector.py:551` `build_reserve_packages` | REUSE |
@@ -89,10 +98,10 @@ baseline** and which replaces neither of the first two as historical fact (Decis
 | A44 | Execution receipts, `invocation_mode = "offline_execution"` | `Docs/m3/execution_receipt_spec.md` | §§ mode table, fields | `m3/receipt.py` writer `m3-execution-receipt/3.0` | EXTEND |
 | A45 | E1–E8 execution-rehearsal scenarios and pass criteria | `Docs/m3/offline_rehearsal_spec.md` | Part II §§7–9 | none — unimplemented | NEW |
 | A46 | Private-evidence two-layer model; ledger-not-index practice | master plan §12; Decision 065 §8 | — | `m3/evidence_paths.py`, `scripts/check_repo_hygiene.py` | REUSE |
-| A47 | Read-only invariant for a durable-artifact-preserving command | Decision 066 | R1, R2 | `strictly_read_only_connection`, `storage/catalog.py:100` | REUSE — but generality is `reconcile-requests` only (OR-3) |
+| A47 | Read-only invariant for a durable-artifact-preserving command | Decision 066 R1/R2, extended to M3.3 by **Owner Ruling R3** | D066 R1, R2; contract §1.1, §14 | `strictly_read_only_connection`, `storage/catalog.py:100` | REUSE — R3 fixes the M3.3 standard as durable-byte equality on a true OS-level strictly-read-only handle, with no writer lease |
 | A48 | Leakage controls L01–L05, L10, L13, L15, L19; Decision 015 | `Docs/leakage_register.md`; Decision 015 | — | pilot-use prohibition throughout | REUSE |
 | A49 | Frozen research definitions, seed `20260725`, cohort rules | `cohorts.py`; Decision 010 | — | `src/disclosure_drift/cohorts.py` | REUSE — never altered |
-| A50 | Gate H as an M3.3 precondition, expressed as a phase token | master plan §M3.3 §6; runbook §29 | — | token never emitted; Gate H owner-accepted by Decision 065 §3 | **OWNER RULING REQUIRED** (OR-4, CF1) |
+| A50 | Gate H as an M3.3 precondition | Decision 065 §3 + the current `Milestones/STATUS.md` record, per **Owner Ruling R4** | contract §1.1, §22 | token never emitted and never emitted retroactively; Gate H owner-accepted by Decision 065 §3; the two operative surfaces now cite the durable proof | **RULED — R4** (was OR-4, CF1) |
 
 ---
 
@@ -121,7 +130,7 @@ Classification: `REUSE AS-IS`, `EXTEND`, `NEW`, `NOT SUITABLE`, `OWNER QUESTION`
 | **O. Manifest construction** | `release/pilot_manifest.py` (2280 lines — eight component digests, root, `manifest_id`, 81-item crosswalk, thirteen-block document, canonical JSON) and `sec/pilot_manifest_store.py:1019` | **exists, accepted, and complete** (Decision 023 §3) | REUSE AS-IS |
 | **P. Manifest verification** | `sec/pilot_manifest_store.py:1125` `verify_pilot_manifest` | exists; re-derives every digest, the root, `manifest_id`, and the document from persisted rows | REUSE AS-IS |
 | **Q. Atomic file/database writes** | `storage/sqlite.py:119` `transaction`; `pilot_manifest_store._require_serialized_document` and the single-transaction write in `build_and_persist_pilot_manifest` | accepted; row and file commit together (Decision 021 §11.3) | REUSE AS-IS |
-| **R. Recovery / interruption** | `Docs/m3/templates/interrupted_run_recovery.md`; migration `0013` guards; `m3/recovery.py` (M3.2-shaped) | template REUSE; the selection/manifest safe-state enumeration REUSE (master plan §M3.3 §28); a **snapshot-freeze** interruption procedure is undefined | EXTEND + OWNER QUESTION (OR-5) |
+| **R. Recovery / interruption** | `Docs/m3/templates/interrupted_run_recovery.md`; migration `0013` guards; `m3/recovery.py` (M3.2-shaped) | template REUSE; the selection/manifest safe-state enumeration REUSE (master plan §M3.3 §28); the **snapshot-freeze** boundary is now fixed by **Owner Ruling R5** — one atomic construct-and-freeze transaction, a surviving `building` row nonauthoritative and blocking, and no automatic recovery across any authoritative boundary | EXTEND — **RULED (R5)** |
 | **S. Evidence packet utilities** | `Docs/m3/templates/real_snapshot_evidence_packet.md`; `m3/evidence_paths.py`; `m3/receipt.py` | templates and the containment boundary exist | REUSE AS-IS / EXTEND for `offline_execution` fields |
 | **T. Limitations handling** | `Docs/m3/limitations_register.md` | 36 open, 6 closed; register is read at phase start and never closes an inherited entry on its own | REUSE AS-IS |
 | **CLI output deferred from S6** | none | Decision 021 §16 defers it to this phase; `cli.py` has no pilot-manifest subcommand | **NEW** |
@@ -212,7 +221,7 @@ proof (OR-3), which is a proof standard rather than an identity.
 | `census_source_observations` — 77 authoritative rows | accepted | yes; also the source of Decision 021 §8.1's cited-observation set |
 | Structural observations / schema fingerprints | accepted | yes, for Decision 021 §8.1's fingerprint partition rule |
 | Audit projection 77/77 | accepted | yes, as evidence — never an identity input |
-| `census_index_instances` | **empty by design** (`Milestones/STATUS.md`) and never a reason to re-request an index | availability question — **OWNER RULING REQUIRED** (OR-2) |
+| `census_index_instances` | **empty by design** (`Milestones/STATUS.md`) and never a reason to re-request an index | **AVAILABLE-AS-NONE.** Its emptiness is not a blocker and it may not be populated artificially. The proposal's §D and §E trace it as a census planning/coverage table carrying no candidate-column content and therefore **NOT USED** by the builder — a proposal, not a ruling; OR-2 still governs |
 | T6 failed run row, receipt, observations | immutable | **read-only, never mutated** |
 | T7 completed receipt and run | immutable | read-only |
 | Historical `stopped`, receiptless run | permanently non-resumable | read-only |
@@ -266,8 +275,33 @@ Classification: `BLOCKING M3.3 ENTRY`, `BLOCKING REAL SNAPSHOT`, `BLOCKING REAL 
 
 ## G. Owner-ruling requests
 
-Each is stated as a question. **None is answered here.** The draft contract carries the matching
-`OWNER_RULING_REQUIRED` markers.
+Each is stated as a question. **None was answered by this inventory.** Ten have since been disposed of
+by the owner's M3.3-GR packet of 2026-08-13 — **six ruled** (R3, R4, R5, R8, R10, R12) and **four
+deliberately deferred to named owner gates** (OR-6, OR-7, OR-9, OR-11). **OR-1 and OR-2 remain open
+and entry-blocking.** The dispositions are recorded in
+[`Milestones/contracts/m3_3.md`](../../Milestones/contracts/m3_3.md) §1.1 and §1.2, which are the
+current statement; the questions below are retained as the record of what was asked.
+
+**Disposition, as at 2026-08-13:**
+
+| ID | Disposition | Where the current statement lives |
+|---|---|---|
+| **OR-1** | **OPEN — ENTRY-BLOCKING** | contract §10, §21; proposal §§A–C |
+| **OR-2** | **OPEN — ENTRY-BLOCKING** | contract §8, §21; proposal §§D–H |
+| **OR-3** | **RULED — R3** (durable-byte equality; true OS-level strictly-read-only connections; no writer lease; fail closed) | contract §1.1, §14 |
+| **OR-4** | **RULED — R4** (Decision 065 §3 + the current STATUS record substitute; no token is emitted) | contract §1.1, §22 |
+| **OR-5** | **RULED — R5** (one atomic construct-and-freeze transaction; a surviving `building` row blocks; no automatic recovery across an authoritative boundary) | contract §1.1, §11, §17, §32 |
+| **OR-6** | **DEFERRED** to E2 authorization; values stay caller-supplied | contract §1.2, §16 |
+| **OR-7** | **DEFERRED** to after I/R evidence and A1 acceptance, before E1 | contract §1.2, §12 |
+| **OR-8** | **RULED — R8** (narrow hardening of actually-used paths only; no repository-wide cleanup) | contract §1.1, §14, §20 |
+| **OR-9** | **DEFERRED** to Sol/GPT after a fresh A1 rehearsal acceptance | contract §1.2, §2 |
+| **OR-10** | **RULED — R10** (fail closed; `infeasible_or_unproven` is never relabelled proven infeasibility) | contract §1.1, §12 |
+| **OR-11** | **DEFERRED, Decision 023 retained exactly**; rehearsal must trigger it, real execution stops and returns | contract §1.2, §25 |
+| **OR-12** | **RULED — R12; correction applied 2026-08-13** | contract §1.1; `Docs/architecture_map.md` §0, §10.1 |
+
+**An exact proposal for OR-1 and OR-2** — not a ruling — is in
+[`m3_3_snapshot_authority_adjudication_proposal.md`](m3_3_snapshot_authority_adjudication_proposal.md),
+`PROPOSAL — NO AUTHORITY — PENDING SOL/GPT OWNER RULING`.
 
 | ID | Question | Why existing authority does not settle it | Blocks |
 |---|---|---|---|
@@ -359,11 +393,11 @@ the S5.1 and S4 regression suites.
 
 | ID | Finding | Determination for M3.3 | Action now |
 |---|---|---|---|
-| **CF1** | The Gate-H completion token `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` is named as an M3.3 precondition but was never emitted | **Surfaces that treat it as an operative M3.3 precondition:** `Docs/m3/operator_runbook.md:946` (the §29 snapshot-freeze precondition list) and `Milestones/milestone_03_master_plan.md:1464` (M3.3 §6). **Surfaces that name it historically, not as an M3.3 precondition:** master plan `:156`, `:1087`, `:1347`, `:1367` (M3.2's own outputs/token/next action), `Milestones/contracts/m3_2.md:557`, `Docs/m3/templates/gate_h_checklist.md:21` and `:326`, and `Docs/Decisions/decision_027…:154` (byte-unchanged history). **No emitter exists in `src/`**; `tests/integration/test_m3_cli.py:2471` is a *negative* control asserting a refused command must not print it. **An equivalent durable acceptance proof already exists**: Decision 065 §3's `M3_2_FINAL_OWNER_ACCEPTANCE` with Gate H owner-accepted, and `Milestones/STATUS.md`'s `M3_2_GATE_H_STATUS`, which states in terms that "No Gate H phase token emission is claimed by any record". The **smallest** ruling is therefore a one-line owner substitution — naming Decision 065 §3 as the precondition in place of the token, on the two operative surfaces only — with no historical text rewritten and **no token emitted** | **OR-4.** No token is emitted here, and neither operative surface is edited by this session |
+| **CF1** | The Gate-H completion token `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` is named as an M3.3 precondition but was never emitted | **Surfaces that treat it as an operative M3.3 precondition:** `Docs/m3/operator_runbook.md:946` (the §29 snapshot-freeze precondition list) and `Milestones/milestone_03_master_plan.md:1464` (M3.3 §6). **Surfaces that name it historically, not as an M3.3 precondition:** master plan `:156`, `:1087`, `:1347`, `:1367` (M3.2's own outputs/token/next action), `Milestones/contracts/m3_2.md:557`, `Docs/m3/templates/gate_h_checklist.md:21` and `:326`, and `Docs/Decisions/decision_027…:154` (byte-unchanged history). **No emitter exists in `src/`**; `tests/integration/test_m3_cli.py:2471` is a *negative* control asserting a refused command must not print it. **An equivalent durable acceptance proof already exists**: Decision 065 §3's `M3_2_FINAL_OWNER_ACCEPTANCE` with Gate H owner-accepted, and `Milestones/STATUS.md`'s `M3_2_GATE_H_STATUS`, which states in terms that "No Gate H phase token emission is claimed by any record". The **smallest** ruling is therefore a one-line owner substitution — naming Decision 065 §3 as the precondition in place of the token, on the two operative surfaces only — with no historical text rewritten and **no token emitted** | **RULED — R4, 2026-08-13.** The Decision-065/STATUS proof is the operative precondition; **no token is emitted, then or ever**. Under R12's companion correction the two operative surfaces (`Docs/m3/operator_runbook.md` §29 and `Milestones/milestone_03_master_plan.md` M3.3 §6) now cite that proof; **every historical reference listed at left is preserved byte-unchanged**, including the `tests/integration/test_m3_cli.py` negative control |
 | **CF2** | Limitations mention Gate-H closure evidence; **M3-L15** remained `ACTIVE` at closeout | Classified in §F. **M3-L15 is `NONBLOCKING CARRY-FORWARD`** — it guards the live-acquisition SIGTERM latch, and M3.3 runs no live acquisition. **No limitation is closed by this document, and none is closed merely because Gate H passed** | none |
 | **CF3** | `_refuse_inconsistent_recorded_chain` (`src/disclosure_drift/m3/acquisition.py:685`) builds `f"file:{database_path}?mode=ro"` without URI-quoting the path; a path containing `?` or `#` may be misparsed | **Relevant to M3.3?** Only indirectly. The function is an M3.2 catalog-preparation pre-flight, not an M3.3 path; M3.3 opens the catalog through `read_only_catalog` / `strictly_read_only_connection`, which use `Path.absolute().as_uri()` and are not affected. **Correctness/auditability blocker before I/R?** **No** — the accepted evidence root is an owner-chosen absolute path containing neither character, and the failure mode is a refusal, not a silent wrong answer. **Safely deferrable** to a later bounded hardening packet | **DEFER.** Not fixed here, as instructed |
-| **CF4** | Some "non-writer" paths still open read-write OS handles and retain checkpoint-on-close capability | **Complete inventory at `e3e58f9`.** *Strictly read-only (`SQLITE_OPEN_READONLY`, cannot checkpoint):* `storage/catalog.py:100` `strictly_read_only_connection` → `storage/sqlite.py:96` `connect(read_only=True)`; `m3/recovery.py:141` `read_only_catalog`, used by `m3/acquisition.py:2415` (`reconstruct_catalog_state`), `:3888`, `:4413`, `:4605`, `m3/recovery.py:1675`, `:2569`, and `m3/rehearsal.py:1749`. *Read-write OS handle despite being a non-writer:* `storage/catalog.py:84` `read_only_connection` → `connect(writer=False)`, used at `cli.py:1310`, `cli.py:2185`, `cli.py:2274`; and `storage/sqlite.py:626` `backup_database`, which at `:633` opens the source through `connect(source)` — read-write — and the destination through `with sqlite3.connect(destination) as target:`, the exact pattern Decision 066 §5 identified as governing the *transaction* rather than the connection, so that handle closes only at garbage collection. **Will any be used by M3.3?** Every accepted S5/S6 entry point — `load_frozen_joint_candidates`, `execute_and_persist_joint_selection`, `reconstruct_persisted_joint_selection`, `seal_selection_result`, `build_and_persist_pilot_manifest`, `verify_pilot_manifest` — takes a **caller-supplied** `sqlite3.Connection`, so **M3.3 chooses the handle for every path**. The three `read_only_connection` call sites are CLI status helpers (latest-migration name, retrieved index instances) that an M3.3 command could reach incidentally. **Determination:** strict read-only hardening is **required before M3.3-I/R only if OR-3 sets a durable-byte proof standard**; if it does, the M3.3 read paths must be bound to `strictly_read_only_connection`, and any status helper an M3.3 command touches must be too | **Inventory only.** No fix implemented here, as instructed. See OR-3 and OR-8 |
-| **CF5** | CI SQLite 3.45.1 versus local 3.53.4 | **No proposed substantive M3.3 identity depends on physical SQLite file bytes or on version-specific serialization.** Every governed identity is a logical `hash_table` digest over `normalize_value`-rendered rows, sorted before digesting (Decision 021 §5; `release/hashing.py`). The existing canonical logical serialization rules are already governed and are reused unchanged; **no new serialization is invented**. The version difference bears only on a *durable-byte* replay proof, which is OR-3 — a proof standard, not an identity | **No owner ruling required on identity portability.** Folded into OR-3 |
+| **CF4** | Some "non-writer" paths still open read-write OS handles and retain checkpoint-on-close capability | **Complete inventory at `e3e58f9`.** *Strictly read-only (`SQLITE_OPEN_READONLY`, cannot checkpoint):* `storage/catalog.py:100` `strictly_read_only_connection` → `storage/sqlite.py:96` `connect(read_only=True)`; `m3/recovery.py:141` `read_only_catalog`, used by `m3/acquisition.py:2415` (`reconstruct_catalog_state`), `:3888`, `:4413`, `:4605`, `m3/recovery.py:1675`, `:2569`, and `m3/rehearsal.py:1749`. *Read-write OS handle despite being a non-writer:* `storage/catalog.py:84` `read_only_connection` → `connect(writer=False)`, used at `cli.py:1310`, `cli.py:2185`, `cli.py:2274`; and `storage/sqlite.py:626` `backup_database`, which at `:633` opens the source through `connect(source)` — read-write — and the destination through `with sqlite3.connect(destination) as target:`, the exact pattern Decision 066 §5 identified as governing the *transaction* rather than the connection, so that handle closes only at garbage collection. **Will any be used by M3.3?** Every accepted S5/S6 entry point — `load_frozen_joint_candidates`, `execute_and_persist_joint_selection`, `reconstruct_persisted_joint_selection`, `seal_selection_result`, `build_and_persist_pilot_manifest`, `verify_pilot_manifest` — takes a **caller-supplied** `sqlite3.Connection`, so **M3.3 chooses the handle for every path**. The three `read_only_connection` call sites are CLI status helpers (latest-migration name, retrieved index instances) that an M3.3 command could reach incidentally. **Determination:** **R3 does set a durable-byte proof standard**, so strict read-only hardening of the actually-used paths is required before M3.3-I/R: every M3.3 read path must be bound to `strictly_read_only_connection`, and any status helper an M3.3 command touches must be too | **RULED — R3 and R8, 2026-08-13.** R3 sets the standard: durable-byte equality, a **true OS-level strictly-read-only** connection on every governed M3.3 read path, and **no writer lease** — so `read_only_connection` is not admissible for a governed M3.3 read, and the three CLI status-helper call sites are in scope wherever an M3.3 command can reach them. R8 authorizes M3.3-I/R to harden **narrowly, only the paths M3.3 actually uses**, and forbids a repository-wide cleanup of unrelated M2/M3.2 call sites. **No fix is implemented by this inventory** |
+| **CF5** | CI SQLite 3.45.1 versus local 3.53.4 | **No proposed substantive M3.3 identity depends on physical SQLite file bytes or on version-specific serialization.** Every governed identity is a logical `hash_table` digest over `normalize_value`-rendered rows, sorted before digesting (Decision 021 §5; `release/hashing.py`). The existing canonical logical serialization rules are already governed and are reused unchanged; **no new serialization is invented**. The version difference bears only on a *durable-byte* replay proof, which is OR-3 — a proof standard, not an identity | **No owner ruling required on identity portability.** Folded into OR-3 and therefore settled by **R3**, whose durable-byte proof standard is where the version difference actually bears |
 
 ### Additional finding from the §11 semantic-consistency review
 
@@ -385,8 +419,14 @@ This is **not** an authority defect — the architecture map is explicitly a nav
 an authority (CLAUDE.md; the map's own header) — but it is exactly the class of stale current-state
 contradiction Decision 065's broader closeout scan found after a bounded phrase-list audit had
 passed, which is why the M3.3 contract requires **both** a bounded residue scan and an independent
-semantic review. `Docs/architecture_map.md` is outside this session's authorized edit set, so the
-finding is **reported, not corrected** (OR-12).
+semantic review. `Docs/architecture_map.md` was outside *this inventory's* authorized edit set, so the
+finding was **reported, not corrected**.
+
+**Now closed by Owner Ruling R12.** The owner's M3.3-GR packet of 2026-08-13 ruled that the stale
+**current**-state claims be corrected before M3.3-I/R, scoped to `Docs/architecture_map.md` §0's
+Milestone 3 row and §10.1's current `Status` bullet, preserving historical stage-era text as
+historical and rewriting no architecture. **The correction was applied on 2026-08-13** under that
+ruling. The paragraph above is retained as the record of the finding.
 
 ---
 

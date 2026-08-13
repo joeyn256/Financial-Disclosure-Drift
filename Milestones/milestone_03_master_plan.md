@@ -1461,8 +1461,18 @@ The owner decision on the root is **not** taken in this phase.
 
 ### 6. Prerequisites
 
-- `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED` recorded; independent M3.2 review passed;
-  `m3.2-complete` created.
+- **Milestone 3.2 complete and owner-accepted, with Gate H passed and owner-accepted** — proven by
+  [Decision 065](../Docs/Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §3 together
+  with the current `Milestones/STATUS.md` `M3_2_GATE_H_STATUS` record; independent M3.2 review
+  passed; `m3.2-complete` created.
+
+  > **This prerequisite was originally written as the phase token
+  > `M3_2_METADATA_ACQUISITION_COMPLETE_GATE_H_PASSED`.** That token was **never emitted**, no code
+  > path emits one, and no record claims an emission. **M3.3 Owner Ruling R4** (2026-08-13) fixes the
+  > durable Decision-065/STATUS acceptance proof above as the operative precondition in its place.
+  > **The token is not retroactively emitted, fabricated, or backfilled.** Its remaining appearances
+  > in this plan — the M3.2B row in the phase table, and M3.2's own outputs, token, and next-action
+  > entries — are **historical** and stay unchanged.
 - A bounded M3.3 contract, accepted, with exact paths and **network authorization `NONE`**.
 - **Transport disabled again**, verified before snapshot construction begins.
 - Gate H complete, every item `PASS`, owner-signed, integrating both M3.2 windows.

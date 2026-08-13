@@ -269,15 +269,26 @@ M3.3-GV2 evidence verification is owner-accepted, accepted
 resolved **OR-1** and **OR-2** and issued **R13**–**R16**, the fresh independent review of the
 067-corrected contract returned **FAIL** (BLOCKER 0 / MAJOR 1 / MINOR 1), and accepted
 [Decision 068](../../Docs/Decisions/decision_068_m3_3_e0_contract_correction.md) adopted those
-findings and issued **R17**, **R18**, and **R16-C1**. **The next authorized action is a fresh
-independent rereview of the corrected `m3_3.md` contract**, by a **new epoch** that authored none
-of the contract, Decision 067, or Decision 068. **No M3.3 implementation, offline parse, snapshot,
-selection, or manifest work may begin**, and nothing in this directory supplies that authority.
+findings and issued **R17**, **R18**, and **R16-C1**. **That rereview has since run and PASSED**
+(BLOCKER 0 / MAJOR 0 / MINOR 0 / OBSERVATION 1, frozen target `7bb36b8…`, immutable artifact
+[`Docs/m3/reviews/m3_3_decisions_067_068_corrected_contract_fresh_rereview_7bb36b8.md`](../../Docs/m3/reviews/m3_3_decisions_067_068_corrected_contract_fresh_rereview_7bb36b8.md)),
+and **accepted
+[Decision 069](../../Docs/Decisions/decision_069_m3_3_contract_final_owner_acceptance.md)
+(2026-08-13) recorded the owner's acceptance of the rereview and of the contract**, disposing the
+one observation as a nonblocking historical narrative erratum on Decision 068 §3.1. `m3_3.md` is
+now the **accepted** — and therefore the **active** — stage contract. **Acceptance is not
+implementation authorization: the next authorized action is a separate owner M3.3-I/R
+implementation + rehearsal authorization packet.** **No M3.3 implementation, offline parse,
+snapshot, selection, or manifest work may begin**, and nothing in this directory supplies that
+authority.
 
 - [`m3_3.md`](m3_3.md) — Milestone 3.3 candidate-snapshot builder, offline execution rehearsal, and
-  the exact real pilot manifest. **Corrected twice, and NOT accepted.**
-  `STATUS: CORRECTED — DECISIONS 067–068 OWNER RULINGS RECORDED — PENDING FRESH INDEPENDENT
-  REREVIEW AND OWNER ACCEPTANCE`, `CONTRACT_ACCEPTANCE: NO`, `IMPLEMENTATION_AUTHORIZATION: NO`,
+  the exact real pilot manifest. **ACCEPTED — the active stage contract; implementation not
+  authorized.** `STATUS: ACCEPTED — OWNER FINAL CONTRACT ACCEPTANCE — DECISION 069`,
+  `CONTRACT_ACCEPTANCE: YES` (accepted
+  [Decision 069](../../Docs/Decisions/decision_069_m3_3_contract_final_owner_acceptance.md),
+  2026-08-13, on frozen accepted target `7bb36b8…` and the passing fresh independent rereview at
+  B0/M0/MIN0), with every executable-authority flag closed: `IMPLEMENTATION_AUTHORIZATION: NO`,
   `REAL_PRIVATE_PARSE_AUTHORIZATION: NO`, `REAL_SNAPSHOT_AUTHORIZATION: NO`,
   `NETWORK_AUTHORIZATION: NONE`, `REACQUISITION_AUTHORIZATION: NONE`, `REQUEST_CEILING: 0`,
   `MIGRATION_AUTHORIZED: none`. Drafted under the owner's M3.3-G packet (2026-08-13), refined under
@@ -291,14 +302,15 @@ selection, or manifest work may begin**, and nothing in this directory supplies 
   [`Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md`](../../Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md)),
   issuing **R17** (the exact fifteen-table E0 persistence footprint), **R18** (per-planned-source
   E0 dispositions; the 70 full-index sources category C), and clarification **R16-C1** (resolution
-  contributor membership). **No owner ruling is open**; four inputs stay deferred to named owner
-  gates (**OR-6**, **OR-7**, **OR-9**, **OR-11**). **A corrected contract is not an accepted
-  contract**, and per the rule at the head of this file **a draft or corrected contract is not the
-  active stage contract** — `ACTIVE_STAGE_CONTRACT` is unchanged. Active blocker: **a fresh
-  independent rereview by a new epoch that authored none of the contract, Decision 067, or Decision
-  068**, then owner adoption of any further corrections and a separate owner acceptance act. **No
-  network access is authorized**, no builder or offline parse driver exists, and no snapshot,
-  selection, manifest, or root exists.
+  contributor membership). The fresh independent rereview of that corrected text then **PASSED**
+  (B0/M0/MIN0/OBS1), and **accepted Decision 069 recorded the owner acceptance**, disposing OBS-R1
+  as a nonblocking historical narrative erratum on Decision 068 §3.1. **No owner ruling is open**;
+  four inputs stay deferred to named owner gates (**OR-6**, **OR-7**, **OR-9**, **OR-11**). Per the
+  rule at the head of this file an **accepted** successor contract is the active stage contract, so
+  `ACTIVE_STAGE_CONTRACT` now names `m3_3.md` — **activation is navigation, not authorization**.
+  Active blocker: **a separate owner M3.3-I/R implementation + rehearsal authorization packet** —
+  acceptance started nothing. **No network access is authorized**, no builder or offline parse
+  driver exists, and no snapshot, selection, manifest, or root exists.
 
 - [`m3_1.md`](m3_1.md) — Milestone 3.1 acquisition-path rehearsal and Gate F. **Complete.** The
   stage is owner-accepted (accepted Decision 031, `M3_1_ACCEPTED_AND_COMPLETE`) and checkpointed

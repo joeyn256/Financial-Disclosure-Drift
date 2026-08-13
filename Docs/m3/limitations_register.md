@@ -62,7 +62,12 @@ Every Milestone 3 phase:
 [Decision 067](../Decisions/decision_067_m3_3_snapshot_authority_and_offline_parse.md) resolved
 **OR-1** and **OR-2** and issued **R13**–**R16**; it **closed no limitation**, added **D067-L1**, and
 left **D021-L2** `ACTIVE` — OR-1 supplies the derivation that entry recorded as absent, and closure
-still needs the implemented recomputation-and-comparison step, reviewed.
+still needs the implemented recomputation-and-comparison step, reviewed. Accepted
+[Decision 068](../Decisions/decision_068_m3_3_e0_contract_correction.md) (R17/R18/R16-C1) and
+accepted
+[Decision 069](../Decisions/decision_069_m3_3_contract_final_owner_acceptance.md) (the M3.3
+contract's final owner acceptance) likewise **closed no limitation and added none**: D021-L2 and
+D067-L1 remain `ACTIVE`, and contract acceptance changes no limitation state.
 
 ---
 

@@ -695,7 +695,8 @@ artifact `Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md`
 `sec/census.py`) and **R18** (report-level per-planned-source E0 dispositions), clarifies
 **R16-C1** (resolution contributor membership), and applies the MIN-1 and OBS-A–E consistency
 fixes. **It changes no executable source, test, migration, configuration, or CI byte**, authorizes
-nothing, and the contract remains **not accepted**, pending a fresh independent rereview.
+nothing, and — as at that record — the contract remained **not accepted**, pending a fresh
+independent rereview (since run and passed; see the Decision 069 section below).
 
 | Surface touched | Change | Checks |
 |---|---|---|
@@ -715,6 +716,40 @@ nothing, and the contract remains **not accepted**, pending a fresh independent 
 **Which tests to run for it: none of the code suites** — documentation-only, same rule as the
 Decision 067 section above. The review artifact itself is **not modified** by this or any later
 correction.
+
+## Decision 069 — M3.3 corrected-contract final owner acceptance (governance only, zero impact)
+
+[Decision 069](Decisions/decision_069_m3_3_contract_final_owner_acceptance.md)
+(`ACCEPTED — OWNER FINAL M3.3 CONTRACT ACCEPTANCE 2026-08-13`) records the owner's acceptance of
+the fresh independent rereview (`M3_3_DECISIONS_067_068_CORRECTED_CONTRACT_FRESH_REREVIEW_B0_M0_MIN0_PASS`,
+frozen target `7bb36b8…`, immutable artifact
+`Docs/m3/reviews/m3_3_decisions_067_068_corrected_contract_fresh_rereview_7bb36b8.md`, committed
+`033d0d9…`) and of the corrected M3.3 contract (`M3_3_CORRECTED_CONTRACT_FINAL_OWNER_ACCEPTED`),
+and disposes rereview observation **OBS-R1** as a **nonblocking historical narrative erratum** on
+Decision 068 §3.1 — without editing Decision 068. `ACTIVE_STAGE_CONTRACT` transitions to the
+accepted `Milestones/contracts/m3_3.md`; **activation is navigation, not authorization**. **It
+changes no executable source, test, migration, configuration, or CI byte** and authorizes nothing:
+no M3.3-I/R, no E0/E1/E2, no network, no reacquisition, no migration, no M3.4. The next act is a
+**separate owner M3.3-I/R implementation + rehearsal authorization packet**.
+
+| Surface touched | Change | Checks |
+|---|---|---|
+| `Docs/Decisions/decision_069_m3_3_contract_final_owner_acceptance.md` | **new** — the record itself | Markdown link-check only |
+| `Milestones/contracts/m3_3.md` | status transition to `ACCEPTED — OWNER FINAL CONTRACT ACCEPTANCE — DECISION 069` (`CONTRACT_ACCEPTANCE: YES`; frozen accepted target and rereview result recorded; §1, §21, §36 synchronized; **every executable-authority flag kept closed**) | Markdown link-check only |
+| `Milestones/STATUS.md` | banner acceptance paragraph; `ACTIVE_STAGE_CONTRACT` → `m3_3.md`; Decision 069 markers; new `NEXT_AUTHORIZED_ACTION` | Markdown link-check; marker-format check |
+| `Milestones/contracts/README.md` | index update paragraph and `m3_3.md` entry — accepted / active / blocker | Markdown link-check only |
+| `Milestones/milestone_03_master_plan.md` | M3.3 §5 item 1 status | Markdown link-check only |
+| `Docs/Decisions/decision_registry.md` | row `069`; rows 067/068 `Superseded by` amended narrowly; controlling-record row added | Markdown link-check; table-structure check |
+| `Docs/decision_index.md` | M3.3 section — Decision 069 paragraph and acceptance/erratum Q&A rows | Markdown link-check only |
+| `Docs/architecture_map.md` | §0 Milestone 3 row and §4 candidate-family `Status` bullet — acceptance state | Markdown link-check only |
+| `Docs/m3/operator_runbook.md` | banner M3.3 row — accepted contract, next act | Markdown link-check only |
+| `Docs/m3/limitations_register.md` | 2026-08-13 nothing-closed note extended through Decision 069 | Markdown link-check only |
+| `Docs/m3/m3_3_governance_foundation_inventory.md` | fourth current-state banner update | Markdown link-check only |
+| `Docs/change_impact_map.md` | this section | Markdown link-check only |
+
+**Which tests to run for it: none of the code suites** — documentation-only, same rule as the
+Decision 067 and 068 sections above. Decisions 067 and 068, both review artifacts, and the GR
+proposal are **not modified**.
 
 ## Notes on reading this table
 

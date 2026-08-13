@@ -1464,8 +1464,11 @@ snapshot-freeze validation obligations**;
    (2026-08-13); the fresh independent review of that corrected text **FAILED** (BLOCKER 0 /
    MAJOR 1 / MINOR 1), and its findings were owner-adopted and corrected under **accepted
    [Decision 068](../Docs/Decisions/decision_068_m3_3_e0_contract_correction.md)** (2026-08-13,
-   rulings **R17**, **R18**, clarification **R16-C1**) — **still not accepted**, pending a fresh
-   independent rereview by a new non-author epoch and a separate owner acceptance act.
+   rulings **R17**, **R18**, clarification **R16-C1**); the fresh independent rereview by a new
+   non-author epoch then **PASSED** (B0/M0/MIN0/OBS1, frozen target `7bb36b8…`), and **accepted
+   [Decision 069](../Docs/Decisions/decision_069_m3_3_contract_final_owner_acceptance.md)**
+   (2026-08-13) recorded the separate owner acceptance act — **ACCEPTED; acceptance is not
+   implementation authorization**, and a separate owner M3.3-I/R packet is still required.
 2. **Authorization to proceed from M3.3A to M3.3B**, after the M3.3A independent review — separate
    from 1, and not implied by the builder working. **Still open** (**OR-9**).
 2a. **Authorization to run the real offline metadata parse — the M3.3-E0 gate.** Separate from 1 and

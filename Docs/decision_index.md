@@ -527,10 +527,19 @@ the fresh independent review of the 067-corrected contract returned **FAIL** (BL
 MINOR 1 — artifact
 [`Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md`](m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md),
 immutable), it adopts those findings and issues **R17**, **R18**, and clarification **R16-C1** —
-likewise governance-only, accepting no contract and starting no work. The corrected
+likewise governance-only, accepting no contract and starting no work.
+[Decision 069](Decisions/decision_069_m3_3_contract_final_owner_acceptance.md)
+(`ACCEPTED — OWNER FINAL M3.3 CONTRACT ACCEPTANCE 2026-08-13`) is the **third M3.3 record**: after
+the fresh independent rereview of the Decisions-067–068-corrected contract **PASSED** (BLOCKER 0 /
+MAJOR 0 / MINOR 0 / OBSERVATION 1 — frozen target `7bb36b8…`, immutable artifact
+[`Docs/m3/reviews/m3_3_decisions_067_068_corrected_contract_fresh_rereview_7bb36b8.md`](m3/reviews/m3_3_decisions_067_068_corrected_contract_fresh_rereview_7bb36b8.md),
+committed `033d0d9…`), it records the owner's acceptance of the rereview and of the contract, and
+disposes the one observation (OBS-R1) as a nonblocking historical narrative erratum on Decision 068
+§3.1 — without editing Decision 068. The accepted
 [`Milestones/contracts/m3_3.md`](../Milestones/contracts/m3_3.md) is
-`CORRECTED — DECISIONS 067–068 OWNER RULINGS RECORDED — PENDING FRESH INDEPENDENT REREVIEW AND
-OWNER ACCEPTANCE`.
+`ACCEPTED — OWNER FINAL CONTRACT ACCEPTANCE — DECISION 069` with `CONTRACT_ACCEPTANCE: YES` and
+**every executable-authority flag still closed**; `ACTIVE_STAGE_CONTRACT` now names it, and
+**activation is navigation, not authorization**.
 
 | Question | Controlling record |
 |---|---|
@@ -547,7 +556,10 @@ OWNER ACCEPTANCE`.
 | The exact E0 durable write set | **Decision 068 §3 Ruling R17** — exactly **fifteen tables** (the nine parse-layer tables plus the six companion tables the reusable accepted persistence path legitimately writes), mechanically verified; `census_qa_metrics` and all four index-side tables excluded; no second writer implementation |
 | What "E0 completeness" means per planned source | **Decision 068 §4 Ruling R18** — exactly one **report-level** disposition per planned source: `E0_REQUIRED_PARSE`, `E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE`, or `E0_NOT_REQUIRED_VALIDATION_OR_PROVENANCE_ONLY`; the 70 quarterly full-index sources are category C, deliberately untouched, with no `parser_state` mutation |
 | Which evidence rows a candidate resolution digest binds | **Decision 068 §8 Clarification R16-C1** — exactly the persisted rows the accepted deterministic resolution procedure actually uses; substantive, mechanical, independently recomputable, I/R-exposed and I/R-tested; an undeterminable set stops and refers |
-| Whether Decision 067 or 068 accepts the M3.3 contract or authorizes implementation | Decision 067 §12; Decision 068 §10 — **neither.** The next act is a **fresh independent rereview** by a new non-author epoch |
+| Whether Decision 067 or 068 accepts the M3.3 contract or authorizes implementation | Decision 067 §12; Decision 068 §10 — **neither.** The required fresh independent rereview then ran, passed, and **Decision 069** recorded the separate owner acceptance act |
+| Whether the M3.3 contract is accepted, and by what authority | **Decision 069 §3** — **yes**: `M3_3_CORRECTED_CONTRACT_FINAL_OWNER_ACCEPTED`, on the frozen accepted target `7bb36b8…` and the passing fresh rereview (`B0/M0/MIN0`, artifact committed `033d0d9…`). `ACTIVE_STAGE_CONTRACT` names the accepted contract |
+| How Decision 068 §3.1's "exactly twenty-four durable-write statements" is read | **Decision 069 §4 (OBS-R1 erratum)** — as **19 execute sites, or 23 write clauses counting embedded upsert clauses**; the sixteen-distinct-tables resolution and the fifteen-table permitted E0 footprint are unchanged and correct, and Decision 068 is not edited |
+| Whether contract acceptance authorizes implementation, E0, E1, E2, or M3.4 | **Decision 069 §§5–6 — no, none of them.** Acceptance is one Decision 024 §8 condition; the next act is a **separate owner M3.3-I/R implementation + rehearsal authorization packet**, and E0/E1/E2 each remain later separate owner gates |
 
 ## Deviation register — where deviations are recorded
 

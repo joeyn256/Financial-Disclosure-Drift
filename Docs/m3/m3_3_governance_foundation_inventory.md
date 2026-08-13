@@ -40,10 +40,25 @@ the E0 permitted persistence footprint at exactly **fifteen tables** (the mechan
 write set of the reusable accepted parser-and-`CensusCatalog` path, `census_qa_metrics` and every
 index-side table excluded), **R18** fixes the report-level per-planned-source E0 dispositions
 (A/B/C, the 70 full-index sources category C, no `parser_state` mutation for category C), and
-**R16-C1** clarifies resolution contributor membership. The contract is now
+**R16-C1** clarifies resolution contributor membership. The contract became
 `CORRECTED — DECISIONS 067–068 OWNER RULINGS RECORDED — PENDING FRESH INDEPENDENT REREVIEW AND
-OWNER ACCEPTANCE`; implementation, E0, and E1 remain unauthorized, and the next act is a **fresh
+OWNER ACCEPTANCE`; implementation, E0, and E1 remained unauthorized, and the next act was a **fresh
 independent rereview by a new non-author epoch**.
+
+**Updated a fourth time 2026-08-13 under accepted
+[Decision 069](../Decisions/decision_069_m3_3_contract_final_owner_acceptance.md) — the paragraph
+above is historical as at Decision 068.** The fresh independent rereview by a new non-author epoch
+ran against frozen target `7bb36b8…` and **PASSED** — BLOCKER 0 / MAJOR 0 / MINOR 0 / OBSERVATION 1
+([rereview artifact](reviews/m3_3_decisions_067_068_corrected_contract_fresh_rereview_7bb36b8.md),
+immutable, committed `033d0d9…`) — and the owner accepted the rereview and the contract. The M3.3
+contract is now **`ACCEPTED — OWNER FINAL CONTRACT ACCEPTANCE — DECISION 069`** and is the active
+stage contract; the single observation (OBS-R1, Decision 068 §3.1's "twenty-four durable-write
+statements" numeral) is disposed as a **nonblocking historical narrative erratum** (read as 19
+execute sites, or 23 write clauses counting embedded upserts; the fifteen-table footprint is
+unchanged), without editing Decision 068. **Acceptance is not implementation authorization**:
+implementation, E0, E1, and E2 remain unauthorized, network authority remains `NONE`, no limitation
+changed state, and the next act is a **separate owner M3.3-I/R implementation + rehearsal
+authorization packet**. This document remains a navigation index and gains no authority.
 
 **What this document is.** A compact map from each M3.3 requirement to the accepted record that
 governs it, the code that already implements it, and what remains. It exists so that the owner can

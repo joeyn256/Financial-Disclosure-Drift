@@ -1,29 +1,37 @@
 # Milestone 3 — Mac Operator Runbook
 
 
-> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED, REHEARSED, AND CORRECTED AFTER
-> ULTRAREVIEW; THE CORRECTED TARGET IS PENDING A FRESH READ-ONLY REREVIEW; AND NO REAL
-> EXECUTION IS AUTHORIZED.** Accepted [Decision 070](../Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
-> issued the bounded M3.3-I/R authority; accepted Decisions
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, ITS REVIEW AND
+> CORRECTION WORK IS COMPLETE, AND THE NEXT ACT IS ONE FRESH FORMAL FABLE 5 MAXIMUM
+> M3.3-I/R ACCEPTANCE REVIEW. NO REAL EXECUTION IS AUTHORIZED.** Accepted
+> [Decision 070](../Decisions/decision_070_m3_3_i_r_implementation_authorization.md) issued the bounded
+> M3.3-I/R authority; accepted Decisions
 > [071](../Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
 > [072](../Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
 > [073](../Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
-> and [074](../Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
-> that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
-> bridge is clean, and the mutation campaign M1–M38 is fully killed. **The independent read-only
-> ultrareview of the frozen executable target `6f87abc…` then returned BLOCKER 0 / MAJOR 0 /
-> MINOR 3**, and accepted
-> [Decision 075](../Decisions/decision_075_m3_3_i_r_ultrareview_bounded_correction.md)
-> authorized and applied the bounded correction of those three findings. **The corrected target
-> has NOT yet passed a rereview and no acceptance is complete** — a fresh read-only
-> ultrareview-rereview against the corrected SHA is the next act. Every statement below that says
-> M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
-> M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
-> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
-> parse layer is untouched; network, SEC, reacquisition, and private-evidence authority remain NONE;
-> migration remains none; and **two real-path feasibility gates are OPEN** —
-> `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
-> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag.
+> and [074](../Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern that same
+> stage. **The M3.3A execution rehearsal E1–E8 has been run and passes**, the **R28** bridge is
+> clean, and the mutation campaign M1–M38 is fully killed. The independent read-only ultrareview
+> of the frozen executable target `6f87abc…` returned BLOCKER 0 / MAJOR 0 / MINOR 3; accepted
+> [Decision 075](../Decisions/decision_075_m3_3_i_r_ultrareview_bounded_correction.md) authorized and
+> applied that bounded correction; **the corrected-target rereview is COMPLETE and MIN-A is
+> CLOSED.** Accepted
+> [Decision 076](../Decisions/decision_076_m3_3_preacceptance_infrastructure_optimization.md) then completed
+> the test, governance, and audit infrastructure and returned RET-1, **now CLOSED**. The **first**
+> formal Fable 5 Maximum acceptance review returned **BLOCKER 0 / MAJOR 0 / MINOR 2**, which is
+> **not an acceptance**; accepted
+> [Decision 077](../Decisions/decision_077_m3_3_i_r_fable_acceptance_findings_correction.md) authorized and
+> applied that bounded correction. **The next act is one fresh Fable 5 Maximum formal M3.3-I/R
+> acceptance review; a further Opus ultrareview is neither authorized nor required.** Every
+> statement below that says M3.3 has not begun, that its implementation is unauthorized, that the
+> next act is a separate M3.3-I/R packet, that the E1–E8 rehearsal has not been run, or that the
+> corrected target is pending a fresh read-only rereview is **historical**. **Still true and
+> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate and **none is
+> authorized**; the census parse layer is untouched; network, SEC, reacquisition, and
+> private-evidence authority remain NONE; migration remains none; **two real-path feasibility gates
+> are OPEN** — `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
+> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag; and
+> real acceptance-ordering adequacy remains **PENDING FUTURE AUTHORIZED E0 VERIFICATION**.
 
 
 **Status:** documentation only. **No step here is authorized to run against the SEC network.**
@@ -156,6 +164,97 @@ is in [`src/disclosure_drift/m3/evidence_paths.py`](../../src/disclosure_drift/m
 Limitations register entry **M3-L11** is `CLOSED` (2026-08-03). Corrected under accepted
 [Decision 065](../Decisions/decision_065_m3_2_final_acceptance_and_closeout.md) §5 — documentary
 only; no command, argument, exit code, or label changed.
+
+---
+
+## Routine development validation — which command to run
+
+**`AVAILABLE NOW`** · **`VERIFICATION`** · Governed by accepted
+[Decision 077](../Decisions/decision_077_m3_3_i_r_fable_acceptance_findings_correction.md) §4
+(**R38**) over accepted
+[Decision 076](../Decisions/decision_076_m3_3_preacceptance_infrastructure_optimization.md) §3
+(**R35**) and §4.
+
+**This section is workflow documentation.** It alters no real-operation command, grants no network
+authority, and is **never** a precondition for, or a component of, an M3.3-E0, M3.3-E1, or M3.3-E2
+authorization. Nothing below places a request or touches the operational evidence root.
+
+### The recommended path
+
+```bash
+make check-fast
+```
+
+**`make check-fast` is the owner-recommended routine local full development validation** on the
+project owner's current Mac. It runs the **same gate set as `make check`, in the same fixed order** —
+lint, format check, full mypy, the full test suite, secret scan, hygiene check, Markdown link check,
+decision section-reference check, config validation, cohort print, SEC help — differing in exactly
+one respect: pytest runs across xdist workers instead of serially. **No gate is dropped, relaxed, or
+reordered**, so a green `check-fast` covers what a green `check` covers.
+
+Its pytest leg uses the Makefile defaults:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WORKERS` | `7` | xdist worker count |
+| `DIST` | `worksteal` | xdist scheduling mode — seeds every worker up front, then re-balances when one runs dry |
+
+**Both are overridable**, because both are plain `?=` defaults:
+
+```bash
+make check-fast WORKERS=4
+make test-parallel WORKERS=4 DIST=load
+```
+
+**Seven workers with `worksteal` is a value measured on the project owner's machine, not a
+universal constant.** A busier machine, or a runner with different core topology, should measure its
+own. `loadfile` is deliberately not used here: grouping by file pins the two large test modules to
+single workers and makes them the critical path.
+
+### The conservative serial references
+
+```bash
+make check     # identical gate set, serial pytest
+make test      # the suite alone, serial
+```
+
+**Neither is ever removed, and neither is weakened.** `make check` is the serial reference gate and
+`make test` is the serial reference run; a bare `pytest` also stays serial, because no `-n` enters
+`addopts`. **Reach for serial validation when a concrete reason requires it** — a parallel and a
+serial run disagree, a test-isolation symptom appears, a debugger or `--pdb` is needed, or a reviewer
+wants the unscheduled execution order. Routine correction and review packets that warrant a complete
+test run should prefer `check-fast`.
+
+### Pytest alone, either way
+
+```bash
+make test           # serial
+make test-parallel  # WORKERS / DIST as above
+```
+
+### The governance reference gates
+
+```bash
+make links          # every relative Markdown link resolves to a tracked path
+make decision-refs  # every "Decision NNN §N" citation names a section that exists
+```
+
+Both are already inside `make check` and `make check-fast`; run them directly when iterating on
+documentation. Their acceptance invariants are `UNALLOWED_BROKEN_LINKS = 0` and
+`INVALID_DECISION_SECTION_REFS = 0` — **stated as zero, never as a frozen link or citation total**
+(Decision 076 §12, **P1**). Neither may be made green by editing accepted history, and every
+exception is exact (Decision 076 §7).
+
+**`make decision-refs` is an existence checker.** It proves a cited section *exists*; it cannot
+prove the cited section is the *right* one. A pointer naming a real but semantically unrelated
+section passes the gate and is still a defect — that remains a reviewer's job (Decision 077 §2,
+**R36**).
+
+### CI is separately governed
+
+**CI was not switched to seven workers.** The measured optimum is machine-specific, so GitHub Actions
+kept its serial run and was not altered by Decision 076 (§10). The Makefile accepts a worker override
+so CI may later choose an appropriate value once measured **there** rather than assumed from here.
 
 ---
 
@@ -1076,7 +1175,12 @@ deleted; every gate green.
 | Command | Purpose |
 |---|---|
 | `make context` | Read-only live state: branch, HEAD, tree, tags, migrations, stage, blocker, next action |
-| `make check` | The full acceptance gate, in fixed order |
+| `make check-fast` | **The recommended routine full validation** — the `make check` gate set with parallel pytest (`WORKERS=7`, `DIST=worksteal`, both overridable) |
+| `make check` | The same full acceptance gate, serial pytest — the conservative reference |
+| `make test` | The suite alone, serial |
+| `make test-parallel` | The suite alone, across `WORKERS` xdist workers |
+| `make links` | Every relative Markdown link resolves to a tracked path (`UNALLOWED_BROKEN_LINKS = 0`) |
+| `make decision-refs` | Every decision section citation names a section that **exists** (`INVALID_DECISION_SECTION_REFS = 0`) |
 | `make fast` | Changed-file Ruff plus the mypy daemon; not a gate |
 | `make sqlite-check` | Python and SQLite versions (floor 3.37) |
 | `make secrets` | Secret scan over tracked and untracked-not-ignored text |

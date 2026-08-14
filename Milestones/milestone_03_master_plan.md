@@ -1,29 +1,37 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
 
-> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED, REHEARSED, AND CORRECTED AFTER
-> ULTRAREVIEW; THE CORRECTED TARGET IS PENDING A FRESH READ-ONLY REREVIEW; AND NO REAL
-> EXECUTION IS AUTHORIZED.** Accepted [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
-> issued the bounded M3.3-I/R authority; accepted Decisions
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, ITS REVIEW AND
+> CORRECTION WORK IS COMPLETE, AND THE NEXT ACT IS ONE FRESH FORMAL FABLE 5 MAXIMUM
+> M3.3-I/R ACCEPTANCE REVIEW. NO REAL EXECUTION IS AUTHORIZED.** Accepted
+> [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md) issued the bounded
+> M3.3-I/R authority; accepted Decisions
 > [071](../Docs/Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
 > [072](../Docs/Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
 > [073](../Docs/Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
-> and [074](../Docs/Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
-> that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
-> bridge is clean, and the mutation campaign M1–M38 is fully killed. **The independent read-only
-> ultrareview of the frozen executable target `6f87abc…` then returned BLOCKER 0 / MAJOR 0 /
-> MINOR 3**, and accepted
-> [Decision 075](../Docs/Decisions/decision_075_m3_3_i_r_ultrareview_bounded_correction.md)
-> authorized and applied the bounded correction of those three findings. **The corrected target
-> has NOT yet passed a rereview and no acceptance is complete** — a fresh read-only
-> ultrareview-rereview against the corrected SHA is the next act. Every statement below that says
-> M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
-> M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
-> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
-> parse layer is untouched; network, SEC, reacquisition, and private-evidence authority remain NONE;
-> migration remains none; and **two real-path feasibility gates are OPEN** —
-> `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
-> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag.
+> and [074](../Docs/Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern that same
+> stage. **The M3.3A execution rehearsal E1–E8 has been run and passes**, the **R28** bridge is
+> clean, and the mutation campaign M1–M38 is fully killed. The independent read-only ultrareview
+> of the frozen executable target `6f87abc…` returned BLOCKER 0 / MAJOR 0 / MINOR 3; accepted
+> [Decision 075](../Docs/Decisions/decision_075_m3_3_i_r_ultrareview_bounded_correction.md) authorized and
+> applied that bounded correction; **the corrected-target rereview is COMPLETE and MIN-A is
+> CLOSED.** Accepted
+> [Decision 076](../Docs/Decisions/decision_076_m3_3_preacceptance_infrastructure_optimization.md) then completed
+> the test, governance, and audit infrastructure and returned RET-1, **now CLOSED**. The **first**
+> formal Fable 5 Maximum acceptance review returned **BLOCKER 0 / MAJOR 0 / MINOR 2**, which is
+> **not an acceptance**; accepted
+> [Decision 077](../Docs/Decisions/decision_077_m3_3_i_r_fable_acceptance_findings_correction.md) authorized and
+> applied that bounded correction. **The next act is one fresh Fable 5 Maximum formal M3.3-I/R
+> acceptance review; a further Opus ultrareview is neither authorized nor required.** Every
+> statement below that says M3.3 has not begun, that its implementation is unauthorized, that the
+> next act is a separate M3.3-I/R packet, that the E1–E8 rehearsal has not been run, or that the
+> corrected target is pending a fresh read-only rereview is **historical**. **Still true and
+> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate and **none is
+> authorized**; the census parse layer is untouched; network, SEC, reacquisition, and
+> private-evidence authority remain NONE; migration remains none; **two real-path feasibility gates
+> are OPEN** — `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
+> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag; and
+> real acceptance-ordering adequacy remains **PENDING FUTURE AUTHORIZED E0 VERIFICATION**.
 
 
 **Status:** `DECISIONS_028_029_ACCEPTED_M3_1_CONTRACT_ACCEPTED_IMPLEMENTATION_EXISTS_NOT_ACCEPTED`

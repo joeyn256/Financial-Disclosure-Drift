@@ -607,8 +607,9 @@ its architectural conclusion in full. Decision 075 authorizes **only** the bound
 three MINOR findings require. It **reopens no architecture and no methodology**, supersedes and
 amends nothing in Decisions 001–074, and **grants no execution authority of any kind**.
 
-**It is not an acceptance of the corrected target.** A fresh read-only ultrareview-rereview against
-the corrected SHA must return B0/M0/MIN0 first.
+**It was not an acceptance of the corrected target.** *(Current state: that corrected-target
+rereview is **COMPLETE** and MIN-A is **CLOSED**; the requirement below is therefore satisfied and
+historical. The live next act is stated under Decision 077.)*
 
 | Question | Controlling record |
 |---|---|
@@ -644,8 +645,35 @@ gates remain **OPEN**, and it is **not** a Fable acceptance.
 | Whether CI switches to seven workers | **Decision 076 §10 — no.** The measured optimum is machine-specific; CI keeps its serial run and is not altered by this stage. The Makefile accepts a worker override so CI can choose its own value once measured **there** |
 | What is explicitly deferred | **Decision 076 §11** — eight items including the `evidence_reference` byte-digest question, all returned as **DEFERRED — REQUIRES SEPARATE OWNER ARCHITECTURE DECISION** |
 | The adopted review-process rules | **Decision 076 §12** — **P1–P7**: invariants over incidental totals; real versus synthetic evidence root; defect-in-correction handling; claim-provenance labels; gate timings; machine-readable first; mechanical A/B branches. **Process rules, not methodology** |
-| What the new gates found on their first run | **Decision 076 §13** — four **OPEN DEFECTS** in live M3.3-I/R source and tests of the same class as MIN-A, plus seven wrong citations inside immutable accepted records and two known-broken links. **None is corrected by Decision 076**; correcting the live four needs its own bounded owner authorization |
+| What the new gates found on their first run | **Decision 076 §13** — four **OPEN DEFECTS** in live M3.3-I/R source and tests of the same class as MIN-A, plus seven wrong citations inside immutable accepted records and two known-broken links. **None was corrected by Decision 076**; correcting the live four needed its own bounded owner authorization. *(Current state: those four are **RET-1**, since **CLOSED**. The seven in-record citations and two links remain documented historical exceptions.)* |
 | Whether all five MIN-A references are mechanically detectable | **Decision 076 §13 — no, three of five.** Decision 075 genuinely **has** a section 6, so the two bare section-6 citations were pointing at the wrong section rather than a missing one. An existence gate cannot catch that, and a test keeps the limitation visible |
+
+## Decision 077 — ACCEPTED (M3.3-I/R Fable acceptance findings, final bounded correction)
+
+[Decision 077](Decisions/decision_077_m3_3_i_r_fable_acceptance_findings_correction.md)
+(`ACCEPTED — OWNER M3.3-I/R FABLE ACCEPTANCE FINDINGS CORRECTION 2026-08-14`) is the **eighth M3.3
+record**. The **first** formal Fable 5 Maximum M3.3-I/R acceptance review of target `46b6742…`
+returned **BLOCKER 0 / MAJOR 0 / MINOR 2 / OPTIONAL 1 / OBSERVATION 3**. Decision 077 disposes those
+findings and authorizes **only** the bounded correction they require: where live comments point,
+what live navigation surfaces say the current stage is, and how the operator runs routine
+validation. It changes **no** methodology, selector, quota, schema, identity, or authorization.
+
+**It is not an acceptance, and it claims none.** The live next act is **one fresh Fable 5 Maximum
+formal M3.3-I/R acceptance review**; a further Opus ultrareview is **neither authorized nor
+required**. Both real-path gates remain **OPEN** and unmerged.
+
+| Question | Controlling record |
+|---|---|
+| What a live authority pointer must name | **Decision 077 §2 — R36.** The **actual accepted section supporting the adjacent claim**. A structurally existing but **semantically unrelated** section is not acceptable, which is why `R20 §7` — resolving to Decision 071 §7, the calendar-source R18 recheck — was a defect an existence gate cannot see |
+| Whether the section-reference gate is changed to catch this | **Decision 077 §2 — no.** `check_decision_section_refs.py` stays an **existence** checker, neither broadened nor weakened to force a result. **No semantic NLP checker is built.** Where structural existence and human semantic review disagree, **semantic review controls** |
+| Whether correcting only a reviewer's listed sites is sufficient | **Decision 077 §2 — no.** Every live Decision 071–076 citation is swept. A site whose accepted target is not mechanically clear is **returned to the owner as a new MINOR**, never resolved by inventing an authority |
+| Whether the `R19 §4.N` and `R23 §5.N` internal labels are defects | **Decision 077 §2 — no.** Decision 071 §3's R19 table keeps its original `4.1`–`4.12` row labels and Decision 072 §3's R23 table keeps its `§5.1`–`§5.6` aspect labels; both exist in the accepted records and name the right predicates. Because `R19 §4.N` can be misread as Decision 071 §4 — which is **R20** — the modules using that form now state the convention |
+| What a current-state surface must say | **Decision 077 §3 — R37.** I/R implemented and rehearsed; Opus review work **complete**; MIN-A and RET-1 **CLOSED**; Decision 076 infrastructure complete; first Fable review **B0/M0/MIN2, not accepted**; Decision 077 applied; **fresh Fable acceptance next**; E0/E1/E2/M3.4 unauthorized; both gates **OPEN** |
+| Whether accepted historical records are rewritten to match | **Decision 077 §3 — no.** Decision 075 §10 keeps its own next act and Decision 076 §13 keeps its RET-1 finding; both are historically true. Historical passages on a navigation surface may remain **when marked historical**; operative instructions may not |
+| The routine local validation command | **Decision 077 §4 — R38.** **`make check-fast`**, whose pytest leg uses `WORKERS ?= 7` and `DIST ?= worksteal`. `make test` and `make check` remain the serial references; `make links` and `make decision-refs` are the governance gates |
+| Whether seven workers is the CI standard | **Decision 077 §4 — no.** It is measured on the owner's machine, `WORKERS`/`DIST` are overridable, and CI was **not** switched under Decision 076 §10. R38 is workflow documentation and is **never** a precondition for an E0/E1/E2 authorization |
+| How the `evidence_reference` observation was disposed | **Decision 077 §6 — OBS-1, DEFERRED.** It stays part of the Decision 076 deferred architecture question. **No** redefinition of `evidence_reference`, receipt, evidence, selection, manifest, or catalog-digest semantics |
+| What was returned to the owner unresolved | **Decision 077 §7** — one new **MINOR**: `tests/unit/test_m3_support_target_pairs.py`'s `§17 item L`, which names no accepted record and was left byte-unchanged rather than guessed |
 
 ## Deviation register — where deviations are recorded
 

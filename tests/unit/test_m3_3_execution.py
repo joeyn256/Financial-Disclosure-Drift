@@ -617,7 +617,7 @@ def test_the_execution_rehearsal_report_never_claims_real_feasibility() -> None:
 
     Decision 073 **R30** and Decision 074 **R32** are independently governed and
     independently auditable, and `real_builder_feasibility_proved` is a third, separate
-    claim that neither gate stands in for (Decision 075 §6).
+    claim that neither gate stands in for (Decision 075 §3.3).
     """
     report = er.ExecutionRehearsalReport(
         outcomes=(),
@@ -640,7 +640,7 @@ def test_the_execution_rehearsal_report_never_claims_real_feasibility() -> None:
         "real_linked_amendment_feasibility_gate",
     }
     # Additive completion of an already-governed status block: the report schema version
-    # is deliberately NOT bumped (Decision 075 §6.1).
+    # is deliberately NOT bumped (Decision 075 §4).
     assert payload["report_schema_version"] == "m3-3a-execution-rehearsal-report/1.0"
 
 
@@ -885,7 +885,7 @@ def test_the_rehearsal_command_writes_an_offline_execution_receipt(
     assert str(tmp_path) not in printed
 
     # Both real-path gates are printed separately and by name, beside the distinct
-    # builder-feasibility claim, and nothing merges them (Decision 075 §6.2).
+    # builder-feasibility claim, and nothing merges them (Decision 075 §3.3).
     for line in (
         "real builder feasibility proved        : no",
         "real amendment-purpose feasibility gate: OPEN",

@@ -200,7 +200,7 @@ class ExecutionRehearsalReport:
             # The two real-path gates are independently governed and independently
             # auditable -- Decision 073 **R30** and Decision 074 **R32** -- and are never
             # merged into one field. `real_builder_feasibility_proved` is a third,
-            # separate claim and neither gate stands in for it (Decision 075 §6).
+            # separate claim and neither gate stands in for it (Decision 075 §3.3).
             "real_builder_feasibility_proved": False,
             "real_amendment_purpose_feasibility_gate": "OPEN",
             "real_linked_amendment_feasibility_gate": "OPEN",

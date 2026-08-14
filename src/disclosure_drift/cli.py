@@ -1692,7 +1692,7 @@ def _m3_rehearse_execution_command(
     # Both real-path gates are printed separately and by name, read from the generated
     # payload so the printed summary and the evidence report can never disagree. They are
     # never merged into one line, and neither replaces the builder-feasibility claim
-    # (Decision 073 **R30**, Decision 074 **R32**, Decision 075 §6.2).
+    # (Decision 073 **R30**, Decision 074 **R32**, Decision 075 §3.3).
     payload = report.as_payload()
     print("\nExecution rehearsal summary.")
     for label, value in (

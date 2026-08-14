@@ -20,6 +20,13 @@ Migration ``0011`` adds the ``PILOT_JOINT_SELECTOR_POLICY_VERSION`` row the same
 (Decision 018 section 20), for the Stage S5 joint entity-accession selector. The
 accepted S4 ``PILOT_SELECTOR_POLICY_VERSION`` is unchanged, so the checkpointed S4
 artifact stays byte-stable.
+
+``PILOT_COVERAGE_POLICY_VERSION`` is the newest entry and the only one with no
+``reference_policy_versions`` seed row: seeding it would need a migration, which the
+accepted M3.3 contract §19 prohibits. Accepted Decision 067 §8 fixed its value as
+methodology and recorded that it had no executable home; accepted Decision 070 §4
+supplies that home here, as the single canonical definition the candidate-snapshot
+builder consumes rather than repeating the literal.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from typing import Final
 
 __all__ = [
     "PILOT_CANDIDATE_POLICY_VERSION",
+    "PILOT_COVERAGE_POLICY_VERSION",
     "PILOT_EVIDENCE_POLICY_VERSION",
     "PILOT_JOINT_SELECTOR_POLICY_VERSION",
     "PILOT_MANIFEST_HASH_POLICY_VERSION",
@@ -39,6 +47,7 @@ __all__ = [
 ]
 
 PILOT_CANDIDATE_POLICY_VERSION: Final = "pilot-candidate/1.0"
+PILOT_COVERAGE_POLICY_VERSION: Final = "pilot-coverage/1.0"
 PILOT_EVIDENCE_POLICY_VERSION: Final = "pilot-evidence/1.0"
 SIC_FAMILY_MAPPING_VERSION: Final = "sic-family-mapping/0.2"
 PILOT_SELECTOR_POLICY_VERSION: Final = "deterministic-constrained/1.0"

@@ -382,7 +382,7 @@ M3.2A live acquisition completed, **Gate H is passed and owner-accepted**, and M
 complete and owner-accepted
 ([Decision 065](Decisions/decision_065_m3_2_final_acceptance_and_closeout.md), 2026-08-13). What
 still holds: **no real snapshot, selection, manifest, or approval exists**, the M3.3A execution
-rehearsal (E1–E8) has not been run, and **M3.3 has not begun and is not authorized**.
+rehearsal (E1–E8) had not been run, and M3.3 had not begun. **That sentence is historical as at its own record.** M3.3-I/R is authorized by accepted Decision 070, is implemented and rehearsed, and the E1–E8 rehearsal passes — while **M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 all remain separate owner gates and no real execution is authorized**.
 
 **D023-O1 remains the sole unresolved owner-ruling condition** and is referred only if a real run
 reaches it. Accepted Decision 028 records the owner rulings for **M3-L11** and **M3-L12**, preserving
@@ -560,6 +560,42 @@ disposes the one observation (OBS-R1) as a nonblocking historical narrative erra
 | Whether the M3.3 contract is accepted, and by what authority | **Decision 069 §3** — **yes**: `M3_3_CORRECTED_CONTRACT_FINAL_OWNER_ACCEPTED`, on the frozen accepted target `7bb36b8…` and the passing fresh rereview (`B0/M0/MIN0`, artifact committed `033d0d9…`). `ACTIVE_STAGE_CONTRACT` names the accepted contract |
 | How Decision 068 §3.1's "exactly twenty-four durable-write statements" is read | **Decision 069 §4 (OBS-R1 erratum)** — as **19 execute sites, or 23 write clauses counting embedded upsert clauses**; the sixteen-distinct-tables resolution and the fifteen-table permitted E0 footprint are unchanged and correct, and Decision 068 is not edited |
 | Whether contract acceptance authorizes implementation, E0, E1, E2, or M3.4 | **Decision 069 §§5–6 — no, none of them.** Acceptance is one Decision 024 §8 condition; the next act is a **separate owner M3.3-I/R implementation + rehearsal authorization packet**, and E0/E1/E2 each remain later separate owner gates |
+
+[Decision 070](Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
+(`ACCEPTED — OWNER M3.3-I/R IMPLEMENTATION + REHEARSAL AUTHORIZATION 2026-08-13`) is the **fourth
+M3.3 record** and the **only** authority under which M3.3 implementation may begin;
+[Decision 071](Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
+[Decision 072](Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
+[Decision 073](Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
+and
+[Decision 074](Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md)
+then govern that same bounded stage without creating a new one. **The stage is now implemented and
+rehearsed and still authorizes no real execution**: scenarios E1–E8 pass at their accepted track
+assignment, the **R28** bridge is clean, and the mutation campaign M1–M38 is fully killed — none of
+which is an authorization for M3.3-E0, M3.3-E1, M3.3-E2, or M3.4. **Two real-path feasibility gates
+are open and independently auditable**, and they are never merged into one flag.
+
+| Question | Controlling record |
+|---|---|
+| Under what authority M3.3 implementation may begin, and how far it extends | **Decision 070 §2** — exactly five things: implementing the accepted contract, its tests, **fixture / disposable-copy rehearsal**, narrow **R3** hardening, and the governance records the stage needs. **Not** `EV_ROOT`, E0, a real snapshot, a real selection, a real manifest or root, SEC, HTTP, network, reacquisition, CompanyFacts, Frames, filing bodies, methodology changes, or migrations |
+| Where `coverage_policy_version` lives executably | **Decision 070 §4** — `PILOT_COVERAGE_POLICY_VERSION` in `src/disclosure_drift/pilot_policy.py` at `pilot-coverage/1.0`; an engineering/provenance version only, with **no** config setting, environment variable, `reference_policy_versions` seed row, or migration. Discharges contract §20 and §23 item 28 **for that constant and nothing else** |
+| How each Decision 014 §5 event flag is **detected** | **Decision 071 §3 Ruling R19** — only from accepted, structured, explicit evidence that mechanically establishes it. **Lack of evidence is never a positive event**, and substring matching, regular expressions over status text, fuzzy matching, synonyms, name or ticker keywords, `entityType` inference, operator judgment, outcome data, filing narrative, and absence from an alias-only ticker list are all forbidden |
+| How a candidate is **established** as a boundary control | **Decision 071 §4 Ruling R20** — four independent evidence predicates; **`entityType` may not assign `control_kind`**. Exactly one predicate assigns; zero means not a control; **more than one is conflicting, with no precedence defined** |
+| What the XBRL resolution's `resolved_value` is | **Decision 071 §5 Ruling R21** — the canonical serialization of exactly `{has_inline_xbrl, has_xbrl}` through the **existing** accepted canonical-JSON serializer; `hash_table`'s internal separator is never an application-level encoding |
+| Whether the 2009/2010 pair quota may be proved from one accession's flags | **Decision 071 §6 IN-3 — no.** A pair is a property of the **joint selection result**: one selected SUPPORT-role 2009 original and one selected BASE-role 2010 development target under one anchor CIK, both in the same run, counted **once per distinct entity**, at **six** distinct entities |
+| Whether `sec_full_index_company` is candidate-substantive | **Decision 072 §2 Ruling R22 — yes.** Category **A** when usable, **B** when unavailable, and **never C**. A source does not become category C merely because current code lacks a candidate-facing route (**R25**) |
+| How co-registrants and `multi_registrant` are established | **Decision 072 §3 Ruling R23** — from plan-bound accepted `company.idx` rows through the **existing** accepted parser and canonicalization; a full-index row **never creates** a candidate accession; `multi_registrant` is true **iff** one valid anchor plus at least one distinct valid associated registrant; submitter-only rows never make it true |
+| Whether the multi-registrant quota may be deferred | **Decision 072 §4 Ruling R24 — no.** Measurable, hard, not deferred, not optional; the difficult-package exception is **not generalized** |
+| The exact RIC/ETF SIC set | **Decision 072 §6 Ruling R26** — exactly **`{6722, 6726}`**; not broadened by proximity, and **`6798` is not included** |
+| Why a builder-derived snapshot is expected to be infeasible | **Decision 073 §1** — the accepted builder assigns no affirmative `amendment_purpose_category` from authorized metadata, IN-2 forbids inventing one, the selector requires three distinct categories, and a `NULL` category produces no witness. **Not a selector defect and not a builder defect under IN-2** |
+| How rehearsal is structured, and what Track B may and may not claim | **Decision 073 §§3–5 Rulings R27–R29** — two tracks that are never conflated; Track A must **prove** the infeasible disposition and is never modified to become feasible; Track B is explicitly governed, and every Track-B report states `FEASIBILITY SOURCE: EXPLICITLY_GOVERNED_SYNTHETIC_REHEARSAL_SNAPSHOT` and never implies real feasibility |
+| What keeps Track B from being an easier universe | **Decision 073 §4 Ruling R28** — paired siblings from one synthetic base case, compared **mechanically before selector execution**, with an **explicit allowlist**; the bridge **fails on any difference outside it** |
+| Whether the real builder can produce a feasible selection | **Decision 073 §6 Ruling R30 — unknown, and OPEN.** `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN`. **I/R passing does not authorize E0, and A1 passing does not by itself** |
+| Whether every selected target must hold a reserve package | **Decision 074 §2 Ruling R31 — no.** Decision 020 §7 makes a target-specific `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` disposition **lawful, durable, and nonblocking**. The old E5(a) requirement was production-invalid and is superseded; E5(a) now proves the **positive** compatible path at the **pure** reserve layer, E5(b) the zero-compatible case, and E5(c) the mixed case |
+| Whether the real path can satisfy the linked-amendment quota | **Decision 074 §3 Ruling R32 — unknown, and OPEN.** `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN`: no accepted source field maps to `amendment_relationship`, and `possible_amendment_of` / `unresolved_amendment` satisfy nothing. The quota is **not** lowered, deferred, or proxied |
+| How `cohort_boundary_crossed` is derived | **Decision 074 §5 Ruling R33** — from **this build's own** resolved official filing date and acceptance audit date, in the **same** candidate-snapshot derivation. Both known and different ⇒ `TRUE`; both known and equal ⇒ `FALSE`; either unresolved, absent, or malformed ⇒ **review-required, never a silent `FALSE`** |
+| What a future real E0 must report about acceptance evidence | **Decision 074 §6 Ruling R34** — the seven enumerated counts. Strict parsing and Decision 019's fail-closed ordering are retained; **no result is assumed today**, and this is an E0/E1 **verification condition**, not a third pre-E0 methodology gate |
+| Whether a passing I/R, ultrareview, or independent acceptance authorizes real E0 | **Decision 074 §4 — no.** A separate Sol/GPT architecture disposition must first address **both** open real-path gates, and the two are **never merged into one vague flag** |
 
 ## Deviation register — where deviations are recorded
 

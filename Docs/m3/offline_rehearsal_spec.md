@@ -516,7 +516,7 @@ builder.** They cannot run at M3.1: the production paths do not exist there.
 
 | Field | Specification |
 |---|---|
-| **Setup** | Three variants: (a) every selected target has a compatible rank-1 reserve package; (b) **no** target has one; (c) a mixed run |
+| **Setup** | Three variants. ***(a) SUPERSEDED FOR M3.3 REHEARSAL by accepted [Decision 074](../Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) §2.1, Ruling R31**: requiring every selected target to hold a rank-1 package imposed a production-invalid condition, because Decision 020 §7 makes a target-specific no-compatible-reserve disposition lawful and nonblocking. (a) now proves the **positive** compatible-reserve path directly at the **pure** reserve layer, without invoking the pilot-scale joint selector. Variants (b) and (c) are unchanged.)* (a) the compatible rank-1 reserve path; (b) **no** target has one; (c) a mixed run |
 | **Expected command** | `m3 rehearse-execution --scenarios E5` |
 | **Expected response** | All three runs are lawful, feasible, and **manifest-eligible** |
 | **Expected reason code** | (b) and (c) record `REVIEW_PILOT_NO_COMPATIBLE_RESERVE` per uncovered target; `PILOT_RESERVE_UNAVAILABLE` and `PILOT_RESERVE_SIGNATURE_INCOMPATIBLE` on the eligibility variants |

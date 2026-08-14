@@ -1,5 +1,24 @@
 # Milestones/contracts/ — purpose and structure
 
+
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, AND NO REAL EXECUTION IS
+> AUTHORIZED.** Accepted [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
+> issued the bounded M3.3-I/R authority; accepted Decisions
+> [071](../Docs/Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
+> [072](../Docs/Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
+> [073](../Docs/Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
+> and [074](../Docs/Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
+> that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
+> bridge is clean, and the mutation campaign M1–M38 is fully killed. Every statement below that says
+> M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
+> M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
+> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
+> parse layer is untouched; network, SEC, reacquisition, and private-evidence authority remain NONE;
+> migration remains none; and **two real-path feasibility gates are OPEN** —
+> `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
+> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag.
+
+
 A **stage contract** is a short, per-stage scope document. It tells an engineering session what one
 stage of implementation work is authorized to touch, which authorities govern it, which tests are the
 minimum credible validation set, and where the commit boundary sits. It exists so that "what is this
@@ -240,8 +259,9 @@ shape above and to the master plan's §16 additions.
 2026-08-13).** Gate F ran, M3.2A live acquisition completed (75 of 75 successor request identities
 satisfied at 77 of 801 cumulative physical attempts), **Gate H is passed and owner-accepted**, and
 **Milestone 3.2 is complete and owner-accepted**. **No real snapshot, selection, manifest, or
-approval exists**, the M3.3A execution rehearsal (E1–E8) has not been run, and **M3.3 has not begun
-and is not authorized**. The paragraph below is the pre-acquisition record, preserved as written.
+approval exists**, the M3.3A execution rehearsal (E1–E8) **is now implemented and passes** under accepted
+Decisions 070–074, and **M3.3-I/R is implemented and rehearsed** — while **M3.3-E0, M3.3-E1,
+M3.3-E2, and M3.4 each remain a separate owner gate and no real execution is authorized**. The paragraph below is the pre-acquisition record, preserved as written.
 
 **Gate F readiness is recorded and Gate F execution has not begun; no live acquisition occurred;
 no Gate H has passed; and no real snapshot, selection, manifest, or approval exists.** Both M3.1

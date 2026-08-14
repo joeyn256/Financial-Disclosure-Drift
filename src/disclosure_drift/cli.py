@@ -62,6 +62,12 @@ from disclosure_drift.m3.acquisition import (
     verify_window_bindings,
 )
 from disclosure_drift.m3.evidence_paths import EvidenceRootError, require_external_evidence_root
+from disclosure_drift.m3.execution_rehearsal import run_execution_rehearsal
+from disclosure_drift.m3.offline_execution import (
+    OFFLINE_EXECUTION_MODE,
+    cohort_definition_digest,
+    offline_execution_policy_versions,
+)
 from disclosure_drift.m3.receipt import (
     ExecutionReceipt,
     ReceiptChainResolutionError,
@@ -97,7 +103,11 @@ from disclosure_drift.sec.source_registry import (
     SOURCES,
     require_registered,
 )
-from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
+from disclosure_drift.storage.catalog import (
+    CatalogWriter,
+    read_only_connection,
+    strictly_read_only_connection,
+)
 
 __all__ = ["build_parser", "main", "run"]
 
@@ -278,6 +288,53 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         metavar="RELATIVE_PATH",
         help="Where to write this command's receipt, relative to --evidence-root.",
     )
+
+    rehearse_execution = m3_subparsers.add_parser(
+        "rehearse-execution",
+        help="Run the offline M3.3A execution rehearsal, scenarios E1-E8. Fixtures only.",
+        description=(
+            "Runs the M3.3A execution rehearsal against disposable synthetic catalogs the "
+            "command creates under --evidence-root. It never reads the accepted real private "
+            "catalog, constructs no transport, and places no request. A passing run is not an "
+            "authorization for M3.3-E0, M3.3-E1, M3.3-E2, or M3.4."
+        ),
+    )
+    _add_config_argument(rehearse_execution)
+    _add_evidence_root_argument(rehearse_execution)
+    rehearse_execution.add_argument(
+        "--scenarios",
+        default="all",
+        metavar="{all,<id>[,<id>...]}",
+        help="Scenarios to run. A complete report requires 'all'; a subset is for diagnosis.",
+    )
+    rehearse_execution.add_argument(
+        "--evidence-out",
+        type=Path,
+        required=True,
+        metavar="RELATIVE_PATH",
+        help="Where to write the execution-rehearsal evidence report, relative to --evidence-root.",
+    )
+    rehearse_execution.add_argument(
+        "--receipt-out",
+        type=Path,
+        default=None,
+        metavar="RELATIVE_PATH",
+        help="Where to write this command's receipt, relative to --evidence-root.",
+    )
+
+    for name, gate, summary in _M3_3_GATED_COMMANDS:
+        gated = m3_subparsers.add_parser(
+            name,
+            help=f"{summary} Recognized; refuses without a separate owner {gate} authorization.",
+            description=(
+                f"{summary} This surface is recognized so the contract's command set is "
+                f"complete, and it refuses: {gate} is a separate Sol/GPT owner gate that no "
+                "contract acceptance, passing rehearsal, green suite, commit, or tag supplies. "
+                "It constructs no transport on any code path."
+            ),
+        )
+        _add_config_argument(gated)
+        _add_evidence_root_argument(gated)
 
     rehearse_report = m3_subparsers.add_parser(
         "rehearse-report", help="Print a stored rehearsal evidence report. Read-only."
@@ -1274,7 +1331,34 @@ _M3_COMMAND_VERSIONS: Final[Mapping[str, str]] = {
     "m3 plan-requests": "m3.1b/1.0",
     "m3 acquire": "m3.2/1.0",
     "m3 derive-dependent-plan": "m3.2b-plan/1.0",
+    "m3 rehearse-execution": "m3.3a/1.0",
 }
+
+#: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
+#: the command set is complete and each **refuses**: the owner gate it names has not been
+#: issued, and no acceptance, rehearsal, suite, commit, or tag issues one.
+_M3_3_GATED_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        "offline-parse",
+        "M3.3-E0",
+        "Derive the census parse layer from accepted stored objects, offline.",
+    ),
+    (
+        "build-candidate-snapshot",
+        "M3.3-E1",
+        "Construct and freeze the authoritative candidate snapshot.",
+    ),
+    (
+        "execute-selection",
+        "M3.3-E1",
+        "Execute, persist, reconstruct, and replay the accepted joint selection.",
+    ),
+    (
+        "manifest-output",
+        "M3.3-E2",
+        "Construct the pilot manifest and render the deferred CLI output.",
+    ),
+)
 
 
 def _configuration_fingerprint(config: ProjectConfig) -> str:
@@ -1302,12 +1386,19 @@ def _configuration_fingerprint(config: ProjectConfig) -> str:
 
 
 def _migration_chain_head(config: ProjectConfig) -> str:
-    """The highest applied migration name, read without taking a writer lease."""
+    """The highest applied migration name, read without touching a durable byte.
+
+    Opened ``SQLITE_OPEN_READONLY`` rather than by convention: M3.3 reaches this for
+    receipt provenance, and ruling **R3** requires every governed M3.3 read-only path to
+    be strictly read-only at the operating system. A read-write handle to a WAL-mode
+    database checkpoints on close, which would rewrite the main file's bytes even though
+    no statement wrote anything.
+    """
     database = config.data_tree().catalog_database
     if not database.is_file():
         return "none"
     try:
-        with read_only_connection(database) as connection:
+        with strictly_read_only_connection(database) as connection:
             row = connection.execute(
                 "SELECT name FROM ops_schema_migrations ORDER BY name DESC LIMIT 1"
             ).fetchone()
@@ -1408,7 +1499,9 @@ def _m3_command(
 
     handlers = {
         "rehearse": _m3_rehearse_command,
+        "rehearse-execution": _m3_rehearse_execution_command,
         "rehearse-report": _m3_rehearse_report_command,
+        **{name: _m3_gated_command for name, _, _ in _M3_3_GATED_COMMANDS},
         "plan-requests": _m3_plan_requests_command,
         "show-budget": _m3_show_budget_command,
         "show-receipt": _m3_show_receipt_command,
@@ -1557,6 +1650,156 @@ def _m3_rehearse_command(
     print(f"\n{M3_1A_COMPLETION_TOKEN}")
     logger.info("m3 rehearse: all twelve scenarios passed")
     return EXIT_OK
+
+
+def _m3_rehearse_execution_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Run the M3.3A execution rehearsal E1-E8 against disposable synthetic catalogs.
+
+    Offline in every mode: it opens no socket, constructs no transport, resolves no host,
+    and never reads the accepted real private catalog. Its disposable data trees and
+    catalogs are created beneath the validated external evidence root, alongside the
+    evidence report and the receipt.
+
+    **A passing run authorizes nothing.** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain
+    a separate owner gate, and both real-path feasibility gates stay open regardless of
+    what this command reports.
+    """
+    requested = (
+        None
+        if args.scenarios.strip() == "all"
+        else [item.strip() for item in args.scenarios.split(",") if item.strip()]
+    )
+    started = _utc_now()
+    report = run_execution_rehearsal(requested, workspace_root=evidence_root)
+    completed = _utc_now()
+
+    for outcome in report.outcomes:
+        status = "PASS" if outcome.passed else "FAIL"
+        print(f"  {outcome.scenario_id:<4} {status}  {outcome.track:<8} {outcome.title}")
+        if not outcome.passed:
+            print(f"       {outcome.detail}")
+
+    print("\nExecution rehearsal summary.")
+    for label, value in (
+        ("scenarios run", str(len(report.outcomes))),
+        ("all eight run", "yes" if report.complete else "no"),
+        ("every scenario passed", "yes" if report.passed else "no"),
+        ("R28 bridge violations", str(report.bridge.get("violation_count", "unknown"))),
+        ("builder-derived disposition", report.builder_derived_disposition),
+        (
+            "selector feasible on rehearsal",
+            "yes" if report.accepted_selector_feasible_on_rehearsal_snapshot else "no",
+        ),
+        ("real builder feasibility proved", "no"),
+        ("actual network requests", "0"),
+        ("evidence reference", report.evidence_reference),
+    ):
+        print(f"  {label:<32}: {value}")
+
+    evidence_written = _write_m3_artifact_once(
+        report.canonical_bytes(),
+        evidence_root=evidence_root,
+        relative=args.evidence_out,
+        description="execution-rehearsal evidence report",
+    )
+    print(f"  evidence written                : {args.evidence_out}")
+
+    receipt = ExecutionReceipt(
+        command_name="m3 rehearse-execution",
+        command_version=_M3_COMMAND_VERSIONS["m3 rehearse-execution"],
+        phase="M3.3A",
+        invocation_mode=OFFLINE_EXECUTION_MODE,
+        configuration_fingerprint=_configuration_fingerprint(config),
+        migration_chain_head=_migration_chain_head(config),
+        cohort_definition_digest=cohort_definition_digest(),
+        parser_versions={
+            source_id: source.parser_version for source_id, source in sorted(SOURCES.items())
+        },
+        quota_policy_version=_offline_policy("quota_policy_version"),
+        joint_selector_policy_version=_offline_policy("joint_selector_policy_version"),
+        replacement_signature_policy_version=_offline_policy(
+            "replacement_signature_policy_version"
+        ),
+        manifest_hash_policy_version=_offline_policy("manifest_hash_policy_version"),
+        selection_input_schema_version=_offline_policy("selection_input_schema_version"),
+        started_at_utc=_rfc3339(started),
+        completed_at_utc=_rfc3339(completed),
+        elapsed_seconds=round((completed - started).total_seconds(), 3),
+        # Contract §6 item 5: an offline execution places no request, so both network
+        # counts are zero. Nothing simulated is ever recorded in these fields.
+        actual_logical_request_count=0,
+        actual_physical_attempt_count=0,
+        # Schema-drift fields belong to the live and rehearsal modes only; the receipt
+        # spec forbids them here, so they are omitted rather than reported as "none".
+        completion_status="complete" if report.passed else "failed",
+        reason_code=(None if report.passed else "OFFLINE_REHEARSAL_SCENARIO_MISMATCH"),
+        reason_detail=(None if report.passed else _execution_rehearsal_detail(report)),
+        # `rehearsal_evidence_reference` is a rehearsal-mode field the spec forbids here.
+        # The evidence report is named by the operator-supplied relative path printed
+        # above and by its own content-derived reference, so nothing is lost.
+    )
+    written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
+    print(f"  receipt written                 : {args.receipt_out or written.name}")
+    print(f"  receipt_id                      : {receipt.receipt_id}")
+
+    if not report.passed:
+        logger.error("m3 rehearse-execution: a scenario failed; the phase does not pass")
+        return EXIT_GATE_FAILURE
+    if not report.complete:
+        logger.warning("m3 rehearse-execution: a subset ran, so no completion statement is made")
+        return EXIT_OK
+    for label, artifact in (("receipt", written), ("evidence report", evidence_written)):
+        if not artifact.is_file():  # pragma: no cover - the writes above raise on failure
+            message = f"the execution-rehearsal {label} was not written"
+            raise GateFailureError(message)
+    print("\nM3_3A_EXECUTION_REHEARSAL_PASSED_NO_REAL_EXECUTION_AUTHORIZED")
+    logger.info("m3 rehearse-execution: all eight scenarios passed")
+    return EXIT_OK
+
+
+def _offline_policy(name: str) -> str:
+    """One accepted ``offline_execution`` policy version, read from its owning constant."""
+    return offline_execution_policy_versions()[name]
+
+
+def _execution_rehearsal_detail(report: object) -> str:
+    """The first failing scenario, rendered without a path or an SEC identity."""
+    outcomes = getattr(report, "outcomes", ())
+    failed = [item.scenario_id for item in outcomes if not item.passed]
+    return f"scenario(s) {','.join(failed)} did not reach the specified outcome"
+
+
+def _m3_gated_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+    evidence_root: Path,
+) -> int:
+    """Refuse an M3.3 real-execution surface that has no owner authorization.
+
+    The command exists so the accepted contract §19 surface set is complete and visible.
+    It refuses, and the refusal is the point: **M3.3-E0, M3.3-E1, and M3.3-E2 are separate
+    Sol/GPT owner gates**, and neither contract acceptance, a passing rehearsal, a green
+    suite, a commit, a tag, nor the presence of a private catalog supplies one. Two
+    real-path feasibility gates are additionally open. No transport is constructed on any
+    path here.
+    """
+    del config, evidence_root
+    command = str(args.m3_command)
+    gate = next(item[1] for item in _M3_3_GATED_COMMANDS if item[0] == command)
+    print(
+        f"m3 {command} refused: {gate} is not authorized.\n"
+        "  A separate Sol/GPT owner authorization is required, and no contract acceptance, "
+        "rehearsal,\n  green suite, commit, tag, or private catalog supplies one.",
+        file=sys.stderr,
+    )
+    logger.error("m3 %s refused: %s is not authorized", command, gate)
+    return EXIT_STAGE_NOT_ENABLED
 
 
 def _m3_rehearse_report_command(
@@ -2267,11 +2510,15 @@ def _m3_migration_chain_head(catalog_path: Path) -> str:
 
     Deliberately not :func:`_migration_chain_head`, which reads the *repository* data root: an
     M3.2 receipt reports the chain of the catalog the window actually ran against.
+
+    Strictly read-only at the operating system, for the same **R3** reason: M3.3 reaches
+    this path too, and a governed read-only action may not checkpoint or otherwise alter
+    the main database.
     """
     if not catalog_path.is_file():
         return "none"
     try:
-        with read_only_connection(catalog_path) as connection:
+        with strictly_read_only_connection(catalog_path) as connection:
             row = connection.execute(
                 "SELECT name FROM ops_schema_migrations ORDER BY name DESC LIMIT 1"
             ).fetchone()

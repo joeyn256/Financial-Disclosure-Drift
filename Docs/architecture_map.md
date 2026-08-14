@@ -1,5 +1,24 @@
 # Architecture Map — Disclosure Drift
 
+
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, AND NO REAL EXECUTION IS
+> AUTHORIZED.** Accepted [Decision 070](Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
+> issued the bounded M3.3-I/R authority; accepted Decisions
+> [071](Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
+> [072](Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
+> [073](Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
+> and [074](Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
+> that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
+> bridge is clean, and the mutation campaign M1–M38 is fully killed. Every statement below that says
+> M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
+> M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
+> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
+> parse layer is untouched; network, SEC, reacquisition, and private-evidence authority remain NONE;
+> migration remains none; and **two real-path feasibility gates are OPEN** —
+> `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
+> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag.
+
+
 **Purpose:** orient a reader to where each stage of the data-flow pipeline lives, without
 re-reading the full milestone plan or every decision record. This is a navigation aid: it names
 source modules, governing decisions, persistence, and tests, and states lifecycle status. It is
@@ -52,7 +71,7 @@ None is a module, a migration, a table, a CLI command, or a runtime path, and no
 | [`Docs/m3/m3_2_t2_implementation_authorization_packet.md`](m3/m3_2_t2_implementation_authorization_packet.md) | The accepted T2 implementation plan (revision v2), preserved byte-identical. It proposes the fifteen-path maximum T2 envelope and declines `sec/census_orchestrator.py` and `sec/index_retrieval.py`. **A packet is mechanics; the decision that cites it is the authority** |
 | [`Milestones/milestone_03_master_plan.md`](../Milestones/milestone_03_master_plan.md) | The five phases, each with 36 specified fields, and their frozen internal subdivisions; the request-volume policy; the two-layer evidence model; the mandatory contents of every future phase contract |
 | [`Docs/m3/operator_runbook.md`](m3/operator_runbook.md) | The 31-step Mac operator sequence, with every command labelled by implementation status. Its current-state banner records that M3.2A acquisition is complete at 75/75 successor identities and 77 of 801 attempts, and that no further live SEC request is authorized (Decision 064 §9) |
-| [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **A1–A12 is implemented but has not been run to a passing operational token; E1–E8 remains unimplemented and belongs to M3.3A** |
+| [`Docs/m3/offline_rehearsal_spec.md`](m3/offline_rehearsal_spec.md) | Two rehearsals: **A1–A12** acquisition at M3.1A, before the first SEC request; **E1–E8** execution at M3.3A, before the real snapshot freeze. **A1–A12 is implemented but has not been run to a passing operational token; E1–E8 is now implemented and passes at M3.3A** under accepted Decisions 070–074 — which authorizes no real execution, and E5(a)'s original wording is superseded by Decision 074 **R31** |
 | [`Docs/m3/execution_receipt_spec.md`](m3/execution_receipt_spec.md) | The execution-receipt design for dry-run and live commands — permitted fields, prohibited fields, serialization, storage (both accepted filename conventions — Decision 064 §8), retention, redaction, replay, recovery, versioning, validation. Written against `m3-execution-receipt/2.0`; the current writer is `3.0` and readers accept both (Decision 055 §7). **Creates no code and no table** |
 | [`Docs/m3/limitations_register.md`](m3/limitations_register.md) | Every inherited limitation plus the Milestone 3 entries — **M3-L01**–**M3-L16** from planning through the post-T5 remediation, and **D067-L1** new at the M3.3 snapshot-authority rulings. **Closes none**; read its own register summary for the live counts |
 | [`Docs/m3/templates/`](m3/templates/request_budget.md) | The eight frozen operational templates: request budget, Gate F, Gate H, schema-drift incident, interrupted-run recovery, real-snapshot evidence, root-hash approval, and the public evidence index |

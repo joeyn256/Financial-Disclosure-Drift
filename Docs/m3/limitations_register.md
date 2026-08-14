@@ -962,3 +962,67 @@ binding `Decision 059` and the accepted evidence-manifest SHA-256, and no zero-b
 ever lawful. Decision 052's remaining nonblocking
 observations **O2**, **O3**, and **O4** are recorded at Decision 052 §10 and **create no register
 entry of their own**.
+
+## D074-L1 — Real amendment-purpose feasibility is unresolved
+
+- **Status:** `ACTIVE — OWNER RESOLUTION REQUIRED BEFORE REAL EXECUTION`
+- **Source:** accepted [Decision 073](../Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md)
+  §6, Ruling **R30**; token `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN`
+- **Condition.** The accepted selector requires **three distinct** amendment-purpose categories. The
+  accepted metadata-only production builder has **no affirmative classifier** — Decision 071 **IN-2**
+  forbids inventing one from a form suffix, XBRL presence, filing timing, a primary-document
+  filename heuristic, an amendment count, linkage state, a company name, or filing size — so it
+  supplies **no purpose witness**, and a real builder-derived selection would currently be expected
+  to return **infeasible** on that requirement.
+- **Why it is not a defect.** Production stays fail-closed, the synthetic rehearsal facts are
+  explicitly stipulated and mechanically unreachable from any real operator path, and **no
+  real-feasibility claim is made**. **No real candidate distribution has been inspected.**
+- **What it blocks.** Real **M3.3-E0** may **not** be owner-authorized merely because M3.3-I/R
+  passes, an ultrareview passes, or a fresh independent I/R acceptance passes. A separate Sol/GPT
+  architecture disposition is required first.
+- **Required owner action.** Decide, in a separate packet, whether an already accepted metadata-safe
+  evidence route exists, whether a new pre-selection evidence stage is required, whether an explicit
+  methodology revision is justified **before** any real candidate distribution is inspected, or
+  whether real infeasibility is intentionally accepted. **Decision 073 chooses none of these.**
+- **Not closed by:** a passing I/R, a green suite, a commit, a tag, an execution receipt, or a
+  rehearsal token.
+
+## D074-L2 — Real linked-amendment feasibility is unresolved
+
+- **Status:** `ACTIVE — OWNER RESOLUTION REQUIRED BEFORE REAL EXECUTION`
+- **Source:** accepted [Decision 074](../Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md)
+  §3, Ruling **R32**; token `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN`
+- **Condition.** The linked-amendment quota requires **eight** affirmative entity witnesses and
+  admits only **provisional** amendment-linkage evidence; `possible_amendment_of` and
+  `unresolved_amendment` satisfy nothing. **No accepted source field maps to the Decision 012
+  canonical field `amendment_relationship`** (`sec/census.py`'s
+  `CANONICAL_FIELD_BY_SOURCE_FIELD`), so a real offline parse resolves it for no accession, and
+  absent filing-header relationship evidence the accepted Decision 008 `link_amendment` machinery
+  reaches at best a possible or unresolved state. The current real metadata path therefore has **no
+  demonstrated way** to produce the eight witnesses.
+- **Why it is not a defect.** Production stays fail-closed, the rehearsal's linkage facts are
+  explicitly stipulated census-layer inputs identical across the **R28** bridge, and **no
+  real-feasibility claim is made.**
+- **What is prohibited.** Parentage is never invented from a `/A` suffix, accession order, a company
+  name, filing-date proximity, or an amendment sequence number; the quota is never lowered,
+  deferred, or proxied; and no filing header, filing body, or network is authorized.
+- **Independence.** This gate is **separate from D074-L1** and the two are **never merged into one
+  vague real-feasibility flag**.
+
+## D074-L3 — Real acceptance-ordering adequacy is unverified
+
+- **Status:** `PENDING FUTURE AUTHORIZED E0 VERIFICATION`
+- **Source:** accepted [Decision 074](../Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md)
+  §6, Ruling **R34**
+- **Condition.** Decision 010 fixes the raw SEC acceptance format `YYYYMMDDHHMMSS` and derives
+  `acceptance_date_sec` from the first eight characters; a value in any other shape yields a `NULL`
+  acceptance audit date, and Decision 019 §5.9's strict-later ordering then **fails closed** for
+  every resolved amendment linkage. **That is retained and not weakened.**
+- **What a future authorized real E0 verification must report.**
+  `TOTAL_AMENDMENT_CANDIDATES`, `ACCEPTANCE_RAW_PRESENT`, `ACCEPTANCE_RAW_VALID_14_DIGIT`,
+  `ACCEPTANCE_RAW_MISSING`, `ACCEPTANCE_RAW_MALFORMED`, `RESOLVED_LINKAGE_WITH_ORDERING_PROOF`, and
+  `RESOLVED_LINKAGE_BLOCKED_BY_ACCEPTANCE_ORDERING`.
+- **No result is assumed today**, because private evidence may not be inspected. If real data later
+  carries insufficient valid acceptance evidence, affected resolved linkage fails closed under
+  existing authority. **This is an E0/E1 verification condition, not a third pre-E0 methodology
+  gate.**

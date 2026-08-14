@@ -1,5 +1,24 @@
 # Milestone 3 — Mac Operator Runbook
 
+
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, AND NO REAL EXECUTION IS
+> AUTHORIZED.** Accepted [Decision 070](../Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
+> issued the bounded M3.3-I/R authority; accepted Decisions
+> [071](../Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
+> [072](../Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
+> [073](../Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
+> and [074](../Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
+> that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
+> bridge is clean, and the mutation campaign M1–M38 is fully killed. Every statement below that says
+> M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
+> M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
+> unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
+> parse layer is untouched; network, SEC, reacquisition, and private-evidence authority remain NONE;
+> migration remains none; and **two real-path feasibility gates are OPEN** —
+> `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` and
+> `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` — which are never merged into one flag.
+
+
 **Status:** documentation only. **No step here is authorized to run against the SEC network.**
 **Controlling records:** [Decision 027](../Decisions/decision_027_m3_master_plan_and_operational_readiness.md)
 §7, as narrowly corrected by accepted

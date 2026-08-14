@@ -139,11 +139,15 @@ class NetworkBombError(AssertionError):
 def network_bomb(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
     """Detonate on socket use, transport construction, or client construction.
 
-    The autouse suite blocker already covers raw sockets. This adds the two
-    construction points Decision 071 §11 names -- ``HttpxTransport`` and ``SecClient`` --
-    plus ``urlopen``, so the claim a rehearsal may make is the accurate one: **no
-    network construction or use occurred**, rather than the weaker and false "no network
-    capability was imported".
+    The autouse suite blocker already covers raw sockets. This adds both current
+    production transport-construction points -- ``HttpxTransport`` and ``SecClient`` --
+    plus ``urlopen``. That pair is an implementation inventory established by source
+    inspection; no decision record names it, and none is cited for it here. The
+    governed requirement is Decision 071 §6 (**IN-4**), which prohibits network
+    construction, network calls, and SEC client or transport creation, requires a
+    process-level network bomb, and fixes the claim a rehearsal may make as the
+    accurate one: **no network construction or use occurred**, rather than the weaker
+    and false "no network capability was imported".
     """
     detonations = 0
 

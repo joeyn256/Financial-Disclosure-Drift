@@ -48,7 +48,18 @@ there would not be.
 ``ALLOWED_UNRESOLVED`` carries exact exceptions: one source file, one decision,
 one section, a reason, and a governing status. No wildcard, no pattern, no
 per-line escape marker. An entry that matches nothing fails the gate, so the
-list cannot rot into a blanket exemption.
+list cannot rot into a blanket exemption. Neither can it absorb a defect that
+could simply be fixed: every entry names a document that may not be rewritten,
+and an entry under ``src/`` or ``tests/`` fails the gate outright, because a
+stale citation in code or in a test is always correctable.
+
+One further limit is accepted rather than engineered around, and it is the more
+important of the two. This gate resolves citation-to-nonexistent-section; it
+cannot resolve citation-to-real-but-wrong-section, because Decision 075 genuinely
+has a section 6, so a citation naming the wrong-but-existing §6 stays structurally
+valid. No natural-language inference and no keyword mapping is attempted here.
+Approval-critical citation review is therefore this mechanical existence check
+**plus** human semantic review, never either alone.
 """
 
 from __future__ import annotations
@@ -122,73 +133,25 @@ class AllowedUnresolved(NamedTuple):
     governing_status: str
 
 
+#: Every path a live exception may never name. A stale citation in code or in a test is a defect to
+#: correct, never one to exempt: the four this gate found on its first run were corrected under the
+#: owner's bounded Decision 076 continuation, and :func:`live_exceptions` fails the gate if one is
+#: ever added back. The invariant is structural rather than a matter of review discipline.
+LIVE_PREFIXES: Final[tuple[str, ...]] = ("src/", "tests/")
+
 #: Exact exceptions: one file, one decision, one section each. No wildcard, no pattern, no
-#: directory-wide waiver. Two classes, and the difference between them matters.
+#: directory-wide waiver.
 #:
-#: **Class 1 -- immutable accepted records.** The citation is wrong and the document may not be
-#: rewritten. Decision 076 section 7 forbids editing accepted history to make a checker green.
+#: One class only -- **immutable accepted records**. The citation is wrong and the document may not
+#: be rewritten. Decision 076 section 7 forbids editing accepted history to make a checker green.
 #:
-#: **Class 2 -- OPEN DEFECT, awaiting owner correction.** Four live citations in M3.3-I/R source
-#: and tests, found by this gate on its first run. They are the same defect class as MIN-A, which
-#: swept only Decision 075 citations and so left these standing. Correcting them is not within
-#: Decision 076's authorized paths -- MIN-A needed its own owner authorization to change a single
-#: docstring -- so they are recorded, reported, and returned to the owner rather than edited here.
-#: Every run prints them, so the exemption is loud rather than quiet, and an entry that stops
-#: matching fails the gate, so each one disappears from this list only when it is really fixed.
+#: The class this list once also carried -- OPEN DEFECT, four live M3.3-I/R citations awaiting a
+#: bounded owner authorization Decision 076 did not itself hold -- is gone, because those four
+#: citations were corrected rather than exempted. Nothing here exempts a file that can be fixed.
 _IMMUTABLE_HISTORY: Final = (
     "immutable accepted record; not rewritten to satisfy a later checker (Decision 076 section 7)"
 )
-_OPEN_DEFECT: Final = (
-    "OPEN DEFECT — reported to the project owner under Decision 076 section 6; correcting live "
-    "M3.3-I/R source or tests is outside Decision 076's authorized paths and needs its own "
-    "bounded owner authorization, exactly as MIN-A did"
-)
 ALLOWED_UNRESOLVED: Final[tuple[AllowedUnresolved, ...]] = (
-    # ---- Class 2: open defects in the live M3.3-I/R target ----
-    AllowedUnresolved(
-        source="src/disclosure_drift/m3/execution_rehearsal.py",
-        decision="074",
-        section="3.1",
-        reason=(
-            "cites accepted R31, which is Decision 074 section 2 ('Ruling R31 — Reserve "
-            "Rehearsal Totality Semantics'); section 3 is R32, a different ruling. The "
-            "corrected-E5(a) content the comment describes is section 2.1. Decision 074 has "
-            "no section 3.1."
-        ),
-        governing_status=_OPEN_DEFECT,
-    ),
-    AllowedUnresolved(
-        source="src/disclosure_drift/m3/offline_parse.py",
-        decision="071",
-        section="13",
-        reason=(
-            "Decision 071 has sections 1-9 only. The cited R25 is Decision 072 section 5, and "
-            "the calendar-source category-C content is Decision 071 section 7."
-        ),
-        governing_status=_OPEN_DEFECT,
-    ),
-    AllowedUnresolved(
-        source="tests/unit/test_m3_offline_parse.py",
-        decision="071",
-        section="13",
-        reason=(
-            "same citation as src/disclosure_drift/m3/offline_parse.py; Decision 071 has "
-            "sections 1-9 only."
-        ),
-        governing_status=_OPEN_DEFECT,
-    ),
-    AllowedUnresolved(
-        source="tests/unit/test_m3_3_boundaries.py",
-        decision="071",
-        section="11",
-        reason=(
-            "Decision 071 has sections 1-9 only. No decision record names HttpxTransport and "
-            "SecClient as the two construction points, so the intended target is not inferable "
-            "from the records and is left for the owner to state."
-        ),
-        governing_status=_OPEN_DEFECT,
-    ),
-    # ---- Class 1: wrong citations inside immutable accepted records ----
     AllowedUnresolved(
         source="Docs/Decisions/decision_047_m3_2_t4_operational_preflight_authorization.md",
         decision="032",
@@ -523,11 +486,22 @@ def partition(
 ) -> tuple[list[Finding], list[Finding], list[AllowedUnresolved]]:
     """Split findings into unallowed and allowed, and report exceptions that matched nothing."""
     allowed_keys = {(e.source, e.decision, e.section) for e in ALLOWED_UNRESOLVED}
-    unallowed = [f for f in findings if (f.source, f.decision, f.section) not in allowed_keys]
-    allowed = [f for f in findings if (f.source, f.decision, f.section) in allowed_keys]
-    matched = {(f.source, f.decision, f.section) for f in allowed}
+    unallowed = [f for f in findings if _key(f) not in allowed_keys]
+    allowed = [f for f in findings if _key(f) in allowed_keys]
+    matched = {_key(f) for f in allowed}
     unused = [e for e in ALLOWED_UNRESOLVED if (e.source, e.decision, e.section) not in matched]
     return unallowed, allowed, unused
+
+
+def live_exceptions() -> list[AllowedUnresolved]:
+    """Return exception entries naming a correctable source or test path.
+
+    An exception exists for a document that may not be rewritten. Source and tests may always be
+    corrected, so an entry naming one exempts a defect instead of fixing it -- exactly what the
+    owner's bounded Decision 076 continuation closed. Any entry returned here fails the gate, so
+    the rule holds by construction rather than by reviewer vigilance.
+    """
+    return [entry for entry in ALLOWED_UNRESOLVED if entry.source.startswith(LIVE_PREFIXES)]
 
 
 def scan_repository(root: Path) -> tuple[list[Finding], int, int]:
@@ -555,8 +529,9 @@ def main() -> int:
     root = repository_root()
     findings, checked, records = scan_repository(root)
     unallowed, allowed, unused = partition(sorted(findings))
+    live = live_exceptions()
 
-    if unallowed or unused:
+    if unallowed or unused or live:
         print(f"Decision section references FAILED: {len(unallowed)} invalid citation(s).")
         for finding in unallowed:
             print(f"  {finding.source}:{finding.line_number}: {finding.detail}")
@@ -566,23 +541,22 @@ def main() -> int:
                 f"Decision {entry.decision} section {entry.section}"
             )
             print("    the citation it exempts is gone or the entry is wrong; remove or fix it")
+        for entry in live:
+            print(
+                f"  correctable path exempted: {entry.source} -> "
+                f"Decision {entry.decision} section {entry.section}"
+            )
+            print("    source and tests are correctable; fix the citation, never allowlist it")
         return 1
 
     print(f"Decision section references passed: {checked} citation(s) against {records} record(s).")
-    print(f"Invalid citations: 0. Allowed documented exceptions: {len(allowed)}.")
-    reasons = {(e.source, e.decision, e.section): e for e in ALLOWED_UNRESOLVED}
+    print(f"INVALID_DECISION_SECTION_REFS = {len(unallowed)}")
+    print(f"LIVE_OPEN_DEFECT_EXCEPTIONS = {len(live)}")
+    print(f"Allowed documented exceptions: {len(allowed)}, every one an immutable accepted record.")
     for finding in allowed:
-        entry = reasons[(finding.source, finding.decision, finding.section)]
-        marker = "OPEN DEFECT" if entry.governing_status.startswith("OPEN DEFECT") else "historical"
         print(
-            f"  allowed ({marker}): {finding.source}:{finding.line_number} -> "
+            f"  allowed (historical): {finding.source}:{finding.line_number} -> "
             f"Decision {finding.decision} section {finding.section}"
-        )
-    open_defects = sum(1 for f in allowed if reasons[_key(f)].governing_status.startswith("OPEN"))
-    if open_defects:
-        print(
-            f"{open_defects} of these are OPEN DEFECTS awaiting owner correction, not accepted "
-            "exceptions. See ALLOWED_UNRESOLVED for each one's reason and governing status."
         )
     return 0
 

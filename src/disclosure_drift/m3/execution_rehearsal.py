@@ -781,7 +781,7 @@ def _run_e5(workspace: Path) -> ScenarioOutcome:
             probe.note(f"{label}: {json.dumps(shape)}")
 
     # (a) The positive compatible-reserve path, proved directly at the **pure** reserve
-    # layer under accepted R31 (Decision 074 §3.1). The former requirement — that every
+    # layer under accepted R31 (Decision 074 §2.1). The former requirement — that every
     # selected target hold a rank-1 package — is superseded: Decision 020 §7 makes a
     # target-specific no-compatible-reserve disposition a lawful, nonblocking outcome, so
     # requiring universal coverage imposed a production-invalid condition. The pilot-scale

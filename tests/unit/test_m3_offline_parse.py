@@ -100,7 +100,7 @@ def test_an_unavailable_full_index_object_is_category_b_not_category_c() -> None
     "source_id", ["sec_edgar_filing_calendar", "sec_edgar_calendar_announcement"]
 )
 def test_the_calendar_sources_are_category_c_by_forward_trace(source_id: str) -> None:
-    """Decision 071 §13: traced, not assumed.
+    """Traced, not assumed (**R25**, Decision 072 §5; calendar-source recheck, Decision 071 §7).
 
     ``census_calendar_days`` -- the only destination the annual calendar parses into --
     is read solely by ``sec/census.py``'s calendar QA metrics, which are reachable only

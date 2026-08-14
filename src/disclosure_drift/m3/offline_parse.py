@@ -191,7 +191,7 @@ CANDIDATE_SUBSTANTIVE_SOURCE_IDS: Final[frozenset[str]] = frozenset(
 )
 
 #: Category **C**, each established by a forward trace rather than by assumption
-#: (Decision 071 §13; **R25**):
+#: (**R25**, Decision 072 §5; calendar-source recheck, Decision 071 §7):
 #:
 #: * the dated calendar announcement has no parse destination on the reusable path;
 #: * the annual filing calendar parses into ``census_calendar_days``, whose **only**

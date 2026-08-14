@@ -31,8 +31,11 @@ E8      B        replay is write-free and regeneration reproduces the root;
 ``FEASIBILITY SOURCE`` on every Track-B outcome is
 ``EXPLICITLY_GOVERNED_SYNTHETIC_REHEARSAL_SNAPSHOT`` (**R29**). A passing rehearsal
 proves the accepted system operates correctly on a conforming feasible snapshot; it
-proves **nothing** about whether the real metadata-only builder can produce one, and
-``M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN`` (**R30**) stays open.
+proves **nothing** about whether the real metadata-only builder can produce one. **Both**
+real-path gates stay open, and the generated report states them **separately** and by
+name: ``M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN`` (**R30**) and
+``M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN`` (**R32**). They are never merged
+into one flag, and neither is ``real_builder_feasibility_proved``.
 """
 
 from __future__ import annotations
@@ -194,8 +197,13 @@ class ExecutionRehearsalReport:
             "accepted_selector_feasible_on_conforming_explicit_rehearsal_snapshot": (
                 self.accepted_selector_feasible_on_rehearsal_snapshot
             ),
+            # The two real-path gates are independently governed and independently
+            # auditable -- Decision 073 **R30** and Decision 074 **R32** -- and are never
+            # merged into one field. `real_builder_feasibility_proved` is a third,
+            # separate claim and neither gate stands in for it (Decision 075 §6).
             "real_builder_feasibility_proved": False,
             "real_amendment_purpose_feasibility_gate": "OPEN",
+            "real_linked_amendment_feasibility_gate": "OPEN",
             "real_private_parse_authorization": "NO",
             "actual_network_requests": 0,
             "transports_constructed": 0,

@@ -1,15 +1,22 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
 
-> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, AND NO REAL EXECUTION IS
-> AUTHORIZED.** Accepted [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED, REHEARSED, AND CORRECTED AFTER
+> ULTRAREVIEW; THE CORRECTED TARGET IS PENDING A FRESH READ-ONLY REREVIEW; AND NO REAL
+> EXECUTION IS AUTHORIZED.** Accepted [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
 > issued the bounded M3.3-I/R authority; accepted Decisions
 > [071](../Docs/Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
 > [072](../Docs/Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
 > [073](../Docs/Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
 > and [074](../Docs/Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
 > that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
-> bridge is clean, and the mutation campaign M1–M38 is fully killed. Every statement below that says
+> bridge is clean, and the mutation campaign M1–M38 is fully killed. **The independent read-only
+> ultrareview of the frozen executable target `6f87abc…` then returned BLOCKER 0 / MAJOR 0 /
+> MINOR 3**, and accepted
+> [Decision 075](../Docs/Decisions/decision_075_m3_3_i_r_ultrareview_bounded_correction.md)
+> authorized and applied the bounded correction of those three findings. **The corrected target
+> has NOT yet passed a rereview and no acceptance is complete** — a fresh read-only
+> ultrareview-rereview against the corrected SHA is the next act. Every statement below that says
 > M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
 > M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
 > unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
@@ -1501,9 +1508,14 @@ snapshot-freeze validation obligations**;
    fixes the `evidence_sha256` call shape and the eight candidate `*_resolution_sha256` derivations
    (§7), and **R13**/**R14** fix the offline parse prerequisite that makes the mapping non-vacuous
    (§§4–5). **That record is governance authority and is not implementation authorization.** One
-   consequence remains open and is **not** resolved by it: `coverage_policy_version` is fixed as
-   `pilot-coverage/1.0` but has **no authorized executable home**, which is an implementation-packet
-   path question (contract §20).
+   consequence remained open and was **not** resolved by it: `coverage_policy_version` is fixed as
+   `pilot-coverage/1.0` but had **no authorized executable home**, which was an implementation-packet
+   path question (contract §20). ***(NO LONGER OPEN: accepted
+   [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md) §4 fixes
+   the canonical executable home as `PILOT_COVERAGE_POLICY_VERSION` in
+   `src/disclosure_drift/pilot_policy.py` at `pilot-coverage/1.0` — an engineering/provenance version
+   only, with no config setting, no environment variable, no `reference_policy_versions` seed row, and
+   no migration. It discharges contract §20 and §23 item 28 for that constant and nothing else.)***
 4. **A ruling on Decision 023 O1** if the M3.3A rehearsal or the real M3.3B run reaches an empty
    sole-carrier crosswalk family. **Still deferred** (**OR-11**; Decision 023 retained exactly).
 5. **A ruling on any infeasibility** — if the real candidate universe cannot satisfy the frozen

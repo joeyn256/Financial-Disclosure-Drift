@@ -104,15 +104,45 @@ def test_a_category_c_source_is_left_deliberately_untouched(world: rw.RehearsalW
     assert state["parser_state"] == "not_started"
 
 
-def test_the_candidate_form_universe_is_the_reference_family(world: rw.RehearsalWorld) -> None:
-    """IMP-3: an unrelated ``10-D`` census row must not fail the builder closed."""
+def test_the_candidate_form_universe_is_the_reference_family(
+    world: rw.RehearsalWorld, paired: rsnap.PairedSnapshots
+) -> None:
+    """IMP-3: an unrelated ``10-D`` census row must not fail the builder closed.
+
+    Proved directly on all three sides rather than inferred from a passing build: the
+    row **exists** in the census / source-history layer, it **never** becomes a
+    ``pilot_candidate_accessions`` row, and its exclusion is **reported** by form with
+    the expected deterministic count (CLAUDE.md rule 11). **R20** §6.2 still reads the
+    same row as source-history evidence, so the bound is on the candidate universe
+    only -- it does not blind the control predicates.
+    """
     with connect(world.database, writer=False) as connection:
-        assert (
-            connection.execute(
-                "SELECT COUNT(*) FROM census_accessions WHERE form_type = '10-D'"
+        census = connection.execute(
+            "SELECT accession_plain, registrant_cik_numeric FROM census_accessions "
+            "WHERE form_type = '10-D' ORDER BY accession_plain"
+        ).fetchall()
+    assert len(census) == 1
+    plain = str(census[0]["accession_plain"])
+    anchor = int(census[0]["registrant_cik_numeric"])
+
+    for snapshot, database in (
+        (paired.track_a, paired.track_a_database),
+        (paired.track_b, paired.track_b_database),
+    ):
+        assert snapshot.excluded_form_counts["10-D"] == 1
+        with connect(database, writer=False) as connection:
+            excluded = connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accessions "
+                "WHERE snapshot_id = ? AND (accession_plain = ? OR form_type = '10-D')",
+                (snapshot.snapshot_id, plain),
             ).fetchone()[0]
-            == 1
-        )
+            asset_backed = connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_entities WHERE snapshot_id = ? "
+                "AND cik_numeric = ? AND control_kind = 'asset_backed_issuer'",
+                (snapshot.snapshot_id, anchor),
+            ).fetchone()[0]
+        assert excluded == 0
+        assert asset_backed == 1
 
 
 def test_track_a_is_infeasible_on_amendment_purpose_and_nothing_else(
@@ -583,6 +613,12 @@ def test_the_offline_execution_policy_versions_come_from_their_owning_constants(
 
 
 def test_the_execution_rehearsal_report_never_claims_real_feasibility() -> None:
+    """Both real-path gates are generated separately, by name, and never merged.
+
+    Decision 073 **R30** and Decision 074 **R32** are independently governed and
+    independently auditable, and `real_builder_feasibility_proved` is a third, separate
+    claim that neither gate stands in for (Decision 075 §6).
+    """
     report = er.ExecutionRehearsalReport(
         outcomes=(),
         builder_derived_disposition="INFEASIBLE_AMENDMENT_PURPOSE_COVERAGE",
@@ -592,8 +628,20 @@ def test_the_execution_rehearsal_report_never_claims_real_feasibility() -> None:
     payload = json.loads(report.canonical_bytes())
     assert payload["real_builder_feasibility_proved"] is False
     assert payload["real_amendment_purpose_feasibility_gate"] == "OPEN"
+    assert payload["real_linked_amendment_feasibility_gate"] == "OPEN"
     assert payload["real_private_parse_authorization"] == "NO"
     assert payload["actual_network_requests"] == 0
+
+    # No merged or generic substitute stands in for either named gate.
+    assert "real_feasibility_gate" not in payload
+    gates = {key for key in payload if key.endswith("_feasibility_gate")}
+    assert gates == {
+        "real_amendment_purpose_feasibility_gate",
+        "real_linked_amendment_feasibility_gate",
+    }
+    # Additive completion of an already-governed status block: the report schema version
+    # is deliberately NOT bumped (Decision 075 §6.1).
+    assert payload["report_schema_version"] == "m3-3a-execution-rehearsal-report/1.0"
 
 
 def test_every_track_b_scenario_declares_the_governed_feasibility_source() -> None:
@@ -834,8 +882,17 @@ def test_the_rehearsal_command_writes_an_offline_execution_receipt(
     assert code == 0
     printed = capsys.readouterr().out
     assert "M3_3A_EXECUTION_REHEARSAL_PASSED_NO_REAL_EXECUTION_AUTHORIZED" in printed
-    assert "real builder feasibility proved : no" in printed
     assert str(tmp_path) not in printed
+
+    # Both real-path gates are printed separately and by name, beside the distinct
+    # builder-feasibility claim, and nothing merges them (Decision 075 §6.2).
+    for line in (
+        "real builder feasibility proved        : no",
+        "real amendment-purpose feasibility gate: OPEN",
+        "real linked-amendment feasibility gate : OPEN",
+    ):
+        assert line in printed
+    assert "real feasibility gate" not in printed
 
     document = inspect_receipt(evidence / "receipt.json")
     assert document["invocation_mode"] == ox.OFFLINE_EXECUTION_MODE
@@ -845,6 +902,8 @@ def test_the_rehearsal_command_writes_an_offline_execution_receipt(
     assert document["completion_status"] == "complete"
     payload = json.loads((evidence / "report.json").read_text(encoding="utf-8"))
     assert payload["real_builder_feasibility_proved"] is False
+    assert payload["real_amendment_purpose_feasibility_gate"] == "OPEN"
+    assert payload["real_linked_amendment_feasibility_gate"] == "OPEN"
 
 
 # ==========================================================================
@@ -955,6 +1014,49 @@ def test_a_superset_replacement_bundle_is_rejected() -> None:
     )
     assert not widened.packages
     assert len(widened.no_compatible_reserve) == 1
+
+
+def test_a_subset_replacement_bundle_is_rejected() -> None:
+    """**R31** / **E5**: exactness holds in the *narrowing* direction too.
+
+    The accepted M2.3 reserve suite already proves strict-subset rejection at the
+    contribution-set level. This is the M3.3 I/R-level proof, taken through the **same**
+    accepted ``build_reserve_packages`` entry point that E5 uses, so the M3.3 suite
+    itself directly proves **both** directions rather than inheriting one of them. No
+    reserve-signature logic is duplicated and ``reserve_selector.py`` is untouched.
+
+    The exact-match control matters: it proves the two-accession target shape *is*
+    coverable, so the strict-subset rejection is caused by the narrowing and not by an
+    unbuildable fixture.
+    """
+    target, spare = 4_300_001, 4_300_002
+    entities = [er._reserve_entity(cik) for cik in (target, spare)]
+    target_bundle = [er._reserve_accession(target, y, s) for y, s in ((2018, 1), (2019, 2))]
+    spare_bundle = [er._reserve_accession(spare, y, s) for y, s in ((2018, 3), (2019, 4))]
+    selected = [item.accession_plain for item in target_bundle]
+
+    exact = er._reserve_construction(
+        entities,
+        [*target_bundle, *spare_bundle],
+        target_cik=f"{target:010d}",
+        selected_plains=selected,
+    )
+    assert len(exact.packages) == 1
+    assert not exact.no_compatible_reserve
+    covering = {item.accession_plain for item in exact.packages[0].accessions}
+    assert covering == {item.accession_plain for item in spare_bundle}
+
+    narrowed = er._reserve_construction(
+        entities,
+        [*target_bundle, spare_bundle[0]],
+        target_cik=f"{target:010d}",
+        selected_plains=selected,
+    )
+    # Premise: the surviving replacement's whole bundle is a strict subset of the one
+    # that matched exactly -- nothing else about the pool changed.
+    assert {spare_bundle[0].accession_plain} < covering
+    assert not narrowed.packages
+    assert len(narrowed.no_compatible_reserve) == 1
 
 
 def test_a_self_referential_amendment_parent_stays_unresolved() -> None:

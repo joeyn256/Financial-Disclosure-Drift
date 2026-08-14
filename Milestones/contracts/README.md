@@ -1,15 +1,22 @@
 # Milestones/contracts/ — purpose and structure
 
 
-> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, AND NO REAL EXECUTION IS
-> AUTHORIZED.** Accepted [Decision 070](../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED, REHEARSED, AND CORRECTED AFTER
+> ULTRAREVIEW; THE CORRECTED TARGET IS PENDING A FRESH READ-ONLY REREVIEW; AND NO REAL
+> EXECUTION IS AUTHORIZED.** Accepted [Decision 070](../../Docs/Decisions/decision_070_m3_3_i_r_implementation_authorization.md)
 > issued the bounded M3.3-I/R authority; accepted Decisions
-> [071](../Docs/Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
-> [072](../Docs/Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
-> [073](../Docs/Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
-> and [074](../Docs/Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
+> [071](../../Docs/Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
+> [072](../../Docs/Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md),
+> [073](../../Docs/Decisions/decision_073_m3_3_rehearsal_snapshot_bifurcation_and_amendment_purpose_blocker.md),
+> and [074](../../Docs/Decisions/decision_074_m3_3_e5_reserve_rehearsal_and_real_linkage_gate.md) govern
 > that same stage. **The M3.3A execution rehearsal E1–E8 has now been run and passes**, the **R28**
-> bridge is clean, and the mutation campaign M1–M38 is fully killed. Every statement below that says
+> bridge is clean, and the mutation campaign M1–M38 is fully killed. **The independent read-only
+> ultrareview of the frozen executable target `6f87abc…` then returned BLOCKER 0 / MAJOR 0 /
+> MINOR 3**, and accepted
+> [Decision 075](../../Docs/Decisions/decision_075_m3_3_i_r_ultrareview_bounded_correction.md)
+> authorized and applied the bounded correction of those three findings. **The corrected target
+> has NOT yet passed a rereview and no acceptance is complete** — a fresh read-only
+> ultrareview-rereview against the corrected SHA is the next act. Every statement below that says
 > M3.3 has not begun, that its implementation is unauthorized, that the next act is a separate
 > M3.3-I/R packet, or that the E1–E8 rehearsal has not been run is **historical**. **Still true and
 > unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate; the census
@@ -321,8 +328,11 @@ authority.
   after the fresh independent review FAILED (immutable artifact
   [`Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md`](../../Docs/m3/reviews/m3_3_corrected_contract_independent_review_c8acfef.md)),
   issuing **R17** (the exact fifteen-table E0 persistence footprint), **R18** (per-planned-source
-  E0 dispositions; the 70 full-index sources category C), and clarification **R16-C1** (resolution
-  contributor membership). The fresh independent rereview of that corrected text then **PASSED**
+  E0 dispositions; the 70 full-index sources category C — ***narrowly superseded by accepted
+  [Decision 072](../../Docs/Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md)
+  §2, Ruling R22: `sec_full_index_company` is candidate-substantive, category **A** when usable and
+  **B** when accepted unavailable, and **never C**; R18's disposition mechanics otherwise stand***),
+  and clarification **R16-C1** (resolution contributor membership). The fresh independent rereview of that corrected text then **PASSED**
   (B0/M0/MIN0/OBS1), and **accepted Decision 069 recorded the owner acceptance**, disposing OBS-R1
   as a nonblocking historical narrative erratum on Decision 068 §3.1. **No owner ruling is open**;
   four inputs stay deferred to named owner gates (**OR-6**, **OR-7**, **OR-9**, **OR-11**). Per the

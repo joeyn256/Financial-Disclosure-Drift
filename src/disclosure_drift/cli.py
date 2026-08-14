@@ -1334,6 +1334,11 @@ _M3_COMMAND_VERSIONS: Final[Mapping[str, str]] = {
     "m3 rehearse-execution": "m3.3a/1.0",
 }
 
+#: Label column for the ``m3 rehearse-execution`` summary. Wide enough for the longest
+#: label — the amendment-purpose real-path gate — so every gate keeps its own aligned,
+#: independently greppable line rather than being abbreviated or merged.
+_M3_3A_SUMMARY_LABEL_WIDTH: Final = 39
+
 #: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
 #: the command set is complete and each **refuses**: the owner gate it names has not been
 #: issued, and no acceptance, rehearsal, suite, commit, or tag issues one.
@@ -1684,6 +1689,11 @@ def _m3_rehearse_execution_command(
         if not outcome.passed:
             print(f"       {outcome.detail}")
 
+    # Both real-path gates are printed separately and by name, read from the generated
+    # payload so the printed summary and the evidence report can never disagree. They are
+    # never merged into one line, and neither replaces the builder-feasibility claim
+    # (Decision 073 **R30**, Decision 074 **R32**, Decision 075 §6.2).
+    payload = report.as_payload()
     print("\nExecution rehearsal summary.")
     for label, value in (
         ("scenarios run", str(len(report.outcomes))),
@@ -1696,10 +1706,18 @@ def _m3_rehearse_execution_command(
             "yes" if report.accepted_selector_feasible_on_rehearsal_snapshot else "no",
         ),
         ("real builder feasibility proved", "no"),
+        (
+            "real amendment-purpose feasibility gate",
+            str(payload["real_amendment_purpose_feasibility_gate"]),
+        ),
+        (
+            "real linked-amendment feasibility gate",
+            str(payload["real_linked_amendment_feasibility_gate"]),
+        ),
         ("actual network requests", "0"),
         ("evidence reference", report.evidence_reference),
     ):
-        print(f"  {label:<32}: {value}")
+        print(f"  {label:<{_M3_3A_SUMMARY_LABEL_WIDTH}}: {value}")
 
     evidence_written = _write_m3_artifact_once(
         report.canonical_bytes(),
@@ -1707,7 +1725,7 @@ def _m3_rehearse_execution_command(
         relative=args.evidence_out,
         description="execution-rehearsal evidence report",
     )
-    print(f"  evidence written                : {args.evidence_out}")
+    print(f"  {'evidence written':<{_M3_3A_SUMMARY_LABEL_WIDTH}}: {args.evidence_out}")
 
     receipt = ExecutionReceipt(
         command_name="m3 rehearse-execution",
@@ -1744,8 +1762,9 @@ def _m3_rehearse_execution_command(
         # above and by its own content-derived reference, so nothing is lost.
     )
     written = _write_m3_receipt(receipt, evidence_root=evidence_root, relative=args.receipt_out)
-    print(f"  receipt written                 : {args.receipt_out or written.name}")
-    print(f"  receipt_id                      : {receipt.receipt_id}")
+    name = args.receipt_out or written.name
+    print(f"  {'receipt written':<{_M3_3A_SUMMARY_LABEL_WIDTH}}: {name}")
+    print(f"  {'receipt_id':<{_M3_3A_SUMMARY_LABEL_WIDTH}}: {receipt.receipt_id}")
 
     if not report.passed:
         logger.error("m3 rehearse-execution: a scenario failed; the phase does not pass")

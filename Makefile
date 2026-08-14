@@ -5,14 +5,24 @@ BIN := $(VENV)/bin
 .DEFAULT_GOAL := help
 .PHONY: help venv install lint lint-changed format format-check typecheck typecheck-fast \
 	typecheck-stop test test-parallel test-cov validate cohorts \
-	secrets hygiene sqlite-check sec-validate sec-help check fast context stage-gate clean
+	secrets hygiene sqlite-check sec-validate sec-help \
+	check check-fast fast context stage-gate clean
 
 # Extra arguments for the pytest targets, e.g.
 #   make test PYTEST_ARGS="tests/unit/test_cohorts.py -k frozen"
 PYTEST_ARGS ?=
-# Worker count for the parallel target. `auto` measured fastest on an 8-core machine;
-# override for a busier one, e.g. `make test-parallel WORKERS=4`.
-WORKERS ?= auto
+# Worker count for the parallel targets (Decision 076 R35, "Seven-Worker Full-Suite Development
+# Standard"). Seven is the measured local optimum on the project owner's 8-core machine, not a
+# universal constant: it is a plain `?=` default precisely so a busier machine or a CI runner with
+# different core topology can choose its own, e.g. `make test-parallel WORKERS=4`.
+WORKERS ?= 7
+# xdist scheduling mode. `worksteal` seeds every worker up front and then re-balances whenever one
+# runs dry, so a worker that draws the long subprocess tests does not become the critical path.
+# Measured at WORKERS=7 on this repository: worksteal 60.75s, load 72.68s, both 3949 passed /
+# 1 skipped. `loadfile` is deliberately not used -- grouping by file pins the two large modules
+# (test_m3_acquisition.py, test_m3_cli.py) to single workers and makes them the bottleneck.
+# Override with `make test-parallel DIST=load`.
+DIST ?= worksteal
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -47,11 +57,14 @@ typecheck-fast: ## Type-check via the mypy daemon (development loop only)
 typecheck-stop: ## Stop the mypy daemon
 	-$(BIN)/dmypy stop
 
-test: ## Run the test suite
+test: ## Run the test suite serially (the reference path)
+	@# The serial reference execution. Nothing may remove it: xdist is an optimization, and a
+	@# suite that is only ever observed under a scheduler is a suite whose isolation is assumed
+	@# rather than checked. Debugging, `--pdb`, and any parallel/serial disagreement start here.
 	$(BIN)/pytest $(PYTEST_ARGS)
 
-test-parallel: ## Run the test suite across xdist workers (WORKERS=auto)
-	$(BIN)/pytest -n $(WORKERS) $(PYTEST_ARGS)
+test-parallel: ## Run the test suite across xdist workers (WORKERS=7, DIST=worksteal)
+	$(BIN)/pytest -n $(WORKERS) --dist $(DIST) $(PYTEST_ARGS)
 
 test-cov: ## Run the test suite with coverage
 	$(BIN)/pytest --cov --cov-report=term-missing $(PYTEST_ARGS)
@@ -81,12 +94,23 @@ fast: lint-changed typecheck-fast ## Fast development validation (changed-file R
 	@# Deliberately does not run the suite: pass the tests you are working on, e.g.
 	@#   make test PYTEST_ARGS="tests/unit/test_sec_parsers_and_census.py"
 	@echo "fast validation passed: changed-file Ruff, mypy daemon."
-	@echo "Run 'make check' before accepting work; it is the acceptance gate."
+	@echo "Run 'make check-fast' before accepting work; it is the acceptance gate."
 
-check: lint format-check typecheck test secrets hygiene validate cohorts sec-help ## Run every gate
+check: lint format-check typecheck test secrets hygiene validate cohorts sec-help ## Run every gate serially
 	@# Gates run sequentially and in a fixed order so a failure is attributable to one
 	@# named gate. Running them concurrently measured 0.46s -> 0.21s, which does not
 	@# justify interleaving their output.
+	@#
+	@# The conservative reference gate: identical gate set to `check-fast`, serial pytest.
+	@# Reach for it when a parallel and a serial run disagree, when a test-isolation symptom
+	@# appears, or when a reviewer wants the unscheduled execution order.
+
+check-fast: lint format-check typecheck test-parallel secrets hygiene validate cohorts sec-help ## Run every gate, parallel pytest (recommended)
+	@# Same substantive gate set as `check`, in the same order, differing in exactly one
+	@# respect: pytest runs across $(WORKERS) xdist workers instead of serially. No gate is
+	@# dropped, relaxed, or reordered, so a green `check-fast` covers what a green `check`
+	@# covers. Decision 076 R35 makes this the routine full-validation command; `check`
+	@# remains available unchanged as the serial reference.
 
 context: ## Print a fast, read-only repository/state snapshot (branch, HEAD, stage, blocker)
 	./scripts/context_snapshot.sh

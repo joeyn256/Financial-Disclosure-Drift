@@ -5,7 +5,7 @@ BIN := $(VENV)/bin
 .DEFAULT_GOAL := help
 .PHONY: help venv install lint lint-changed format format-check typecheck typecheck-fast \
 	typecheck-stop test test-parallel test-cov validate cohorts \
-	secrets hygiene sqlite-check sec-validate sec-help \
+	secrets hygiene links decision-refs sqlite-check sec-validate sec-help \
 	check check-fast fast context stage-gate clean
 
 # Extra arguments for the pytest targets, e.g.
@@ -81,6 +81,12 @@ secrets: ## Scan tracked project files for secrets
 hygiene: ## Verify no raw data, database, release, or personal path is tracked
 	$(BIN)/python scripts/check_repo_hygiene.py
 
+links: ## Verify every relative Markdown link resolves to a tracked path
+	$(BIN)/python scripts/check_markdown_links.py
+
+decision-refs: ## Verify every decision section citation names a section that exists
+	$(BIN)/python scripts/check_decision_section_refs.py
+
 sqlite-check: ## Report the SQLite runtime version (floor 3.37 for STRICT tables)
 	$(BIN)/python -c "import sqlite3, sys; print(sys.version.split()[0], sqlite3.sqlite_version)"
 
@@ -96,7 +102,7 @@ fast: lint-changed typecheck-fast ## Fast development validation (changed-file R
 	@echo "fast validation passed: changed-file Ruff, mypy daemon."
 	@echo "Run 'make check-fast' before accepting work; it is the acceptance gate."
 
-check: lint format-check typecheck test secrets hygiene validate cohorts sec-help ## Run every gate serially
+check: lint format-check typecheck test secrets hygiene links decision-refs validate cohorts sec-help ## Run every gate serially
 	@# Gates run sequentially and in a fixed order so a failure is attributable to one
 	@# named gate. Running them concurrently measured 0.46s -> 0.21s, which does not
 	@# justify interleaving their output.
@@ -105,7 +111,7 @@ check: lint format-check typecheck test secrets hygiene validate cohorts sec-hel
 	@# Reach for it when a parallel and a serial run disagree, when a test-isolation symptom
 	@# appears, or when a reviewer wants the unscheduled execution order.
 
-check-fast: lint format-check typecheck test-parallel secrets hygiene validate cohorts sec-help ## Run every gate, parallel pytest (recommended)
+check-fast: lint format-check typecheck test-parallel secrets hygiene links decision-refs validate cohorts sec-help ## Run every gate, parallel pytest (recommended)
 	@# Same substantive gate set as `check`, in the same order, differing in exactly one
 	@# respect: pytest runs across $(WORKERS) xdist workers instead of serially. No gate is
 	@# dropped, relaxed, or reordered, so a green `check-fast` covers what a green `check`

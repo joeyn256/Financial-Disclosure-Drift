@@ -622,6 +622,31 @@ the corrected SHA must return B0/M0/MIN0 first.
 | Whether the original implementer evidence was edited | **Decision 075 §7 — no.** [`m3_3_i_r_rehearsal_6f87abc.md`](m3/reviews/m3_3_i_r_rehearsal_6f87abc.md) is byte-unchanged historical evidence for target `6f87abc`; the corrected target gets its **own** new artifact |
 | Whether anything about the real path changed | **Decision 075 §8 — no.** Both gates stay **OPEN** and unmerged, acceptance-ordering adequacy stays **PENDING FUTURE AUTHORIZED E0 VERIFICATION**, and **E0/E1/E2 remain unauthorized** |
 
+## Decision 076 — ACCEPTED (M3.3 pre-acceptance infrastructure optimization)
+
+[Decision 076](Decisions/decision_076_m3_3_preacceptance_infrastructure_optimization.md)
+(`ACCEPTED — OWNER M3.3 PRE-ACCEPTANCE INFRASTRUCTURE OPTIMIZATION 2026-08-14`) is the **seventh
+M3.3 record** and the only one that governs **infrastructure rather than methodology**. It changes
+no research definition, no selector, no quota, no schema, no evidence identity, and no
+authorization; it changes how the existing suite is scheduled and adds tooling. Both real-path
+gates remain **OPEN**, and it is **not** a Fable acceptance.
+
+| Question | Controlling record |
+|---|---|
+| The local full-suite standard | **Decision 076 §3 — R35, the Seven-Worker Full-Suite Development Standard.** Seven workers, three-run median below 80.0 seconds, achieved with no test deleted, skipped, `xfail`ed, mocked for timing, or otherwise weakened. Seven is a **measured local optimum, not a constant** |
+| Whether the serial path survives | **Decision 076 §4 — yes, and it is never deleted.** `make test` and `make check` keep serial pytest; `make check-fast` is the same gate set with the parallel path substituted. No `-n` enters `addopts`, so a bare `pytest` stays serial |
+| Which xdist mode, and why | **Decision 076 §4** — `worksteal`, chosen by measurement (60.75s against `load`'s 72.68s at seven workers, both 3949 passed / 1 skipped). **`loadfile` is prohibited** for this repository: grouping by file pins the two large modules to single workers |
+| What `make links` checks | **Decision 076 §5** — every relative Markdown link resolves to a tracked path. Acceptance invariant `UNALLOWED_BROKEN_LINKS = 0`; **no link total is frozen** |
+| What `make decision-refs` checks | **Decision 076 §6** — every `Decision NNN section N` citation names a section that exists, across the **three** section conventions the records actually use: numbered headings, ordered-list items under a numbered heading, and numbered lines inside a fenced verbatim owner instrument. Acceptance invariant `INVALID_DECISION_SECTION_REFS = 0` |
+| Whether a gate may be made green by editing history | **Decision 076 §7 — no.** Every exception is exact — one file plus one target, or one file plus one decision-and-section — with a reason and a governing status. **No wildcard, no pattern, no per-line escape marker**, and an entry matching nothing **fails** the gate |
+| Where the audit tools live and what they may do | **Decision 076 §8 and §9.** `scripts/verify_target.py` is read-only and hard-codes no milestone SHA. The mutation runner lives at `scripts/dev/`, is **never** imported by the package, refuses the authoritative repository unless explicitly and safely permitted, proves source isolation, restores from in-memory bytes, and checks residue |
+| Where the M1–M38 definitions come from | **Decision 076 §9** — **recovered** from [`m3_3_i_r_mutation_campaign_06bb47a.md`](m3/reviews/m3_3_i_r_mutation_campaign_06bb47a.md), never invented, per Decision 075 §6. That artifact is read and never written, and a definition that cannot be recovered exactly stops for owner referral |
+| Whether CI switches to seven workers | **Decision 076 §10 — no.** The measured optimum is machine-specific; CI keeps its serial run and is not altered by this stage. The Makefile accepts a worker override so CI can choose its own value once measured **there** |
+| What is explicitly deferred | **Decision 076 §11** — eight items including the `evidence_reference` byte-digest question, all returned as **DEFERRED — REQUIRES SEPARATE OWNER ARCHITECTURE DECISION** |
+| The adopted review-process rules | **Decision 076 §12** — **P1–P7**: invariants over incidental totals; real versus synthetic evidence root; defect-in-correction handling; claim-provenance labels; gate timings; machine-readable first; mechanical A/B branches. **Process rules, not methodology** |
+| What the new gates found on their first run | **Decision 076 §13** — four **OPEN DEFECTS** in live M3.3-I/R source and tests of the same class as MIN-A, plus seven wrong citations inside immutable accepted records and two known-broken links. **None is corrected by Decision 076**; correcting the live four needs its own bounded owner authorization |
+| Whether all five MIN-A references are mechanically detectable | **Decision 076 §13 — no, three of five.** Decision 075 genuinely **has** a section 6, so the two bare section-6 citations were pointing at the wrong section rather than a missing one. An existence gate cannot catch that, and a test keeps the limitation visible |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

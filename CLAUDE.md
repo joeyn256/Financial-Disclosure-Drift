@@ -178,15 +178,22 @@ stage contract for the current position; do not treat this summary as the live r
 
 ## Workflow modes
 
-Three `make` targets cover the normal development cycle. Each just invokes the Makefile — see there
+Four `make` targets cover the normal development cycle. Each just invokes the Makefile — see there
 for exact commands; they are not duplicated here.
 
 - **Fast development loop — `make fast`.** Changed-file Ruff plus the mypy daemon. Deliberately does
   not run the test suite; pass the specific tests you're working on via
   `make test PYTEST_ARGS="tests/..."`. Not an acceptance gate.
-- **Full acceptance validation — `make check`.** Every gate in fixed order: lint, format check, full
-  mypy, full test suite, secret scan, hygiene check, config validation, cohort print, SEC help. This
-  is the acceptance gate — run it before considering work done.
+- **Full acceptance validation — `make check-fast`.** Every gate in fixed order: lint, format check,
+  full mypy, full test suite, secret scan, hygiene check, Markdown link check, decision
+  section-reference check, config validation, cohort print, SEC help. The suite runs across
+  `WORKERS` xdist workers, defaulting to 7 (Decision 076 R35). This is the acceptance gate — run it
+  before considering work done.
+- **Conservative serial reference — `make check`.** The identical gate set with serial pytest
+  instead of the parallel path. Nothing is dropped or relaxed in either direction; the two differ
+  only in how the suite is scheduled. Reach for it when a parallel and a serial run disagree, when
+  a test-isolation symptom appears, or when a reviewer wants the unscheduled execution order.
+  `make test` likewise stays serial and is never removed.
 - **Context snapshot — `make context`.** Runs `scripts/context_snapshot.sh`: a fast, read-only report
   of repository root, branch, HEAD, origin/main comparison, working-tree status, checkpoint tags,
   latest migration, latest decision record, and the current stage/blocker from `Milestones/STATUS.md`.

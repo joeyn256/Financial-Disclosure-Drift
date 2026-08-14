@@ -225,11 +225,25 @@ mypy src
 pytest
 python scripts/check_no_secrets.py
 python scripts/check_repo_hygiene.py
+python scripts/check_markdown_links.py
+python scripts/check_decision_section_refs.py
 ```
 
-`make check` runs all of the above plus both CLI validation commands, sequentially and in a fixed
-order so a failure is attributable to one named gate. CI runs the same sequence on pull requests and
-pushes to `main`.
+`make check-fast` runs all of the above plus both CLI validation commands, sequentially and in a
+fixed order so a failure is attributable to one named gate, with the suite spread across `WORKERS`
+xdist workers (default 7, per Decision 076 R35). It is the recommended acceptance command.
+
+`make check` runs the identical gate set with serial `pytest`. The two differ only in how the suite
+is scheduled: no gate is added, dropped, relaxed, or reordered between them, and `make test` stays
+serial too. Use the serial path when a parallel and a serial run disagree, when a test-isolation
+symptom appears, or when you want the unscheduled execution order. Override the worker count with
+`make check-fast WORKERS=4`; CI runs its own serial sequence on pull requests and pushes to `main`.
+
+The last two scripts are the governance gates added by Decision 076: `make links` verifies every
+relative Markdown link resolves to a tracked path, and `make decision-refs` verifies every
+`Decision NNN section N` citation names a section that exists. Both refuse to be made green by
+editing accepted history, so each carries an exact, individually justified exception list rather
+than any wildcard.
 
 Fast development loop — `make fast` runs the first two:
 

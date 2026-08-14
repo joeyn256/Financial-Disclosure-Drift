@@ -702,6 +702,34 @@ owner gate.
 | Which inferences stay prohibited | **Decision 078 §4** — purpose never from `/A` alone, XBRL presence, timing, sequence, company name, filename heuristic, amendment count, linkage state, or size; parentage never from `/A` alone, same CIK, same report date, date proximity, filing or accession order, document name, or filename. Both quotas stay hard — **8** linked-amendment entities, **3** purpose categories |
 | What happens if a gate returns `NO` | **Decision 078 §5** — the minimum additional acquisition is **designed and not executed**, as a bounded option matrix, with **one shared source explicitly preferred** where both gates need one and sharing never forced |
 
+*(Current state: **Decision 078 §3's ruling is numbered R39**, and **Decision 079 §3 independently
+numbers a different ruling R39**. Neither amends the other. Always write **Decision 078 R39** or
+**Decision 079 R39** — a bare "R39" is ambiguous and prohibited. See Decision 079 §1.)*
+
+## Decision 079 — ACCEPTED (the pre-E0 ephemeral real-source parse and amendment-inventory audit)
+
+[Decision 079](Decisions/decision_079_m3_3_pre_e0_ephemeral_real_source_parse_audit.md)
+(`ACCEPTED — OWNER PRE-E0 EPHEMERAL REAL-SOURCE PARSE / AMENDMENT-INVENTORY AUDIT AUTHORIZATION
+2026-08-14`) is the **tenth M3.3 record**. It authorizes **one** bounded pre-E0 audit that measures
+the **real** amendment-candidate population from the **already acquired** accepted M3.2 raw objects,
+and records **R39 (Decision 079)**, **R40**, **R41**, and **P8**. It does nothing else.
+
+**It closes neither real-path gate**, and it authorizes no real execution: **M3.3-E0 durable
+parsing**, M3.3-E1, M3.3-E2, and M3.4 each remain a separate, unissued owner gate.
+
+| Question | Controlling record |
+|---|---|
+| What the durable catalog's zeros mean | **Decision 079 §2 — a structural zero, not an empirical one.** No parse has ever run, so `DURABLE_PARSED_AMENDMENT_POPULATION = 0` while `REAL_RAW_SOURCE_AMENDMENT_POPULATION = NOT YET MEASURED`. Measuring it requires **no new SEC request** |
+| How to treat a hash/validator contradiction | **Decision 079 §3 — R39.** Byte-exact frozen SHA-256 plus a contradictory ad-hoc field-level checker is `VALIDATOR_CONFLICT`, **not** `ARTIFACT_IDENTITY_MISMATCH`, until a correct structured parse confirms it. A hash proves the bytes, not every semantic assertion — but a weaker substring/search checker may never overrule byte-exact identity |
+| Which R39 is being cited | **Decision 079 §1 — always decision-qualified.** Decision 078 R39 is the read-only source audit; Decision 079 R39 is the validator-conflict rule. A bare "R39" is prohibited |
+| What an ephemeral parse may do | **Decision 079 §4 — R40.** Accepted production parsers over accepted M3.2 raw objects, producing temporary records in Python memory or session scratch **outside** the repository and `EV_ROOT`. **Never** written to `census_parser_runs`, `census_parsed_records`, `census_accessions`, `census_accession_observations`, any candidate or selection table, or any accepted catalog. **No SQLite writer, no migration, no durable parser-state change** |
+| What the audit output is worth | **Decision 079 §5 — R41.** Audit values only. They constitute no E0 census state, candidate record, evidence, resolution, selection eligibility, purpose classification, amendment relationship, or manifest input, and become durable real-pilot evidence only if a separately authorized stage persists and validates them |
+| Which sources and forms are in scope | **Decision 079 §§7.3, 7.5** — only raw objects bound to accepted M3.2 plan sources by `census_plan_sources` / `census_source_observations` provenance; amendment-eligible forms are exactly **`10-K/A`** and **`10-KT/A`** against original-compatible **`10-K`** and **`10-KT`**, and no other form is added |
+| Which parsers the audit must use | **Decision 079 §7.4** — the accepted pure parsers `submissions.py` and `full_index.py` with the accepted canonical normalization. **No new independent SEC parser**, no OCR, and no regex over raw JSON as a parser substitute. Machine-readable first (Decision 076 §12, P6) |
+| What the audit may not conclude | **Decision 079 §7.7** — no purpose classification, no keyword inference from `primaryDocDescription`, no parent selection, no `amendment_relationship`, no date-proximity or accession-order linkage. Full index corroborates but **never overwrites** submissions facts, and no index-only accession becomes a candidate. Both quotas stay hard — **8** linked-amendment entities, **3** purpose categories |
+| What nonmutation must prove | **Decision 079 §8** — HEAD, tree, receipt identity, raw-object count, catalog logical counts, main-DB and WAL size and mtime all unchanged; the three census counts still **0**; `parser_state` still `not_started` across all **76** plan sources. **SHM is a non-governed reader artifact** whose mtime may move under a genuine read-only WAL connection |
+| What was returned to the owner unresolved | **Decision 079 §10** — one **OBS-1**: the R39 ruling-number collision, recorded with a mandatory citation convention rather than silently renumbering an owner-issued ruling |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

@@ -1,4 +1,4 @@
-"""The IN-3 2009/2010 support-target pair matrix (Decision 071 §6; §17 item L).
+"""The IN-3 2009/2010 support-target pair matrix (Decision 071 §6).
 
 Every condition of the pair rule is negated **one at a time**, so no single condition can
 be dropped without a test failing. A half pair -- either leg selected without the other --

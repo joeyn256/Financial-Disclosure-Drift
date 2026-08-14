@@ -61,8 +61,12 @@ BOUNDARY_CONTROL_KINDS: Final[tuple[str, ...]] = (
 
 #: Decision 014 §4 excludes these from the operating-financial industry family and states
 #: that they "map to the RIC/ETF **boundary-control** category": 6726 is named there
-#: explicitly, and 6722 is the SEC SIC list's only open-end fund code. The set is
-#: enumerated here rather than widened by proximity, and no competing SIC list exists.
+#: explicitly, and 6722 is the SEC SIC list's only open-end fund code. **R26**
+#: (Decision 072 §6) is the later exact authority over the set itself: it is exactly these
+#: two as the mechanical enumeration of the accepted open-end / closed-end
+#: investment-office wording, it is **not broadened by proximity**, no competing SIC list
+#: exists, and **6798 is not included** -- accepted policy treats REITs as an
+#: engineering-only operating-financial matter, not the RIC/ETF control.
 RIC_ETF_SIC_CODES: Final[frozenset[str]] = frozenset({"6722", "6726"})
 
 #: Decision 014 §4: "6770 (blank checks), which maps to the shell/blank-check

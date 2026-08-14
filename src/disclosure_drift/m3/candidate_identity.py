@@ -179,7 +179,7 @@ CLASSIFICATION_COLUMNS_BY_DIMENSION: Final[Mapping[str, tuple[str, ...]]] = {
     "amendment_purpose": ("amendment_purpose_category",),
 }
 
-#: **R21** (Decision 071 §8). The one dimension whose resolved value binds two persisted
+#: **R21** (Decision 071 §5). The one dimension whose resolved value binds two persisted
 #: governed facts, and therefore renders through the accepted canonical-JSON serializer
 #: rather than as a bare scalar. Every other dimension keeps its exact canonical
 #: persisted scalar.

@@ -171,7 +171,7 @@ PROHIBITED_IMPORT_PREFIXES: Final[tuple[str, ...]] = (
 #: (accepted OR-2 mapping §§D.2-D.6, §E). Category **A** when the accepted source is
 #: usable, category **B** when it is accepted as failed or unavailable.
 #:
-#: ``sec_full_index_company`` is here by **R22** (Decision 072 §4), correcting the
+#: ``sec_full_index_company`` is here by **R22** (Decision 072 §2), correcting the
 #: Decision 068 §4 disposition. ``company.idx`` emits one row per registrant per
 #: accession, and grouping those rows by canonical accession is the accepted M2.3 way to
 #: establish co-registrants -- the submissions documents alone cannot. The earlier

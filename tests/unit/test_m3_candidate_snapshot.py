@@ -553,7 +553,7 @@ def test_an_unestablished_sic_authority_fails_every_sic_classification_closed(
 
 
 def test_a_boundary_control_sic_reaches_the_candidate_row(catalog: Path, tmp_path: Path) -> None:
-    """R20 §6.1: the RIC/ETF predicate, end to end through the builder."""
+    """R20 (Decision 071 §4): the RIC/ETF predicate, end to end through the builder."""
     with connect(catalog, writer=True) as connection, transaction(connection) as active:
         active.execute(
             "UPDATE census_registrant_observations SET value_text = '6726' "
@@ -577,7 +577,7 @@ def test_a_boundary_control_sic_reaches_the_candidate_row(catalog: Path, tmp_pat
 
 
 def test_an_entity_type_string_can_never_create_a_control(catalog: Path, tmp_path: Path) -> None:
-    """R20 §7: the removed ``entityType == kind`` mapping must stay removed."""
+    """R20 (Decision 071 §4): the removed ``entityType == kind`` mapping stays removed."""
     with connect(catalog, writer=True) as connection, transaction(connection) as active:
         active.execute(
             "UPDATE census_registrant_observations SET value_text = 'foreign_private_issuer' "
@@ -760,7 +760,7 @@ def _materialize_full_index(
 def test_a_full_index_co_registrant_reaches_the_candidate_registrant_rows(
     catalog: Path, tmp_path: Path
 ) -> None:
-    """Decision 072 §10: the corrected route, through production code end to end."""
+    """Decision 072 §3: the corrected route, through production code end to end."""
     _materialize_full_index(
         catalog, tmp_path, (("ALPHA TECHNOLOGIES INC", 1), ("CO REGISTRANT LLC", 2))
     )

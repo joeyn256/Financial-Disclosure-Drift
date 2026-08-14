@@ -219,7 +219,7 @@ def test_a_resolved_value_with_no_contributor_fails_closed() -> None:
 
 
 # --------------------------------------------------------------------------
-# R21 -- the XBRL composite resolved value (Decision 071 §8)
+# R21 -- the XBRL composite resolved value (Decision 071 §5)
 # --------------------------------------------------------------------------
 
 

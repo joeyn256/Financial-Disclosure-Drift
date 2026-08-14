@@ -197,7 +197,7 @@ def classify_history(
     eligible_original_annual_reports: int,
     evidence_available: bool,
 ) -> tuple[str | None, EvidenceLevel]:
-    """Decision 014 §5 as **R19 §4.13** operationalizes it.
+    """Decision 014 §5 as **R19**'s history stratum (Decision 071 §3.1) operationalizes it.
 
     ``eventful`` needs one affirmatively observed event flag. ``stable`` needs every
     Decision 014 §5 condition to hold mechanically, which -- because each of those

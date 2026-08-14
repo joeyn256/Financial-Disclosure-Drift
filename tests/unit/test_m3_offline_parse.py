@@ -76,7 +76,7 @@ def _observation(store_path: str, **overrides: object) -> object:
 
 
 def test_the_full_index_family_is_candidate_substantive() -> None:
-    """**R22** (Decision 072 §4), correcting the Decision 068 §4 disposition.
+    """**R22** (Decision 072 §2), correcting the Decision 068 §4 disposition.
 
     ``company.idx`` is the accepted M2.3 source for co-registrants, so its disposition
     follows accepted methodology rather than whatever route the current code exposes.
@@ -590,7 +590,7 @@ def test_no_observation_or_stored_object_is_added(
 
 
 # ==========================================================================
-# Group E: R23 full-index registrant materialization (Decision 072 §§5, 10)
+# Group E: R23 full-index registrant materialization (Decision 072 §3)
 # ==========================================================================
 
 

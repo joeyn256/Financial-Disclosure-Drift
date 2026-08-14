@@ -320,8 +320,8 @@ def _read_full_index_registrants(
 
     ``company.idx`` emits one row per registrant per accession, so grouping its accepted
     ``cik_padded`` observations by canonical accession is what establishes co-registrants
-    (Decision 072 §4). The submissions documents alone cannot: ``census_accessions``
-    carries one registrant CIK and one submitter CIK and no more.
+    (Decision 072 §3). The submissions documents alone cannot: ``census_accessions``
+    carries one registrant CIK and one submitter CIK and no more (Decision 072 §1).
 
     Identity is the canonical CIK and nothing else -- never a company name, never a row
     count. A malformed stored CIK fails the snapshot closed rather than contributing a
@@ -909,7 +909,7 @@ def _amendment_linkage(
 def _cohort_boundary(
     official_filing_date: str | None, acceptance_audit_date: str | None
 ) -> tuple[str, str, int, bool]:
-    """**R33** (Decision 074 §6) — the same-build cohort-boundary derivation.
+    """**R33** (Decision 074 §5) — the same-build cohort-boundary derivation.
 
     Decision 010 already fixes every input: the official filing date determines the
     authoritative temporal cohort, ``acceptance_date_sec`` determines the audit-only
@@ -1225,7 +1225,7 @@ def _candidate_form_universe(connection: sqlite3.Connection) -> frozenset[str]:
     exactly that reference table -- the eligible annual-report forms plus the
     control-evidence annual forms. ``census_accessions`` is deliberately wider: the
     accepted persistence path stores **every** form the submissions parser emits, and
-    **R20** §§6.2 and 6.4 read that wider history for the asset-backed and
+    **R20** (Decision 071 §4) reads that wider history for the asset-backed and
     foreign-private-issuer predicates.
 
     Bounding the candidate rows by the reference table is therefore reading the
@@ -1242,7 +1242,7 @@ def _candidate_form_universe(connection: sqlite3.Connection) -> frozenset[str]:
 
 
 def _submission_forms(connection: sqlite3.Connection) -> Mapping[int, frozenset[str]]:
-    """R20 §§6.2, 6.4 -- every exact form in each entity's stored submissions history.
+    """R20 (Decision 071 §4) -- every exact form in an entity's stored submissions history.
 
     Deliberately **not** restricted to the eligible annual-report universe or to the
     coverage window: the asset-backed and foreign-private-issuer predicates read the

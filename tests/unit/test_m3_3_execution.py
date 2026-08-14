@@ -112,9 +112,9 @@ def test_the_candidate_form_universe_is_the_reference_family(
     Proved directly on all three sides rather than inferred from a passing build: the
     row **exists** in the census / source-history layer, it **never** becomes a
     ``pilot_candidate_accessions`` row, and its exclusion is **reported** by form with
-    the expected deterministic count (CLAUDE.md rule 11). **R20** §6.2 still reads the
-    same row as source-history evidence, so the bound is on the candidate universe
-    only -- it does not blind the control predicates.
+    the expected deterministic count (CLAUDE.md rule 11). **R20**'s asset-backed
+    predicate (Decision 071 §4) still reads the same row as source-history evidence, so
+    the bound is on the candidate universe only -- it does not blind the predicates.
     """
     with connect(world.database, writer=False) as connection:
         census = connection.execute(
@@ -925,7 +925,7 @@ def test_the_ric_etf_sic_set_is_exactly_the_two_enumerated_codes() -> None:
 
 
 def test_an_amendment_alone_never_establishes_the_foreign_private_issuer_control() -> None:
-    """**R20** §6.4: the **original** forms only."""
+    """**R20** (Decision 071 §4): the **original** forms only."""
     from disclosure_drift.m3 import candidate_controls as controls
 
     amendment_only = controls.original_forms({"20-F/A", "40-F/A"})

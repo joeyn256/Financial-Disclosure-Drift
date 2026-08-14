@@ -186,7 +186,7 @@ def test_the_runner_lives_outside_the_package_tree() -> None:
 
 
 def test_every_definition_is_recovered_from_the_durable_record() -> None:
-    """All 38, with every field populated. Decision 076 §14's first requirement."""
+    """All 38, with every field populated -- recovered, never re-invented (Decision 076 §9)."""
     mutations = _campaign.recover_definitions(_ARTIFACT.read_text(encoding="utf-8"))
     assert len(mutations) == 38
     assert [m.mutation_id for m in mutations] == [f"M{n}" for n in range(1, 39)]
@@ -202,7 +202,7 @@ def test_every_definition_is_recovered_from_the_durable_record() -> None:
 
 
 def test_all_38_anchors_resolve_against_the_live_target() -> None:
-    """Decision 076 §14's second requirement, kept standing.
+    """Decision 076 §9's recovered definitions, held against the target they describe.
 
     A failure here does not mean the runner broke. It means the durable campaign record has
     stopped describing the executable target -- which is exactly the fact a reviewer needs before

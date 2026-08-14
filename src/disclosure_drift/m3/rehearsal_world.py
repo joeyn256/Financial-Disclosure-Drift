@@ -647,11 +647,11 @@ def _stipulate_census_facts(database: Path, design: WorldDesign) -> Mapping[str,
     ``amendment_relationship``: no accepted source field maps to that Decision 012
     canonical field, so an offline parse resolves it for no accession and the
     linked-amendment quota could not be exercised at all. The real-path consequence is
-    accepted **R32** (Decision 074 §4) and is recorded as an open gate, never as real
+    accepted **R32** (Decision 074 §3) and is recorded as an open gate, never as real
     feasibility.
 
     ``cohort_boundary_crossed`` is **no longer stipulated**: accepted **R33**
-    (Decision 074 §6) makes it a same-build production derivation from this build's own
+    (Decision 074 §5) makes it a same-build production derivation from this build's own
     resolved official filing date and acceptance audit date, so the filler originals
     become base-ineligible through the production rule rather than through a fixture.
     """

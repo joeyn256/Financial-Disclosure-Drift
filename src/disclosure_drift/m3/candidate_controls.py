@@ -1,4 +1,4 @@
-"""Boundary-control classification, under owner ruling **R20** (Decision 071 §6).
+"""Boundary-control classification, under owner ruling **R20** (Decision 071 §4).
 
 Decision 013 §3 and Decision 016 §2 froze the **four** boundary-control kinds; no
 accepted record said how a candidate is *established* as one. **R20 supplies that
@@ -19,14 +19,14 @@ kind                                    predicate
 ``foreign_private_issuer``                at least one **original** ``20-F`` or ``40-F``
 ======================================  ==================================================
 
-Overlap is not resolved by precedence, because R20 §6.5 forbids defining one: exactly
-one predicate assigns that kind, zero predicates means the candidate is not a boundary
-control, and more than one is a conflicting classification that can satisfy no
+Overlap is not resolved by precedence, because Decision 071 §4.1 forbids defining one:
+exactly one predicate assigns that kind, zero predicates means the candidate is not a
+boundary control, and more than one is a conflicting classification that can satisfy no
 control-kind quota until a later owner ruling resolves it.
 
 If a required control category cannot be supplied from the accepted candidate pool,
 **selection is infeasible**. The predicates are never loosened after seeing the pool,
-and acquisition is never reopened (R20 §6.5).
+and acquisition is never reopened (Decision 071 §4.1).
 """
 
 from __future__ import annotations
@@ -47,9 +47,11 @@ __all__ = [
 ]
 
 #: Migration ``0009``'s persisted vocabulary, which governs the stored contract. Decision
-#: 071 §6 describes the fourth kind as "foreign_private_issuer_annual_report_filer"; that
-#: is the same kind under its descriptive name, and the persisted value stays the
-#: schema's ``foreign_private_issuer`` because the migration is the schema authority.
+#: 071 §4 names the fourth kind ``foreign_private_issuer`` *(annual-report filer)*, and
+#: Decision 072 §7 (OBS-E) gives it the project-facing name
+#: "foreign_private_issuer_annual_report_filer"; that is the same kind under its
+#: descriptive name, and the persisted value stays the schema's
+#: ``foreign_private_issuer`` because the migration is the schema authority.
 BOUNDARY_CONTROL_KINDS: Final[tuple[str, ...]] = (
     "registered_investment_company_or_etf",
     "asset_backed_issuer",
@@ -67,10 +69,12 @@ RIC_ETF_SIC_CODES: Final[frozenset[str]] = frozenset({"6722", "6726"})
 #: **boundary-control** category".
 SHELL_BLANK_CHECK_SIC_CODES: Final[frozenset[str]] = frozenset({"6770"})
 
-#: R20 §6.2. Form metadata only -- no filing body, no narrative, no name heuristic.
+#: R20's asset-backed predicate (Decision 071 §4). Form metadata only -- no filing body,
+#: no narrative, no name heuristic.
 ASSET_BACKED_FORMS: Final[frozenset[str]] = frozenset({"10-D"})
 
-#: R20 §6.4. The **original** forms only; an amendment alone never satisfies it.
+#: R20's foreign-private-issuer predicate (Decision 071 §4). The **original** forms only;
+#: an amendment alone never satisfies it.
 FPI_ANNUAL_REPORT_FORMS: Final[frozenset[str]] = frozenset({"20-F", "40-F"})
 
 ControlStatus = Literal["not_a_control", "resolved", "conflicting"]
@@ -146,7 +150,8 @@ def original_forms(forms: Iterable[str]) -> frozenset[str]:
     """The exact original (non-amendment) forms in a submissions history.
 
     Applied before the FPI predicate so that a ``20-F/A`` with no original ``20-F``
-    cannot satisfy it (R20 §6.4). An amendment is recognized by the accepted ``/A``
-    suffix convention, which is the same rule ``census_accessions.is_amendment`` uses.
+    cannot satisfy it (R20, Decision 071 §4). An amendment is recognized by the accepted
+    ``/A`` suffix convention, which is the same rule ``census_accessions.is_amendment``
+    uses.
     """
     return frozenset(form for form in forms if not form.endswith("/A"))

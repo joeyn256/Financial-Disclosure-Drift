@@ -1,4 +1,7 @@
-"""R19 event-flag and R20 boundary-control matrices (Decision 071 §§4-7).
+"""R19 event-flag and R20 boundary-control matrices (Decision 071 §§3-4).
+
+`R19 §4.N` below names row *N* of the predicate table in Decision 071 §3, whose original
+`4.1`-`4.12` row labels the accepted record keeps. It is not Decision 071 §4, which is R20.
 
 The negative half of this module is the load-bearing half. R19 and R20 exist because the
 first-cut implementation inferred events and control kinds from free text; every
@@ -196,7 +199,7 @@ def test_every_registered_flag_is_reachable_by_some_predicate() -> None:
 
 
 # ==========================================================================
-# R19 §4.13 -- the history stratum
+# Decision 071 §3.1 -- the history stratum
 # ==========================================================================
 
 
@@ -270,7 +273,7 @@ def test_an_original_foreign_annual_report_satisfies_the_fpi_predicate(form: str
 
 @pytest.mark.parametrize("form", ["20-F/A", "40-F/A"])
 def test_an_amendment_alone_never_satisfies_the_fpi_predicate(form: str) -> None:
-    """R20 §6.4: do not count only an amendment."""
+    """R20 (Decision 071 §4): do not count only an amendment."""
     forms = controls.original_forms({form})
     assert _control(submission_forms=forms).control_kind is None
 
@@ -309,7 +312,7 @@ def test_zero_predicates_is_not_a_boundary_control() -> None:
 def test_every_reachable_overlap_is_conflicting_and_assigns_no_kind(
     evidence: dict[str, object], expected: tuple[str, ...]
 ) -> None:
-    """R20 §6.5: no precedence is defined, so an overlap resolves to neither kind."""
+    """Decision 071 §4.1: no precedence, so an overlap resolves to neither kind."""
     verdict = _control(**evidence)
     assert verdict.status == "conflicting"
     assert verdict.control_kind is None
@@ -330,13 +333,13 @@ def test_a_triple_overlap_is_also_conflicting() -> None:
 
 
 def test_an_unresolved_or_conflicting_sic_supports_no_sic_predicate() -> None:
-    """R20 §§6.1, 6.3: missing, conflicting, or review-required SIC assigns nothing."""
+    """R20 (Decision 071 §4): missing, conflicting, or review-required SIC assigns nothing."""
     assert _control(sic_code="6726", sic_resolved=False).status == "not_a_control"
     assert _control(sic_code=None, sic_resolved=True).status == "not_a_control"
 
 
 def test_control_evidence_cannot_carry_entity_type_or_a_name() -> None:
-    """R20 §6: ``entityType`` is not used at all, and neither is a company name."""
+    """R20 (Decision 071 §4): ``entityType`` is not used at all, nor is a company name."""
     fields = set(controls.ControlEvidence.__dataclass_fields__)
     assert fields == {"sic_code", "sic_resolved", "submission_forms"}
 

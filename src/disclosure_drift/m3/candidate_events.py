@@ -1,4 +1,4 @@
-"""Decision 014 §5 event-flag detection, under owner ruling **R19** (Decision 071 §4).
+"""Decision 014 §5 event-flag detection, under owner ruling **R19** (Decision 071 §3).
 
 Decision 014 §5 froze the **names** of twelve event flags but no accepted record stated
 how any of them is *detected* from accepted M2.2 metadata. **R19 supplies that
@@ -20,10 +20,11 @@ Two consequences are recorded rather than engineered around:
   require an accepted structured status observation whose canonical value **equals** the
   frozen token. The accepted M2.2 submissions vocabulary is not known to emit those
   tokens, so on the real corpus they are expected to be **NOT OBSERVED** — which is
-  exactly what R19 §4.1–4.4 rule, and R19 §4.13 already fixes the consequence: if the
-  inactive-eventful quota cannot be satisfied from accepted evidence, the selector
-  reports **infeasible**. It is never satisfied by absence from `sec_company_tickers*`,
-  which is an alias source and not an authoritative universe.
+  exactly what R19 §4.1–4.4 rule, and the history stratum (Decision 071 §3.1) already
+  fixes the consequence: if the inactive-eventful quota cannot be satisfied from
+  accepted evidence, the selector reports **infeasible**. It is never satisfied by
+  absence from `sec_company_tickers*`, which is an alias source and not an
+  authoritative universe.
 * `reverse_merger_or_de_spac_review` requires lineage evidence that **explicitly**
   identifies the condition. The accepted lineage layer emits only `company_name` and
   `ticker` edge kinds, so it is **NOT OBSERVED** and no proxy is invented (R19 §4.6).
@@ -31,6 +32,10 @@ Two consequences are recorded rather than engineered around:
 Everything here is engineering-coverage stratification only. It never influences a
 feature, vocabulary, threshold, transform, model choice, or outcome (Decision 015;
 leakage register L19).
+
+**Reading the section pointers below.** `R19 §4.N` names row *N* of the predicate table
+in Decision 071 **§3** — the accepted record keeps that table's original `4.1`–`4.12`
+row labels. It is not a pointer to Decision 071 §4, which is R20.
 """
 
 from __future__ import annotations
@@ -167,7 +172,7 @@ class EventDetection:
 
     @property
     def is_eventful(self) -> bool:
-        """R19 §4.13: eventful needs one affirmatively true flag, never an absence."""
+        """Decision 071 §3.1: eventful needs one true flag, never an absence."""
         return bool(self.observed)
 
 

@@ -658,9 +658,11 @@ findings and authorizes **only** the bounded correction they require: where live
 what live navigation surfaces say the current stage is, and how the operator runs routine
 validation. It changes **no** methodology, selector, quota, schema, identity, or authorization.
 
-**It is not an acceptance, and it claims none.** The live next act is **one fresh Fable 5 Maximum
-formal M3.3-I/R acceptance review**; a further Opus ultrareview is **neither authorized nor
-required**. Both real-path gates remain **OPEN** and unmerged.
+**It is not an acceptance, and it claims none.** *(Current state: the fresh Fable 5 Maximum formal
+M3.3-I/R acceptance review this record named as its next act has since been run and **PASSED** at
+B0/M0/MIN0, and **Sol/GPT has accepted M3.3-I/R** — see Decision 078 below. The sentence that a
+further Opus ultrareview is neither authorized nor required still holds.)* Both real-path gates
+remain **OPEN** and unmerged.
 
 | Question | Controlling record |
 |---|---|
@@ -674,6 +676,31 @@ required**. Both real-path gates remain **OPEN** and unmerged.
 | Whether seven workers is the CI standard | **Decision 077 §4 — no.** It is measured on the owner's machine, `WORKERS`/`DIST` are overridable, and CI was **not** switched under Decision 076 §10. R38 is workflow documentation and is **never** a precondition for an E0/E1/E2 authorization |
 | How the `evidence_reference` observation was disposed | **Decision 077 §6 — OBS-1, DEFERRED.** It stays part of the Decision 076 deferred architecture question. **No** redefinition of `evidence_reference`, receipt, evidence, selection, manifest, or catalog-digest semantics |
 | What was returned to the owner unresolved | **Decision 077 §7** — one new **MINOR**: `tests/unit/test_m3_support_target_pairs.py`'s `§17 item L`, which names no accepted record and was left byte-unchanged rather than guessed |
+
+## Decision 078 — ACCEPTED (M3.3-I/R owner acceptance and the pre-E0 real-feasibility source audit)
+
+[Decision 078](Decisions/decision_078_m3_3_i_r_owner_acceptance_and_real_feasibility_audit.md)
+(`ACCEPTED — OWNER M3.3-I/R ACCEPTANCE AND PRE-E0 READ-ONLY SOURCE-AUDIT AUTHORIZATION 2026-08-14`)
+is the **ninth M3.3 record**. It records **Sol/GPT's formal owner acceptance of the completed
+M3.3-I/R stage** and authorizes **one** bounded read-only pre-E0 source audit. It does nothing else.
+
+**M3.3-I/R is COMPLETE and OWNER ACCEPTED.** **It closes neither real-path gate**, and it
+authorizes no real execution: M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate, unissued
+owner gate.
+
+| Question | Controlling record |
+|---|---|
+| Whether M3.3-I/R is accepted | **Decision 078 §1 — yes.** Accepted executable target `feaeaa4163587730d6b12ebb87aabf2fc215c8f3` at tree `3d33454a…`, `M3_3_I_R_STATUS: OWNER ACCEPTED / COMPLETE`, formal outcome `M3_3_I_R_OWNER_ACCEPTED` |
+| What the acceptance rests on | **Decision 078 §1** — the final fresh Fable 5 Maximum formal independent acceptance review's **PASS at B0 / M0 / MIN0 / OPT0 / OBS1** (immutable artifact [`m3_3_i_r_formal_independent_acceptance_feaeaa4.md`](m3/reviews/m3_3_i_r_formal_independent_acceptance_feaeaa4.md), evidence commit `8c43edd…`), an optimized full check of **4029 passed / 1 skipped / 0 failed**, a clean live Decision-authority semantic review, and the four contract/plan item references adjudicated **4/4 CORRECT** |
+| What a passing I/R proves | **Decision 078 §1 — that the accepted system operates correctly on a conforming feasible candidate snapshot, and nothing about real feasibility.** A review artifact is evidence; **this record**, not that artifact, is the acceptance |
+| Whether the accepted I/R architecture may be reopened | **Decision 078 §1 — not without a newly discovered material defect** |
+| The state of the two real-path gates | **Decision 078 §2 — both OPEN / ACTIVE and never merged.** `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_OPEN` (Decision 073 R30) and `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN` (Decision 074 R32); `real_builder_feasibility_proved` remains **false**; acceptance-ordering adequacy remains **PENDING FUTURE AUTHORIZED E0 VERIFICATION** (Decision 074 R34) |
+| What the pre-E0 audit may do | **Decision 078 §3 — R39.** One bounded, **zero-network**, **read-only** inspection of the **already accepted** M3.2 source material, with true OS-level read-only handles where SQLite is involved, in-memory parsing and out-of-repository scratch permitted, and **counts reported, never the evidence-root path** |
+| The two questions it answers | **Decision 078 §3.1** — independently, whether existing accepted sources suffice for (**A**) real amendment purpose and (**B**) real linked-amendment parentage, each `YES` / `NO` / `UNDETERMINED — <exact bounded reason>`. **Hopeful and probabilistic language is prohibited**, and a negative result is never withheld |
+| What it may not do | **Decision 078 §3.3** — no mutation, snapshot, E0 write, E1, selection, persistence, seal, manifest, network, SEC retrieval, HTTP, reacquisition, filing body or header, CompanyFacts, Frames, or alternate URL. `REQUEST_CEILING` is **0**. **STOP** if the accepted evidence root cannot be mechanically identified without guessing |
+| Who decides methodology | **Decision 078 §3.4 — Sol/GPT, not the auditor.** The audit may not weaken a quota, accept inferential parentage, accept `/A` as linkage, invent a category, authorize filing-body retrieval, reopen M3.2, or change the no-network rule |
+| Which inferences stay prohibited | **Decision 078 §4** — purpose never from `/A` alone, XBRL presence, timing, sequence, company name, filename heuristic, amendment count, linkage state, or size; parentage never from `/A` alone, same CIK, same report date, date proximity, filing or accession order, document name, or filename. Both quotas stay hard — **8** linked-amendment entities, **3** purpose categories |
+| What happens if a gate returns `NO` | **Decision 078 §5** — the minimum additional acquisition is **designed and not executed**, as a bounded option matrix, with **one shared source explicitly preferred** where both gates need one and sharing never forced |
 
 ## Deviation register — where deviations are recorded
 

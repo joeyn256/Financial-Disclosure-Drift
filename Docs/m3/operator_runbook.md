@@ -1,9 +1,9 @@
 # Milestone 3 — Mac Operator Runbook
 
 
-> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS IMPLEMENTED AND REHEARSED, ITS REVIEW AND
-> CORRECTION WORK IS COMPLETE, AND THE NEXT ACT IS ONE FRESH FORMAL FABLE 5 MAXIMUM
-> M3.3-I/R ACCEPTANCE REVIEW. NO REAL EXECUTION IS AUTHORIZED.** Accepted
+> **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS
+> THE DECISION-078 PRE-E0 READ-ONLY REAL-FEASIBILITY SOURCE AUDIT. NO REAL EXECUTION IS
+> AUTHORIZED AND E0 DOES NOT BEGIN.** Accepted
 > [Decision 070](../Decisions/decision_070_m3_3_i_r_implementation_authorization.md) issued the bounded
 > M3.3-I/R authority; accepted Decisions
 > [071](../Decisions/decision_071_m3_3_i_r_methodology_gap_adjudication.md),
@@ -21,11 +21,20 @@
 > formal Fable 5 Maximum acceptance review returned **BLOCKER 0 / MAJOR 0 / MINOR 2**, which is
 > **not an acceptance**; accepted
 > [Decision 077](../Decisions/decision_077_m3_3_i_r_fable_acceptance_findings_correction.md) authorized and
-> applied that bounded correction. **The next act is one fresh Fable 5 Maximum formal M3.3-I/R
-> acceptance review; a further Opus ultrareview is neither authorized nor required.** Every
+> applied that bounded correction. **The fresh Fable 5 Maximum formal M3.3-I/R acceptance review
+> then ran and PASSED at BLOCKER 0 / MAJOR 0 / MINOR 0 / OPTIMIZATION 0 / OBSERVATION 1** —
+> immutable artifact
+> [`m3_3_i_r_formal_independent_acceptance_feaeaa4.md`](reviews/m3_3_i_r_formal_independent_acceptance_feaeaa4.md),
+> evidence commit `8c43edd…` — and **accepted
+> [Decision 078](../Decisions/decision_078_m3_3_i_r_owner_acceptance_and_real_feasibility_audit.md) records
+> Sol/GPT's formal owner acceptance: M3.3-I/R is COMPLETE and OWNER-ACCEPTED at accepted executable
+> target `feaeaa4…` (tree `3d33454a…`).** **The next act is the Decision-078 pre-E0 read-only,
+> zero-network real-feasibility source audit of the already-accepted M3.2 material — NOT E0**, and
+> a further Opus ultrareview is neither authorized nor required. Every
 > statement below that says M3.3 has not begun, that its implementation is unauthorized, that the
-> next act is a separate M3.3-I/R packet, that the E1–E8 rehearsal has not been run, or that the
-> corrected target is pending a fresh read-only rereview is **historical**. **Still true and
+> next act is a separate M3.3-I/R packet or a fresh Fable acceptance review, that the E1–E8
+> rehearsal has not been run, or that the corrected target is pending a fresh read-only rereview
+> is **historical**. **Still true and
 > unchanged:** M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 each remain a separate owner gate and **none is
 > authorized**; the census parse layer is untouched; network, SEC, reacquisition, and
 > private-evidence authority remain NONE; migration remains none; **two real-path feasibility gates

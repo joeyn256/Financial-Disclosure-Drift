@@ -855,6 +855,26 @@ unauthorized, and network, SEC, and HTTP authority remains **NONE** at `REQUEST_
 | What is authorized to be built | **Decision 083 §10 — the R46 correction and migration `0014` only.** `0014` is prospective and pre-E0: it never mutates the accepted private M3.2 catalog, and non-empty state requiring destructive reinterpretation is a **STOP**. Historical D070–D077 rehearsal evidence is **immutable**; affected synthetic scenarios get **new** expectations; `SINGLE_REGISTRANT_UNEXPECTED_IDENTITY_DELTAS = 0`; and all fourteen **MR-M1**–**MR-M14** protections are implemented at their exact definitions with **demonstrated** effectiveness |
 | What happens next | **Decision 083 §13** — implement **R46** and `0014`, then **return to Sol/GPT**. Successful implementation is **not** acceptance: **R49** condition B needs a fresh independent review **and** owner acceptance. The implementing session does not self-review for formal acceptance |
 
+*(Current state: the **R46** implementation and migration `0014` are **written and proved** but hit
+one narrow owner-action stop at final validation. Accepted Decision 084 disposes of it — see below.)*
+
+## Decision 084 — ACCEPTED (bounded continuation of the D083 correction)
+
+[Decision 084](Decisions/decision_084_m3_3_d083_bounded_owner_action_continuation.md)
+(`ACCEPTED — OWNER BOUNDED CONTINUATION OF THE D083 IMPLEMENTATION 2026-08-15`) is the **fifteenth
+M3.3 record**. It resolves the single stop the Decision-083 implementation hit, and **nothing else**.
+
+**It does not modify Decision 083**, and it does not redo, revert, or re-derive the implementation:
+the existing uncommitted working tree is the continuation baseline and is **preserved**.
+
+| Question | Controlling record |
+|---|---|
+| Why a continuation was needed at all | **Decision 084 §1.** The **R46** implementation is complete and proved — **MR-M1**–**MR-M14** all pass, **E1**–**E8** all pass, `SINGLE_REGISTRANT_UNEXPECTED_IDENTITY_DELTAS = 0`, the affected identity inventory did **not** exceed **E1**–**E5**, and every static gate passes — but migration `0014` moved the schema chain head past a constant living in a path Decision 083 §11 prohibited, so `make check-fast` could not pass without an owner ruling |
+| The migration chain head | **Decision 084 §2 — R65.** `FINAL_MIGRATION_VERSION` in `src/disclosure_drift/m3/acquisition.py` moves **13 → 14** — that constant and **nothing else** in that file. It records a schema fact: it does **not** reopen M3.2, authorize acquisition, authorize network access, authorize applying `0014` to the accepted private M3.2 operational catalog, authorize writing accepted M3.2 evidence, move `m3.2-complete`, or grant **M3.3-E0**. Migration `0014` stays **prospective and pre-E0**, and the private catalog stays **untouched** |
+| The joint support-pair caller | **Decision 084 §3 — R66.** Decision 083's **MINOR-1** is a correction-stage defect. `src/disclosure_drift/m3/offline_execution.py` is authorized **strictly at the `paired_accessions_from_rows` caller**, so a jointly filed 2009/2010 leg reaches its truthful substantive entities with **no arbitrary scalar anchor**; single-registrant behaviour stays **byte-for-byte identical**; an **unestablished** set **fails closed at zero credit**; and min/max CIK, first-write, submitter, row order, date proximity, name, ticker, and hash order are all prohibited routes. The pair quota, eligible forms, the 2009/2010 rule, and the methodology are **unchanged** |
+| The narrower identity implementation | **Decision 084 §4 — R67. ACCEPTED.** `src/disclosure_drift/m3/candidate_identity.py` is **not** modified solely to widen `ACCESSION_TABLE_COLUMNS`, `REGISTRANT_TABLE_COLUMNS`, or `SNAPSHOT_CONTENT_FIELDS`, because widening them would move identities for **pure single-registrant** snapshots with no semantic change. The accepted stronger requirement: a pure single-registrant snapshot keeps **E1**–**E5** **byte-identical**, and a multi-registrant snapshot moves **only** what **R58**–**R62** require. The independent review **must verify** the relational set is genuinely bound — or the session **STOPS** |
+| What happens next | **Decision 084 §6** — apply **R65** and **R66**, validate, commit the complete implementation as one commit parented on this governance commit, push once, and **return to Sol/GPT**. Migration `0015`, Review A, Review B, the adjudication, **E0**, **E1**, **E2**, and **M3.4** all remain unauthorized at `REQUEST_CEILING` 0 |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

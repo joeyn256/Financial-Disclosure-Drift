@@ -290,10 +290,10 @@ def _insert_selection_run(
 # --------------------------------------------------------------------------
 
 
-def test_migration_inventory_is_contiguous_through_0014() -> None:
+def test_migration_inventory_is_contiguous_through_0015() -> None:
     versions = tuple(migration.version for migration in available_migrations())
-    assert versions == tuple(range(1, 15))
-    assert versions[-1] == 14
+    assert versions == tuple(range(1, 16))
+    assert versions[-1] == 15
 
 
 def test_migration_0009_contains_no_forbidden_statements() -> None:
@@ -355,12 +355,12 @@ def test_migration_0009_raise_messages_are_string_literals() -> None:
     assert checked == 79, f"expected 79 RAISE invocations in migration 0009, found {checked}"
 
 
-def test_fresh_database_applies_migrations_through_0013(tmp_path: Path) -> None:
+def test_fresh_database_applies_migrations_through_0015(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     with connect(path, writer=True) as connection:
         cursor = connection.execute("SELECT version FROM ops_schema_migrations ORDER BY version")
         versions = tuple(row["version"] for row in cursor.fetchall())
-    assert versions == tuple(range(1, 15))
+    assert versions == tuple(range(1, 16))
 
 
 def test_second_migration_pass_is_idempotent(tmp_path: Path) -> None:

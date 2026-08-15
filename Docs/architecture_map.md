@@ -250,6 +250,27 @@ metadata before any selection runs, per Decision 013 §2 (D2).
   `census_plan_sources.observation_id`. Its **real** execution is the separately owner-gated
   **M3.3-E0**, and **R14** forbids substituting a uniformly empty structural fingerprint for it.
 
+### 4.1 Verified document evidence — schema ahead of its writer (migration `0015`)
+
+| Concern | Where it lives |
+|---|---|
+| The four relations, their constraints, and their sixteen triggers | `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` |
+| Frozen vocabularies, the verified-applicability gate, the private-path validator, the new hash domains | `src/disclosure_drift/m3/document_evidence.py` |
+| Field-level description | [`Docs/sec_data_dictionary.md`](sec_data_dictionary.md) §15 |
+| Governing records | Decision 082 §§11–12; Decision 083 **R63**/**R64**; Decision 087 §§4–9 |
+
+**Status: schema exists, writer does not.** The relations ship **empty**. Their writer is the
+Decision 083 **R64** protocol `m3.3-document-evidence/1.0`, which is **owner accepted and EXECUTION
+DEFERRED** — Review A, Review B, and the document adjudication are all **unauthorized**, and the 108
+real Decision-081 artifacts are neither read nor stored.
+
+**Two properties this layer is defined by.** The document bytes stay in the **private external
+evidence root** and never enter SQLite, with no governed value able to carry a filesystem path; and
+`evidence_level = 'verified'` is authorized for **amendment purpose** and **amendment linkage /
+explicit-original** evidence **only**, enforced by the schema and by
+`document_evidence.require_verified_evidence_applicable`. The layer lives entirely in **new hash
+domains**, so it disturbs no accepted candidate, registrant, snapshot, or selection identity.
+
 ## 5. Entity selection
 
 **Purpose:** deterministic constrained entity-level selection against frozen quotas — the S4.1 pure

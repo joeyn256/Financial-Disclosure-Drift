@@ -600,7 +600,7 @@ def test_an_accession_can_never_have_neither_an_anchor_nor_an_association_set() 
 
 @pytest.fixture
 def catalog(tmp_path: Path) -> Iterator[sqlite3.Connection]:
-    """A migrated catalog at the full 0001-0014 chain, on a disposable path."""
+    """A migrated catalog at the full 0001-0015 chain, on a disposable path."""
     with connect(tmp_path / "catalog.sqlite3", writer=True) as connection:
         apply_migrations(connection)
         with transaction(connection) as c:
@@ -759,10 +759,10 @@ def test_r65_the_disposable_catalog_machinery_recognizes_migration_head_0014(
     """
     from disclosure_drift.m3.acquisition import FINAL_MIGRATION_VERSION, prepare_operational_catalog
 
-    assert FINAL_MIGRATION_VERSION == 14
+    assert FINAL_MIGRATION_VERSION == 15
     preparation = prepare_operational_catalog(evidence_root=tmp_path)
     assert preparation.created is True
-    assert preparation.migration_chain_head == 14
+    assert preparation.migration_chain_head == 15
     assert preparation.chain_is_exact is True
     with connect(preparation.database_path) as connection:
         versions = tuple(
@@ -771,7 +771,7 @@ def test_r65_the_disposable_catalog_machinery_recognizes_migration_head_0014(
                 "SELECT version FROM ops_schema_migrations ORDER BY version"
             ).fetchall()
         )
-    assert versions == tuple(range(1, 15))
+    assert versions == tuple(range(1, 16))
 
 
 def test_r66_the_persisted_caller_gives_a_joint_pair_its_truthful_entities(

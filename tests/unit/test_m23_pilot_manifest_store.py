@@ -752,14 +752,33 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
     Correcting migration ``0014``'s stale R67 comments and closing its
     established-with-zero-relation doors changes that file's bytes, and the file's
     ``checksum_sha256`` is one of ``MIGRATION_CHAIN_COLUMNS``' three fields. So
-    ``selector_policy_sha256`` moves again -- ``29783a60…`` to ``cd237060…`` -- and
-    carries ``root_manifest_sha256`` (``afe6fd9e…`` to ``129b8636…``) and ``manifest_id``
-    (``44de5d26…`` to ``b07f4965…``) with it. **Nothing else moves at all:** the other
-    seven components, ``selection_result_sha256``, and the canonical-JSON length are all
-    byte-identical to the previous baseline, which is the proof that this is the accepted
-    Decision-021 policy-binding behaviour of the component and **not** a registrant- or
-    selection-semantics change. It is confined to **E5** and touches no
-    single-registrant identity.
+    ``selector_policy_sha256`` moved again -- ``29783a60…`` to ``cd237060…`` -- and
+    carried ``root_manifest_sha256`` (``afe6fd9e…`` to ``129b8636…``) and ``manifest_id``
+    (``44de5d26…`` to ``b07f4965…``) with it. Nothing else moved at all.
+
+    **Re-baselined a third time, under accepted Decision 087 §9, on the same one component
+    and for the same one reason.** Migration ``0015`` exists, so ``ops_schema_migrations``
+    carries a fifteenth row, so ``migration_chain_sha256`` moves, so
+    ``selector_policy_sha256`` moves (``cd237060…`` to ``2f675005…``) and carries
+    ``root_manifest_sha256`` (``129b8636…`` to ``317edeb1…``) and ``manifest_id``
+    (``b07f4965…`` to ``bd9cbce6…``) with it. This is precisely the path accepted Decision
+    086 §3 (**R68**) classified as an EXPECTED GOVERNED POLICY-BINDING CONSEQUENCE::
+
+        migration checksum -> migration_chain_sha256 -> selector_policy_sha256
+                           -> root_manifest_sha256 / manifest_id
+
+    The canonical-JSON length moves too, and only this time: ``275547`` to ``275721``. That
+    is +174 characters for one rendered ``(version, name, checksum_sha256)`` entry in the
+    Decision 021 §13.2 block-5 migration chain -- a row being ADDED, where the Decision-085
+    re-baseline only changed an existing row's value. It is arithmetic about the document,
+    not a selection or registrant fact.
+
+    **Unchanged, and asserted as such:** all seven other components -- including
+    ``candidate_tables_sha256``, which is the frozen snapshot's own identity -- and
+    ``selection_result_sha256``. **No verified document evidence exists anywhere in this
+    fixture**, so nothing here reflects evidence CONTENT; the movement is caused solely by
+    the migration chain, which is the distinction Decision 087 §9 requires to be stated
+    rather than assumed.
     """
     manifest = _seal_and_build(catalog)
     assert manifest.components == pm.ManifestComponents(
@@ -768,7 +787,7 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
         ),
         candidate_tables_sha256="b882a148be763ded3531509d7b91d800ca7b5f838865a6bfb5cd06988e775a83",
         quota_definitions_sha256="0a2fd409cb7eaad47fbd6cb4c1b3cf11cffa1a56af5716acdb4aacb801ac616d",
-        selector_policy_sha256="cd237060a3afb1a6dd133c1b1694fa76df4513581462443237a658df38a9cdc0",
+        selector_policy_sha256="2f675005c9796c5285d4d698c4764c958d129bb0760bad53f68d6b4624599f1f",
         selected_entities_sha256="86a18dac1629d83ee5d8e8f9bb8ad3a606ae0de7ec8c527079b080c8e113d963",
         selected_accessions_sha256="541bbf7b55b3b355b3e5fcbe15572be2a96df35877f25083ba20f4ba78d7ca87",
         reserves_sha256="ac83550bc6168b5d933d8dc1e3abdd451689c39576f1f08ab49abe6950fc935d",
@@ -780,13 +799,13 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
     )
     assert (
         manifest.root_manifest_sha256
-        == "129b8636068b9203815c69c56e0e66a4b2d81c2a230231ff138527292908be6c"
+        == "317edeb19635a91b0f48842e23ac004a8f7d9709dcf7f862a6b5baf608efa893"
     )
     assert (
         manifest.identity.manifest_id
-        == "b07f4965d7861cbe086ec81686c202b427ea4cf82d5186b7a201738f1db1c17b"
+        == "bd9cbce677d4841b394629bbf09ec466eb78866f14d903be7211b154779cd761"
     )
-    assert len(manifest.canonical_json) == 275547
+    assert len(manifest.canonical_json) == 275721
 
 
 def test_manifest_document_refuses_a_dropped_authority_record_family(

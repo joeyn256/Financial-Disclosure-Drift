@@ -794,6 +794,46 @@ no M3.3-I/R, no E0/E1/E2, no network, no reacquisition, no migration, no M3.4. T
 Decision 067 and 068 sections above. Decisions 067 and 068, both review artifacts, and the GR
 proposal are **not modified**.
 
+## Decision 087 — the verified document-evidence schema and migration `0015` (real impact)
+
+[Decision 087](Decisions/decision_087_m3_3_r46_owner_acceptance_and_verified_evidence_schema.md)
+(`ACCEPTED — OWNER FINAL R46 ACCEPTANCE AND VERIFIED-EVIDENCE SCHEMA IMPLEMENTATION AUTHORIZATION
+2026-08-15`) records the final owner acceptance of the corrected **R46** implementation and lifts the
+implementation deferral on the Decision 082 §11 verified-evidence schema contract. Unlike the
+governance-only sections above, **this one has real impact**: it adds migration `0015`, four new
+relations, and the narrow policy module they need.
+
+**What it does not touch.** No research definition, quota, selector, cohort, or seed. No
+candidate-selection methodology, offline parse, reserve selector, or manifest construction. No
+network, acquisition, or transport module. `cohorts.py`, `pilot_policy.py`, `candidate_identity.py`,
+and migrations `0001`–`0014` are byte-unchanged.
+
+| Surface touched | Change | Checks |
+|---|---|---|
+| `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` | **new** — the four relations, sixteen triggers, and the two-constraint evidence-level widening | `tests/unit/test_m3_3_verified_document_evidence.py`, `test_migration_provenance.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py` |
+| `src/disclosure_drift/m3/document_evidence.py` | **new** — frozen vocabularies, the verified-applicability gate, the private-path validator, and the new hash domains | `tests/unit/test_m3_3_verified_document_evidence.py` |
+| `src/disclosure_drift/m3/acquisition.py` | `FINAL_MIGRATION_VERSION` **14 → 15**, that constant and nothing else (accepted Decision 084 **R65** interpretation) | `tests/unit/test_m3_acquisition.py`, `test_m3_3_multi_registrant_correction.py` |
+| `tests/unit/test_m3_3_verified_document_evidence.py` | **new** — VE-M1…VE-M14 plus the migration-safety and identity-nonchange proofs | itself |
+| `tests/unit/test_migration_provenance.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py`, `test_m3_3_multi_registrant_correction.py` | chain-head expectations `0014` → `0015` | themselves |
+| `tests/unit/test_m23_pilot_manifest_store.py` | the **R68** migration-chain re-baseline: `selector_policy_sha256`, `root_manifest_sha256`, `manifest_id`, and the canonical-JSON length | `tests/unit/test_m23_pilot_manifest_store.py` |
+| `Docs/sec_data_dictionary.md` | new §15 and the coverage table | Markdown link-check only |
+| `Docs/architecture_map.md`, `Docs/decision_index.md`, `Docs/Decisions/decision_registry.md`, `Milestones/STATUS.md`, `Docs/change_impact_map.md` | navigation and current state | Markdown link-check only |
+
+**Which tests to run for it.** Direct: `tests/unit/test_m3_3_verified_document_evidence.py`.
+Chain-head neighbours: `test_migration_provenance.py`, `test_storage_catalog.py`,
+`test_m23_pilot_schema.py`, `test_m3_3_multi_registrant_correction.py`, `test_m3_acquisition.py`.
+Identity neighbours: `test_m23_pilot_manifest_store.py`, `test_m23_pilot_manifest.py`,
+`test_m3_candidate_identity.py`. Rehearsal, because the migration chain binds the manifest:
+`test_m3_3_execution.py` (**E1**–**E8**).
+
+**Expected identity movement, and its exact bound.** Migration `0015` adds one
+`ops_schema_migrations` row, so the accepted Decision 086 §3 (**R68**) path moves three digests and
+one document length in the reserve-bearing fixture — `selector_policy_sha256`,
+`root_manifest_sha256`, `manifest_id`, and the canonical-JSON length. **Nothing else moves**, and in
+particular `candidate_tables_sha256` and `selection_result_sha256` are byte-identical. That movement
+is caused **solely by the migration chain**; **no verified evidence content exists anywhere**, which
+is the distinction Decision 087 §9 requires to be stated rather than assumed.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

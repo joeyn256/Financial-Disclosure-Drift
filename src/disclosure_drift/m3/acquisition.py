@@ -256,7 +256,7 @@ OPERATIONAL_CATALOG_RELATIVE_PATH: Final = "catalogs/m3_2a_operational.sqlite3"
 #: operational catalog, authorize writing any accepted M3.2 evidence, move ``m3.2-complete``, or
 #: grant M3.3-E0 authority. Migration ``0014`` remains prospective and pre-E0, the accepted private
 #: M3.2 operational catalog remains untouched, and no invocation against it is authorized.
-FINAL_MIGRATION_VERSION: Final = 14
+FINAL_MIGRATION_VERSION: Final = 15
 
 #: The two acquisition windows. A window name outside this set is refused rather than treated as
 #: an unrecognized-but-harmless label.

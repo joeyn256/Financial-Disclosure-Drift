@@ -45,14 +45,19 @@ def test_valid_unchanged_chain_reopens_successfully(tmp_path: Path) -> None:
         )
 
 
-def test_packaged_chain_is_contiguous_and_ends_at_0014() -> None:
-    """The pre-E0 R46 correction adds exactly one migration on top of the accepted chain."""
+def test_packaged_chain_is_contiguous_and_ends_at_0015() -> None:
+    """The verified-evidence schema adds exactly one migration, after the R46 correction.
+
+    Decision 082 section 11.4's ordering constraint is asserted as a real chain position:
+    ``0015`` sits after ``0014``, and ``0014`` keeps its own name and its own bytes.
+    """
     inventory = available_migrations()
     versions = tuple(migration.version for migration in inventory)
     assert versions == tuple(range(1, len(inventory) + 1))
-    assert versions[-1] == 14
-    assert inventory[-1].name == "m33_multi_registrant_relational_correction"
-    assert inventory[-2].name == "m23_manifest_lifecycle_guards"
+    assert versions[-1] == 15
+    assert inventory[-1].name == "m33_verified_document_evidence"
+    assert inventory[-2].name == "m33_multi_registrant_relational_correction"
+    assert inventory[-3].name == "m23_manifest_lifecycle_guards"
 
 
 def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
@@ -62,7 +67,7 @@ def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 15))
+    assert [row["version"] for row in rows] == list(range(1, 16))
     recorded = next(row for row in rows if row["version"] == 11)
     assert recorded["name"] == "m23_joint_selector_policy_reference"
     assert recorded["checksum_sha256"] == packaged.checksum_sha256
@@ -75,26 +80,50 @@ def test_migration_0012_provenance_is_recorded_in_order(tmp_path: Path) -> None:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 15))
+    assert [row["version"] for row in rows] == list(range(1, 16))
     recorded = next(row for row in rows if row["version"] == 12)
     assert recorded["name"] == "m23_selection_entity_reasons"
     assert recorded["checksum_sha256"] == packaged.checksum_sha256
 
 
 def test_migration_0014_provenance_is_recorded_in_order(tmp_path: Path) -> None:
-    """The R46 correction's migration is recorded last, with its packaged checksum."""
+    """The R46 correction's migration keeps its position and its packaged checksum.
+
+    Migration 0015 is a separate record: it does not rewrite, squash, or re-checksum 0014
+    (Decision 087 section 4), which is what this test now asserts by position rather than
+    by "last".
+    """
     path = _migrated_database(tmp_path)
     packaged = next(m for m in available_migrations() if m.version == 14)
     with connect(path, writer=True) as connection:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 15))
-    assert rows[-1]["name"] == "m33_multi_registrant_relational_correction"
+    assert [row["version"] for row in rows] == list(range(1, 16))
+    recorded = next(row for row in rows if row["version"] == 14)
+    assert recorded["name"] == "m33_multi_registrant_relational_correction"
+    assert recorded["checksum_sha256"] == packaged.checksum_sha256
+
+
+def test_migration_0015_provenance_is_recorded_in_order(tmp_path: Path) -> None:
+    """The verified-evidence migration is recorded last, with its packaged checksum.
+
+    Provenance recognizing 0015's FINAL bytes is one of Decision 087 section 12's required
+    checks: an edited migration script must fail reopen rather than be re-checksummed, and
+    the parametrized tamper test above now covers version 15 for exactly that reason.
+    """
+    path = _migrated_database(tmp_path)
+    packaged = next(m for m in available_migrations() if m.version == 15)
+    with connect(path, writer=True) as connection:
+        rows = connection.execute(
+            "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
+        ).fetchall()
+    assert [row["version"] for row in rows] == list(range(1, 16))
+    assert rows[-1]["name"] == "m33_verified_document_evidence"
     assert rows[-1]["checksum_sha256"] == packaged.checksum_sha256
 
 
-@pytest.mark.parametrize("version", (11, 12, 13, 14))
+@pytest.mark.parametrize("version", (11, 12, 13, 14, 15))
 def test_altered_migration_bytes_block_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
 ) -> None:

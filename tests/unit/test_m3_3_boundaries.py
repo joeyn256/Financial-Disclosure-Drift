@@ -244,20 +244,28 @@ def test_the_tracked_network_switches_remain_disabled() -> None:
     assert config["network"]["m3_acquire_enabled"] is False
 
 
-def test_only_the_authorized_r46_migration_was_added() -> None:
-    """Accepted Decision 083 §10 authorizes migration ``0014`` and nothing beyond it.
+def test_only_the_authorized_migrations_were_added() -> None:
+    """The chain ends where the owner authorized it to end, and not one migration past it.
 
     The M3.3 boundary is not "no migration ever"; it is "no migration this stage was not
-    authorized to write". ``0015`` -- the verified-evidence schema -- remains explicitly
-    unauthorized (**R63**), so the chain ending anywhere past ``0014`` fails here.
+    authorized to write". Two records set the current end:
+
+    * accepted Decision 083 §10 authorized ``0014``, the R46 relational correction;
+    * accepted Decision 087 §4 lifted **R63**'s implementation deferral and authorized
+      ``0015``, the verified-evidence schema, with ``MIGRATION_AUTHORIZED = 0015 only``.
+
+    **``0016`` and anything past it remain unauthorized**, so a chain ending beyond ``0015``
+    fails here -- which is the assertion that keeps this test a boundary rather than a
+    running total.
     """
     migrations = sorted(
         path.name
         for path in (_REPOSITORY / "src/disclosure_drift/storage/migrations").glob("*.sql")
     )
-    assert migrations[-1] == "0014_m33_multi_registrant_relational_correction.sql"
-    assert len(migrations) == 14
-    assert not any(name.startswith("0015_") for name in migrations)
+    assert migrations[-1] == "0015_m33_verified_document_evidence.sql"
+    assert migrations[-2] == "0014_m33_multi_registrant_relational_correction.sql"
+    assert len(migrations) == 15
+    assert not any(name.startswith("0016_") for name in migrations)
 
 
 def test_the_coverage_policy_version_has_exactly_one_executable_definition() -> None:

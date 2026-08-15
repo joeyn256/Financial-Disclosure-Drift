@@ -668,7 +668,143 @@ requires of every Milestone 3 phase — none of which has begun or is authorized
 | `0011_m23_joint_selector_policy_reference` | joint selector policy row | **9** |
 | `0012_m23_selection_entity_reasons` | **1 pilot table + 4 triggers** | **9, 12** |
 | `0013_m23_manifest_lifecycle_guards` | **8 triggers** | **9, 13.2** |
+| `0014_m33_multi_registrant_relational_correction` | **1 census relation + 4 table rebuilds + 8 triggers** | **10, 11** (see note) |
+| `0015_m33_verified_document_evidence` | **4 evidence relations + 1 table rebuild + 16 triggers** | **15** |
 
-**Coverage is complete for `0001`–`0013`.** Milestone 3 (phases M3.1–M3.5) has not begun and is not
-authorized; when it introduces schema, this dictionary must be extended in the same pass
-(Decision 024 §8).
+**Coverage is complete for `0001`–`0013` and `0015`.**
+
+**Note on `0014`.** The R46 multi-registrant relational correction changed tables §§10–11 already
+describe — it made `census_accessions.registrant_cik_numeric` and both anchor columns nullable, added
+`census_accession_registrants` and the per-accession `registrant_set_completeness` fact, and replaced
+the snapshot-freeze anchor invariant. **Those §§10–11 rows were not revised when `0014` landed**, so
+they still read as the pre-correction schema, and `0014` has no dictionary section of its own. That
+gap is recorded here rather than repaired: revising it is Decision 083's implementation scope, not
+the verified-evidence stage's, and
+[Decision 083](Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md) §§3–7 plus the
+migration itself remain the authoritative description in the meantime. The migrations are ground
+truth for the persisted contract; this dictionary describes the schema and never defines it.
+
+Milestone 3 phases M3.4–M3.5 have not begun and are not authorized; when they introduce schema, this
+dictionary must be extended in the same pass (Decision 024 §8).
+
+## 15. Verified document-evidence layer (migration `0015`)
+
+**No module writes any `document_*` table.** This is schema ahead of its writer, in the same sense
+as §10: the writer is the Decision 083 **R64** document-adjudication protocol
+`m3.3-document-evidence/1.0`, which is **owner accepted and EXECUTION DEFERRED**. The four relations
+ship **empty**, and only synthetic disposable test fixtures populate them. **No real Decision-081
+evidence is stored, and the Decision-081 private evidence artifacts are not read.**
+
+Governing records: [Decision 082](Decisions/decision_082_m3_3_d081_owner_adjudication_and_pre_e0_contracts.md)
+§11 (the schema contract) and §12 (the protocol);
+[Decision 083](Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md) §8 (**R63**, the
+four dispositions) and §9 (**R64**);
+[Decision 087](Decisions/decision_087_m3_3_r46_owner_acceptance_and_verified_evidence_schema.md) §§4–9.
+
+**The artifact bytes are not here.** `document_artifacts` is a governed **catalog-metadata** relation
+(**R63** item A): the Complete Submission Text stays in the private external evidence root and never
+enters SQLite. **No absolute `EV_ROOT` path, private filesystem path, local user path, or scratch
+path is persisted**, and there is deliberately **no locator column at all** — `artifact_sha256` is
+itself the content address, so the "only if technically required" permission is never exercised.
+Every text column carries a shape CHECK that a filesystem path violates.
+
+| Table | PK | Key uniqueness / FKs | Material CHECKs | Role |
+|---|---|---|---|---|
+| `document_artifacts` | `artifact_sha256` (64-hex) | **UNIQUE (`accession_plain`,`source_class`)** — one artifact per accession per class, which is the artifact-substitution guard; idx on `accession_plain`. No FK to `census_accessions`: the D081 artifacts have no census row until **E0**, which is unauthorized | `accession_plain` is 18 digits; `source_class` ∈ {`complete_submission_text`} (Decision 080 **R45**, Decision 082 **R56**); `byte_length` > 0; `source_url` GLOB `https://www.sec.gov/Archives/*` with no space or backslash; `retrieval_receipt_id` charset excludes `/`, `\`, `:` and space; UTC timestamp shape | Binds one document artifact by content hash and public source identity |
+| `document_review_records` | `review_id` (64-hex) | **UNIQUE (`accession_plain`,`reviewer_role`)** — one record per pass per accession; FK `artifact_sha256` → `document_artifacts`; idx on (`accession_plain`,`artifact_sha256`) and on `review_epoch_id` | `reviewer_role` ∈ {`review_a`,`review_b`,`adjudication`} and must agree with `review_pass` ∈ {`A`,`B`,`ADJUDICATION`}; `protocol_version` = `m3.3-document-evidence/1.0`; `purpose_category` is Decision 014 §6's three frozen categories; `abstention_reason` is Decision 082 §12.2's four allowed abstentions and exists exactly when `abstained` = 1; an abstention asserts nothing; `original_form_asserted` ∈ {`10-K`,`10-KT`} (**X-2**/**R44**); `reviewer_model` charset excludes spaces, so **no personal name** can be recorded | One independent review pass |
+| `document_review_spans` | (`review_id`,`span_ordinal`) | FK → `document_review_records`; idx on (`review_id`,`span_role`) | `span_ordinal` ≥ 1; `span_role` ∈ {`amendment_purpose`,`original_form`,`original_filing_date`,`original_accession`}; `span_text_verbatim` non-empty; `span_location` is `bytes:START-END` into the frozen artifact — a shape no filesystem path satisfies | Exact source-span provenance (Decision 082 §12.5) |
+| `document_adjudicated_evidence` | (`accession_plain`,`evidence_kind`) | FK `artifact_sha256` → `document_artifacts`; idx on `artifact_sha256` | **`evidence_kind` ∈ {`amendment_purpose`,`explicit_original`} — this is where R63 item C is enforced**; `agreement_state` ∈ {`agreed`,`resolved`,`conflicting`,`abstained`}; `evidence_level` ∈ {`verified`,`conflicting`,`unavailable`} and `verified` requires `agreed` or `resolved`; a value exists exactly when the outcome is `agreed` or `resolved`; per-kind value shapes; `contributing_review_ids_json` is the canonical sorted array | The frozen final adjudication result |
+
+### 15.1 Where `verified` is authorized, and where it is not
+
+Decision 083 **R63** item C authorizes `evidence_level = 'verified'` for **amendment purpose** and
+**amendment linkage / explicit-original** evidence **only**. The `evidence_kind` CHECK above is that
+authorization made structural: an unauthorized dimension is refused at the kind, before an evidence
+level is even considered.
+
+Migration `0015` widens **exactly two** constraints on `pilot_candidate_accessions`, and no others:
+
+| # | Constraint | Before | After |
+|---|---|---|---|
+| 1 | `amendment_purpose_evidence_level` | `provisional`, `unproven`, `review_required`, `conflicting`, `unavailable` | the same **plus `verified`** |
+| 2 | `amendment_purpose_quota_eligible` | requires `amendment_purpose_evidence_level = 'provisional'` | requires it ∈ (`provisional`, `verified`) |
+
+Every other evidence-level CHECK in the catalog — `size`, `industry`, `history`,
+`primary_universe`, `filing_date`, `cohort`, `xbrl`, and both registrant relations — is left exactly
+as migrations `0009` and `0014` wrote it, still excluding `verified`.
+
+Two triggers make widening 1 non-silent: `amendment_purpose_evidence_level = 'verified'` on insert
+or update requires a frozen `document_adjudicated_evidence` row for that accession, of kind
+`amendment_purpose`, at level `verified`. **`verified` cannot be asserted from nowhere.**
+
+### 15.2 Linkage: what the relationship is, versus how strongly it was verified
+
+**No `verified_amends_original` state exists** (**R63** item B; Decision 087 §6). The relationship
+stays `pilot_candidate_accessions.amendment_linkage_state = 'amends_original'`, whose vocabulary
+migration `0015` does **not** touch. Verification strength lives separately, in
+`document_adjudicated_evidence.evidence_level = 'verified'` with its document, review, and
+adjudication provenance.
+
+### 15.3 Reviewer identity: opaque epochs, never people
+
+**R63** item D: `review_epoch_id` is a durable **opaque** 64-hex identifier, beside `reviewer_role`
+and `reviewer_model`. **No personal name is persisted and no raw Claude session ID is required.**
+
+Distinctness is enforced, not documented, by two mechanisms that combine:
+
+* **UNIQUE (`accession_plain`, `reviewer_role`)** — within one accession each role appears once;
+* **`document_review_records_epoch_carries_one_role`** — a given epoch carries exactly one role,
+  globally.
+
+Three roles therefore force three distinct epochs for any accession. The rule is one role per epoch,
+**not** one row per epoch, so a single fresh Review-A epoch reviewing all 108 frozen artifacts — the
+**R64** protocol's actual shape — stays lawful.
+
+### 15.4 Adjudication provenance
+
+Four triggers make an adjudicated row unwritable unless its evidence is present:
+
+| Trigger | Refuses |
+|---|---|
+| `document_adjudicated_evidence_requires_bound_artifact` | an adjudication whose artifact is not the one every review of that accession bound |
+| `document_adjudicated_evidence_requires_review_provenance` | a missing Review A or Review B; and a `resolved` outcome with no third adjudication record |
+| `document_adjudicated_evidence_review_ids_are_exact` | a contributing set that is not exactly the reviews of that accession and artifact |
+| `document_adjudicated_evidence_verified_requires_spans` | `verified` where any non-abstaining review lacks a span of the matching role (Decision 082 §12.5) |
+
+The contributing set is validated by **arithmetic, not `json1`**: for `n` reviews the canonical array
+is `1 + 67n` characters with `2n` quotes, and every identity must appear inside it. The repository's
+declared SQLite floor is 3.37, where JSON1 is an optional compile-time extension, so the check is
+written to hold on every build that floor admits.
+
+### 15.5 Append-only and frozen at insert
+
+Decision 082 §11.2: each relation is "append-only and immutable once frozen". Every row here is
+written **already frozen**, so "immutable once frozen" and "immutable" are the same rule and **no
+lifecycle transition is invented** (Decision 087 §8). `UPDATE` and `DELETE` are refused outright on
+all four relations by eight unconditional triggers, which discharges all five Decision 087 §8
+protections: a frozen review cannot be mutated, span provenance cannot be rewritten, an artifact SHA
+cannot change after review, reviewer role and epoch cannot change after freeze, and an adjudicated
+result cannot change after final freeze.
+
+Two further triggers close the append-after-consumption door:
+`document_review_spans_never_appended_after_adjudication` and
+`document_review_records_never_added_after_adjudication`.
+
+### 15.6 Hash domains
+
+Every digest goes through `src/disclosure_drift/release/hashing.py` under a **new**
+evidence-specific domain; **no second hash implementation is introduced** (Decision 082 §11.3 /
+Decision 067 §9 **R16**). The domains are `document_artifact`, `document_review_record`,
+`document_review_span`, `document_adjudicated_evidence`, and Decision 082 §12.7's three pass-level
+domains `document_review_a_table`, `document_review_b_table`, and `document_adjudication_table`.
+Their executable home is `src/disclosure_drift/m3/document_evidence.py`.
+
+**A new domain leaves every existing digest byte-unchanged**, and **no existing column tuple is
+widened** (accepted Decision 084 **R67**). That is why the evidence layer disturbs no accepted
+candidate, registrant, snapshot, or selection identity.
+
+**State class:** Operational-only (§9.1).
+
+**Future-stage boundary. Documenting this table family authorizes nothing.** Review A, Review B, the
+document adjudication, **M3.3-E0**, **M3.3-E1**, **M3.3-E2**, and **M3.4** all remain
+**UNAUTHORIZED**, and network, SEC, and HTTP authority is **NONE** at `REQUEST_CEILING = 0`.

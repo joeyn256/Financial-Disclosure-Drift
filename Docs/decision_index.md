@@ -730,6 +730,37 @@ parsing**, M3.3-E1, M3.3-E2, and M3.4 each remain a separate, unissued owner gat
 | What nonmutation must prove | **Decision 079 §8** — HEAD, tree, receipt identity, raw-object count, catalog logical counts, main-DB and WAL size and mtime all unchanged; the three census counts still **0**; `parser_state` still `not_started` across all **76** plan sources. **SHM is a non-governed reader artifact** whose mtime may move under a genuine read-only WAL connection |
 | What was returned to the owner unresolved | **Decision 079 §10** — one **OBS-1**: the R39 ruling-number collision, recorded with a mandatory citation convention rather than silently renumbering an owner-issued ruling |
 
+*(Current state: the single Decision-079 audit **ran on 2026-08-14 and is consumed** — its findings
+are owner-accepted by Decision 080 §2, and `REAL_PRIVATE_EPHEMERAL_PARSE_AUDIT_AUTHORIZATION` is
+**CLOSED**. OBS-1 is **CLOSED** by Decision 080 §7: the operative validator-conflict citation is now
+**Decision 080 R42**.)*
+
+## Decision 080 — ACCEPTED (post-D079 owner adjudication and single-artifact source architecture)
+
+[Decision 080](Decisions/decision_080_m3_3_post_d079_owner_adjudication_and_source_architecture.md)
+(`ACCEPTED — OWNER POST-D079 ADJUDICATION AND SOURCE-ARCHITECTURE RULINGS 2026-08-14`) is the
+**eleventh M3.3 record**. It accepts the Decision-079 audit findings as a frozen source-inventory
+fact set, freezes **R42**–**R45**, and records **six architecture items PENDING OWNER ACCEPTANCE**.
+It authorizes no real execution and no acquisition, and it does nothing else.
+
+**It closes neither real-path gate**, and **M3.3-E0 durable parsing**, M3.3-E1, M3.3-E2, and M3.4
+each remain a separate, unissued owner gate.
+
+| Question | Controlling record |
+|---|---|
+| The frozen real amendment-inventory facts | **Decision 080 §2** — `REAL_RAW_TOTAL_AMENDMENT_CANDIDATES = 46912`; `FROZEN_COHORT_AMENDMENT_CANDIDATES = 20258` (16401 / 1750 / 861 / 711 / 535); `10-K/A` 46775, `10-KT/A` 137; 48199 raw rows before dedup; **568 multi-registrant accessions**; compatible-original diagnostic 4677 / 42159 / 75 / 1; XBRL 8424 true, inline 4199 true. **Audit facts under Decision 079 R41 — never durable E0 candidate evidence** |
+| Which validator-conflict citation is live | **Decision 080 §3 — R42**, the operative prospective alias. Historical decision-qualified R39 citations stand; a bare "R39" stays prohibited; OBS-1 is **CLOSED** (§7) |
+| Where the frozen 14-digit acceptance value comes from | **Decision 080 §4 — R43.** The native `<ACCEPTANCE-DATETIME>` header of a future owner-authorized Complete Submission Text is the intended higher authority (the Decision 012 §4 level-1 class); submissions values stay lower-authority corroboration; truncation, timezone arithmetic, duplicate-choosing, and registrant precedence are prohibited; fail-closed behavior remains until the native source exists; `REAL_ACCEPTANCE_ORDERING_ADEQUACY` stays **PENDING FUTURE AUTHORIZED E0 VERIFICATION** |
+| Whether legacy original forms are admitted | **Decision 080 §5 — R44. No.** Original-compatible forms stay exactly `10-K` / `10-KT`; no `10-K405`, `10KSB`, or `NT 10-K`; no quota weakened |
+| The preferred additional-source artifact | **Decision 080 §6 — R45.** The accession-level Complete Submission Text — native acceptance header, primary filing body, XBRL facts, Explanatory Note — as a **source candidate only, not acquisition authority**, with the frozen qualification that XBRL presence never implies `AmendmentDescription` exists |
+| The multi-registrant representation | **Decision 080 §8 — findings F-MR-1–F-MR-6 and proposals MR-1–MR-5, PENDING OWNER ACCEPTANCE.** No accepted rule supplies a single lawful anchor for the 568; associations are preserved without migration; the duplicates are substantive associations forced through a single-valued model; the MR-3 anchor choice is the owner's |
+| Verified amendment-purpose evidence | **Decision 080 §9 — YES, architecture-compatible; PENDING OWNER ACCEPTANCE.** The AP-1–AP-10 pre-registered dual-blind adjudication protocol over accepted stored artifacts, frozen and hash-sealed before pipeline use; requires a new owner ruling plus a future migration (`0009` excludes `verified` throughout); IN-2 not reversed; zero classifications performed |
+| Explicit original / linkage evidence | **Decision 080 §10 — `REQUIRES_NEW_OWNER_RULING`, PENDING OWNER ACCEPTANCE.** The mechanism (explicit self-assertion resolved to exactly one catalog accession) contradicts no accepted prohibition, but the CST is not yet an accepted source and no evidence class authorizes it; required ruling content L-1–L-8 |
+| The fixed source-verification sample | **Decision 080 §11 — design only, PENDING OWNER ACCEPTANCE.** `SAMPLE_N = 125`, deterministic hash-order selection, precommitted oversamples, `MAX_PHYSICAL_REQUESTS = 250`, mechanical measurements m1–m8, reconciliation against the frozen §2 totals. **Not executed** |
+| Request economics | **Decision 080 §12 — PENDING OWNER ACCEPTANCE.** A 125/250; B expected 100–300, ceiling 400/800; **C (46912) REJECTED** — minimum acquisition consistent with non-cherry-picked evidence |
+| Whether durable E0 may precede enrichment | **Decision 080 §13 — `E0_CAN_RUN_FAIL_CLOSED_BEFORE_ENRICHMENT`, PENDING OWNER ACCEPTANCE**, with three binding caveats: the enrichment ingest is **not E0**; the §8 ruling is recommended before E0; E1 stays expected-infeasible and separately gated. **The verdict does not authorize E0** |
+| What happens next | **Decision 080 §16** — return to Sol/GPT for owner adjudication of the six pending items. No session may begin E0, any acquisition, or any implementation on the strength of this record |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

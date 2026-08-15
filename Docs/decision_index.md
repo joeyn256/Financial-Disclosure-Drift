@@ -827,6 +827,34 @@ classifies **zero** real filings, resolves **zero** real parentage, and grants *
 | The future adjudication protocol | **Decision 082 §12 — PENDING OWNER ACCEPTANCE, not executed.** Sequential **Review A → Review B → adjudication** in separate fresh epochs over the **already stored** D081 artifacts at **zero** new SEC requests; no parallel sessions required. Defines review fields, allowed abstentions, the three verbatim categories, extraction rules X-1–X-6, span-citation and fail-closed rules, agreement and third-adjudication rules, five frozen hashes, and both feasibility-witness calculations. **No real filing is classified** |
 | What happens next | **Decision 082 §15** — **owner adjudication of the three contracts**, and nothing else. No session may begin the R46 implementation, write any migration, execute any document review, or begin M3.3-E0 on the strength of this record |
 
+*(Current state: all three contracts are **owner accepted** by accepted Decision 083 §2, and only the
+**R46** contract is authorized for implementation — see below.)*
+
+## Decision 083 — ACCEPTED (pre-E0 multi-registrant relational correction)
+
+[Decision 083](Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md)
+(`ACCEPTED — OWNER ACCEPTANCE OF THE DECISION-082 CONTRACTS AND R46 IMPLEMENTATION AUTHORIZATION
+2026-08-14`) is the **fourteenth M3.3 record**. It accepts the three Decision-082 contracts, freezes
+**R58**–**R64**, and authorizes **exactly one** bounded implementation: the **R46** multi-registrant
+relational correction and migration `0014`.
+
+**It authorizes nothing else.** Migration `0015`, the verified-evidence schema, Review A, Review B,
+the document adjudication, **M3.3-E0**, **M3.3-E1**, **M3.3-E2**, and **M3.4** all remain
+unauthorized, and network, SEC, and HTTP authority remains **NONE** at `REQUEST_CEILING = 0`.
+
+| Question | Controlling record |
+|---|---|
+| Whether the Decision-082 contracts are accepted | **Decision 083 §2 — YES**, token `M3_3_DECISION_082_PRE_E0_CONTRACTS_OWNER_ACCEPTED`. The pushed Decision-082 commit `5231359f…` is the **sole** Decision-082 execution; it is not rerun, replaced, rolled back, or duplicated, and the duplicate-delivery condition is **CLOSED**. `R46_MULTI_REGISTRANT_IMPLEMENTATION_CONTRACT = OWNER ACCEPTED / IMPLEMENTATION AUTHORIZED`; the other two are **OWNER ACCEPTED** with implementation and execution **DEFERRED** |
+| How a multi-registrant accession is represented | **Decision 083 §3 — R58**, adjudicating Decision 082 §10.15 item 1. The new `census_accession_registrants` relation is adopted and is **authoritative**; an established sole registrant may occupy the scalar, an established set of cardinality > 1 forces the scalar **`NULL`**, and every listed anchor-selection heuristic — first/last write, min/max CIK, archive, record, hash, submissions occurrence, full-index row order, submitter, agent, URL, filename — is **prohibited** |
+| What an incomplete registrant set does | **Decision 083 §4 — R59**, adjudicating Decision 082 §10.15 item 5. `registrant_set_completeness = unestablished` **blocks accession candidacy entirely**, not merely the scalar anchor, and fails closed with an explicit accepted reason. **Silence is never proof of a sole registrant** |
+| What occupies the tie-break registrant slot | **Decision 083 §5 — R60**, adjudicating Decision 082 §10.15 item 2 as **H-a**. The exact sentinel `MULTI_REGISTRANT_NO_SINGLETON` is used **only** for an established set of cardinality > 1; it is never a CIK, never persisted in a CIK column, never an entity, and never a locator. Established single-registrant preimages stay **byte-for-byte identical**; unestablished sets hash nothing |
+| What manifest item 48 asserts | **Decision 083 §6 — R61**, adjudicating Decision 082 §10.15 item 3. Decision 021 is **not rewritten**; prospectively item 48 is the factual CIK at cardinality 1 and **`NULL`** above it, with `candidate_registrant_table_sha256` binding the relation and **no fabricated anchor**. The five identity consumers **E1–E5** are accepted as prospectively changeable; `snapshot_id`, `entity_tie_break_sha256`, and the **R15**/**R16** preimages are unaffected, and a wider impact is a **STOP** |
+| How a joint filing is attributed | **Decision 083 §7 — R62**, adjudicating Decision 082 §10.15 item 4 as **every substantive registrant**. Accession-domain calculations still deduplicate one joint filing as one accession; entity-domain metrics admit each truthful entity under their **existing** definitions; **no quota changes its declared domain**, and Decision 072's hard multi-registrant quota of **2** is unchanged |
+| The verified-evidence schema | **Decision 083 §8 — R63. OWNER ACCEPTED / IMPLEMENTATION DEFERRED.** `document_artifacts` is a **catalog metadata relation** with no absolute private path and no `EV_ROOT` exposure; `amends_original` is **reused** with strength carried by `evidence_level = 'verified'`, so no second semantic state is invented; `verified` applies **only** to amendment purpose and linkage in M3.3 v1, enforced by the future migration; reviewer identity is a durable **opaque** review-epoch identifier plus role and model. **Migration `0015` is NOT authorized** |
+| The document adjudication protocol | **Decision 083 §9 — R64. OWNER ACCEPTED / EXECUTION DEFERRED.** `PROTOCOL_VERSION m3.3-document-evidence/1.0` over **all 108** frozen D081 artifacts at **zero** new SEC requests; sequential Review A (Opus 5) → Review B (Fable 5) → adjudication (Opus 5), each a fresh epoch, the adjudication seeing A + B only once both are hash-frozen. **The independence unit is the epoch plus the frozen-input boundary**, so one operator may launch all three. An unresolvable conflict is **TERMINAL** for that protocol version and artifact set |
+| What is authorized to be built | **Decision 083 §10 — the R46 correction and migration `0014` only.** `0014` is prospective and pre-E0: it never mutates the accepted private M3.2 catalog, and non-empty state requiring destructive reinterpretation is a **STOP**. Historical D070–D077 rehearsal evidence is **immutable**; affected synthetic scenarios get **new** expectations; `SINGLE_REGISTRANT_UNEXPECTED_IDENTITY_DELTAS = 0`; and all fourteen **MR-M1**–**MR-M14** protections are implemented at their exact definitions with **demonstrated** effectiveness |
+| What happens next | **Decision 083 §13** — implement **R46** and `0014`, then **return to Sol/GPT**. Successful implementation is **not** acceptance: **R49** condition B needs a fresh independent review **and** owner acceptance. The implementing session does not self-review for formal acceptance |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

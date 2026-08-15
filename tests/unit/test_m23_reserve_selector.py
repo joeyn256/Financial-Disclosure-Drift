@@ -164,6 +164,21 @@ def dashed(cik: int, year: int, seq: int) -> str:
     return f"{cik:010d}-{year % 100:02d}-{seq:06d}"
 
 
+#: **Decision 083 R58**: ``multi_registrant`` is not a free-standing flag -- it IS the
+#: distinct substantive association-set cardinality. A fixture that wants a
+#: multi-registrant accession must therefore state the SET: no anchor, and a real
+#: co-registrant. This offset keeps the synthetic co-registrant CIK clear of the
+#: fixture's own entity CIKs.
+_CO_REGISTRANT_OFFSET = 900
+
+
+def _multi_registrant_set(cik: int, multi_registrant: bool) -> tuple[int | None, tuple[int, ...]]:
+    """The (anchor, substantive set) pair for one fixture accession."""
+    if not multi_registrant:
+        return cik, ()
+    return None, (cik, _CO_REGISTRANT_OFFSET + cik)
+
+
 def mk_accession(
     cik: int,
     year: int,
@@ -184,10 +199,12 @@ def mk_accession(
 ) -> AccessionCandidate:
     number = dashed(cik, year, seq)
     is_amendment = form.endswith("/A")
+    anchor, substantive = _multi_registrant_set(cik, multi_registrant)
     return AccessionCandidate(
         accession_plain=number.replace("-", ""),
         accession_number_dashed=number,
-        anchor_cik_numeric=cik,
+        anchor_cik_numeric=anchor,
+        substantive_registrant_ciks=substantive,
         form_type=form,
         is_amendment=is_amendment,
         official_filing_date=f"{year}-03-15",
@@ -795,7 +812,7 @@ def test_the_cap_gate_rejects_an_over_cap_bundle_on_its_own() -> None:
     )
     assert not _caps_preserved(profile, target_plains=set(), selected_roles={})
     usage = _usage_from(
-        {entry.accession_plain: ("0000000306", entry.accession_role) for entry in bundle}
+        {entry.accession_plain: (("0000000306",), entry.accession_role) for entry in bundle}
     )
     assert usage.max_base_per_cik == MAX_BASE_ACCESSIONS_PER_CIK + 1
     assert (
@@ -807,22 +824,24 @@ def test_the_cap_gate_rejects_an_over_cap_bundle_on_its_own() -> None:
 
 def test_a_conforming_bundle_preserves_every_cap_under_substitution() -> None:
     result, construction = construct(pool_with_plain_spare())
+    # **Decision 083 R62**: the cap key is the complete substantive association set, so a
+    # joint base filing counts toward each of its registrants' per-CIK base caps.
     selected_roles = {
-        a.accession_plain: (a.anchor_cik_padded, a.accession_role)
+        a.accession_plain: (a.substantive_registrants_padded, a.accession_role)
         for a in result.selected_accessions
     }
     for package in construction.packages:
         target_plains = {
             a.accession_plain
             for a in result.selected_accessions
-            if a.anchor_cik_padded == package.target_cik_padded
+            if package.target_cik_padded in a.substantive_registrants_padded
         }
         substituted = {
             plain: entry for plain, entry in selected_roles.items() if plain not in target_plains
         }
         for entry in package.accessions:
             substituted[entry.accession_plain] = (
-                package.replacement_cik_padded,
+                (package.replacement_cik_padded,),
                 entry.accession_role,
             )
         assert accession_caps_satisfied(_usage_from(substituted))

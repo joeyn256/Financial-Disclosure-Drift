@@ -72,6 +72,7 @@ from disclosure_drift.pilot_policy import (
 )
 from disclosure_drift.sec.accession_resolution import AUTHORITY_LEVEL, authority_for_source
 from disclosure_drift.sec.accession_selector import (
+    accession_registrant_slot,
     accession_selection_rank,
     canonical_anchor_cik_padded,
 )
@@ -82,6 +83,7 @@ from disclosure_drift.storage.catalog import CatalogWriter
 from disclosure_drift.storage.sqlite import transaction, utc_now
 
 __all__ = [
+    "UNESTABLISHED_REGISTRANT_SET_REASON",
     "CandidateDerivation",
     "CandidateSnapshotError",
     "CandidateSnapshotInputs",
@@ -118,6 +120,17 @@ _PRIOR_CURRENT_RELATIONSHIP: Final = "prior_current"
 
 #: Decision 019 §6.2: a submitter that is not a registrant never establishes the set.
 _CONTRIBUTING_REGISTRANT_ROLES: Final[frozenset[str]] = frozenset({"anchor", "associated"})
+
+#: Migration ``0014``'s ``association_class`` value for a genuine registrant association.
+#: Reading one column is what keeps the substantive-set rule in one place rather than
+#: re-derived from the role vocabulary at every site.
+_SUBSTANTIVE_ASSOCIATION: Final = "substantive"
+
+#: **Decision 083 R59**'s explicit accepted reason for the fail-closed exclusion. The
+#: excluded accession has no candidate row to carry it, so the reason names the
+#: condition in the registry and the count is reported to the caller (CLAUDE.md
+#: rule 11). A future authorized stage attaches it per accession.
+UNESTABLISHED_REGISTRANT_SET_REASON: Final = "PILOT_ACCESSION_REGISTRANT_SET_UNESTABLISHED"
 
 _FILING_DATE_FIELDS: Final[tuple[str, ...]] = ("filingDate", "date_filed")
 _XBRL_FIELDS: Final[tuple[str, ...]] = ("isXBRL", "isInlineXBRL")
@@ -159,6 +172,11 @@ class FrozenCandidateSnapshot:
     excluded_form_counts: Mapping[str, int] = field(default_factory=dict)
     #: Census accessions dropped for sitting outside the coverage window.
     excluded_out_of_coverage: int = 0
+    #: **Decision 083 R59.** Census accessions blocked from candidacy ENTIRELY because
+    #: the accepted evidence never established their complete substantive registrant
+    #: set. Reported rather than silent (CLAUDE.md rule 11): a fail-closed exclusion is
+    #: still a row-count change and must be accounted for.
+    excluded_unestablished_registrant_set: int = 0
 
 
 @dataclass(slots=True)
@@ -221,6 +239,10 @@ class CandidateDerivation:
     #: Census accessions dropped because their resolved filing date sits outside the
     #: coverage window, reported for the same reason.
     excluded_out_of_coverage: int = 0
+    #: **Decision 083 R59.** Census accessions whose substantive registrant set the
+    #: accepted evidence never established, and which are therefore blocked from
+    #: candidacy entirely rather than silently read as single-registrant.
+    excluded_unestablished_registrant_set: int = 0
 
 
 def _precedence_for(source_id: str) -> int:
@@ -326,6 +348,13 @@ def _read_full_index_registrants(
     Identity is the canonical CIK and nothing else -- never a company name, never a row
     count. A malformed stored CIK fails the snapshot closed rather than contributing a
     guessed registrant.
+
+    **Decision 083 R58/R59.** The presence of accepted full-index evidence for an
+    accession is exactly what *establishes* its substantive association set; its absence
+    is the R22 category-B silence that **R59** forbids reading as proof of a sole
+    registrant. An accession absent from this mapping therefore has an ``unestablished``
+    set and is blocked from candidacy entirely, rather than being quietly treated as
+    single-registrant.
     """
     rows = connection.execute(
         "SELECT o.accession_plain, o.raw_value_json FROM census_accession_observations AS o "
@@ -346,6 +375,33 @@ def _read_full_index_registrants(
                 f"{row['accession_plain']!r} carries a non-canonical CIK: {exc}"
             )
             raise CandidateSnapshotError(message) from exc
+    return {accession: tuple(sorted(ciks)) for accession, ciks in grouped.items()}
+
+
+def _read_census_registrant_associations(
+    connection: sqlite3.Connection,
+) -> Mapping[str, tuple[int, ...]]:
+    """**Decision 083 R58** -- the canonical census-layer substantive association set.
+
+    ``census_accession_registrants`` (migration ``0014``) is the durable census-level
+    relation between an accession and **all** substantive registrants established for
+    it. When it carries rows for an accession, that relation is authoritative and is
+    preferred over re-deriving the set. It is written by the real durable offline parse
+    (**M3.3-E0**), which no accepted decision authorizes yet, so today it is empty and
+    the accepted **R23** §5.2 derivation above remains the operative establishment rule.
+
+    There is one establishment rule, not two: both paths yield the complete set of
+    distinct canonical substantive registrant CIKs, and neither invents a member.
+    Submitter-only associations are excluded here exactly as Decision 019 §6.2 requires.
+    """
+    rows = connection.execute(
+        "SELECT accession_plain, registrant_cik_numeric FROM census_accession_registrants "
+        "WHERE association_class = 'substantive' "
+        "ORDER BY accession_plain, registrant_cik_numeric"
+    ).fetchall()
+    grouped: dict[str, set[int]] = defaultdict(set)
+    for row in rows:
+        grouped[str(row["accession_plain"])].add(int(row["registrant_cik_numeric"]))
     return {accession: tuple(sorted(ciks)) for accession, ciks in grouped.items()}
 
 
@@ -950,6 +1006,7 @@ def _derive_accession(
     linkage: tuple[str | None, str | None],
     associated: Sequence[int],
     *,
+    established: bool,
     recorded: str,
 ) -> _AccessionDraft:
     """Derive one candidate accession row, its registrants, evidence, and reasons."""
@@ -967,8 +1024,6 @@ def _derive_accession(
         )
         raise CandidateSnapshotError(message)
 
-    anchor_numeric = int(row["registrant_cik_numeric"])
-    anchor_padded = canonical_anchor_cik_padded(anchor_numeric)
     form_type = str(row["form_type"])
     is_amendment = int(row["is_amendment"])
 
@@ -1022,17 +1077,37 @@ def _derive_accession(
     purpose_category: str | None = None
     purpose_level = "unproven" if is_amendment else "unavailable"
 
-    registrants = _registrant_rows(row, associated, recorded=recorded)
+    registrants = _registrant_rows(row, associated, established=established, recorded=recorded)
+    # **Decision 072 R23 §5.3**, restated anchor-free at identical extension by
+    # **Decision 083 R58**: the flag is the DISTINCT SUBSTANTIVE CIK cardinality, never a
+    # raw row count and never a submitter-only row. The two lines below are held at their
+    # accepted M1-M38 campaign text (mutations M20 and M22 anchor on them verbatim), and
+    # they still express exactly that rule: `_registrant_rows` gives every substantive row
+    # a role of 'anchor' or 'associated' and every submitter row 'submitter_only', so the
+    # role filter and `association_class = 'substantive'` are the same predicate.
     contributing = [item for item in registrants if item["role"] in _CONTRIBUTING_REGISTRANT_ROLES]
     multi_registrant = int(len(contributing) > 1)
+    # **Decision 083 R58**: an anchor exists only for an established sole substantive
+    # registrant. There is no arbitrary primary CIK above that, so the scalar is NULL.
+    anchor_numeric = (
+        int(_as_int(contributing[0]["registrant_cik_numeric"]))
+        if established and len(contributing) == 1
+        else None
+    )
+    # **Decision 083 R60**: the slot names a registrant only when one lawfully exists.
+    registrant_slot = accession_registrant_slot(
+        anchor_numeric,
+        [_as_int(item["registrant_cik_numeric"]) for item in contributing],
+    )
 
     linkage_state, parent_plain = linkage
 
     columns: dict[str, object] = {
         "accession_plain": accession_plain,
         "accession_number_dashed": identity.dashed,
-        "accession_tie_break_sha256": accession_selection_rank(anchor_padded, identity.dashed),
+        "accession_tie_break_sha256": accession_selection_rank(registrant_slot, identity.dashed),
         "anchor_cik_numeric": anchor_numeric,
+        "registrant_set_completeness": "established" if established else "unestablished",
         "form_type": form_type,
         "is_amendment": is_amendment,
         "official_filing_date": resolved_date,
@@ -1120,39 +1195,49 @@ def _derive_accession(
 
 
 def _registrant_rows(
-    row: sqlite3.Row, associated: Sequence[int], *, recorded: str
+    row: sqlite3.Row, associated: Sequence[int], *, established: bool, recorded: str
 ) -> list[dict[str, object]]:
-    """Decision 019 §6 and **R23** §5.2 -- the structural registrant set, one anchor.
+    """Decision 019 §6, **R23** §5.2, and **Decision 083 R58** -- the structural set.
 
     Built only from approved census observations, with no inference beyond what the
-    parser captured. The anchor stays the authoritative census anchor; every other
-    distinct canonical CIK the accepted ``company.idx`` rows list for the same accession
-    is ``associated``; a submitter that is neither is ``submitter_only`` and never
-    establishes the registrant set (Decision 019 §6.2). ``company.idx`` creates no
-    ``submitter_only`` membership of its own.
+    parser captured. Every distinct canonical CIK the accepted evidence lists for the
+    accession, together with the census scalar registrant, is a **substantive**
+    association; a submitter that is neither is ``submitter_only`` and never establishes
+    the registrant set (Decision 019 §6.2). ``company.idx`` creates no ``submitter_only``
+    membership of its own.
 
     Repeated index rows for one CIK collapse to one registrant, because membership is
     the distinct canonical CIK set and never a row count (**R23** §5.3).
+
+    **What Decision 083 R58 changes is when ``anchor`` may be used, not what the word
+    means.** The role is ``anchor`` only where the set is *established* with cardinality
+    exactly one. Above that, every substantive row is ``associated`` and **no anchor row
+    exists** -- the first-observed CIK, the smallest, the largest, the census scalar, and
+    the submitter are all equally ineligible, because none of them is the registrant.
+
+    The output is keyed and emitted in canonical CIK order, so it is invariant to
+    observation, parser, archive, full-index row, and insertion order.
     """
-    anchor = int(row["registrant_cik_numeric"])
-    rows: dict[int, dict[str, object]] = {
-        anchor: {
-            "registrant_cik_numeric": anchor,
-            "registrant_cik_padded": canonical_anchor_cik_padded(anchor),
-            "role": "anchor",
-            "is_anchor": 1,
-            "evidence_level": "provisional",
-            "recorded_at_utc": recorded,
-        }
-    }
-    for numeric in associated:
-        if numeric == anchor:
-            continue
+    scalar = row["registrant_cik_numeric"]
+    substantive: set[int] = {int(numeric) for numeric in associated}
+    if scalar is not None:
+        substantive.add(int(scalar))
+
+    # Decision 072 R23 §5.3 restated anchor-free at identical extension: an anchor
+    # exists exactly when the established set holds one distinct substantive CIK.
+    sole_registrant = next(iter(substantive)) if established and len(substantive) == 1 else None
+    completeness = "established" if established else "unestablished"
+
+    rows: dict[int, dict[str, object]] = {}
+    for numeric in sorted(substantive):
+        is_anchor = numeric == sole_registrant
         rows[numeric] = {
             "registrant_cik_numeric": numeric,
             "registrant_cik_padded": canonical_anchor_cik_padded(numeric),
-            "role": "associated",
-            "is_anchor": 0,
+            "role": "anchor" if is_anchor else "associated",
+            "is_anchor": 1 if is_anchor else 0,
+            "association_class": "substantive",
+            "registrant_set_completeness": completeness,
             "evidence_level": "provisional",
             "recorded_at_utc": recorded,
         }
@@ -1164,6 +1249,8 @@ def _registrant_rows(
             "registrant_cik_padded": canonical_anchor_cik_padded(numeric),
             "role": "submitter_only",
             "is_anchor": 0,
+            "association_class": "submitter_only",
+            "registrant_set_completeness": completeness,
             "evidence_level": "provisional",
             "recorded_at_utc": recorded,
         }
@@ -1175,8 +1262,22 @@ def _registrant_rows(
 # --------------------------------------------------------------------------
 
 
+def _substantive_ciks(draft: _AccessionDraft) -> tuple[int, ...]:
+    """One accession draft's complete substantive association set, in canonical order.
+
+    **Decision 083 R58**: the relation is authoritative, so every attachment, history,
+    and eligibility question is answered from it rather than from a scalar that may
+    lawfully be ``NULL``.
+    """
+    return tuple(
+        _as_int(item["registrant_cik_numeric"])
+        for item in draft.registrants
+        if item["association_class"] == _SUBSTANTIVE_ASSOCIATION
+    )
+
+
 def _material_conflict_ciks(
-    connection: sqlite3.Connection, anchor_by_accession: Mapping[str, int]
+    connection: sqlite3.Connection, registrants_by_accession: Mapping[str, tuple[int, ...]]
 ) -> set[int]:
     """R19 §4.12 -- entities whose accepted machinery explicitly reports a conflict.
 
@@ -1186,6 +1287,11 @@ def _material_conflict_ciks(
     persistence path flagged with ``conflict_indicator``. A missing, unavailable, or
     merely ``review_required`` field is **not** a conflict, and neither is the mere
     existence of former-name history or of more than one observation.
+
+    **Decision 083 R62**: a conflict on a jointly filed accession is a conflict for
+    **every** substantive registrant of that accession. Attributing it to one CIK would
+    require choosing one, which no rule permits, and attributing it to none would hide a
+    conflict the accepted machinery explicitly reported.
     """
     conflicted: set[int] = set()
     for row in connection.execute(
@@ -1194,9 +1300,7 @@ def _material_conflict_ciks(
         "UNION SELECT DISTINCT accession_plain FROM census_accession_observations "
         "WHERE conflict_indicator = 1"
     ).fetchall():
-        anchor = anchor_by_accession.get(str(row["accession_plain"]))
-        if anchor is not None:
-            conflicted.add(anchor)
+        conflicted.update(registrants_by_accession.get(str(row["accession_plain"]), ()))
     return conflicted
 
 
@@ -1278,6 +1382,7 @@ def derive_candidate_snapshot(
     field_resolutions = _read_field_resolutions(connection)
     lineage = _read_lineage_edge_kinds(connection)
     full_index_registrants = _read_full_index_registrants(connection)
+    census_registrants = _read_census_registrant_associations(connection)
     observations = _read_observations(connection)
     submission_forms = _submission_forms(connection)
     sic_authority = _sic_authority(connection)
@@ -1296,18 +1401,45 @@ def derive_candidate_snapshot(
             accession_rows.append(row)
         else:
             excluded_forms[form] += 1
-    anchor_by_accession = {
-        str(row["accession_plain"]): int(row["registrant_cik_numeric"]) for row in accession_rows
-    }
-    conflicted = _material_conflict_ciks(connection, anchor_by_accession)
+    # **Decision 083 R62**: conflict attribution follows the complete substantive
+    # association set, on the same establishment rule the candidate rows use below.
+    registrants_by_accession: dict[str, tuple[int, ...]] = {}
+    for row in accession_rows:
+        plain = str(row["accession_plain"])
+        associations = census_registrants.get(plain, full_index_registrants.get(plain))
+        if associations is None:
+            continue
+        scalar = row["registrant_cik_numeric"]
+        members = set(associations)
+        if scalar is not None:
+            members.add(int(scalar))
+        registrants_by_accession[plain] = tuple(sorted(members))
+    conflicted = _material_conflict_ciks(connection, registrants_by_accession)
 
     originals: dict[str, bool] = {
         str(row["accession_plain"]): not int(row["is_amendment"]) for row in accession_rows
     }
     accessions: list[_AccessionDraft] = []
     out_of_coverage = 0
+    unestablished_registrant_sets = 0
     for row in accession_rows:
         plain = str(row["accession_plain"])
+        # **Decision 083 R58**: the canonical census-layer relation is authoritative
+        # where it carries rows. It is written by the real durable offline parse, which
+        # is not authorized, so today it is empty everywhere and the accepted R23 §5.2
+        # derivation below establishes the set. One rule, two storage locations.
+        census_associations = census_registrants.get(plain)
+        derived_associations = full_index_registrants.get(plain)
+        associations = (
+            census_associations if census_associations is not None else derived_associations
+        )
+        # **Decision 083 R59**: absent accepted evidence, the substantive association set
+        # is UNESTABLISHED. That silence is never proof of a sole registrant, and it
+        # BLOCKS CANDIDACY ENTIRELY -- not merely the scalar anchor -- so the accession
+        # never enters a candidate snapshot and never becomes a later identity problem.
+        if associations is None:
+            unestablished_registrant_sets += 1
+            continue  # reason code UNESTABLISHED_REGISTRANT_SET_REASON
         draft = _derive_accession(
             row,
             accession_observations.get(plain, ()),
@@ -1319,7 +1451,8 @@ def derive_candidate_snapshot(
                 resolution=field_resolutions.get((plain, "amendment_relationship")),
                 originals=originals,
             ),
-            full_index_registrants.get(plain, ()),
+            associations,
+            established=True,
             recorded=recorded,
         )
         if _within_coverage(draft, inputs):
@@ -1364,18 +1497,27 @@ def derive_candidate_snapshot(
         if entry.columns["candidate_category"] == "control"
     }
     for draft in accessions:
-        if _as_int(draft.columns["anchor_cik_numeric"]) in boundary_controls:
+        # **Decision 083 R62**: an accession is control-eligible when any of its
+        # substantive registrants is a boundary control -- the same attachment rule the
+        # selector applies, not an anchor lookup.
+        if boundary_controls & set(_substantive_ciks(draft)):
             draft.columns["control_eligible"] = 1
             draft.columns["base_eligible"] = 0
             draft.columns["support_eligible"] = 0
 
     known = {_as_int(entry.columns["cik_numeric"]) for entry in entities}
     for draft in accessions:
-        anchor = _as_int(draft.columns["anchor_cik_numeric"])
-        if anchor not in known:
+        # At least ONE substantive registrant must have an accepted registrant row: an
+        # accession no accepted entity is associated with cannot enter a snapshot, and no
+        # entity is ever synthesized to make it fit. A co-registrant the accepted index
+        # names but the accepted submissions corpus never described is a real and
+        # expected condition (Decision 072 section 3) and is not an entity of its own.
+        associated = set(_substantive_ciks(draft))
+        if not associated & known:
             message = (
-                f"accession {draft.columns['accession_plain']!r} anchors on CIK {anchor}, "
-                "which has no accepted registrant row; no entity is synthesized"
+                f"accession {draft.columns['accession_plain']!r} associates only with CIK(s) "
+                f"{sorted(associated)}, none of which has an accepted registrant row; "
+                "no entity is synthesized"
             )
             raise CandidateSnapshotError(message)
 
@@ -1394,6 +1536,7 @@ def derive_candidate_snapshot(
         cited_observation_ids=tuple(cited),
         excluded_form_counts=dict(sorted(excluded_forms.items())),
         excluded_out_of_coverage=out_of_coverage,
+        excluded_unestablished_registrant_set=unestablished_registrant_sets,
     )
 
 
@@ -1408,29 +1551,49 @@ def _aggregate_by_entity(
     R19 §4.7 branch-B comparison is between *consecutive* reports; one whose date the
     accepted evidence does not establish sorts last and makes its comparison unresolved
     rather than silently skipped.
+
+    **Decision 083 R62 -- history and event attribution.** An established
+    multi-registrant accession participates in the filing history of **every** substantive
+    registrant associated with it: not one CIK chosen by some heuristic, and not none. A
+    joint annual report really is each co-registrant's annual report, so it enters each of
+    their ``eligible_forms``, ``original_annual_report_dates``,
+    ``multi_registrant_annual_filing``, and ``non_ordinary_amendment_lineage``.
+
+    This is entity-domain aggregation throughout. It never counts accessions, so
+    attributing one filing to two registrants cannot double-count a filing anywhere: the
+    accession-domain totals live in the selector and are computed over the accession set
+    itself.
     """
     forms: dict[int, list[str]] = defaultdict(list)
     originals: dict[int, list[tuple[str, str | None]]] = defaultdict(list)
     multi: dict[int, bool] = defaultdict(bool)
     non_ordinary: dict[int, bool] = defaultdict(bool)
     for draft in accessions:
-        anchor = _as_int(draft.columns["anchor_cik_numeric"])
+        entities = tuple(
+            _as_int(item["registrant_cik_numeric"])
+            for item in draft.registrants
+            if item["association_class"] == _SUBSTANTIVE_ASSOCIATION
+        )
         form = _as_str(draft.columns["form_type"])
-        forms[anchor].append(form)
-        if form in _ORIGINAL_ANNUAL_FORMS:
-            filing_date = draft.columns["official_filing_date"]
-            report_date = draft.columns["report_date"]
-            originals[anchor].append(
-                (
-                    "" if filing_date is None else str(filing_date),
-                    None if report_date is None else str(report_date),
-                )
-            )
-        if draft.columns["multi_registrant"]:
-            multi[anchor] = True
         linkage = draft.columns["amendment_linkage_state"]
-        if isinstance(linkage, str) and linkage in events.NON_ORDINARY_AMENDMENT_LINKAGE_STATES:
-            non_ordinary[anchor] = True
+        is_non_ordinary = (
+            isinstance(linkage, str) and linkage in events.NON_ORDINARY_AMENDMENT_LINKAGE_STATES
+        )
+        for entity in entities:
+            forms[entity].append(form)
+            if form in _ORIGINAL_ANNUAL_FORMS:
+                filing_date = draft.columns["official_filing_date"]
+                report_date = draft.columns["report_date"]
+                originals[entity].append(
+                    (
+                        "" if filing_date is None else str(filing_date),
+                        None if report_date is None else str(report_date),
+                    )
+                )
+            if draft.columns["multi_registrant"]:
+                multi[entity] = True
+            if is_non_ordinary:
+                non_ordinary[entity] = True
 
     aggregated: dict[int, _EntityAggregates] = {}
     for anchor in set(forms) | set(submission_forms) | conflicted:
@@ -1696,6 +1859,7 @@ def persist_and_freeze_derivation(
         cited_observation_ids=derivation.cited_observation_ids,
         excluded_form_counts=derivation.excluded_form_counts,
         excluded_out_of_coverage=derivation.excluded_out_of_coverage,
+        excluded_unestablished_registrant_set=derivation.excluded_unestablished_registrant_set,
     )
 
 
@@ -1975,7 +2139,14 @@ def _revalidate(
 def _require_counts(
     connection: sqlite3.Connection, snapshot_id: str, derivation: CandidateDerivation
 ) -> None:
-    """Decision 019 §9 -- declared counts equal actual rows, one anchor per accession."""
+    """Decision 019 §9 -- declared counts equal actual rows, exact anchor cardinality.
+
+    **Decision 083 R58** replaces "one anchor per accession" with the condition it was
+    a proxy for: an anchor exists exactly when the substantive association set has
+    cardinality one, and **none** exists above that. The check is not relaxed -- an
+    accession that mints an anchor for a joint filing, or loses the anchor of a sole
+    registrant, still fails here, before the freeze trigger ever sees it.
+    """
     for table, expected in (
         ("pilot_candidate_entities", len(derivation.entities)),
         ("pilot_candidate_accessions", len(derivation.accessions)),
@@ -1991,12 +2162,15 @@ def _require_counts(
             raise CandidateSnapshotError(message)
     offending = connection.execute(
         "SELECT accession_plain FROM pilot_candidate_accession_registrants "
-        "WHERE snapshot_id = ? GROUP BY accession_plain HAVING SUM(is_anchor) <> 1",
+        "WHERE snapshot_id = ? GROUP BY accession_plain "
+        "HAVING SUM(is_anchor) <> (CASE WHEN SUM(association_class = 'substantive') = 1 "
+        "THEN 1 ELSE 0 END)",
         (snapshot_id,),
     ).fetchall()
     if offending:
         message = (
-            "every candidate accession requires exactly one anchor registrant; "
+            "a candidate accession requires exactly one anchor registrant when its "
+            "substantive association set has cardinality one, and none above it; "
             f"{len(offending)} accession(s) do not"
         )
         raise CandidateSnapshotError(message)

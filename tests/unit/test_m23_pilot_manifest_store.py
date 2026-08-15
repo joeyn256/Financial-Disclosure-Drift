@@ -725,10 +725,28 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
 ) -> None:
     """Decision 022 §6: the existing reserve-bearing path is unchanged, byte for byte.
 
-    These are the values the accepted fixture produced **before** the clarification. They
-    are pinned so that any future change to item-46 applicability, or to a preimage, that
+    These are pinned so that any change to item-46 applicability, or to a preimage, that
     perturbs a reserve-bearing manifest fails here rather than silently reissuing an
     identity the owner has already seen.
+
+    **Re-baselined once, under Decision 083 §10, and every delta is traceable.** The
+    fixture carries exactly two genuinely multi-registrant accessions (CIK 17 with 917,
+    CIK 18 with 918), so the correction moves precisely five of the eight components and
+    no others:
+
+    * ``selector_policy_sha256`` -- its ``migration_chain_sha256`` now covers ``0001``
+      through ``0014`` instead of ``0013``. This is migration 0014 existing, and is
+      unrelated to registrant semantics;
+    * ``selected_entities_sha256``, ``selected_accessions_sha256``, ``reserves_sha256``,
+      and ``quota_report_sha256`` -- all four carry ``selection_run_id``, which derives
+      from ``selection_input_sha256`` (**E5**), which carries ``accession_content_sha256``,
+      which now reports the two multi-registrant accessions as **anchorless** with the
+      **R60** sentinel in their tie-break preimage.
+
+    **Unchanged, and asserted as such:** ``source_observation_set_sha256``,
+    ``candidate_tables_sha256``, and ``quota_definitions_sha256``. The candidate-table
+    digest holding still is the load-bearing one -- it is the frozen snapshot's own
+    identity, so **E2**, **E3**, and **E4** are byte-unchanged for this fixture.
     """
     manifest = _seal_and_build(catalog)
     assert manifest.components == pm.ManifestComponents(
@@ -737,25 +755,25 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
         ),
         candidate_tables_sha256="b882a148be763ded3531509d7b91d800ca7b5f838865a6bfb5cd06988e775a83",
         quota_definitions_sha256="0a2fd409cb7eaad47fbd6cb4c1b3cf11cffa1a56af5716acdb4aacb801ac616d",
-        selector_policy_sha256="5b979306e1099b04466ada22183cb974f395afa6257c97930baf52fdd8a2d566",
-        selected_entities_sha256="dacdf7c0a3a572606d831fe83890fa57d8caacc035d66c4f1618d17b7222e0af",
-        selected_accessions_sha256="9fe83cbfdf98b215604536b983270feebd12dd8e3882f06710016648801f9853",
-        reserves_sha256="b910f3b73c234e1ecef0437e493339ef84ba51161ea8e9ce2ce02fa238a7dc1c",
-        quota_report_sha256="e66f658808460162bf47745cafa281a361058b1553023cffd21b052640b2eab4",
+        selector_policy_sha256="29783a60966dc341a7f081a9a671d5fb37242f5e2d3fbf2521369c0fc8082ceb",
+        selected_entities_sha256="86a18dac1629d83ee5d8e8f9bb8ad3a606ae0de7ec8c527079b080c8e113d963",
+        selected_accessions_sha256="541bbf7b55b3b355b3e5fcbe15572be2a96df35877f25083ba20f4ba78d7ca87",
+        reserves_sha256="ac83550bc6168b5d933d8dc1e3abdd451689c39576f1f08ab49abe6950fc935d",
+        quota_report_sha256="8b9bb4e4f456b469ecb486160cd81dbd98d6d0a83aca25dcdd2a3f19f65de0eb",
     )
     assert (
         manifest.selection_result_sha256
-        == "bb9ad417232d0f29b31e6b6c83e67048fd02b62f0c76b5d19c30c5b380e8ea23"
+        == "1c7d8b8ce4357ac3fc7e2b39630c2a60b1cbfac586bd1eba159c7718185c5815"
     )
     assert (
         manifest.root_manifest_sha256
-        == "6f621f8b92ddbe0277a0539697bc7db6ee772f901916f0e214ddc762af433a58"
+        == "afe6fd9e2c46cbc247a8d960d49c52bbef09638fa669a1a2ac117209c463f8d5"
     )
     assert (
         manifest.identity.manifest_id
-        == "649ef3006a9a67f4c0445476d939fb744dae44d6c74cd832923410323f3a5a08"
+        == "44de5d261b6ee98b4688f7577bc3075c27c3dc2d421ae229619f07938af3787b"
     )
-    assert len(manifest.canonical_json) == 275349
+    assert len(manifest.canonical_json) == 275547
 
 
 def test_manifest_document_refuses_a_dropped_authority_record_family(

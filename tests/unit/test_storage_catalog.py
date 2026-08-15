@@ -111,6 +111,7 @@ EXPECTED_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (11, "m23_joint_selector_policy_reference"),
     (12, "m23_selection_entity_reasons"),
     (13, "m23_manifest_lifecycle_guards"),
+    (14, "m33_multi_registrant_relational_correction"),
 )
 """The canonical migration chain, asserted by exact version and name.
 

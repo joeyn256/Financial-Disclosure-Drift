@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Final, Literal
@@ -91,6 +91,8 @@ __all__ = [
     "MAX_BASE_ACCESSIONS_PER_CIK",
     "MAX_BASE_ACCESSIONS_TOTAL",
     "MAX_STRESS_ACCESSIONS_TOTAL",
+    "MULTI_REGISTRANT_MINIMUM",
+    "MULTI_REGISTRANT_TIE_BREAK_SENTINEL",
     "NOT_APPLICABLE",
     "ORIGINAL_ANNUAL_FORMS",
     "QUOTA_DIMENSION_ACCESSION_CAP",
@@ -131,6 +133,7 @@ __all__ = [
     "accession_cap_outcomes",
     "accession_caps_satisfied",
     "accession_evidence_penalty",
+    "accession_registrant_slot",
     "accession_selection_rank",
     "assign_accession_role",
     "canonical_anchor_cik_padded",
@@ -158,6 +161,27 @@ FYE_CIRCULAR_TOLERANCE_DAYS: Final = 7
 
 _LEAP_REFERENCE_YEAR: Final = 2000
 _DAYS_IN_LEAP_YEAR: Final = 366
+
+#: **Decision 083 R60** (adopting Decision 082 section 10.9 option **H-a**). The exact
+#: domain-separated literal that occupies the registrant slot of the accession tie-break
+#: preimage when -- and only when -- the substantive registrant set is *established* with
+#: cardinality greater than one.
+#:
+#: It is **not a CIK**. It is never parsed as one, never persisted in a CIK column, never
+#: presented as an entity, never counted toward any entity or quota, and never a transport
+#: locator. It selects **no** registrant at all, which is precisely why it does not violate
+#: Decision 081 **R46** section 3.2(5)'s prohibition on choosing a primary CIK by hash:
+#: recording that no anchor exists is not selecting one.
+#:
+#: Being non-numeric, it cannot collide with any ten-digit zero-padded CIK, so the
+#: multi-registrant and single-registrant preimage spaces are provably disjoint.
+MULTI_REGISTRANT_TIE_BREAK_SENTINEL: Final = "MULTI_REGISTRANT_NO_SINGLETON"
+
+#: Decision 072 **R23** section 5.3, restated anchor-free at identical extension by
+#: **Decision 083 R58**: an accession is multi-registrant exactly when its *established*
+#: substantive association set has **distinct canonical CIK** cardinality of at least two.
+#: Never a raw row count, and never a submitter-only row.
+MULTI_REGISTRANT_MINIMUM: Final = 2
 
 ORIGINAL_ANNUAL_FORMS: Final[frozenset[str]] = frozenset({"10-K", "10-KT"})
 AMENDMENT_FORMS: Final[frozenset[str]] = frozenset({"10-K/A", "10-KT/A"})
@@ -361,6 +385,46 @@ def canonical_anchor_cik_padded(cik_numeric: int) -> str:
     return f"{cik_numeric:010d}"
 
 
+def accession_registrant_slot(
+    anchor_cik_numeric: int | None,
+    substantive_registrant_ciks: Sequence[int] = (),
+) -> str:
+    """Return what occupies the tie-break registrant slot (**Decision 083 R60**).
+
+    Exactly two outcomes, and no third:
+
+    * an **established sole** substantive registrant yields that registrant's
+      canonical ten-digit padded CIK, byte-identical to what the pre-correction
+      implementation produced -- which is what preserves every existing
+      single-registrant preimage (Decision 082 section 10.9);
+    * an **established** substantive set of cardinality greater than one yields
+      :data:`MULTI_REGISTRANT_TIE_BREAK_SENTINEL`, which names **no** registrant.
+
+    ``anchor_cik_numeric`` is authoritative when present: migration ``0014``'s
+    ``CHECK`` constraints already guarantee it exists only under an established set
+    of cardinality exactly one. When it is ``None`` the set must be genuinely
+    multi-registrant, and a sole-registrant set arriving without its anchor is a
+    contradiction rather than a case to be papered over.
+
+    The slot is a pure function of the *cardinality* of the association set and
+    never of its membership, so it cannot drift when the set is later corrected --
+    the exact hazard Decision 082 section 10.9 rejected option H-b for -- and it is
+    invariant to observation, parser, archive, and insertion order.
+
+    Raises:
+        ValueError: no anchor and fewer than two substantive registrants.
+    """
+    if anchor_cik_numeric is not None:
+        return canonical_anchor_cik_padded(anchor_cik_numeric)
+    if len(set(substantive_registrant_ciks)) < MULTI_REGISTRANT_MINIMUM:
+        message = (
+            "an accession with no anchor must carry at least two distinct substantive "
+            f"registrants; got {sorted(set(substantive_registrant_ciks))!r}"
+        )
+        raise ValueError(message)
+    return MULTI_REGISTRANT_TIE_BREAK_SENTINEL
+
+
 def accession_selection_rank(
     anchor_cik_padded: str,
     accession_number_dashed: str,
@@ -368,12 +432,19 @@ def accession_selection_rank(
 ) -> str:
     """Return the frozen accession tie-break rank (Decision 018 section 5.2).
 
-    ``SHA256(selection_seed + "|" + anchor_cik_padded + "|" +
+    ``SHA256(selection_seed + "|" + registrant_slot + "|" +
     accession_number_dashed)``, lowercase 64-character hexadecimal. The **dashed**
-    form is canonical for hashing; the plain 18-character form remains the future
+    form is canonical for hashing; the plain 18-character form remains the
     database and foreign-key column. Associated registrant CIKs never enter this
     hash, so a multi-registrant accession's identity cannot drift when its
     registrant set is later corrected.
+
+    The first positional argument is the **registrant slot**
+    (:func:`accession_registrant_slot`), not necessarily a CIK: under **Decision 083
+    R60** an established multi-registrant accession passes
+    :data:`MULTI_REGISTRANT_TIE_BREAK_SENTINEL` here, because no anchor exists to
+    pass. The parameter keeps its historical name so that every single-registrant
+    call site, and therefore every single-registrant digest, is untouched.
     """
     payload = f"{selection_seed}|{anchor_cik_padded}|{accession_number_dashed}".encode()
     return hashlib.sha256(payload).hexdigest()
@@ -489,8 +560,15 @@ class AccessionCandidate:
 
     accession_plain: str
     accession_number_dashed: str
-    anchor_cik_numeric: int
+    #: **Decision 083 R58.** ``None`` whenever the accession does not have exactly one
+    #: established substantive registrant. No arbitrary primary CIK is ever put here.
+    anchor_cik_numeric: int | None
     form_type: str
+    #: **Decision 083 R58/R62.** The complete substantive registrant association set.
+    #: Left empty for a sole-registrant accession, where ``anchor_cik_numeric`` already
+    #: carries the whole set -- see :attr:`substantive_registrant_ciks_resolved`. It is
+    #: *required* when there is no anchor, because an accession can never have neither.
+    substantive_registrant_ciks: tuple[int, ...] = ()
     is_amendment: bool = False
     official_filing_date: str | None = None
     report_date: str | None = None
@@ -515,14 +593,55 @@ class AccessionCandidate:
     multi_registrant: bool = False
 
     @property
-    def anchor_cik_padded(self) -> str:
-        """Canonical ten-digit anchor CIK, derived from the stored numeric CIK."""
+    def substantive_registrant_ciks_resolved(self) -> tuple[int, ...]:
+        """The complete substantive association set, sorted and deduplicated.
+
+        An anchor is available only under an established set of cardinality exactly
+        one (migration ``0014``), so an anchor *is* the whole substantive set and
+        needs no second field to restate it. That equivalence is what lets every
+        existing single-registrant construction stay byte-unchanged while the
+        relational set becomes authoritative for the multi-registrant case.
+        """
+        if self.anchor_cik_numeric is not None:
+            return (self.anchor_cik_numeric,)
+        return tuple(sorted(set(self.substantive_registrant_ciks)))
+
+    @property
+    def substantive_registrants_padded(self) -> tuple[str, ...]:
+        """The substantive association set as canonical ten-digit padded CIKs.
+
+        Sorted by canonical CIK, so it is invariant to observation, parser, archive,
+        full-index row, and insertion order (**Decision 083 R58**).
+        """
+        return tuple(
+            canonical_anchor_cik_padded(cik) for cik in self.substantive_registrant_ciks_resolved
+        )
+
+    @property
+    def is_established_multi_registrant(self) -> bool:
+        """Whether the established substantive set has cardinality greater than one."""
+        return len(self.substantive_registrant_ciks_resolved) >= MULTI_REGISTRANT_MINIMUM
+
+    @property
+    def anchor_cik_padded(self) -> str | None:
+        """Canonical ten-digit anchor CIK, or ``None`` when no anchor exists.
+
+        ``None`` is the truthful answer for an established multi-registrant accession
+        (**Decision 083 R58**) and is never replaced by a substitute CIK.
+        """
+        if self.anchor_cik_numeric is None:
+            return None
         return canonical_anchor_cik_padded(self.anchor_cik_numeric)
+
+    @property
+    def registrant_slot(self) -> str:
+        """What occupies the tie-break registrant slot (**Decision 083 R60**)."""
+        return accession_registrant_slot(self.anchor_cik_numeric, self.substantive_registrant_ciks)
 
     @property
     def rank(self) -> str:
         """Deterministic tie-break rank under the frozen production seed."""
-        return accession_selection_rank(self.anchor_cik_padded, self.accession_number_dashed)
+        return accession_selection_rank(self.registrant_slot, self.accession_number_dashed)
 
 
 # --------------------------------------------------------------------------
@@ -536,10 +655,15 @@ class SelectedAccession:
 
     accession_plain: str
     accession_number_dashed: str
-    anchor_cik_padded: str
+    #: **Decision 083 R58/R61.** ``None`` for an established multi-registrant accession,
+    #: where the relational set below is authoritative and no anchor exists.
+    anchor_cik_padded: str | None
     accession_role: AccessionRole
     selected_order: int
     accession_tie_break_sha256: str
+    #: The complete substantive association set, sorted by canonical CIK. For a
+    #: sole-registrant accession this is exactly ``(anchor_cik_padded,)``.
+    substantive_registrants_padded: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,7 +671,10 @@ class AccessionDiagnostic:
     """Why a candidate accession could not be selected, or was not selected."""
 
     accession_number_dashed: str
-    anchor_cik_padded: str
+    #: The **Decision 083 R60** registrant slot: a padded CIK for a sole-registrant
+    #: accession, or :data:`MULTI_REGISTRANT_TIE_BREAK_SENTINEL`. A diagnostic label,
+    #: never a claim of primacy and never an entity reference.
+    registrant_slot_padded: str
     form_type: str
     reason: str
 
@@ -637,15 +764,37 @@ class QuotaContributionMember:
 
     ``cik_padded`` is the member entity for an ``entity`` member and the **anchor**
     entity for an ``accession`` member, so the entity-level projection of a
-    membership artifact needs no further derivation. ``accession_plain`` is
-    ``None`` on an ``entity`` member and the canonical eighteen-digit identity on
+    membership artifact needs no further derivation. Under **Decision 083 R58** an
+    established multi-registrant accession has no anchor, so ``cik_padded`` is
+    ``None`` there and :attr:`registrant_ciks_padded` carries the truth instead --
+    no substitute CIK is invented to keep the column populated. ``accession_plain``
+    is ``None`` on an ``entity`` member and the canonical eighteen-digit identity on
     an ``accession`` member, matching ``pilot_quota_result_members``'s two
-    mutually exclusive member columns (Decision 016 section 3).
+    mutually exclusive member columns (Decision 016 section 3), which already
+    require ``cik_numeric`` to be ``NULL`` for an accession member in any case.
     """
 
     member_kind: QuotaMemberKind
-    cik_padded: str
+    cik_padded: str | None
     accession_plain: str | None
+    #: **Decision 083 R58/R62.** The complete substantive association set of an
+    #: ``accession`` member, sorted by canonical CIK. Empty on an ``entity`` member,
+    #: whose contributing entity is ``cik_padded`` itself.
+    registrant_ciks_padded: tuple[str, ...] = ()
+
+    @property
+    def contributing_ciks(self) -> tuple[str, ...]:
+        """Every entity this member makes contribute, in canonical order.
+
+        For an ``entity`` member that is the entity itself. For an ``accession``
+        member it is the **complete** substantive association set: **Decision 083
+        R62** attributes a joint filing to every substantive registrant, never to one
+        and never to none. A sole-registrant accession yields exactly its anchor, so
+        the pre-correction result is reproduced unchanged.
+        """
+        if self.member_kind == "entity":
+            return () if self.cik_padded is None else (self.cik_padded,)
+        return self.registrant_ciks_padded
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,12 +886,15 @@ class QuotaContributionMembership:
 
         The projection behind ``pilot_selected_entity_quota_contributions``. An
         entity contributes to a quota when it is an entity member of one of that
-        quota's achieved units, or when it anchors an accession member of one.
+        quota's achieved units, or when it is a **substantive registrant** of an
+        accession member of one (**Decision 083 R62**; for a sole-registrant
+        accession that is exactly its anchor, as before).
         """
         rows = {
-            (member.cik_padded, unit.dimension, unit.key)
+            (cik, unit.dimension, unit.key)
             for unit in self.units
             for member in unit.members
+            for cik in member.contributing_ciks
         }
         return tuple(sorted(rows))
 
@@ -759,7 +911,7 @@ class QuotaContributionMembership:
         }
         return tuple(sorted(rows))
 
-    def quota_members(self) -> tuple[tuple[str, str, int, str, str, str | None], ...]:
+    def quota_members(self) -> tuple[tuple[str, str, int, str, str | None, str | None], ...]:
         """``(dimension, key, member_order, member_kind, cik_padded, accession_plain)``.
 
         The projection behind ``pilot_quota_result_members``: every distinct
@@ -769,7 +921,7 @@ class QuotaContributionMembership:
         by_quota: dict[tuple[str, str], set[QuotaContributionMember]] = {}
         for unit in self.units:
             by_quota.setdefault((unit.dimension, unit.key), set()).update(unit.members)
-        rows: list[tuple[str, str, int, str, str, str | None]] = []
+        rows: list[tuple[str, str, int, str, str | None, str | None]] = []
         for (dimension, key), members in sorted(by_quota.items()):
             for order, member in enumerate(sorted(members, key=_member_sort_key), start=1):
                 rows.append(
@@ -807,8 +959,13 @@ class QuotaContributionMembership:
 
 
 def _member_sort_key(member: QuotaContributionMember) -> tuple[str, str, str]:
-    """Canonical member order: kind, then entity identity, then accession identity."""
-    return (member.member_kind, member.cik_padded, member.accession_plain or "")
+    """Canonical member order: kind, then entity identity, then accession identity.
+
+    An anchorless accession member sorts under the empty entity identity, which is
+    below every padded CIK and is not a CIK -- so ordering stays total and
+    deterministic without the sentinel ever entering an entity position.
+    """
+    return (member.member_kind, member.cik_padded or "", member.accession_plain or "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -929,8 +1086,28 @@ def _validate_accessions(
         seen_dashed.add(dashed)
         seen_plain.add(plain)
 
-        # Raises on a malformed or out-of-range numeric CIK.
-        anchor = accession.anchor_cik_padded
+        # Raises on a malformed or out-of-range numeric CIK, and -- under
+        # **Decision 083 R58/R60** -- on an anchorless accession that does not carry a
+        # genuine multi-registrant set. An accession can never have neither an anchor
+        # nor an association set: that combination is unrepresentable, not a default.
+        registrants = accession.substantive_registrants_padded
+        _reject(
+            not registrants,
+            f"accession {dashed!r} carries neither an anchor nor a substantive "
+            "registrant association set",
+        )
+        _reject(
+            accession.anchor_cik_numeric is None and len(registrants) < MULTI_REGISTRANT_MINIMUM,
+            f"accession {dashed!r} has no anchor but fewer than "
+            f"{MULTI_REGISTRANT_MINIMUM} distinct substantive registrants",
+        )
+        # **Decision 072 R23 section 5.3**, restated anchor-free at identical extension.
+        # The flag and the association set can never disagree.
+        _reject(
+            accession.multi_registrant != accession.is_established_multi_registrant,
+            f"multi_registrant on {dashed!r} disagrees with its substantive association "
+            f"set of {len(registrants)} distinct registrant(s)",
+        )
 
         _reject(
             not isinstance(accession.form_type, str) or not accession.form_type,
@@ -984,8 +1161,8 @@ def _validate_accessions(
             f"has_inline_xbrl without has_xbrl is contradictory on {dashed!r}",
         )
         _reject(
-            not anchor.isdigit(),
-            f"non-canonical anchor CIK rendering on {dashed!r}: {anchor!r}",
+            any(not cik.isdigit() for cik in registrants),
+            f"non-canonical registrant CIK rendering on {dashed!r}: {registrants!r}",
         )
     return pool
 
@@ -1272,7 +1449,14 @@ class _PoolContext:
 
     accessions: tuple[AccessionCandidate, ...]
     penalties: tuple[int, ...]
-    anchors: tuple[str, ...]
+    #: **Decision 083 R60.** Per accession, what occupies the tie-break registrant slot:
+    #: a padded CIK for a sole substantive registrant, or the non-CIK sentinel. Used for
+    #: hashing and deterministic ordering, **never** as an entity reference.
+    slots: tuple[str, ...]
+    #: **Decision 083 R58/R62.** Per accession, the complete substantive association set
+    #: as sorted padded CIKs. This -- not a scalar -- is the attachment domain: history,
+    #: eligibility, role assignment, and every entity-domain quota read it.
+    registrants: tuple[tuple[str, ...], ...]
     hashes: tuple[str, ...]
     filing_years: tuple[int | None, ...]
     report_dates: tuple[date | None, ...]
@@ -1312,9 +1496,10 @@ def _build_pool_context(
     return _PoolContext(
         accessions=accessions,
         penalties=tuple(accession_evidence_penalty(a) for a in accessions),
-        anchors=tuple(a.anchor_cik_padded for a in accessions),
+        slots=tuple(a.registrant_slot for a in accessions),
+        registrants=tuple(a.substantive_registrants_padded for a in accessions),
         hashes=tuple(
-            accession_selection_rank(a.anchor_cik_padded, a.accession_number_dashed, selection_seed)
+            accession_selection_rank(a.registrant_slot, a.accession_number_dashed, selection_seed)
             for a in accessions
         ),
         filing_years=tuple(filing_years),
@@ -1423,7 +1608,12 @@ def _build_witnesses(
 
     for i in available:
         a = ctx.accessions[i]
-        anchor = ctx.anchors[i]
+        # **Decision 083 R62.** An established multi-registrant accession participates in
+        # the filing history of EVERY substantive registrant associated with it -- not one
+        # CIK, and not none. Each entity-domain quota below therefore emits one witness per
+        # substantive registrant. Accession-domain quotas keep their accession key and are
+        # untouched, so one joint filing still counts exactly once there.
+        entities = ctx.registrants[i]
 
         if a.is_amendment:
             root = ctx.root_index[i]
@@ -1431,7 +1621,10 @@ def _build_witnesses(
                 a.amendment_linkage_evidence_level == _PROVISIONAL
             )
             if root is not None and root in available_set and linkage_ok:
-                witnesses[QUOTA_KEY_LINKED_AMENDMENT_ENTITIES].append(_Witness(anchor, (i, root)))
+                for entity in entities:
+                    witnesses[QUOTA_KEY_LINKED_AMENDMENT_ENTITIES].append(
+                        _Witness(entity, (i, root))
+                    )
             if a.amendment_purpose_category is not None and (
                 (not require_evidence) or a.amendment_purpose_quota_eligible
             ):
@@ -1440,8 +1633,12 @@ def _build_witnesses(
                 )
 
         if a.form_type in TRANSITION_REPORT_FORMS:
-            witnesses[QUOTA_KEY_TRANSITION_REPORT_ENTITIES].append(_Witness(anchor, (i,)))
+            for entity in entities:
+                witnesses[QUOTA_KEY_TRANSITION_REPORT_ENTITIES].append(_Witness(entity, (i,)))
 
+        # Accession-keyed already, and therefore needing no anchor: Decision 013 fixes
+        # that an accession satisfies this quota ONCE however many registrants it
+        # carries (Decision 082 section 10.11). The hard requirement stays 2 accessions.
         if a.multi_registrant and (
             (not require_evidence) or a.multi_registrant_evidence_level == _PROVISIONAL
         ):
@@ -1460,14 +1657,17 @@ def _build_witnesses(
                 witnesses[key].append(_Witness(a.accession_number_dashed, (i,)))
             filing_ok = (not require_evidence) or a.filing_date_evidence_level == _PROVISIONAL
             if filing_ok and ctx.filing_years[i] == _CURRENT_ORIGINAL_YEAR:
-                witnesses[QUOTA_KEY_ORIGINAL_2024_ENTITIES].append(_Witness(anchor, (i,)))
+                for entity in entities:
+                    witnesses[QUOTA_KEY_ORIGINAL_2024_ENTITIES].append(_Witness(entity, (i,)))
             if filing_ok and ctx.filing_years[i] in _RECENT_ORIGINAL_YEARS:
-                witnesses[QUOTA_KEY_ORIGINAL_2025_2026_ENTITIES].append(_Witness(anchor, (i,)))
+                for entity in entities:
+                    witnesses[QUOTA_KEY_ORIGINAL_2025_2026_ENTITIES].append(_Witness(entity, (i,)))
 
         # Fiscal-year-end witnesses are an upper-bound model only; the exact rule
         # (Decision 018 section 12) is evaluated on the complete selection.
         if a.form_type in TRANSITION_REPORT_FORMS:
-            witnesses[QUOTA_KEY_FISCAL_YEAR_END_CHANGE_ENTITIES].append(_Witness(anchor, (i,)))
+            for entity in entities:
+                witnesses[QUOTA_KEY_FISCAL_YEAR_END_CHANGE_ENTITIES].append(_Witness(entity, (i,)))
 
     _add_pair_witnesses(
         ctx,
@@ -1499,10 +1699,15 @@ def _add_pair_witnesses(
     targets: dict[str, list[int]] = {}
     for i in available:
         role = assigned_roles.get(i)
+        # **Decision 083 R62**: a jointly filed leg belongs to every substantive
+        # registrant's history, so each of them may form a pair with its own other leg.
+        # The quota still counts DISTINCT entities, so no entity is double-counted.
         if _is_support_accession(ctx, i, assigned_role=role, require_evidence=require_evidence):
-            supports.setdefault(ctx.anchors[i], []).append(i)
+            for entity in ctx.registrants[i]:
+                supports.setdefault(entity, []).append(i)
         if _is_target_accession(ctx, i, assigned_role=role, require_evidence=require_evidence):
-            targets.setdefault(ctx.anchors[i], []).append(i)
+            for entity in ctx.registrants[i]:
+                targets.setdefault(entity, []).append(i)
     for anchor in sorted(supports):
         for support_index in supports[anchor]:
             for target_index in targets.get(anchor, ()):
@@ -1530,7 +1735,8 @@ def _add_fye_distance_witnesses(
     for i in available:
         report = ctx.report_dates[i]
         if ctx.is_original_annual[i] and report is not None:
-            originals_by_anchor.setdefault(ctx.anchors[i], []).append((report, i))
+            for entity in ctx.registrants[i]:
+                originals_by_anchor.setdefault(entity, []).append((report, i))
     for anchor in sorted(originals_by_anchor):
         dated = originals_by_anchor[anchor]
         for position, (first_date, first) in enumerate(dated):
@@ -1565,17 +1771,21 @@ def _fiscal_year_end_contributions(
     originals_by_anchor: dict[str, list[tuple[date, str, int]]] = {}
     undated_anchors: set[str] = set()
     for i in chosen:
-        anchor = ctx.anchors[i]
+        # **Decision 083 R62**: a joint filing is part of every substantive registrant's
+        # annual-report history, so it enters each of their consecutive-report sequences.
+        entities = ctx.registrants[i]
         if ctx.accessions[i].form_type in TRANSITION_REPORT_FORMS:
-            contributing.setdefault(anchor, []).append(i)
+            for entity in entities:
+                contributing.setdefault(entity, []).append(i)
         if ctx.is_original_annual[i]:
             report = ctx.report_dates[i]
             if report is None:
-                undated_anchors.add(anchor)
+                undated_anchors.update(entities)
             else:
-                originals_by_anchor.setdefault(anchor, []).append(
-                    (report, ctx.accessions[i].accession_number_dashed, i)
-                )
+                for entity in entities:
+                    originals_by_anchor.setdefault(entity, []).append(
+                        (report, ctx.accessions[i].accession_number_dashed, i)
+                    )
     for anchor in sorted(originals_by_anchor):
         if anchor in contributing or anchor in undated_anchors:
             continue
@@ -1617,11 +1827,54 @@ def _achieved_unit_members(
     return {unit: tuple(sorted(members)) for unit, members in achieved.items()}
 
 
-def _accession_member(ctx: _PoolContext, index: int) -> QuotaContributionMember:
+def _attached_category(
+    registrants: Sequence[str], category_by_cik: Mapping[str, str | None]
+) -> str | None:
+    """The single candidate category an accession's attached registrants agree on.
+
+    **Decision 083 R62** attaches an accession to every substantive registrant, so an
+    accession can reach more than one entity. Decision 018's role model assigns each
+    accession exactly one mutually exclusive role, chosen by its entity's category,
+    and that stays true here.
+
+    Two entities of the *same* category leave the role well defined. Entities of
+    *different* categories do not, and there is no non-arbitrary way to prefer one --
+    picking either would be exactly the kind of unjustified primacy **R58**
+    prohibits. That case therefore returns ``None`` and the accession is simply not
+    available: **fail closed, order-independent, and inventing nothing.**
+    """
+    categories = {
+        category_by_cik[cik] for cik in registrants if category_by_cik.get(cik) is not None
+    }
+    if len(categories) != 1:
+        return None
+    return categories.pop()
+
+
+def _accession_member(
+    ctx: _PoolContext, index: int, selected_ciks: Collection[str]
+) -> QuotaContributionMember:
+    """One accession member, carrying the substantive registrants that are selected.
+
+    ``cik_padded`` is the anchor when one lawfully exists and ``None`` otherwise
+    (**Decision 083 R58**); the association set is what the entity-level projection
+    reads either way, so nothing depends on a fabricated anchor.
+
+    The set is narrowed to **selected** entities on purpose. Membership is a property
+    of a selection, and ``pilot_selected_entity_quota_contributions`` is keyed on
+    selected entities: a co-registrant the accepted index names but that this run never
+    selected has no row to contribute to. **Decision 083 R62** lets each truthful
+    substantive entity participate *according to that metric's existing definition*, and
+    this metric's existing definition is per selected entity. For a sole-registrant
+    accession the narrowing is a no-op -- an accession is only available when its
+    attached registrants are in the entity set -- so every pre-correction contribution is
+    reproduced exactly.
+    """
     return QuotaContributionMember(
         member_kind="accession",
-        cik_padded=ctx.anchors[index],
+        cik_padded=ctx.accessions[index].anchor_cik_padded,
         accession_plain=ctx.accessions[index].accession_plain,
+        registrant_ciks_padded=tuple(cik for cik in ctx.registrants[index] if cik in selected_ciks),
     )
 
 
@@ -1665,7 +1918,7 @@ def _derive_membership(
 
     assigned_roles: dict[int, AccessionRole] = {}
     for index in chosen:
-        category = category_by_cik.get(ctx.anchors[index])
+        category = _attached_category(ctx.registrants[index], category_by_cik)
         role: AccessionRole | None
         if category == "operating":
             role = ctx.role_if_operating[index]
@@ -1701,7 +1954,9 @@ def _derive_membership(
             members = (
                 (QuotaContributionMember("entity", unit, None),)
                 if entity_units
-                else tuple(_accession_member(ctx, index) for index in members_by_unit[unit])
+                else tuple(
+                    _accession_member(ctx, index, selected_ciks) for index in members_by_unit[unit]
+                )
             )
             units.append(
                 QuotaContributionUnit(
@@ -1769,7 +2024,10 @@ class _Subproblem:
     order: tuple[int, ...]
     roles: tuple[AccessionRole, ...]
     penalties: tuple[int, ...]
-    anchors: tuple[str, ...]
+    #: **Decision 083 R62.** Per ordered position, every *selected* substantive
+    #: registrant the accession attaches to. One entry for a sole-registrant accession;
+    #: several for a joint filing, which really is part of each of their histories.
+    attachments: tuple[tuple[str, ...], ...]
     hashes: tuple[str, ...]
     identities: tuple[str, ...]
     base_positions_by_cik: Mapping[str, tuple[int, ...]]
@@ -1782,15 +2040,19 @@ class _Subproblem:
 
 
 def _selected_order_key(ctx: _PoolContext, index: int) -> tuple[str, str, str]:
-    """Decision 018 section 4: tie-break hash, then anchor CIK, then dashed accession.
+    """Decision 018 section 4: tie-break hash, then registrant slot, then dashed accession.
 
     Role, entity ``selected_order``, amendment family, and associated registrants
     are deliberately absent, so the ordering is a pure function of accession
-    identity.
+    identity. The middle component is the **Decision 083 R60** registrant slot, which
+    is the anchor CIK exactly when one exists -- so every single-registrant ordering
+    is unchanged -- and the non-CIK sentinel otherwise. The sentinel depends only on
+    the *cardinality* of the association set, never its membership, so the order is
+    invariant to which registrants a joint filing happens to carry.
     """
     return (
         ctx.hashes[index],
-        ctx.anchors[index],
+        ctx.slots[index],
         ctx.accessions[index].accession_number_dashed,
     )
 
@@ -1806,37 +2068,47 @@ def _build_subproblem(
     purely entity-level quota (Decision 018 section 13) and is settled before the
     accession search begins, so no accession choice can affect it.
     """
+    category_by_cik: dict[str, str | None] = dict.fromkeys(operating_ciks, "operating")
+    category_by_cik.update(dict.fromkeys(control_ciks, "control"))
+
     available: list[int] = []
     roles: list[AccessionRole] = []
+    attached: list[tuple[str, ...]] = []
     for i in range(len(ctx.accessions)):
-        anchor = ctx.anchors[i]
+        # **Decision 083 R62.** An accession is available when at least one of its
+        # substantive registrants is in this entity set -- the section 10.11 attachment
+        # rule -- and its role comes from the category those attached entities agree on.
+        entities = tuple(cik for cik in ctx.registrants[i] if cik in category_by_cik)
+        category = _attached_category(entities, category_by_cik)
         role: AccessionRole | None
-        if anchor in operating_ciks:
+        if category == "operating":
             role = ctx.role_if_operating[i]
-        elif anchor in control_ciks:
+        elif category == "control":
             role = ctx.role_if_control[i]
         else:
             role = None
         if role is not None:
             available.append(i)
             roles.append(role)
+            attached.append(entities)
 
     order_positions = sorted(
         range(len(available)), key=lambda p: _selected_order_key(ctx, available[p])
     )
     order = tuple(available[p] for p in order_positions)
     ordered_roles = tuple(roles[p] for p in order_positions)
+    ordered_attachments = tuple(attached[p] for p in order_positions)
 
     base_positions: dict[str, list[int]] = {cik: [] for cik in operating_ciks}
     control_positions: dict[str, list[int]] = {cik: [] for cik in control_ciks}
     positions_by_cik: dict[str, list[int]] = {cik: [] for cik in operating_ciks | control_ciks}
-    for position, index in enumerate(order):
-        anchor = ctx.anchors[index]
-        positions_by_cik[anchor].append(position)
-        if ordered_roles[position] == "base":
-            base_positions[anchor].append(position)
-        elif ordered_roles[position] == "control":
-            control_positions[anchor].append(position)
+    for position, _index in enumerate(order):
+        for anchor in ordered_attachments[position]:
+            positions_by_cik[anchor].append(position)
+            if ordered_roles[position] == "base":
+                base_positions[anchor].append(position)
+            elif ordered_roles[position] == "control":
+                control_positions[anchor].append(position)
 
     if any(not values for values in base_positions.values()):
         return None
@@ -1864,7 +2136,7 @@ def _build_subproblem(
         order=order,
         roles=ordered_roles,
         penalties=tuple(ctx.penalties[i] for i in order),
-        anchors=tuple(ctx.anchors[i] for i in order),
+        attachments=ordered_attachments,
         hashes=tuple(ctx.hashes[i] for i in order),
         identities=tuple(ctx.accessions[i].accession_number_dashed for i in order),
         base_positions_by_cik={k: tuple(v) for k, v in base_positions.items()},
@@ -1997,11 +2269,16 @@ def _solve_accessions(
             return
 
         role = sub.roles[i]
-        anchor = sub.anchors[i]
-        # Only the anchor's own count can change here, so the new per-CIK maximum
-        # is the old maximum or that one incremented count -- exact, and O(1).
+        # **Decision 083 R62.** A joint base filing counts toward the per-CIK base cap
+        # of every substantive registrant it attaches to -- the cap is entity-domain,
+        # and each of them genuinely filed it. Only those CIKs' counts can change here,
+        # so the new per-CIK maximum is the old maximum or one of their incremented
+        # counts -- still exact, and O(attachments).
+        attachments = sub.attachments[i]
         next_max_base_per_cik = (
-            max(max_base_per_cik, base_by_cik[anchor] + 1) if role == "base" else max_base_per_cik
+            max(max_base_per_cik, *(base_by_cik[cik] + 1 for cik in attachments))
+            if role == "base" and attachments
+            else max_base_per_cik
         )
         prospective = AccessionCapUsage(
             base_total=base_count + (1 if role == "base" else 0),
@@ -2015,7 +2292,8 @@ def _solve_accessions(
         chosen_flags[i] = True
         chosen.append(i)
         if role == "base":
-            base_by_cik[anchor] += 1
+            for cik in attachments:
+                base_by_cik[cik] += 1
         dfs(
             i + 1,
             penalty + sub.penalties[i],
@@ -2024,7 +2302,8 @@ def _solve_accessions(
             next_max_base_per_cik,
         )
         if role == "base":
-            base_by_cik[anchor] -= 1
+            for cik in attachments:
+                base_by_cik[cik] -= 1
         chosen.pop()
         chosen_flags[i] = False
 
@@ -2655,16 +2934,22 @@ def solve_joint_selection(
     ctx = _build_pool_context(accession_pool, selection_seed)
     eligible_entity_ciks = {c.cik_padded for c in operating_eligible} | eligible_control_ids
     operating_eligible_ciks = {c.cik_padded for c in operating_eligible}
-    # An accession's assigned role is the one its own anchor's category selects,
-    # so a control-anchored accession is `control` no matter which other
-    # eligibility flags its snapshot row happens to carry.
+    # An accession's assigned role is the one its attached registrants' category
+    # selects, so a control-attached accession is `control` no matter which other
+    # eligibility flags its snapshot row happens to carry. Under **Decision 083 R62**
+    # an accession attaches to every substantive registrant, and `_attached_category`
+    # fails closed when those span more than one category.
+    pool_category_by_cik: dict[str, str | None] = dict.fromkeys(
+        operating_eligible_ciks, "operating"
+    )
+    pool_category_by_cik.update(dict.fromkeys(eligible_control_ids, "control"))
     pool_assigned_roles: dict[int, AccessionRole] = {}
     for i in range(len(accession_pool)):
-        anchor = ctx.anchors[i]
+        category = _attached_category(ctx.registrants[i], pool_category_by_cik)
         role: AccessionRole | None
-        if anchor in operating_eligible_ciks:
+        if category == "operating":
             role = ctx.role_if_operating[i]
-        elif anchor in eligible_control_ids:
+        elif category == "control":
             role = ctx.role_if_control[i]
         else:
             role = None
@@ -2707,10 +2992,11 @@ def solve_joint_selection(
             SelectedAccession(
                 accession_plain=ctx.accessions[index].accession_plain,
                 accession_number_dashed=ctx.accessions[index].accession_number_dashed,
-                anchor_cik_padded=ctx.anchors[index],
+                anchor_cik_padded=ctx.accessions[index].anchor_cik_padded,
                 accession_role=incumbent.accession_roles[index],
                 selected_order=position,
                 accession_tie_break_sha256=ctx.hashes[index],
+                substantive_registrants_padded=ctx.registrants[index],
             )
             for position, index in enumerate(chosen_indices, start=1)
         )
@@ -2755,12 +3041,15 @@ def solve_joint_selection(
         name_change_structural,
         membership,
     )
+    # **Decision 083 R62.** ``max_base_per_cik`` is entity-domain, so a joint base
+    # filing counts once for each substantive registrant. The three totals below stay
+    # accession-domain and are computed over ``selected_accessions``, which holds one
+    # row per accession -- so one joint filing is still exactly one filing there.
     base_by_cik: dict[str, int] = {}
     for selected in selected_accessions:
         if selected.accession_role == "base":
-            base_by_cik[selected.anchor_cik_padded] = (
-                base_by_cik.get(selected.anchor_cik_padded, 0) + 1
-            )
+            for cik in selected.substantive_registrants_padded:
+                base_by_cik[cik] = base_by_cik.get(cik, 0) + 1
     cap_usage = AccessionCapUsage(
         base_total=sum(1 for s in selected_accessions if s.accession_role == "base"),
         stress_total=sum(1 for s in selected_accessions if s.accession_role == "stress"),
@@ -2801,8 +3090,10 @@ def _accession_diagnostics(
     for i, accession in enumerate(ctx.accessions):
         if i in eligible:
             continue
-        anchor = ctx.anchors[i]
-        if anchor not in eligible_entity_ciks:
+        slot = ctx.slots[i]
+        # **Decision 083 R62**: an accession attaches to every substantive registrant,
+        # so it is only entity-ineligible when NONE of them is eligible.
+        if not any(cik in eligible_entity_ciks for cik in ctx.registrants[i]):
             reason = "anchor_entity_not_eligible"
         elif ctx.role_if_operating[i] is None and ctx.role_if_control[i] is None:
             reason = ctx.role_reason[i] or "role_unclassified_no_match"
@@ -2811,7 +3102,7 @@ def _accession_diagnostics(
         diagnostics.append(
             AccessionDiagnostic(
                 accession_number_dashed=accession.accession_number_dashed,
-                anchor_cik_padded=anchor,
+                registrant_slot_padded=slot,
                 form_type=accession.form_type,
                 reason=reason,
             )
@@ -2823,7 +3114,7 @@ def _accession_diagnostics(
             diagnostics.append(
                 AccessionDiagnostic(
                     accession_number_dashed=accession.accession_number_dashed,
-                    anchor_cik_padded=anchor,
+                    registrant_slot_padded=slot,
                     form_type=accession.form_type,
                     reason="unparseable_official_filing_date",
                 )
@@ -2833,7 +3124,7 @@ def _accession_diagnostics(
             diagnostics.append(
                 AccessionDiagnostic(
                     accession_number_dashed=accession.accession_number_dashed,
-                    anchor_cik_padded=ctx.anchors[i],
+                    registrant_slot_padded=ctx.slots[i],
                     form_type=accession.form_type,
                     reason="unparseable_report_date",
                 )

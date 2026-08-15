@@ -249,6 +249,23 @@ def verify_support_target_pairs(
     entity counts exactly once. The rule itself lives in the pure
     :mod:`~disclosure_drift.m3.support_target_pairs` module; this reads the rows it needs
     and refuses to guess any of them.
+
+    **Accepted Decision 084 R66.** The complete substantive registrant association set is
+    read alongside the selected rows and handed to the pure rule, because under
+    **Decision 083 R58** a jointly filed accession has **no anchor** and under **R62** it
+    belongs to every substantive registrant's history. Without the set, a joint 2009 or
+    2010 leg would silently contribute nothing.
+
+    The read is `association_class = 'substantive'` on the governed candidate relation --
+    the same predicate every other consumer uses -- so a submitter-only row never buys pair
+    credit, and no CIK is ever chosen by minimum, maximum, first write, submitter, row
+    order, date proximity, name, ticker, or hash. An accession whose set was never
+    established has **no rows here at all**, which is exactly the fail-closed, zero-credit
+    outcome R66 requires: the mapping is a lookup, never a default.
+
+    Nothing about the frozen pair rule moves: the quota, the eligible forms, the 2009/2010
+    years, and the accession-domain deduplication all live in the pure module and are
+    untouched.
     """
     selected = [
         dict(row)
@@ -282,8 +299,20 @@ def verify_support_target_pairs(
             (selection_run_id, PRE_STUDY_SUPPORT_REASON_CODE),
         ).fetchall()
     ]
+    registrants: dict[str, list[int]] = {}
+    for row in connection.execute(
+        "SELECT g.accession_plain, g.registrant_cik_numeric "
+        "FROM pilot_candidate_accession_registrants AS g "
+        "JOIN pilot_selection_runs AS r ON r.snapshot_id = g.snapshot_id "
+        "WHERE r.selection_run_id = ? AND g.association_class = 'substantive' "
+        "ORDER BY g.accession_plain, g.registrant_cik_numeric",
+        (selection_run_id,),
+    ).fetchall():
+        registrants.setdefault(str(row["accession_plain"]), []).append(
+            int(row["registrant_cik_numeric"])
+        )
     assembled: tuple[PairedAccession, ...] = paired_accessions_from_rows(
-        selected, candidates, marked
+        selected, candidates, marked, registrants
     )
     return PairVerification(
         entities=support_target_pair_entities(assembled),

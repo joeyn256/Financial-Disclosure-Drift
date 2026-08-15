@@ -82,12 +82,15 @@ from disclosure_drift.pilot_policy import (
 )
 from disclosure_drift.release.hashing import hash_table
 from disclosure_drift.sec.accession_selector import (
+    MULTI_REGISTRANT_MINIMUM,
+    MULTI_REGISTRANT_TIE_BREAK_SENTINEL,
     NOT_APPLICABLE,
     AccessionCandidate,
     AccessionQuotaDiagnostic,
     EntityCandidate,
     JointSelectionResult,
     NameChangeEvidence,
+    accession_registrant_slot,
     accession_selection_rank,
     canonical_anchor_cik_padded,
     solve_joint_selection,
@@ -169,6 +172,12 @@ _UNRESOLVED_PARENT_REASON: Final = "REVIEW_AMENDMENT_PARENT_UNRESOLVED"
 # -- Decision 019 section 6: multi-registrant --------------------------------------- #
 
 _MULTI_REGISTRANT_SCOPE: Final = "multi_registrant"
+#: Migration ``0014``'s ``association_class`` value for a genuine registrant
+#: association, as opposed to the noncontributing submitter (Decision 019 section 6.2).
+_SUBSTANTIVE_ASSOCIATION: Final = "substantive"
+#: Migration ``0014``'s completeness state in which candidacy is permitted at all
+#: (Decision 083 R59).
+_ESTABLISHED_REGISTRANT_SET: Final = "established"
 _MULTI_REGISTRANT_INCOMPLETE_REASON: Final = "REVIEW_PILOT_MULTI_REGISTRANT_INCOMPLETE"
 _REGISTRANT_DIGEST_TABLE: Final = "pilot_candidate_accession_registrants"
 _REGISTRANT_DIGEST_COLUMNS: Final[tuple[str, ...]] = (
@@ -296,6 +305,7 @@ _CANDIDATE_ACCESSION_COLUMNS: Final[tuple[str, ...]] = (
     "accession_number_dashed",
     "accession_tie_break_sha256",
     "anchor_cik_numeric",
+    "registrant_set_completeness",
     "form_type",
     "is_amendment",
     "official_filing_date",
@@ -455,7 +465,9 @@ class _AccessionRow:
     accession_plain: str
     accession_number_dashed: str
     accession_tie_break_sha256: str
-    anchor_cik_numeric: int
+    #: **Decision 083 R58**: ``None`` for an established multi-registrant accession.
+    anchor_cik_numeric: int | None
+    registrant_set_completeness: str
     form_type: str
     is_amendment: bool
     official_filing_date: str | None
@@ -489,6 +501,8 @@ class _RegistrantRow:
     registrant_cik_padded: str
     role: str
     is_anchor: bool
+    association_class: str
+    registrant_set_completeness: str
     evidence_level: str
 
 
@@ -522,7 +536,14 @@ def _accession_row(row: sqlite3.Row) -> _AccessionRow:
         accession_plain=plain,
         accession_number_dashed=_text(row["accession_number_dashed"], f"{plain} dashed accession"),
         accession_tie_break_sha256=_text(row["accession_tie_break_sha256"], f"{plain} tie-break"),
-        anchor_cik_numeric=_integer(row["anchor_cik_numeric"], f"{plain} anchor_cik_numeric"),
+        anchor_cik_numeric=(
+            None
+            if row["anchor_cik_numeric"] is None
+            else _integer(row["anchor_cik_numeric"], f"{plain} anchor_cik_numeric")
+        ),
+        registrant_set_completeness=_text(
+            row["registrant_set_completeness"], f"{plain} registrant_set_completeness"
+        ),
         form_type=_text(row["form_type"], f"{plain} form_type"),
         is_amendment=_flag(row["is_amendment"], f"{plain} is_amendment"),
         official_filing_date=_optional_text(row["official_filing_date"], f"{plain} filing date"),
@@ -777,19 +798,40 @@ def _multi_registrant_mapping(
     registrants: Sequence[_RegistrantRow],
     reason_scopes: Mapping[str, frozenset[str]],
 ) -> str:
-    """Decision 019 sections 6.2-6.5: the aggregate ``multi_registrant_evidence_level``."""
+    """Decision 019 sections 6.2-6.5: the aggregate ``multi_registrant_evidence_level``.
+
+    **Decision 083 R58** restates the three anchor checks this function used to make.
+    They are not relaxed -- they are stated on the substantive association set, which is
+    what the anchor was standing in for:
+
+    * an anchor row exists exactly when the substantive set has cardinality **one**, and
+      **no** anchor row exists above that;
+    * ``anchor_cik_numeric`` agrees with that anchor when it exists, and is ``NULL``
+      exactly when no anchor does;
+    * ``multi_registrant`` agrees with the distinct substantive cardinality.
+    """
     where = f"accession {row.accession_number_dashed}"
     if not registrants:
         message = f"{where}: no pilot_candidate_accession_registrants row exists"
         raise _fail(message)
 
+    substantive = [
+        registrant
+        for registrant in registrants
+        if registrant.association_class == _SUBSTANTIVE_ASSOCIATION
+    ]
     anchors = [registrant for registrant in registrants if registrant.role == "anchor"]
-    if len(anchors) != 1:
-        message = f"{where}: expected exactly one anchor registrant row, found {len(anchors)}"
-        raise _fail(message)
-    if anchors[0].registrant_cik_numeric != row.anchor_cik_numeric:
+    expected_anchors = 1 if len(substantive) == 1 else 0
+    if len(anchors) != expected_anchors:
         message = (
-            f"{where}: the anchor registrant CIK {anchors[0].registrant_cik_numeric} does not "
+            f"{where}: expected exactly {expected_anchors} anchor registrant row(s) for "
+            f"{len(substantive)} substantive registrant(s), found {len(anchors)}"
+        )
+        raise _fail(message)
+    anchor_cik = anchors[0].registrant_cik_numeric if anchors else None
+    if anchor_cik != row.anchor_cik_numeric:
+        message = (
+            f"{where}: the anchor registrant CIK {anchor_cik} does not "
             f"match anchor_cik_numeric {row.anchor_cik_numeric}"
         )
         raise _fail(message)
@@ -808,10 +850,10 @@ def _multi_registrant_mapping(
             raise _fail(message)
         seen_padded.add(registrant.registrant_cik_padded)
 
-    set_establishing = [
-        registrant for registrant in registrants if registrant.role in ("anchor", "associated")
-    ]
-    qualifies = any(registrant.role == "associated" for registrant in registrants)
+    # Decision 072 R23 section 5.3, restated anchor-free at identical extension: the
+    # predicate is the DISTINCT SUBSTANTIVE cardinality, never a raw row count.
+    set_establishing = substantive
+    qualifies = len(substantive) >= MULTI_REGISTRANT_MINIMUM
 
     if not row.multi_registrant:
         if qualifies:
@@ -819,8 +861,8 @@ def _multi_registrant_mapping(
         return NOT_APPLICABLE
     if not qualifies:
         message = (
-            f"{where}: multi_registrant = 1 without a qualifying registrant set (one anchor plus "
-            "at least one associated row)"
+            f"{where}: multi_registrant = 1 without a qualifying registrant set (at least "
+            f"{MULTI_REGISTRANT_MINIMUM} distinct substantive registrant associations)"
         )
         raise _fail(message)
     if all(registrant.evidence_level == _PROVISIONAL for registrant in set_establishing):
@@ -1267,6 +1309,16 @@ def load_frozen_joint_candidates(
             accession_plain=row.accession_plain,
             accession_number_dashed=row.accession_number_dashed,
             anchor_cik_numeric=row.anchor_cik_numeric,
+            # **Decision 083 R58/R62**: the persisted relation -- not a scalar -- is what
+            # the selector attaches, aggregates, and counts entities on. Reloading it here
+            # is what makes the full association set survive persistence and replay.
+            substantive_registrant_ciks=tuple(
+                sorted(
+                    registrant.registrant_cik_numeric
+                    for registrant in accession_registrants
+                    if registrant.association_class == _SUBSTANTIVE_ASSOCIATION
+                )
+            ),
             form_type=row.form_type,
             is_amendment=row.is_amendment,
             official_filing_date=row.official_filing_date,
@@ -1333,7 +1385,8 @@ def _fetch_registrants(
 ) -> Mapping[str, tuple[_RegistrantRow, ...]]:
     rows = connection.execute(
         "SELECT accession_plain, registrant_cik_numeric, registrant_cik_padded, role, is_anchor, "
-        "evidence_level FROM pilot_candidate_accession_registrants WHERE snapshot_id = ?",
+        "association_class, registrant_set_completeness, evidence_level "
+        "FROM pilot_candidate_accession_registrants WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchall()
     grouped: dict[str, list[_RegistrantRow]] = {}
@@ -1347,10 +1400,36 @@ def _fetch_registrants(
                 registrant_cik_padded=_text(row["registrant_cik_padded"], table),
                 role=_text(row["role"], table),
                 is_anchor=_flag(row["is_anchor"], table),
+                association_class=_text(row["association_class"], table),
+                registrant_set_completeness=_text(row["registrant_set_completeness"], table),
                 evidence_level=_text(row["evidence_level"], table),
             )
         )
     return {plain: tuple(entries) for plain, entries in grouped.items()}
+
+
+def _stored_registrant_slot(row: _AccessionRow, where: str) -> str:
+    """The **Decision 083 R60** registrant slot implied by one persisted candidate row.
+
+    A persisted row carries the anchor and the completeness state but not the
+    association set, so the slot is reconstructed from exactly those two facts -- which
+    migration ``0014``'s ``CHECK`` constraints already make sufficient: an anchor exists
+    if and only if the set is established with cardinality one, so a ``NULL`` anchor on
+    an established row means cardinality greater than one and nothing else.
+
+    An anchorless row that is not established is refused rather than hashed: **R60**
+    forbids hashing a fake value for an unestablished set, and **R59** blocks such an
+    accession from candidacy in the first place.
+    """
+    if row.anchor_cik_numeric is not None:
+        return accession_registrant_slot(row.anchor_cik_numeric)
+    if row.registrant_set_completeness != _ESTABLISHED_REGISTRANT_SET:
+        message = (
+            f"{where}: an accession with no anchor and an unestablished registrant set can "
+            "never be a candidate (Decision 083 R59) and has no tie-break preimage"
+        )
+        raise _fail(message)
+    return MULTI_REGISTRANT_TIE_BREAK_SENTINEL
 
 
 def _validate_accession_identity(row: _AccessionRow) -> None:
@@ -1368,14 +1447,16 @@ def _validate_accession_identity(row: _AccessionRow) -> None:
             f"{row.accession_number_dashed!r} are inconsistent"
         )
         raise _fail(message)
-    anchor_padded = canonical_anchor_cik_padded(row.anchor_cik_numeric)
-    expected = accession_selection_rank(
-        anchor_padded, row.accession_number_dashed, PILOT_SELECTION_SEED
-    )
+    # **Decision 083 R60**: the preimage's registrant slot is the anchor CIK when one
+    # lawfully exists, and the non-CIK sentinel for an established multi-registrant
+    # accession. Recomputing it here from the persisted anchor is what proves the stored
+    # digest was not written under some other rule.
+    slot = _stored_registrant_slot(row, where)
+    expected = accession_selection_rank(slot, row.accession_number_dashed, PILOT_SELECTION_SEED)
     if row.accession_tie_break_sha256 != expected:
         message = (
             f"{where}: stored accession_tie_break_sha256 does not match "
-            "SHA256(selection_seed | anchor_cik_padded | accession_number_dashed)"
+            "SHA256(selection_seed | registrant_slot | accession_number_dashed)"
         )
         raise _fail(message)
 
@@ -1721,7 +1802,10 @@ def _persist_feasible_result(
                 selection_run_id,
                 snapshot_id,
                 selected.accession_plain,
-                int(selected.anchor_cik_padded),
+                # **Decision 083 R58**: NULL for an established multi-registrant
+                # accession. No substitute CIK is written to keep the column populated;
+                # the governed relation is what carries the truth.
+                None if selected.anchor_cik_padded is None else int(selected.anchor_cik_padded),
                 selected.selected_order,
                 selected.accession_tie_break_sha256,
                 selected.accession_role,
@@ -1816,7 +1900,7 @@ def _persist_quota_contribution_membership(
             "recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
             (selection_run_id, snapshot_id, accession_plain, dimension, key, recorded_at_utc),
         )
-    for dimension, key, member_order, member_kind, cik_padded, plain in membership.quota_members():
+    for dimension, key, member_order, member_kind, member_cik, plain in membership.quota_members():
         c.execute(
             "INSERT INTO pilot_quota_result_members "
             "(quota_result_id, selection_run_id, snapshot_id, member_order, member_kind, "
@@ -1827,7 +1911,7 @@ def _persist_quota_contribution_membership(
                 snapshot_id,
                 member_order,
                 member_kind,
-                int(cik_padded) if member_kind == "entity" else None,
+                int(member_cik) if member_kind == "entity" and member_cik else None,
                 plain if member_kind == "accession" else None,
                 recorded_at_utc,
             ),
@@ -2396,7 +2480,15 @@ def _validate_persisted_accessions(
         where = (
             f"selection_run_id {selection_run_id!r} accession {selected.accession_number_dashed}"
         )
-        anchor = canonical_anchor_cik_padded(_integer(row["anchor_cik_numeric"], "anchor"))
+        # **Decision 083 R58**: a persisted NULL anchor is the truthful state for an
+        # established multi-registrant accession and must round-trip as NULL, never as a
+        # reconstructed CIK.
+        stored_anchor = row["anchor_cik_numeric"]
+        anchor = (
+            None
+            if stored_anchor is None
+            else canonical_anchor_cik_padded(_integer(stored_anchor, "anchor"))
+        )
         persisted = (
             _text(row["accession_plain"], "accession_plain"),
             anchor,
@@ -2411,8 +2503,15 @@ def _validate_persisted_accessions(
         ):
             message = f"{where}: the persisted selected accession does not match the derived one"
             raise _fail(message)
-        if anchor not in selected_ciks:
-            message = f"{where}: its anchor CIK is not among the persisted selected entities"
+        # **Decision 082 section 10.11 / Decision 083 R58**: the attachment rule that
+        # replaces what the composite foreign key stops enforcing on a NULL anchor. At
+        # least one substantive registrant must be a selected entity in the same run --
+        # ANY of them, without designating one. Attachment is not primacy.
+        if not any(cik in selected_ciks for cik in selected.substantive_registrants_padded):
+            message = (
+                f"{where}: none of its substantive registrants is among the persisted "
+                "selected entities"
+            )
             raise _fail(message)
     if result.objective is not None:
         _require_objective_vectors_match(rows, result, selection_run_id)

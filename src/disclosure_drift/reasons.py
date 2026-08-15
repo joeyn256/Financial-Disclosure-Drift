@@ -85,6 +85,7 @@ _D014: Final = "Docs/Decisions/decision_014_pilot_evidence_and_classification_po
 _D015: Final = "Docs/Decisions/decision_015_pilot_use_prohibition.md"
 _D016: Final = "Docs/Decisions/decision_016_m23_schema_and_artifact_architecture.md"
 _D018: Final = "Docs/Decisions/decision_018_m23_s5_accession_selection_policy.md"
+_D083: Final = "Docs/Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md"
 _D020: Final = "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
 _D028: Final = "Docs/Decisions/decision_028_m3_1_readiness_corrections.md"
 _D029: Final = "Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md"
@@ -896,6 +897,15 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         "Authorized metadata does not fully establish the accession's registrant set.",
         requires_manual_review=True,
         decision_reference=_D013,
+    ),
+    _code(
+        "PILOT_ACCESSION_REGISTRANT_SET_UNESTABLISHED",
+        "review",
+        "The accepted evidence never established the accession's complete substantive "
+        "registrant set, so it is excluded from candidacy entirely; absent evidence is "
+        "never proof of a sole registrant.",
+        requires_manual_review=True,
+        decision_reference=_D083,
     ),
     # --- M2.3 pilot: selection, reserve, and manifest integrity (Decisions 013, 016) -------- #
     _code(

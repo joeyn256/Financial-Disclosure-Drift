@@ -148,3 +148,125 @@ def test_assembly_from_persisted_rows_reads_the_frozen_candidate_facts() -> None
         ("0000000001090000012",),
     )
     assert assembled[0].is_support_leg
+
+
+# ==========================================================================
+# Accepted Decision 084 R66 -- the joint 2009/2010 pair, proofs A through E
+#
+# Under accepted Decision 083 R58 a jointly filed accession has NO anchor, and under
+# R62 it belongs to every substantive registrant's history. These five proofs are the
+# exact obligations R66 states, held against the pure rule.
+# ==========================================================================
+
+
+def test_r66_a_a_joint_pair_reaches_every_substantive_entity() -> None:
+    """**A.** A joint pair receives truthful entity-domain attribution.
+
+    Both legs are jointly filed by CIK 1 and CIK 901 and neither carries an anchor. Both
+    entities genuinely filed both legs, so both contribute -- and no CIK is designated.
+    """
+    support = _support(anchor_cik_numeric=None, substantive_registrant_ciks=(1, 901))
+    target = _target(anchor_cik_numeric=None, substantive_registrant_ciks=(1, 901))
+    assert pairs.support_target_pair_entities([support, target]) == (1, 901)
+
+
+def test_r66_b_a_joint_pair_is_still_one_accession_each_side() -> None:
+    """**B.** No duplicate accession-domain credit.
+
+    Entity-domain attribution reaching two entities must not multiply the accessions.
+    Each leg is one accession however many registrants it carries, and repeating the same
+    accession in the input cannot manufacture a second one.
+    """
+    support = _support(anchor_cik_numeric=None, substantive_registrant_ciks=(1, 901))
+    target = _target(anchor_cik_numeric=None, substantive_registrant_ciks=(1, 901))
+    entities = pairs.support_target_pair_entities([support, target])
+    # Two entities, from exactly two distinct accessions.
+    assert entities == (1, 901)
+    assert len({support.accession_plain, target.accession_plain}) == 2
+    # Decision 018 §16 counts DISTINCT entities: repeating the legs changes nothing.
+    assert pairs.support_target_pair_entities([support, target, support, target]) == (1, 901)
+
+
+def test_r66_c_joint_pair_attribution_is_order_invariant() -> None:
+    """**C.** Insertion and order invariance.
+
+    Neither the order of the legs nor the order of the association set may change the
+    result -- which is what makes first-write, row-order, and archive-order attribution
+    unreconstructable from the output.
+    """
+    support_forward = _support(anchor_cik_numeric=None, substantive_registrant_ciks=(1, 901))
+    target_forward = _target(anchor_cik_numeric=None, substantive_registrant_ciks=(1, 901))
+    support_reverse = _support(anchor_cik_numeric=None, substantive_registrant_ciks=(901, 1))
+    target_reverse = _target(anchor_cik_numeric=None, substantive_registrant_ciks=(901, 1, 901))
+    expected = (1, 901)
+    assert pairs.support_target_pair_entities([support_forward, target_forward]) == expected
+    assert pairs.support_target_pair_entities([target_forward, support_forward]) == expected
+    assert pairs.support_target_pair_entities([support_reverse, target_reverse]) == expected
+    assert pairs.support_target_pair_entities([target_reverse, support_reverse]) == expected
+
+
+def test_r66_d_an_unestablished_association_set_grants_zero_pair_credit() -> None:
+    """**D.** An unestablished set fails closed at zero credit.
+
+    An accession with no anchor and no supplied association set names no entity, and the
+    rule refuses to invent one. Fail-closed in the safe direction: a hard quota only ever
+    gets harder to satisfy.
+    """
+    support = _support(anchor_cik_numeric=None, substantive_registrant_ciks=())
+    target = _target(anchor_cik_numeric=None, substantive_registrant_ciks=())
+    assert support.contributing_ciks == ()
+    assert target.contributing_ciks == ()
+    assert pairs.support_target_pair_entities([support, target]) == ()
+    # And a legitimate half pair beside it still contributes nothing on its own.
+    assert pairs.support_target_pair_entities([support, target, _target(cik=2)]) == ()
+
+
+def test_r66_e_established_single_registrant_pair_behaviour_is_unchanged() -> None:
+    """**E.** Established single-registrant behaviour does not change.
+
+    The anchor is the whole substantive set, so the result is identical whether the set
+    is stated explicitly or left to the anchor alone.
+    """
+    anchor_only = pairs.support_target_pair_entities([_support(cik=1), _target(cik=1)])
+    stated = pairs.support_target_pair_entities(
+        [
+            _support(cik=1, substantive_registrant_ciks=(1,)),
+            _target(cik=1, substantive_registrant_ciks=(1,)),
+        ]
+    )
+    assert anchor_only == (1,)
+    assert stated == anchor_only
+
+
+def test_r66_the_caller_supplied_association_set_is_what_reaches_the_rule() -> None:
+    """The R66 caller correction, at the assembly boundary it fixes.
+
+    ``paired_accessions_from_rows`` must carry the supplied set onto the leg. Without it
+    an anchorless row contributes nothing -- which is the Decision 083 MINOR-1 defect this
+    ruling closes.
+    """
+    rows = [
+        {
+            "accession_plain": "0000000001090000012",
+            "anchor_cik_numeric": None,
+            "accession_role": "support",
+        }
+    ]
+    candidates = {
+        "0000000001090000012": {
+            "form_type": "10-K",
+            "is_amendment": 0,
+            "official_filing_date": "2009-03-01",
+            "provisional_official_cohort": None,
+        }
+    }
+    without = pairs.paired_accessions_from_rows(rows, candidates, ("0000000001090000012",))
+    assert without[0].is_support_leg
+    assert without[0].contributing_ciks == ()
+
+    with_set = pairs.paired_accessions_from_rows(
+        rows, candidates, ("0000000001090000012",), {"0000000001090000012": (1, 901)}
+    )
+    assert with_set[0].is_support_leg
+    assert with_set[0].contributing_ciks == (1, 901)
+    assert with_set[0].anchor_cik_numeric is None

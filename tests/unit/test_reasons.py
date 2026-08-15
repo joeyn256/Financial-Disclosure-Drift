@@ -242,13 +242,28 @@ _T2_4_DESCRIPTION = (
     "identity, so the window cannot confirm the required object present."
 )
 
+#: The one code accepted Decision 083 R59 adds: the explicit accepted reason for the
+#: fail-closed exclusion of an accession whose substantive registrant set the accepted
+#: evidence never established.
+_D083_CODES: dict[str, dict[str, Any]] = {
+    "PILOT_ACCESSION_REGISTRANT_SET_UNESTABLISHED": {
+        "category": "review",
+        "blocks_release": False,
+        "requires_manual_review": True,
+        "decision_reference": (
+            "Docs/Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md"
+        ),
+    },
+}
+
 _PRE_S3_1_CODE_COUNT = 87
 _S3_1_TOTAL_COUNT = 103
 _S5_2_TOTAL_COUNT = 108
 _S5_4_TOTAL_COUNT = 109
 _M3_1_D028_TOTAL_COUNT = 111
 _M3_1_D029_TOTAL_COUNT = 112
-_TOTAL_COUNT = 113
+_M3_2_T2_4_TOTAL_COUNT = 113
+_TOTAL_COUNT = 114
 
 # Computed once, offline, from the accepted S3.0 governance baseline (the 87 reason codes that
 # existed before the M2.3 S3.1 addition): sort the pre-S3.1 codes by their ``code`` string, render
@@ -267,6 +282,7 @@ def _pre_s3_1_codes() -> dict[str, Any]:
         | set(_M3_1_CODES)
         | set(_M3_1_D029_CODES)
         | set(_T2_4_CODES)
+        | set(_D083_CODES)
     )
     return {code: entry for code, entry in REASON_CODES.items() if code not in added}
 
@@ -296,7 +312,9 @@ def test_exactly_sixteen_s3_1_five_s5_2_and_one_s5_4_code_were_added() -> None:
         | set(_M3_1_CODES)
         | set(_M3_1_D029_CODES)
         | set(_T2_4_CODES)
+        | set(_D083_CODES)
     )
+    assert len(_D083_CODES) == 1
     assert len(_NEW_CODES) == 16
     assert len(_S5_2_CODES) == 5
     assert len(_S5_4_CODES) == 1
@@ -328,7 +346,8 @@ def test_registry_count_is_exactly_one_hundred_thirteen() -> None:
     assert _M3_1_D028_TOTAL_COUNT + len(_M3_1_D029_CODES) == _M3_1_D029_TOTAL_COUNT
     # Decision 040 section 4 approves exactly one further code for M3.2 stage T2.4, closing the
     # delta again at one hundred thirteen.
-    assert _M3_1_D029_TOTAL_COUNT + len(_T2_4_CODES) == _TOTAL_COUNT
+    assert _M3_1_D029_TOTAL_COUNT + len(_T2_4_CODES) == _M3_2_T2_4_TOTAL_COUNT
+    assert _M3_2_T2_4_TOTAL_COUNT + len(_D083_CODES) == _TOTAL_COUNT
 
 
 def test_decision_040_code_carries_the_ruled_metadata() -> None:
@@ -384,6 +403,7 @@ def test_no_reason_code_beyond_the_five_approved_s5_2_additions_exists() -> None
         - set(_M3_1_CODES)
         - set(_M3_1_D029_CODES)
         - set(_T2_4_CODES)
+        - set(_D083_CODES)
     )
     assert beyond_s3_1 == set(_S5_2_CODES)
 
@@ -398,6 +418,7 @@ def test_no_reason_code_beyond_the_single_approved_s5_4_addition_exists() -> Non
         - set(_M3_1_CODES)
         - set(_M3_1_D029_CODES)
         - set(_T2_4_CODES)
+        - set(_D083_CODES)
     )
     assert beyond_s5_2 == set(_S5_4_CODES)
 
@@ -533,6 +554,7 @@ def test_no_reason_code_beyond_the_two_approved_m3_1_additions_exists() -> None:
         - set(_S5_4_CODES)
         - set(_M3_1_D029_CODES)
         - set(_T2_4_CODES)
+        - set(_D083_CODES)
     )
     assert beyond_s5_4 == set(_M3_1_CODES)
 
@@ -547,6 +569,7 @@ def test_no_reason_code_beyond_the_single_approved_d029_addition_exists() -> Non
         - set(_S5_4_CODES)
         - set(_M3_1_CODES)
         - set(_T2_4_CODES)
+        - set(_D083_CODES)
     )
     assert beyond_d028 == set(_M3_1_D029_CODES)
 
@@ -561,6 +584,7 @@ def test_no_reason_code_beyond_the_single_approved_t2_4_addition_exists() -> Non
         - set(_S5_4_CODES)
         - set(_M3_1_CODES)
         - set(_M3_1_D029_CODES)
+        - set(_D083_CODES)
     )
     assert beyond_d029 == set(_T2_4_CODES)
 

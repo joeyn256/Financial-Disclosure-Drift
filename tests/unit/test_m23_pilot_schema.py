@@ -172,6 +172,10 @@ def _insert_accession(
         "accession_number_dashed": accession_plain,
         "accession_tie_break_sha256": _hex(f"accession-tie-break:{snapshot_id}:{accession_plain}"),
         "anchor_cik_numeric": anchor_cik_numeric,
+        # **Decision 083 R59** (migration 0014): every candidate row states whether its
+        # substantive registrant set was established. Fixtures default to 'established',
+        # which is the only state a frozen snapshot may hold.
+        "registrant_set_completeness": "established",
         "form_type": "10-K",
         "is_amendment": 0,
         "filing_date_evidence_level": "unavailable",
@@ -197,20 +201,27 @@ def _insert_registrant(
     accession_plain: str,
     registrant_cik_numeric: int,
     is_anchor: bool = True,
+    association_class: str = "substantive",
+    registrant_set_completeness: str = "established",
 ) -> None:
     with transaction(connection) as c:
         c.execute(
             "INSERT INTO pilot_candidate_accession_registrants "
             "(snapshot_id, accession_plain, registrant_cik_numeric, registrant_cik_padded, "
-            "role, is_anchor, evidence_level, recorded_at_utc) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'unavailable', '2026-01-01T00:00:00Z')",
+            "role, is_anchor, association_class, registrant_set_completeness, evidence_level, "
+            "recorded_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unavailable', '2026-01-01T00:00:00Z')",
             (
                 snapshot_id,
                 accession_plain,
                 registrant_cik_numeric,
                 f"{registrant_cik_numeric:010d}",
-                "anchor" if is_anchor else "associated",
+                "submitter_only"
+                if association_class == "submitter_only"
+                else ("anchor" if is_anchor else "associated"),
                 1 if is_anchor else 0,
+                association_class,
+                registrant_set_completeness,
             ),
         )
 
@@ -279,10 +290,10 @@ def _insert_selection_run(
 # --------------------------------------------------------------------------
 
 
-def test_migration_inventory_is_contiguous_through_0013() -> None:
+def test_migration_inventory_is_contiguous_through_0014() -> None:
     versions = tuple(migration.version for migration in available_migrations())
-    assert versions == tuple(range(1, 14))
-    assert versions[-1] == 13
+    assert versions == tuple(range(1, 15))
+    assert versions[-1] == 14
 
 
 def test_migration_0009_contains_no_forbidden_statements() -> None:
@@ -349,7 +360,7 @@ def test_fresh_database_applies_migrations_through_0013(tmp_path: Path) -> None:
     with connect(path, writer=True) as connection:
         cursor = connection.execute("SELECT version FROM ops_schema_migrations ORDER BY version")
         versions = tuple(row["version"] for row in cursor.fetchall())
-    assert versions == tuple(range(1, 14))
+    assert versions == tuple(range(1, 15))
 
 
 def test_second_migration_pass_is_idempotent(tmp_path: Path) -> None:
@@ -809,9 +820,10 @@ def test_freeze_fails_with_zero_anchors(tmp_path: Path) -> None:
         _insert_accession(
             connection, snapshot_id=snapshot_id, accession_plain="acc-1", anchor_cik_numeric=1
         )
-        # no registrant row at all: zero anchors
+        # No registrant row at all. Under **Decision 083 R58** zero anchors is lawful for
+        # a joint filing, but an accession with NO association whatsoever never is.
         with pytest.raises(
-            sqlite3.IntegrityError, match="requires exactly one anchor per accession"
+            sqlite3.IntegrityError, match="requires at least one registrant row per accession"
         ):
             _freeze_snapshot(connection, snapshot_id=snapshot_id)
 
@@ -1184,7 +1196,7 @@ def test_multi_registrant_flag_true_requires_at_least_two_registrants(tmp_path: 
             connection,
             snapshot_id=snapshot_id,
             accession_plain="acc-1",
-            anchor_cik_numeric=1,
+            anchor_cik_numeric=None,
             multi_registrant=1,
         )
         _insert_registrant(
@@ -1192,10 +1204,14 @@ def test_multi_registrant_flag_true_requires_at_least_two_registrants(tmp_path: 
             snapshot_id=snapshot_id,
             accession_plain="acc-1",
             registrant_cik_numeric=1,
-            is_anchor=True,
+            is_anchor=False,
         )
-        # only one registrant row exists, but multi_registrant = 1
-        with pytest.raises(sqlite3.IntegrityError, match="multi_registrant flag inconsistent"):
+        # Only one substantive registrant row exists, but multi_registrant = 1. The anchor
+        # clause fires first: a sole substantive registrant REQUIRES its anchor.
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="exactly one anchor for a sole substantive registrant",
+        ):
             _freeze_snapshot(connection, snapshot_id=snapshot_id)
 
 
@@ -1211,7 +1227,9 @@ def test_multi_registrant_flag_true_succeeds_with_two_registrants(tmp_path: Path
             connection,
             snapshot_id=snapshot_id,
             accession_plain="acc-1",
-            anchor_cik_numeric=1,
+            # **Decision 083 R58**: a genuinely multi-registrant accession has NO anchor
+            # and a NULL scalar. Both substantive rows are 'associated'.
+            anchor_cik_numeric=None,
             multi_registrant=1,
         )
         _insert_registrant(
@@ -1219,7 +1237,7 @@ def test_multi_registrant_flag_true_succeeds_with_two_registrants(tmp_path: Path
             snapshot_id=snapshot_id,
             accession_plain="acc-1",
             registrant_cik_numeric=1,
-            is_anchor=True,
+            is_anchor=False,
         )
         _insert_registrant(
             connection,
@@ -1236,16 +1254,86 @@ def test_multi_registrant_flag_true_succeeds_with_two_registrants(tmp_path: Path
     assert state == "frozen"
 
 
-def test_multi_registrant_flag_false_with_extra_row_fails_without_review_reason(
+def test_a_submitter_only_row_never_makes_an_accession_multi_registrant(
     tmp_path: Path,
 ) -> None:
+    """**MR-M12 / Decision 083 R58.** Counting a submitter row as substantive is exactly
+    the mutation this kills: the flag is the DISTINCT SUBSTANTIVE cardinality, so a
+    noncontributing submitter alongside a sole registrant is single-registrant, keeps its
+    anchor, and freezes without any divergence reason at all."""
     path = _migrated_database(tmp_path)
-    snapshot_id = _hex("multi-registrant-false-unreviewed")
+    snapshot_id = _hex("submitter-only-not-multi")
     with connect(path, writer=True) as connection:
         _seed_job(connection)
         _insert_snapshot(connection, snapshot_id=snapshot_id, state="building")
         _insert_entity(connection, snapshot_id=snapshot_id, cik_numeric=1)
         _insert_entity(connection, snapshot_id=snapshot_id, cik_numeric=2)
+        _insert_accession(
+            connection,
+            snapshot_id=snapshot_id,
+            accession_plain="acc-1",
+            anchor_cik_numeric=1,
+            multi_registrant=0,
+        )
+        _insert_registrant(
+            connection,
+            snapshot_id=snapshot_id,
+            accession_plain="acc-1",
+            registrant_cik_numeric=1,
+            is_anchor=True,
+        )
+        # A SECOND SUBSTANTIVE row is multi-registrant by definition under **Decision 083
+        # R58**, so the Decision 019 section 6.3 divergence this pair of tests exercises is
+        # now what it always meant: a noncontributing submitter row alongside a sole
+        # substantive registrant.
+        _insert_registrant(
+            connection,
+            snapshot_id=snapshot_id,
+            accession_plain="acc-1",
+            registrant_cik_numeric=2,
+            is_anchor=False,
+            association_class="submitter_only",
+        )
+        _freeze_snapshot(connection, snapshot_id=snapshot_id)
+        state = connection.execute(
+            "SELECT snapshot_state FROM pilot_candidate_snapshots WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()["snapshot_state"]
+    assert state == "frozen"
+
+
+def test_multi_registrant_flag_false_with_two_substantive_rows_has_no_escape(
+    tmp_path: Path,
+) -> None:
+    """**Decision 083 R58**: the flag and the substantive set can never disagree.
+
+    Migration 0009 allowed the disagreement to stand behind a review reason, because the
+    trigger counted ALL registrant rows and a submitter row could create a false
+    divergence. Counting SUBSTANTIVE rows removes the false case entirely -- and with it
+    the escape: two substantive registrants IS multi-registrant, and no reason row buys a
+    frozen snapshot that says otherwise.
+    """
+    path = _migrated_database(tmp_path)
+    snapshot_id = _hex("multi-registrant-false-two-substantive")
+    with connect(path, writer=True) as connection:
+        _seed_job(connection)
+        _insert_snapshot(connection, snapshot_id=snapshot_id, state="building")
+        _insert_entity(connection, snapshot_id=snapshot_id, cik_numeric=1)
+        _insert_entity(connection, snapshot_id=snapshot_id, cik_numeric=2)
+        # Layer 1 -- the table CHECK. Under an established set the anchor is present
+        # exactly when the accession is not multi-registrant, so "anchorless and not
+        # multi-registrant" cannot even be written.
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            _insert_accession(
+                connection,
+                snapshot_id=snapshot_id,
+                accession_plain="acc-0",
+                anchor_cik_numeric=None,
+                multi_registrant=0,
+            )
+        # Layer 2 -- the freeze trigger. Keeping the anchor satisfies the CHECK, so the
+        # disagreement is reachable here and must still be refused, with no reason row
+        # able to buy it a frozen snapshot.
         _insert_accession(
             connection,
             snapshot_id=snapshot_id,
@@ -1267,7 +1355,19 @@ def test_multi_registrant_flag_false_with_extra_row_fails_without_review_reason(
             registrant_cik_numeric=2,
             is_anchor=False,
         )
-        with pytest.raises(sqlite3.IntegrityError, match="multi_registrant flag inconsistent"):
+        with transaction(connection) as c:
+            c.execute(
+                "INSERT INTO pilot_candidate_accession_reasons "
+                "(snapshot_id, accession_plain, reason_scope, reason_code, recorded_at_utc) "
+                "VALUES (?, 'acc-1', 'multi_registrant', "
+                "'REVIEW_PILOT_MULTI_REGISTRANT_INCOMPLETE', '2026-01-01T00:00:00Z')",
+                (snapshot_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="exactly one anchor for a sole substantive registrant|"
+            "multi_registrant flag inconsistent",
+        ):
             _freeze_snapshot(connection, snapshot_id=snapshot_id)
 
 
@@ -1295,12 +1395,17 @@ def test_multi_registrant_flag_false_with_extra_row_passes_with_review_reason(
             registrant_cik_numeric=1,
             is_anchor=True,
         )
+        # A SECOND SUBSTANTIVE row is multi-registrant by definition under **Decision 083
+        # R58**, so the Decision 019 section 6.3 divergence this pair of tests exercises is
+        # now what it always meant: a noncontributing submitter row alongside a sole
+        # substantive registrant.
         _insert_registrant(
             connection,
             snapshot_id=snapshot_id,
             accession_plain="acc-1",
             registrant_cik_numeric=2,
             is_anchor=False,
+            association_class="submitter_only",
         )
         with transaction(connection) as c:
             c.execute(
@@ -4168,7 +4273,12 @@ def test_migration_0013_is_ddl_only_and_carries_no_forbidden_statement() -> None
 
 
 def test_migration_0013_adds_exactly_eight_triggers_and_alters_nothing(tmp_path: Path) -> None:
-    """Additive only: no object is created, dropped, altered, or replaced."""
+    """Additive only: no object is created, dropped, altered, or replaced.
+
+    Bounded at 0013 on purpose. Migration 0014 is a deliberate *rebuild* of four tables
+    (Decision 083 R58) and is proved separately; measuring 0013's additivity through it
+    would conflate two different claims.
+    """
     path = tmp_path / "catalog.sqlite3"
     with connect(path, writer=True) as connection:
         inventory = tuple(m for m in available_migrations() if m.version <= 12)
@@ -4177,7 +4287,7 @@ def test_migration_0013_adds_exactly_eight_triggers_and_alters_nothing(tmp_path:
             (row["type"], row["name"]): row["sql"]
             for row in connection.execute("SELECT type, name, sql FROM sqlite_master")
         }
-        apply_migrations(connection)
+        apply_migrations(connection, tuple(m for m in available_migrations() if m.version <= 13))
         after = {
             (row["type"], row["name"]): row["sql"]
             for row in connection.execute("SELECT type, name, sql FROM sqlite_master")

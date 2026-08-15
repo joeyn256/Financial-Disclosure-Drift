@@ -33,6 +33,12 @@ from disclosure_drift.storage.catalog import ELIGIBLE_FORM_TYPES, CatalogWriter
 from disclosure_drift.storage.sqlite import apply_migrations, connect, transaction
 
 _OBSERVATION = "obs-bulk-submissions-1"
+#: The accepted ``company.idx`` observation whose ``cik_padded`` rows ESTABLISH each
+#: accession's complete substantive registrant set (Decision 072 R23 section 5.2).
+#: Under **Decision 083 R59** an accession without such evidence has an
+#: ``unestablished`` set and is blocked from candidacy entirely, so a realistic
+#: census fixture must carry it -- see ``test_group_r59`` for the absent case.
+_INDEX_OBSERVATION = "obs-full-index-company-1"
 _RUN = "job-census-1"
 _AT = "2026-01-01T00:00:00Z"
 _INPUTS = CandidateSnapshotInputs(
@@ -150,6 +156,8 @@ def _accession(
     form: str = "10-K",
     cohort: str = "development",
     parent: str | None = None,
+    co_registrants: tuple[int, ...] = (),
+    establish_registrant_set: bool = True,
 ) -> str:
     plain = f"{cik:010d}{year % 100:02d}{seq:06d}"
     dashed = f"{cik:010d}-{year % 100:02d}-{seq:06d}"
@@ -228,6 +236,26 @@ def _accession(
         "VALUES (?, 'accession-resolution/1.0', ?, ?, 0, 0, ?, ?)",
         (plain, cohort, cohort, "2" * 64, _AT),
     )
+    if establish_registrant_set:
+        # One accepted ``company.idx`` row per registrant, exactly as the real index
+        # carries a filing: this is the only accepted route by which R23 section 5.2
+        # establishes the substantive set, and the only thing that makes the accession a
+        # candidate at all under **Decision 083 R59**.
+        for member in (cik, *co_registrants):
+            connection.execute(
+                "INSERT INTO census_accession_observations (accession_observation_id, "
+                "accession_plain, source_observation_id, parsed_record_id, field_name, "
+                "raw_value_json, observed_at_utc, conflict_indicator) "
+                "VALUES (?, ?, ?, ?, 'cik_padded', ?, ?, 0)",
+                (
+                    f"ao-{plain}-idx-{member}",
+                    plain,
+                    _INDEX_OBSERVATION,
+                    f"parsed-acc-{plain}",
+                    f'"{member:010d}"',
+                    _AT,
+                ),
+            )
     return plain
 
 
@@ -245,6 +273,15 @@ def _seed_census(connection: sqlite3.Connection) -> None:
             "(?, 'sec_bulk_submissions', 'req/bulk/1', 'https://example.invalid/a', "
             "'census', ?, 'stored_new', ?, 'submissions-json/1.0', ?)",
             (_OBSERVATION, _AT, "a" * 64, _AT),
+        )
+        active.execute(
+            "INSERT INTO census_source_observations (observation_id, source_id, "
+            "request_identity, requested_url, purpose, retrieved_at_utc, outcome, "
+            "logical_sha256, parser_version, recorded_at_utc) VALUES "
+            "(?, 'sec_full_index_company', 'req/index/1', "
+            "'https://example.invalid/company.idx', 'census', ?, 'stored_new', ?, "
+            "'full-index/1.0', ?)",
+            (_INDEX_OBSERVATION, _AT, "b" * 64, _AT),
         )
         active.execute(
             "INSERT INTO census_parser_runs (parser_run_id, source_observation_id, parser_id, "
@@ -776,12 +813,23 @@ def test_a_full_index_co_registrant_reaches_the_candidate_registrant_rows(
             "SELECT multi_registrant FROM pilot_candidate_accessions WHERE accession_plain = ?",
             (_INDEX_ACCESSION_PLAIN,),
         ).fetchone()[0]
+    # **Decision 083 R58**: a genuinely multi-registrant accession has NO anchor. Both
+    # substantive registrants are 'associated', neither is promoted, and the scalar the
+    # schema used to demand is NULL rather than filled with an arbitrary CIK.
     assert [(int(row["registrant_cik_numeric"]), str(row["role"])) for row in registrants] == [
-        (1, "anchor"),
+        (1, "associated"),
         (2, "associated"),
     ]
-    assert sum(int(row["is_anchor"]) for row in registrants) == 1
+    assert sum(int(row["is_anchor"]) for row in registrants) == 0
     assert flag == 1
+    with connect(catalog) as connection:
+        anchor, completeness = connection.execute(
+            "SELECT anchor_cik_numeric, registrant_set_completeness "
+            "FROM pilot_candidate_accessions WHERE accession_plain = ?",
+            (_INDEX_ACCESSION_PLAIN,),
+        ).fetchone()
+    assert anchor is None
+    assert completeness == "established"
     assert frozen.snapshot_id  # type: ignore[attr-defined]
 
 

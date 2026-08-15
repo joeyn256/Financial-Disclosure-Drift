@@ -45,14 +45,14 @@ def test_valid_unchanged_chain_reopens_successfully(tmp_path: Path) -> None:
         )
 
 
-def test_packaged_chain_is_contiguous_and_ends_at_0013() -> None:
-    """Stage S6 adds exactly one additive migration on top of the accepted chain."""
+def test_packaged_chain_is_contiguous_and_ends_at_0014() -> None:
+    """The pre-E0 R46 correction adds exactly one migration on top of the accepted chain."""
     inventory = available_migrations()
     versions = tuple(migration.version for migration in inventory)
     assert versions == tuple(range(1, len(inventory) + 1))
-    assert versions[-1] == 13
-    assert inventory[-1].name == "m23_manifest_lifecycle_guards"
-    assert inventory[-2].name == "m23_selection_entity_reasons"
+    assert versions[-1] == 14
+    assert inventory[-1].name == "m33_multi_registrant_relational_correction"
+    assert inventory[-2].name == "m23_manifest_lifecycle_guards"
 
 
 def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
@@ -62,7 +62,7 @@ def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 14))
+    assert [row["version"] for row in rows] == list(range(1, 15))
     recorded = next(row for row in rows if row["version"] == 11)
     assert recorded["name"] == "m23_joint_selector_policy_reference"
     assert recorded["checksum_sha256"] == packaged.checksum_sha256
@@ -75,26 +75,26 @@ def test_migration_0012_provenance_is_recorded_in_order(tmp_path: Path) -> None:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 14))
+    assert [row["version"] for row in rows] == list(range(1, 15))
     recorded = next(row for row in rows if row["version"] == 12)
     assert recorded["name"] == "m23_selection_entity_reasons"
     assert recorded["checksum_sha256"] == packaged.checksum_sha256
 
 
-def test_migration_0013_provenance_is_recorded_in_order(tmp_path: Path) -> None:
-    """Stage S6's migration is recorded last, with its packaged checksum."""
+def test_migration_0014_provenance_is_recorded_in_order(tmp_path: Path) -> None:
+    """The R46 correction's migration is recorded last, with its packaged checksum."""
     path = _migrated_database(tmp_path)
-    packaged = next(m for m in available_migrations() if m.version == 13)
+    packaged = next(m for m in available_migrations() if m.version == 14)
     with connect(path, writer=True) as connection:
         rows = connection.execute(
             "SELECT version, name, checksum_sha256 FROM ops_schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in rows] == list(range(1, 14))
-    assert rows[-1]["name"] == "m23_manifest_lifecycle_guards"
+    assert [row["version"] for row in rows] == list(range(1, 15))
+    assert rows[-1]["name"] == "m33_multi_registrant_relational_correction"
     assert rows[-1]["checksum_sha256"] == packaged.checksum_sha256
 
 
-@pytest.mark.parametrize("version", (11, 12, 13))
+@pytest.mark.parametrize("version", (11, 12, 13, 14))
 def test_altered_migration_bytes_block_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
 ) -> None:

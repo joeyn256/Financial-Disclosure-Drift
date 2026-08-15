@@ -39,6 +39,7 @@ from disclosure_drift.sec.accession_selector import (
     MAX_BASE_ACCESSIONS_PER_CIK,
     MAX_BASE_ACCESSIONS_TOTAL,
     MAX_STRESS_ACCESSIONS_TOTAL,
+    MULTI_REGISTRANT_TIE_BREAK_SENTINEL,
     NOT_APPLICABLE,
     QUOTA_DIMENSION_ACCESSION_CAP,
     QUOTA_DIMENSION_CROSS_CUTTING,
@@ -199,6 +200,21 @@ def dashed(cik: int, year: int, seq: int) -> str:
     return f"{cik:010d}-{year % 100:02d}-{seq:06d}"
 
 
+#: **Decision 083 R58**: ``multi_registrant`` is not a free-standing flag -- it IS the
+#: distinct substantive association-set cardinality. A fixture that wants a
+#: multi-registrant accession must therefore state the SET: no anchor, and a real
+#: co-registrant. This offset keeps the synthetic co-registrant CIK clear of the
+#: fixture's own entity CIKs.
+_CO_REGISTRANT_OFFSET = 900
+
+
+def _multi_registrant_set(cik: int, multi_registrant: bool) -> tuple[int | None, tuple[int, ...]]:
+    """The (anchor, substantive set) pair for one fixture accession."""
+    if not multi_registrant:
+        return cik, ()
+    return None, (cik, _CO_REGISTRANT_OFFSET + cik)
+
+
 def mk_accession(
     cik: int,
     year: int,
@@ -232,10 +248,12 @@ def mk_accession(
     number = dashed(cik, year, seq)
     is_amendment = form.endswith("/A")
     eligibility = {role, *also_eligible}
+    anchor, substantive = _multi_registrant_set(cik, multi_registrant)
     return AccessionCandidate(
         accession_plain=number.replace("-", ""),
         accession_number_dashed=number,
-        anchor_cik_numeric=cik,
+        anchor_cik_numeric=anchor,
+        substantive_registrant_ciks=substantive,
         form_type=form,
         is_amendment=is_amendment,
         official_filing_date=filing_date if filing_date is not None else f"{year}-03-15",
@@ -284,6 +302,21 @@ class Pool:
     def replace_accession(self, number: str, **changes: object) -> None:
         for index, accession in enumerate(self.accessions):
             if accession.accession_number_dashed == number:
+                # **Decision 083 R58**: ``multi_registrant`` and the association set are
+                # one fact, so flipping the flag must move the set with it. A fixture
+                # that changed only the flag would be asserting a contradiction the
+                # production validator now -- correctly -- refuses.
+                if "multi_registrant" in changes:
+                    cik = int(
+                        accession.substantive_registrant_ciks_resolved[0]
+                        if accession.anchor_cik_numeric is None
+                        else accession.anchor_cik_numeric
+                    )
+                    anchor, substantive = _multi_registrant_set(
+                        cik, bool(changes["multi_registrant"])
+                    )
+                    changes.setdefault("anchor_cik_numeric", anchor)
+                    changes.setdefault("substantive_registrant_ciks", substantive)
                 self.accessions[index] = dataclasses.replace(accession, **changes)  # type: ignore[arg-type]
                 return
         message = f"no accession {number!r} in pool"
@@ -421,8 +454,15 @@ def test_selected_order_ignores_role_and_entity_order() -> None:
         a.selected_order for a in result.selected_accessions
     ]
     for accession in result.selected_accessions:
+        # **Decision 083 R60**: the preimage's registrant slot is the anchor when one
+        # exists and the non-CIK sentinel otherwise -- never a substitute CIK.
+        slot = (
+            accession.anchor_cik_padded
+            if accession.anchor_cik_padded is not None
+            else MULTI_REGISTRANT_TIE_BREAK_SENTINEL
+        )
         assert accession.accession_tie_break_sha256 == accession_selection_rank(
-            accession.anchor_cik_padded, accession.accession_number_dashed
+            slot, accession.accession_number_dashed
         )
 
 
@@ -1168,23 +1208,46 @@ def test_the_frozen_caps_match_decision_018_section_8() -> None:
 
 
 def test_every_selected_entity_anchors_at_least_one_accession() -> None:
+    """**Decision 083 R58/R62**: association, not anchorship, is what attaches.
+
+    A joint filing has NO anchor, so the anchor projection alone no longer covers the
+    selected entity set -- the complete substantive association set does. That is the
+    section 10.11 attachment rule: every selected entity has at least one selected
+    accession it is a substantive registrant of, and no accession designates one of its
+    registrants as primary in order to be attached.
+    """
     result = base_pool().solve()
     assert result.status == "feasible"
-    anchored = {a.anchor_cik_padded for a in result.selected_accessions}
-    assert anchored == {c.cik_padded for c in result.selected_entities}
+    attached = {cik for a in result.selected_accessions for cik in a.substantive_registrants_padded}
+    selected = {c.cik_padded for c in result.selected_entities}
+    assert selected <= attached
+    # And the multi-registrant accessions really are anchorless.
+    assert any(a.anchor_cik_padded is None for a in result.selected_accessions)
+    assert all(
+        (a.anchor_cik_padded is None) == (len(a.substantive_registrants_padded) > 1)
+        for a in result.selected_accessions
+    )
 
 
 def test_every_operating_entity_has_a_base_and_every_control_a_control_role() -> None:
     result = base_pool().solve()
     assert result.status == "feasible"
+    # **Decision 083 R62**: role coverage follows the substantive association set, so a
+    # joint base filing satisfies the base requirement of each of its registrants.
     base_anchors = {
-        a.anchor_cik_padded for a in result.selected_accessions if a.accession_role == "base"
+        cik
+        for a in result.selected_accessions
+        if a.accession_role == "base"
+        for cik in a.substantive_registrants_padded
     }
     control_anchors = {
-        a.anchor_cik_padded for a in result.selected_accessions if a.accession_role == "control"
+        cik
+        for a in result.selected_accessions
+        if a.accession_role == "control"
+        for cik in a.substantive_registrants_padded
     }
-    assert base_anchors == {c.cik_padded for c in result.selected_operating}
-    assert control_anchors == {c.cik_padded for c in result.selected_controls}
+    assert {c.cik_padded for c in result.selected_operating} <= base_anchors
+    assert {c.cik_padded for c in result.selected_controls} <= control_anchors
 
 
 def test_an_operating_entity_with_no_base_accession_is_infeasible() -> None:
@@ -1873,15 +1936,19 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
     anchored: set[str] = set()
     stress_total = 0
     for accession in selection:
-        anchor = f"{accession.anchor_cik_numeric:010d}"
-        anchored.add(anchor)
+        # **Decision 083 R62**: entity-domain coverage and the per-CIK base cap follow the
+        # complete substantive association set; ``stress_total`` stays accession-domain
+        # and is counted once per accession.
+        registrants = _oracle_registrants(accession)
+        anchored.update(registrants)
         role = roles[accession.accession_number_dashed]
         if role == "base":
-            base_by_cik[anchor] = base_by_cik.get(anchor, 0) + 1
+            for cik in registrants:
+                base_by_cik[cik] = base_by_cik.get(cik, 0) + 1
         elif role == "stress":
             stress_total += 1
         elif role == "control":
-            control_anchors.add(anchor)
+            control_anchors.update(registrants)
     for entity in operating:
         if base_by_cik.get(entity.cik_padded, 0) < 1:
             return False
@@ -1893,7 +1960,8 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
             return False
     if base_by_cik and max(base_by_cik.values()) > 4:
         return False
-    if sum(base_by_cik.values()) > 96 or stress_total > 24 or len(selection) > 120:
+    base_total = sum(1 for a in selection if roles[a.accession_number_dashed] == "base")
+    if base_total > 96 or stress_total > 24 or len(selection) > 120:
         return False
 
     linked: set[str] = set()
@@ -1910,7 +1978,9 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
     originals: dict[str, list[tuple[int, str]]] = {}
     undated: set[str] = set()
     for accession in selection:
-        anchor = f"{accession.anchor_cik_numeric:010d}"
+        # Entity-domain quota units are keyed on EVERY substantive registrant
+        # (**Decision 083 R62**); accession-domain ones keep the accession number.
+        anchors = _oracle_registrants(accession)
         number = accession.accession_number_dashed
         year = _oracle_year(accession)
         if accession.is_amendment:
@@ -1920,14 +1990,14 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
                 and root in chosen
                 and accession.amendment_linkage_evidence_level == "provisional"
             ):
-                linked.add(anchor)
+                linked.update(anchors)
             if accession.amendment_purpose_quota_eligible and (
                 accession.amendment_purpose_category is not None
             ):
                 purposes.add(accession.amendment_purpose_category)
         if accession.form_type in ("10-KT", "10-KT/A"):
-            transition.add(anchor)
-            fye.add(anchor)
+            transition.update(anchors)
+            fye.update(anchors)
         if accession.multi_registrant and (
             accession.multi_registrant_evidence_level == "provisional"
         ):
@@ -1937,14 +2007,15 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
                 (inline if accession.has_inline_xbrl else pre_inline).add(number)
             if accession.filing_date_evidence_level == "provisional":
                 if year == 2024:
-                    year_2024.add(anchor)
+                    year_2024.update(anchors)
                 if year in (2025, 2026):
-                    year_2025_2026.add(anchor)
+                    year_2025_2026.update(anchors)
             ordinal = _oracle_report_ordinal(accession)
             if ordinal is None:
-                undated.add(anchor)
+                undated.update(anchors)
             else:
-                originals.setdefault(anchor, []).append((ordinal, number))
+                for cik in anchors:
+                    originals.setdefault(cik, []).append((ordinal, number))
         # Decision 018 section 15 names the contributing roles, so the oracle
         # applies its OWN role classification (``_oracle_role``, called in
         # ``_oracle_best_for_entity_set`` and handed in as ``roles``) on top of the
@@ -1959,7 +2030,8 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
             and year == 2009
             and accession.filing_date_evidence_level == "provisional"
         ):
-            supports[anchor] = supports.get(anchor, 0) + 1
+            for cik in anchors:
+                supports[cik] = supports.get(cik, 0) + 1
         if (
             assigned == "base"
             and not accession.is_amendment
@@ -1970,7 +2042,8 @@ def _oracle_feasible(  # noqa: PLR0911, PLR0912 - a flat independent constraint 
             and accession.filing_date_evidence_level == "provisional"
             and accession.cohort_evidence_level == "provisional"
         ):
-            targets[anchor] = targets.get(anchor, 0) + 1
+            for cik in anchors:
+                targets[cik] = targets.get(cik, 0) + 1
     for anchor, dated in originals.items():
         if anchor in fye or anchor in undated:
             continue
@@ -2070,6 +2143,37 @@ def _oracle_entity_quotas_met(operating: Sequence[Candidate]) -> bool:
     )
 
 
+def _oracle_registrants(accession: AccessionCandidate) -> tuple[str, ...]:
+    """The oracle's own model of the substantive association set (**Decision 083 R58**).
+
+    Derived here rather than read from the production property, so the oracle stays an
+    independent check: an anchor is the whole set, and an anchorless accession states
+    its set explicitly.
+    """
+    if accession.anchor_cik_numeric is not None:
+        return (f"{accession.anchor_cik_numeric:010d}",)
+    return tuple(sorted(f"{cik:010d}" for cik in set(accession.substantive_registrant_ciks)))
+
+
+def _oracle_slot(accession: AccessionCandidate) -> str:
+    """The oracle's own model of the tie-break registrant slot (**Decision 083 R60**)."""
+    if accession.anchor_cik_numeric is not None:
+        return f"{accession.anchor_cik_numeric:010d}"
+    return "MULTI_REGISTRANT_NO_SINGLETON"
+
+
+def _oracle_category(
+    accession: AccessionCandidate, operating_ciks: set[str], control_ciks: set[str]
+) -> str | None:
+    """The single category an accession's attached registrants agree on, or ``None``."""
+    categories = {
+        "operating" if cik in operating_ciks else "control"
+        for cik in _oracle_registrants(accession)
+        if cik in operating_ciks or cik in control_ciks
+    }
+    return categories.pop() if len(categories) == 1 else None
+
+
 def _oracle_best_for_entity_set(
     pool: Pool,
     operating: Sequence[Candidate],
@@ -2083,10 +2187,10 @@ def _oracle_best_for_entity_set(
     available: list[AccessionCandidate] = []
     roles: dict[str, str] = {}
     for accession in pool.accessions:
-        anchor = f"{accession.anchor_cik_numeric:010d}"
-        if anchor in operating_ciks:
+        category = _oracle_category(accession, operating_ciks, control_ciks)
+        if category == "operating":
             role = _oracle_role(accession, "operating")
-        elif anchor in control_ciks:
+        elif category == "control":
             role = _oracle_role(accession, "control")
         else:
             role = None
@@ -2097,12 +2201,12 @@ def _oracle_best_for_entity_set(
     forced: list[AccessionCandidate] = []
     optional: list[AccessionCandidate] = []
     for accession in available:
-        anchor = f"{accession.anchor_cik_numeric:010d}"
+        registrants = set(_oracle_registrants(accession))
         role = roles[accession.accession_number_dashed]
         siblings = [
             other
             for other in available
-            if f"{other.anchor_cik_numeric:010d}" == anchor
+            if registrants & set(_oracle_registrants(other))
             and roles[other.accession_number_dashed] == role
         ]
         if role in ("base", "control") and len(siblings) == 1:
@@ -2128,8 +2232,7 @@ def _oracle_best_for_entity_set(
         accession_hashes = tuple(
             sorted(
                 _oracle_hash(
-                    f"{PILOT_SELECTION_SEED}|{a.anchor_cik_numeric:010d}"
-                    f"|{a.accession_number_dashed}"
+                    f"{PILOT_SELECTION_SEED}|{_oracle_slot(a)}|{a.accession_number_dashed}"
                 )
                 for a in selection
             )
@@ -2149,10 +2252,9 @@ def _oracle_best_for_entity_set(
             for _, _, number in sorted(
                 (
                     _oracle_hash(
-                        f"{PILOT_SELECTION_SEED}|{a.anchor_cik_numeric:010d}"
-                        f"|{a.accession_number_dashed}"
+                        f"{PILOT_SELECTION_SEED}|{_oracle_slot(a)}|{a.accession_number_dashed}"
                     ),
-                    f"{a.anchor_cik_numeric:010d}",
+                    _oracle_slot(a),
                     a.accession_number_dashed,
                 )
                 for a in selection
@@ -2419,9 +2521,10 @@ def test_the_search_and_the_diagnostics_share_one_cap_rule() -> None:
         accession_total=len(result.selected_accessions),
         max_base_per_cik=max(
             collections.Counter(
-                a.anchor_cik_padded
+                cik
                 for a in result.selected_accessions
                 if a.accession_role == "base"
+                for cik in a.substantive_registrants_padded
             ).values()
         ),
     )
@@ -3180,11 +3283,14 @@ def test_membership_is_a_projection_of_the_witness_members_only() -> None:
 def test_the_entity_and_accession_forms_are_transposes_of_one_artifact() -> None:
     result = base_pool().solve()
     emitted = membership(result)
+    # **Decision 083 R62**: an accession member contributes for EVERY substantive
+    # registrant, so the entity projection reads the association set, not one anchor.
     expected_entities = sorted(
         {
-            (member.cik_padded, unit.dimension, unit.key)
+            (cik, unit.dimension, unit.key)
             for unit in emitted.units
             for member in unit.members
+            for cik in member.contributing_ciks
         }
     )
     expected_accessions = sorted(

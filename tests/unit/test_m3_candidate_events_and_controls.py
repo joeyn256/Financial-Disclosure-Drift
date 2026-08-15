@@ -369,14 +369,17 @@ def test_the_four_kinds_are_exactly_the_persisted_vocabulary() -> None:
 
 
 # ==========================================================================
-# IN-5 -- the mechanical 135-column recount
+# IN-5 -- the mechanical column recount (135 at migration 0013; 138 at 0014)
 # ==========================================================================
 
 _CANDIDATE_TABLE_COUNTS: dict[str, int] = {
     "pilot_candidate_snapshots": 28,
     "pilot_candidate_entities": 26,
-    "pilot_candidate_accessions": 35,
-    "pilot_candidate_accession_registrants": 8,
+    # Migration 0014 (accepted Decision 083 R58/R59) adds one column to each: the
+    # per-accession ``registrant_set_completeness``, and on the relation the
+    # ``association_class`` / ``registrant_set_completeness`` pair.
+    "pilot_candidate_accessions": 36,
+    "pilot_candidate_accession_registrants": 10,
     "pilot_candidate_entity_evidence": 13,
     "pilot_candidate_accession_evidence": 13,
     "pilot_candidate_entity_reasons": 6,
@@ -403,4 +406,4 @@ def test_the_or_2_accounting_is_derived_from_the_applied_schema() -> None:
     finally:
         connection.close()
     assert derived == _CANDIDATE_TABLE_COUNTS
-    assert sum(derived.values()) == 135
+    assert sum(derived.values()) == 138

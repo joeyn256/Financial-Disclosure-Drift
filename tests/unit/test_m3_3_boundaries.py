@@ -244,13 +244,20 @@ def test_the_tracked_network_switches_remain_disabled() -> None:
     assert config["network"]["m3_acquire_enabled"] is False
 
 
-def test_no_migration_was_added() -> None:
+def test_only_the_authorized_r46_migration_was_added() -> None:
+    """Accepted Decision 083 §10 authorizes migration ``0014`` and nothing beyond it.
+
+    The M3.3 boundary is not "no migration ever"; it is "no migration this stage was not
+    authorized to write". ``0015`` -- the verified-evidence schema -- remains explicitly
+    unauthorized (**R63**), so the chain ending anywhere past ``0014`` fails here.
+    """
     migrations = sorted(
         path.name
         for path in (_REPOSITORY / "src/disclosure_drift/storage/migrations").glob("*.sql")
     )
-    assert migrations[-1].startswith("0013_")
-    assert len(migrations) == 13
+    assert migrations[-1] == "0014_m33_multi_registrant_relational_correction.sql"
+    assert len(migrations) == 14
+    assert not any(name.startswith("0015_") for name in migrations)
 
 
 def test_the_coverage_policy_version_has_exactly_one_executable_definition() -> None:

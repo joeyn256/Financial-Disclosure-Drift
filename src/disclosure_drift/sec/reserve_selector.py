@@ -221,11 +221,17 @@ class ReserveConstruction:
 def _accession_order_key(
     accession: AccessionCandidate, selection_seed: str
 ) -> tuple[str, str, str]:
-    """Decision 018 section 4's ordering key, expressed through the public rank."""
-    anchor = accession.anchor_cik_padded
+    """Decision 018 section 4's ordering key, expressed through the public rank.
+
+    The middle component is the **Decision 083 R60** registrant slot -- the anchor CIK
+    exactly when one exists, and the non-CIK sentinel for an established
+    multi-registrant accession -- so this key stays byte-identical for every
+    single-registrant accession and stays total and deterministic for the rest.
+    """
+    slot = accession.registrant_slot
     return (
-        accession_selection_rank(anchor, accession.accession_number_dashed, selection_seed),
-        anchor,
+        accession_selection_rank(slot, accession.accession_number_dashed, selection_seed),
+        slot,
         accession.accession_number_dashed,
     )
 
@@ -269,20 +275,25 @@ def _bundle_for(
     """The candidate's exact substitution bundle: all its role-assignable accessions.
 
     The bundle is not searched and not a chosen subset: it is every accession the
-    frozen snapshot anchors to this entity that :func:`assign_accession_role`
+    frozen snapshot associates with this entity that :func:`assign_accession_role`
     admits under the entity's own category, in the accepted Decision 018 section 4
     order. A searched or hand-trimmed bundle would be a discretionary
     substitution, which Decision 013 section 6 forbids outright.
 
+    **Decision 083 R62**: membership is *substantive registrant association*, not
+    anchorship. A joint filing is genuinely part of each co-registrant's history, so
+    it belongs in each of their bundles; for a sole-registrant accession the test is
+    identical to the anchor comparison it replaces.
+
     Raises:
-        GateFailureError: an anchored accession stores an official filing date the
+        GateFailureError: an associated accession stores an official filing date the
             accepted core cannot read (:func:`_bundle_filing_year`).
     """
     cik = entity.cik_padded
     category = entity.candidate.category
     matched: list[tuple[tuple[str, str, str], AccessionCandidate, AccessionRole]] = []
     for accession in accessions:
-        if accession.anchor_cik_padded != cik:
+        if cik not in accession.substantive_registrants_padded:
             continue
         role, _reason = assign_accession_role(
             accession, anchor_category=category, filing_year=_bundle_filing_year(accession)
@@ -528,16 +539,23 @@ class _CandidateProfile:
 
 
 def _usage_from(
-    roles_by_plain: Mapping[str, tuple[str, AccessionRole]],
+    roles_by_plain: Mapping[str, tuple[tuple[str, ...], AccessionRole]],
 ) -> AccessionCapUsage:
-    """Evaluate the four Decision 018 section 8 caps over an accession assignment."""
+    """Evaluate the four Decision 018 section 8 caps over an accession assignment.
+
+    ``base_total``, ``stress_total``, and ``accession_total`` are accession-domain and
+    are counted once per accession key. ``max_base_per_cik`` is entity-domain, so under
+    **Decision 083 R62** a joint base filing counts once for each of its substantive
+    registrants -- each of them really did file it.
+    """
     base_by_cik: dict[str, int] = {}
     base_total = 0
     stress_total = 0
-    for anchor, role in roles_by_plain.values():
+    for registrants, role in roles_by_plain.values():
         if role == "base":
             base_total += 1
-            base_by_cik[anchor] = base_by_cik.get(anchor, 0) + 1
+            for cik in registrants:
+                base_by_cik[cik] = base_by_cik.get(cik, 0) + 1
         elif role == "stress":
             stress_total += 1
     return AccessionCapUsage(
@@ -608,8 +626,11 @@ def build_reserve_packages(
     selected_ciks = {candidate.cik_padded for candidate in result.selected_entities}
     membership = result.quota_contributions
 
-    selected_roles: dict[str, tuple[str, AccessionRole]] = {
-        selected.accession_plain: (selected.anchor_cik_padded, selected.accession_role)
+    selected_roles: dict[str, tuple[tuple[str, ...], AccessionRole]] = {
+        selected.accession_plain: (
+            selected.substantive_registrants_padded,
+            selected.accession_role,
+        )
         for selected in result.selected_accessions
     }
 
@@ -642,7 +663,8 @@ def build_reserve_packages(
                         accession_tie_break_sha256=selected.accession_tie_break_sha256,
                     )
                     for selected in result.selected_accessions
-                    if selected.anchor_cik_padded == target_cik
+                    # **Decision 083 R62**: substantive association, not anchorship.
+                    if target_cik in selected.substantive_registrants_padded
                 ),
                 key=lambda entry: entry.accession_plain,
             )
@@ -783,7 +805,7 @@ def _rank_one_replacement(
     target_contributions: Sequence[tuple[str, str]],
     target_signature: str,
     target_plains: set[str],
-    selected_roles: Mapping[str, tuple[str, AccessionRole]],
+    selected_roles: Mapping[str, tuple[tuple[str, ...], AccessionRole]],
     selection_seed: str,
 ) -> _CandidateProfile | None:
     """The first compatible replacement under the accepted initial-selection tie-break.
@@ -813,7 +835,7 @@ def _caps_preserved(
     profile: _CandidateProfile,
     *,
     target_plains: set[str],
-    selected_roles: Mapping[str, tuple[str, AccessionRole]],
+    selected_roles: Mapping[str, tuple[tuple[str, ...], AccessionRole]],
 ) -> bool:
     """Whether substituting this one package for the target keeps every cap satisfied.
 
@@ -830,7 +852,9 @@ def _caps_preserved(
     for entry in profile.bundle:
         if entry.accession_plain in substituted:
             return False
-        substituted[entry.accession_plain] = (replacement_cik, entry.accession_role)
+        # The replacement supplies the accession under its own single substantive
+        # registrancy: a reserve package is one entity substituting for one entity.
+        substituted[entry.accession_plain] = ((replacement_cik,), entry.accession_role)
     return accession_caps_satisfied(_usage_from(substituted))
 
 

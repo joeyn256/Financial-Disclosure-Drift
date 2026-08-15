@@ -43,6 +43,7 @@ from disclosure_drift.sec.accession_selection_store import (
 )
 from disclosure_drift.sec.accession_selector import (
     DEFERRED_QUOTA_KEY,
+    MULTI_REGISTRANT_TIE_BREAK_SENTINEL,
     NOT_APPLICABLE,
     QUOTA_DIMENSION_ACCESSION_CAP,
     QUOTA_DIMENSION_CROSS_CUTTING,
@@ -149,6 +150,14 @@ class RegistrantPlan:
     role: str = "anchor"
     evidence_level: str = "provisional"
     padded_override: str | None = None
+    #: Forces an exact persisted role, for the tests that deliberately construct an
+    #: unlawful anchor state to prove the loader and the freeze guard refuse it.
+    role_override: str | None = None
+
+    @property
+    def association_class(self) -> str:
+        """Migration 0014's substantive / submitter-only split, from the role."""
+        return "submitter_only" if self.role == "submitter_only" else "substantive"
 
 
 @dataclass
@@ -180,6 +189,9 @@ class AccessionPlan:
     control_eligible: bool = False
     multi_registrant: bool = False
     registrants: list[RegistrantPlan] | None = None
+    #: Forces the persisted scalar anchor, for the one test that must construct an
+    #: anchor/registrant disagreement the schema alone cannot express.
+    anchor_override: int | None = None
     reasons: list[tuple[str, str]] = field(default_factory=list)
     dashed_override: str | None = None
     plain_override: str | None = None
@@ -341,6 +353,26 @@ def _insert_entity_evidence(
     )
 
 
+def _plan_substantive(entry: AccessionPlan) -> tuple[int, ...]:
+    """The plan's complete substantive registrant set, in canonical order."""
+    registrants = (
+        entry.registrants if entry.registrants is not None else [RegistrantPlan(cik=entry.cik)]
+    )
+    return tuple(sorted({r.cik for r in registrants if r.association_class == "substantive"}))
+
+
+def _plan_anchor(entry: AccessionPlan) -> int | None:
+    """**Decision 083 R58**: an anchor only for a sole substantive registrant."""
+    substantive = _plan_substantive(entry)
+    return substantive[0] if len(substantive) == 1 else None
+
+
+def _plan_slot(entry: AccessionPlan) -> str:
+    """**Decision 083 R60**: the padded sole registrant, or the non-CIK sentinel."""
+    anchor = _plan_anchor(entry)
+    return f"{anchor:010d}" if anchor is not None else MULTI_REGISTRANT_TIE_BREAK_SENTINEL
+
+
 def _insert_accession(c: sqlite3.Connection, snapshot_id: str, entry: AccessionPlan) -> None:
     filing_date = (
         None
@@ -352,12 +384,13 @@ def _insert_accession(c: sqlite3.Connection, snapshot_id: str, entry: AccessionP
         filing_date if entry.acceptance_audit_date == _INHERIT else entry.acceptance_audit_date
     )
     tie_break = entry.tie_break_override or accession_selection_rank(
-        f"{entry.cik:010d}", entry.dashed, PILOT_SELECTION_SEED
+        _plan_slot(entry), entry.dashed, PILOT_SELECTION_SEED
     )
     c.execute(
         "INSERT INTO pilot_candidate_accessions "
         "(snapshot_id, accession_plain, accession_number_dashed, accession_tie_break_sha256, "
-        "anchor_cik_numeric, form_type, is_amendment, official_filing_date, report_date, "
+        "anchor_cik_numeric, registrant_set_completeness, form_type, is_amendment, "
+        "official_filing_date, report_date, "
         "acceptance_audit_date, filing_date_evidence_level, filing_date_resolution_sha256, "
         "filing_date_precedence, provisional_official_cohort, acceptance_audit_cohort, "
         "cohort_evidence_level, cohort_resolution_sha256, cohort_ambiguous, has_xbrl, "
@@ -366,14 +399,14 @@ def _insert_accession(c: sqlite3.Connection, snapshot_id: str, entry: AccessionP
         "amendment_purpose_evidence_level, amendment_purpose_resolution_sha256, "
         "amendment_purpose_quota_eligible, base_eligible, stress_eligible, support_eligible, "
         "control_eligible, multi_registrant, recorded_at_utc) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, 'established', ?, ?, ?, ?, ?, 'provisional', ?, 2, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             snapshot_id,
             entry.plain,
             entry.dashed,
             tie_break,
-            entry.cik,
+            entry.anchor_override or _plan_anchor(entry),
             entry.form,
             int(entry.is_amendment),
             filing_date,
@@ -449,18 +482,31 @@ def _insert_accession(c: sqlite3.Connection, snapshot_id: str, entry: AccessionP
     registrants = (
         entry.registrants if entry.registrants is not None else [RegistrantPlan(cik=entry.cik)]
     )
+    # **Decision 083 R58**: the role follows the SET, not the plan's wording. An anchor
+    # exists only for a sole substantive registrant; above that every substantive row is
+    # 'associated' and no row is promoted. A plan that names a role the set does not
+    # support would otherwise assert a state the corrected schema refuses outright.
+    sole = _plan_anchor(entry)
     for registrant in registrants:
+        if registrant.association_class == "submitter_only":
+            role = "submitter_only"
+        elif registrant.cik == sole:
+            role = "anchor"
+        else:
+            role = "associated"
         c.execute(
             "INSERT INTO pilot_candidate_accession_registrants "
             "(snapshot_id, accession_plain, registrant_cik_numeric, registrant_cik_padded, role, "
-            "is_anchor, evidence_level, recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "is_anchor, association_class, registrant_set_completeness, evidence_level, "
+            "recorded_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, 'established', ?, ?)",
             (
                 snapshot_id,
                 entry.plain,
                 registrant.cik,
                 registrant.padded_override or f"{registrant.cik:010d}",
-                registrant.role,
-                int(registrant.role == "anchor"),
+                registrant.role_override or role,
+                int((registrant.role_override or role) == "anchor"),
+                registrant.association_class,
                 registrant.evidence_level,
                 _AT,
             ),
@@ -1379,15 +1425,24 @@ def test_weaker_state_precedence_is_deterministic(
 
 
 def test_submitter_only_rows_never_establish_the_registrant_set(db: sqlite3.Connection) -> None:
-    write_plan(
-        db,
-        registrant_plan(
-            flag=True,
-            registrants=[RegistrantPlan(cik=1), RegistrantPlan(cik=902, role="submitter_only")],
-        ),
-    )
-    with pytest.raises(GateFailureError, match="without a qualifying registrant set"):
-        load_frozen_joint_candidates(db, _SNAPSHOT_ID)
+    """**MR-M12 / Decision 083 R58**, now unrepresentable rather than merely refused.
+
+    A submitter-only row is not a registrant association, so an accession carrying one
+    alongside a sole substantive registrant is single-registrant and keeps its anchor.
+    Claiming ``multi_registrant = 1`` for it means claiming an anchorless accession with
+    one substantive registrant, which migration ``0014``'s CHECK will not store at all.
+    """
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        write_plan(
+            db,
+            registrant_plan(
+                flag=True,
+                registrants=[
+                    RegistrantPlan(cik=1),
+                    RegistrantPlan(cik=902, role="submitter_only"),
+                ],
+            ),
+        )
 
 
 def test_submitter_only_evidence_never_affects_the_aggregate(db: sqlite3.Connection) -> None:
@@ -1418,15 +1473,23 @@ def test_flag_zero_without_associated_rows_is_not_a_divergence(db: sqlite3.Conne
 
 
 def test_the_single_permitted_divergence_requires_the_exact_code(db: sqlite3.Connection) -> None:
-    loaded = frozen(
-        db,
-        registrant_plan(
-            flag=False,
-            registrants=[RegistrantPlan(cik=1), RegistrantPlan(cik=901, role="associated")],
-            reasons=[("multi_registrant", _MULTI_INCOMPLETE)],
-        ),
-    )
-    assert loaded.accessions[0].multi_registrant_evidence_level == NOT_APPLICABLE
+    """**Decision 083 R58** removes the divergence rather than re-permitting it.
+
+    Decision 019 section 6.3 allowed ``multi_registrant = 0`` beside associated rows
+    because the old trigger counted ALL registrant rows and a submitter row could create
+    a false divergence. Counting SUBSTANTIVE rows removes the false case, so two
+    substantive registrants with the flag at 0 is now a contradiction the schema refuses
+    -- no reason code buys it, which is strictly stronger than requiring an exact one.
+    """
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        write_plan(
+            db,
+            registrant_plan(
+                flag=False,
+                registrants=[RegistrantPlan(cik=1), RegistrantPlan(cik=901, role="associated")],
+                reasons=[("multi_registrant", _MULTI_INCOMPLETE)],
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1443,22 +1506,33 @@ def test_the_single_permitted_divergence_requires_the_exact_code(db: sqlite3.Con
 def test_every_other_divergence_shape_fails_closed(
     db: sqlite3.Connection, reasons: list[tuple[str, str]]
 ) -> None:
-    write_plan(
-        db,
-        registrant_plan(
-            flag=False,
-            registrants=[RegistrantPlan(cik=1), RegistrantPlan(cik=901, role="associated")],
-            reasons=reasons,
-        ),
-    )
-    with pytest.raises(GateFailureError, match="authorized only by exactly one"):
-        load_frozen_joint_candidates(db, _SNAPSHOT_ID)
+    """No reason shape rescues the disagreement, because it is no longer storable."""
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        write_plan(
+            db,
+            registrant_plan(
+                flag=False,
+                registrants=[RegistrantPlan(cik=1), RegistrantPlan(cik=901, role="associated")],
+                reasons=reasons,
+            ),
+        )
 
 
 def test_anchor_registrant_must_match_the_accession_anchor(db: sqlite3.Connection) -> None:
-    write_plan(db, registrant_plan(flag=False, registrants=[RegistrantPlan(cik=77)]))
-    with pytest.raises(GateFailureError, match="does not match anchor_cik_numeric"):
-        load_frozen_joint_candidates(db, _SNAPSHOT_ID)
+    """**Decision 083 R58** moves this refusal earlier, and keeps it exact.
+
+    The sole substantive registrant is 77, so a scalar anchor of 1 is a disagreement.
+    Migration ``0014``'s freeze guard now states that condition directly -- the anchor
+    must BE the sole substantive registrant, or be NULL -- so the snapshot can no longer
+    even reach a frozen state for the loader to reject afterwards.
+    """
+    plan = registrant_plan(flag=False, registrants=[RegistrantPlan(cik=77)])
+    plan.accessions[0].anchor_override = 1
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="anchor_cik_numeric to be the sole substantive registrant or NULL",
+    ):
+        write_plan(db, plan)
 
 
 def test_non_canonical_registrant_padding_fails_closed(db: sqlite3.Connection) -> None:
@@ -2590,7 +2664,9 @@ def test_selected_accession_order_is_the_frozen_decision_018_key(db: sqlite3.Con
     keys = [
         (
             row["accession_hash_sha256"],
-            f"{row['anchor_cik_numeric']:010d}",
+            f"{row['anchor_cik_numeric']:010d}"
+            if row["anchor_cik_numeric"] is not None
+            else MULTI_REGISTRANT_TIE_BREAK_SENTINEL,
             f"{row['accession_plain'][:10]}-{row['accession_plain'][10:12]}-"
             f"{row['accession_plain'][12:]}",
         )
@@ -2971,7 +3047,16 @@ def test_composite_foreign_keys_reject_an_unanchored_selected_accession(
         load_frozen_joint_candidates(db, _SNAPSHOT_ID), node_limit=_NODE_LIMIT
     )
     _insert_run_in_state(db, identity, "running")
-    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"), transaction(db) as c:
+    # **Decision 082 section 10.11 / Decision 083 R58**: with a nullable anchor the
+    # composite foreign key is no longer the only gate, so the explicit attachment
+    # trigger is what refuses a selected accession with no co-selected registrant.
+    with (
+        pytest.raises(
+            sqlite3.IntegrityError,
+            match="FOREIGN KEY|requires at least one substantive registrant selected",
+        ),
+        transaction(db) as c,
+    ):
         c.execute(
             "INSERT INTO pilot_selected_accessions "
             "(selection_run_id, snapshot_id, accession_plain, anchor_cik_numeric, selected_order, "

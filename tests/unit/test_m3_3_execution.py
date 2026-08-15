@@ -672,8 +672,24 @@ def test_full_index_corroboration_reaches_the_registrant_rows(
         flagged = connection.execute(
             "SELECT COUNT(*) FROM pilot_candidate_accessions WHERE multi_registrant = 1"
         ).fetchone()[0]
-    assert associated == 2
+    # **Decision 083 R58**: for a genuinely multi-registrant accession NEITHER
+    # substantive registrant is the anchor, so both rows are 'associated'. Two such
+    # accessions therefore contribute four associated rows, not two -- and zero anchors.
+    assert associated == 4
     assert flagged == 2
+    with connect(paired.track_b_database, writer=False) as connection:
+        anchors = connection.execute(
+            "SELECT COUNT(*) FROM pilot_candidate_accession_registrants AS r "
+            "JOIN pilot_candidate_accessions AS a "
+            "  ON a.snapshot_id = r.snapshot_id AND a.accession_plain = r.accession_plain "
+            "WHERE a.multi_registrant = 1 AND r.is_anchor = 1"
+        ).fetchone()[0]
+        null_scalars = connection.execute(
+            "SELECT COUNT(*) FROM pilot_candidate_accessions "
+            "WHERE multi_registrant = 1 AND anchor_cik_numeric IS NULL"
+        ).fetchone()[0]
+    assert anchors == 0
+    assert null_scalars == 2
 
 
 def test_a_full_index_disagreement_is_a_diagnostic_not_an_overwrite(
@@ -736,7 +752,7 @@ def test_a_full_index_disagreement_is_a_diagnostic_not_an_overwrite(
         (er._corrupt_registrant_cik, "not the canonical rendering"),
         (er._remove_company_name, "filing_time_name"),
         (er._corrupt_full_index_cik, "non-canonical CIK"),
-        (er._orphan_accession_anchor, "no accepted registrant row"),
+        (er._orphan_accession_anchor, "none of which has an accepted registrant row"),
     ],
 )
 def test_each_freeze_obligation_fails_for_its_own_reason(

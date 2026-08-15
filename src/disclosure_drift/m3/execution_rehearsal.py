@@ -549,7 +549,7 @@ def _run_e2(workspace: Path) -> ScenarioOutcome:
             (
                 "accession without a registrant row",
                 _orphan_accession_anchor,
-                "no accepted registrant row",
+                "none of which has an accepted registrant row",
             ),
         )
         for label, mutate, expected in variants:
@@ -866,10 +866,11 @@ def _reserve_construction(
             accession_role="base",
             selected_order=order,
             accession_tie_break_sha256=accession_selection_rank(
-                by_plain[plain].anchor_cik_padded,
+                by_plain[plain].registrant_slot,
                 by_plain[plain].accession_number_dashed,
                 PILOT_SELECTION_SEED,
             ),
+            substantive_registrants_padded=by_plain[plain].substantive_registrants_padded,
         )
         for order, plain in enumerate(selected_plains, start=1)
     )

@@ -241,10 +241,22 @@ __all__ = [
 #: The operational catalog's path relative to the external evidence root (contract §16).
 OPERATIONAL_CATALOG_RELATIVE_PATH: Final = "catalogs/m3_2a_operational.sqlite3"
 
-#: The migration chain the operational catalog is created at. Contract §11 fixes it: "created
-#: only inside an authorized window at migration chain ``0013``". No ``0014`` exists or is implied,
-#: so a chain that ends anywhere else is a refusal rather than an upgrade.
-FINAL_MIGRATION_VERSION: Final = 13
+#: The migration chain the operational catalog is created at. Contract §11 originally fixed it at
+#: ``0013`` -- "created only inside an authorized window at migration chain ``0013``" -- and a chain
+#: ending anywhere else is a refusal rather than an upgrade. That refusal rule is **unchanged**;
+#: only the head it names moves.
+#:
+#: **Accepted Decision 084 R65** moves it to ``0014``, because accepted Decision 083 §10 added
+#: migration ``0014`` (the R46 multi-registrant relational correction) and this constant records the
+#: repository's **current schema-chain head**. Leaving it at ``0013`` would make every freshly
+#: prepared catalog refuse itself.
+#:
+#: **It records a schema fact and nothing more.** It does not reopen M3.2, authorize acquisition,
+#: authorize network access, authorize applying migration ``0014`` to the accepted private M3.2
+#: operational catalog, authorize writing any accepted M3.2 evidence, move ``m3.2-complete``, or
+#: grant M3.3-E0 authority. Migration ``0014`` remains prospective and pre-E0, the accepted private
+#: M3.2 operational catalog remains untouched, and no invocation against it is authorized.
+FINAL_MIGRATION_VERSION: Final = 14
 
 #: The two acquisition windows. A window name outside this set is refused rather than treated as
 #: an unrecognized-but-harmless label.

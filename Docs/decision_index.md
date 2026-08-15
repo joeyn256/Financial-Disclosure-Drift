@@ -901,6 +901,28 @@ is **immutable**.
 | The reserve per-CIK cap | **Decision 085 §8 — MIN-4.** `reserve_selector._caps_preserved` must attach an established multi-registrant bundle accession to **every** truthful substantive registrant for per-CIK / entity-domain cap accounting — never to the replacement, an anchor, the first registrant, the min/max CIK, or the submitter — while **accession-domain accounting still counts the filing once**. The cap value and research policy are **unchanged**; a policy-constant change is a **STOP** |
 | What happens next | **Decision 085 §12** — commit this record as one governance-only commit, implement only **M-1** and **MIN-1**–**MIN-4**, re-run **MR-M1**–**MR-M14** including the exact MR-M10 mutant, run targeted and static validation and exactly one `make check-fast`, commit once, push once, and **return to Sol/GPT**. **R49** condition B stays **unsatisfied** until a fresh **genuine Claude Fable 5 maximum** review passes and Sol/GPT accepts; migration `0015`, Review A, Review B, the adjudication, **E0**, **E1**, **E2**, and **M3.4** all remain unauthorized at `REQUEST_CEILING` 0 |
 
+*(Current state: the Decision-085 correction is **implemented and committed** at `1c5b0150…`, and
+accepted Decision 086 adjudicates it — see below.)*
+
+## Decision 086 — ACCEPTED (D085 correction adjudication and genuine Fable rereview)
+
+[Decision 086](Decisions/decision_086_m3_3_d085_correction_owner_adjudication_and_fable_rereview.md)
+(`ACCEPTED — OWNER ADJUDICATION OF THE D085 CORRECTIONS AND GENUINE FABLE REREVIEW AUTHORIZATION
+2026-08-15`) is the **seventeenth M3.3 record**. It adjudicates a completed correction and commissions
+the review that can accept it.
+
+**It is governance only**, and it is **not** final owner acceptance of the R46 implementation.
+Decisions 083, 084, and 085 are **not modified**, and no implementation byte changes with it.
+
+| Question | Controlling record |
+|---|---|
+| Whether the D085 corrections stand | **Decision 086 §2.** The correction report is accepted as **truthful** and all five findings are **CLOSED FOR REREVIEW** — **M-1** on `MR_M10_DERIVATION_MUTANT = KILLED` with **MR-M10A** existing and **MR-M10B** retained, and **MIN-1**–**MIN-4** closed. The correction epoch reported no BLOCKER, MAJOR, or MINOR of its own. **This is acceptance of the corrections FOR REREVIEW, not final R46 acceptance** |
+| The migration-checksum identity movement | **Decision 086 §3 — R68. ACCEPTED.** Correcting migration `0014`'s bytes moved the reserve-bearing fixture's `selector_policy_sha256`, `root_manifest_sha256`, and `manifest_id` along the accepted checksum → `migration_chain_sha256` → `selector_policy_sha256` → root/`manifest_id` path. Classified an **expected governed policy-binding consequence** — **not** a new R46 registrant-semantic identity consumer, **not** an expansion beyond **E1**–**E5**, **not** corruption, **not** a methodology change. R46 semantic movement and migration-policy movement stay **separately attributable**. The rereviewer must verify only those three moved and the **other seven components are byte-identical** (including `candidate_tables_sha256` and `selection_result_sha256`), and must **report** anything else that moved. **No implementation changes because of this ruling** |
+| The duplicate final validation run | **Decision 086 §4 — R69. NONBLOCKING PROCESS DEVIATION.** Two `make check-fast` invocations on the identical unchanged tree, both exit 0, the second only to recover scrolled-past output, no tree edit between them and no gate iterated toward green. **No correction; Decision 085 is not rerun.** The normal rule stands: one routine final `make check-fast` per final tree unless a tree change, a nondeterminism investigation, or an authorized diagnostic need requires another |
+| Which model the next formal review must be | **Decision 086 §5.** **Claude Fable 5 at maximum effort, in a genuine epoch.** The reviewer reports its actual harness/model identity **before** substantive review and **STOPS** with `M3_3_D085_R46_REREVIEW_INVALID_NOT_GENUINE_FABLE` on any mismatch. **Opus is never substituted for Fable**, and a mismatch is never handled by continuing and disclosing it afterward. The prior review's findings remain valid evidence even though its epoch did not satisfy this requirement |
+| What the rereview targets | **Decision 086 §6.** Frozen target `1c5b0150…` at tree `1994e8bf…`; **this governance commit is authority about that target and never becomes it**. The rereviewer compares the original reviewed target `09ee4422…` to the corrected one, verifies the correction is **bounded** to **M-1** and **MIN-1**–**MIN-4** plus truthful governance publication, and **revalidates every formal acceptance property, not only the delta** |
+| What happens next | **Decision 086 §8** — commit this record, push once, and **return to Sol/GPT**. The Fable rereview is **not** started in the Opus session that produced it. **R49** condition B stays **unsatisfied** until a genuine Fable 5 maximum review **passes** and Sol/GPT accepts the corrected implementation; migration `0015`, Review A, Review B, the adjudication, **E0**, **E1**, **E2**, and **M3.4** all remain unauthorized at `REQUEST_CEILING` 0 |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

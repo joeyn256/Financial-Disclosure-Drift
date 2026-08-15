@@ -761,6 +761,38 @@ each remain a separate, unissued owner gate.
 | Whether durable E0 may precede enrichment | **Decision 080 §13 — `E0_CAN_RUN_FAIL_CLOSED_BEFORE_ENRICHMENT`, PENDING OWNER ACCEPTANCE**, with three binding caveats: the enrichment ingest is **not E0**; the §8 ruling is recommended before E0; E1 stays expected-infeasible and separately gated. **The verdict does not authorize E0** |
 | What happens next | **Decision 080 §16** — return to Sol/GPT for owner adjudication of the six pending items. No session may begin E0, any acquisition, or any implementation on the strength of this record |
 
+*(Current state: the six pending items were **adjudicated by accepted Decision 081** on 2026-08-14 —
+see below. Decision 080's **R42–R45** and its frozen Decision-079 fact set remain binding and
+unchanged.)*
+
+## Decision 081 — ACCEPTED (fixed Complete-Submission-Text source verification)
+
+[Decision 081](Decisions/decision_081_m3_3_fixed_complete_submission_source_verification.md)
+(`ACCEPTED — OWNER DECISION-080 ADJUDICATION AND FIXED SOURCE-VERIFICATION AUTHORIZATION
+2026-08-14`) is the **twelfth M3.3 record**. It accepts the Decision-080 source-architecture review,
+adjudicates its six pending items by freezing **R46**–**R50**, and fixes the exact boundary of **one**
+bounded public-SEC source-verification sample.
+
+**It closes neither real-path gate**, performs **zero** amendment-purpose classifications, resolves
+**zero** real amendment parentage, and grants **no** quota credit. **M3.3-E0 durable parsing**,
+M3.3-E1, M3.3-E2, and M3.4 each remain a separate, unissued owner gate.
+
+| Question | Controlling record |
+|---|---|
+| Whether the Decision-080 review is accepted | **Decision 081 §2 — YES**, token `M3_3_DECISION_080_SOURCE_ARCHITECTURE_OWNER_ACCEPTED`. R42–R45 and the frozen Decision-079 fact set stand unchanged, still governed by Decision 079 R41 |
+| How a multi-registrant accession is represented | **Decision 081 §3 — R46.** Relationally. A sole substantive registrant may be the scalar registrant; for more than one, **no** anchor may be chosen by first-write order, min/max CIK, archive path, record order, hash, a submissions-document occurrence, or a filing-agent/submitter heuristic — **the Decision 080 §8.3 MR-3(a) intrinsic-submitter recommendation is rejected**, and MR-3(c) blanket exclusion is not adopted either. No arbitrary scalar registrant may participate in tie-break identity, candidate identity, selection identity, history assignment, or quota credit; the scalar field becomes `NULL`/unresolved where it cannot be truthful. Migration **authorized in principle, not implemented**; any OR-1/R16 correction is returned to the owner with **no replacement singleton invented** |
+| Whether verified amendment-purpose evidence may exist | **Decision 081 §4 — R47. In principle, yes**, under a pre-registered document-level protocol with eleven required properties (frozen protocol, frozen artifact SHA-256, exact document, exact span, two independent outcome-blind reviews, third adjudication or fail-closed, frozen adjudication, immutable provenance, no metadata overwrite, independent span review, post-freeze determinism). Three frozen categories unchanged; every classifier route prohibited; **zero classifications performed**; the required migration is **not authorized here** |
+| When `amends_original` may be established | **Decision 081 §5 — R48.** Only on the amendment's own explicit identification of the original by compatible form (`10-K`/`10-KT`) plus exact stated filing date or accession, mapping to **exactly ONE** accepted catalog original under the same substantive registrant association, with no conflicting statement and the strict-later acceptance rule passing. Zero/multiple/conflict ⇒ unresolved or review. **Never** proximity, same-report-date, ordering, `/A`, or name inference. Decision 018 co-selection and the hard quota **8** unchanged |
+| When M3.3-E0 may run | **Decision 081 §6 — R49.** The Decision 080 §13 verdict `E0_CAN_RUN_FAIL_CLOSED_BEFORE_ENRICHMENT` is accepted, **but E0 stays NOT AUTHORIZED** until **both** the Decision-081 sample has returned and been owner-adjudicated **and** the R46 correction has been implemented, independently reviewed, and owner-accepted. An owner sequencing gate, not a technical dependency claim |
+| What network authority exists | **Decision 081 §7 — R50.** **ONE** bounded stage: SEC Complete Submission Text for the frozen sampled accessions only, `TARGET_SAMPLE_N` **125 max**, logical ceiling **125**, physical ceiling **250**, **2** attempts per accession, **1 sequential request per second**, no parallelism, no crawler behavior, SEC identity never printed, nothing outside the frozen sample, no off-`sec.gov` redirect. **Not** full-population acquisition |
+| How the sample is drawn | **Decision 081 §§8.3–8.4.** Five frozen cohorts only, forms exactly `10-K/A` / `10-KT/A`, XBRL classes X0/X1/X2, deterministic ranking by ascending `sha256("d081-source-verification/1.0:" + accession_plain)` with no stochastic step. CORE 5 × 3 × **6** = **90**, plus oversamples **10** `10-KT/A` / **8** multi-registrant / **8** multiple-original / **8** zero-original / **1** missing-report-date. Undersized strata take all members; **no cross-stratum backfill**, so the final sample may be fewer than 125 |
+| What must reconcile before any request | **Decision 081 §8.2** — the ephemeral Decision-079 population reproduction must return `REAL_RAW_TOTAL_AMENDMENT_CANDIDATES = 46912` and `FROZEN_COHORT_AMENDMENT_CANDIDATES = 20258`, or the session **STOPS before network** |
+| What is measured | **Decision 081 §8.8 — M1–M10**: native `<ACCEPTANCE-DATETIME>` presence and strict-14-digit accession-bound validity; header accession and form; `AmendmentFlag`; `AmendmentDescription`; explicit amendment statement (**source-sufficiency only**); explicit original form/date/accession; the ZERO / EXACTLY_ONE / MULTIPLE lookup; and byte size |
+| What the stage may never return | **Decision 081 §§8.9–8.10.** No `administrative` / `financial` / `narrative` classification of any real accession, and no `amends_original` written anywhere — only explicit-statement presence with its preserved span, and `ORIGINAL_LOOKUP_RESULT`. **No quota witness is created** |
+| Whether a failing accession may be replaced | **Decision 081 §8.12 — no.** Every frozen sample accession appears exactly once including failures and absences; no substitution, no second sample, no post-retrieval edit; `SAMPLE_TOTALITY` is returned |
+| What happens after the last request | **Decision 081 §8.13** — `NETWORK_AUTHORIZATION = SPENT / CLOSED`. No further SEC request may be made under Decision 081, no automatic enrichment, no "one more check" |
+| What happens next | **Decision 081 §14** — execute the fixed verification **once**, then return to Sol/GPT. Results are not committed in that pass; E0, the multi-registrant correction, and enrichment all remain unstarted |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

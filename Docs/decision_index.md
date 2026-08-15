@@ -1102,12 +1102,47 @@ changes, E0 is **not** started by this record, and no network, SEC, or HTTP requ
 | The persistence bridge | **Decision 092 §13.** `DEFERRED_PENDING_E0_R52` — no fabricated Review B, no fabricated adjudication, migration `0015` **not** modified |
 | What happens next | **Decision 092 §16** — return to Sol/GPT; **M3.3-E0 runs in a separate session** under its accepted frozen scope, then the §12 R52 diagnostic returns to the owner |
 
-*(Current state: **this is the controlling current-state record on the amendment-purpose gate and on
-E0 authorization.** The purpose gate is **CLOSED**; the linked-amendment gate is **OPEN pending
-E0/R52**; **M3.3-E0 is AUTHORIZED and not yet started**; E1, E2, and M3.4 remain unauthorized;
-migration `0016` is not authorized; network/SEC/HTTP authority is NONE at `REQUEST_CEILING = 0` with
-new SEC requests 0. Earlier records stating the purpose gate open or E0 unauthorized state their
-position as at their own acceptance and are **not** rewritten.)*
+*(Current state: **this is the controlling record on the amendment-purpose gate and on E0
+authorization**, refined on two points by Decision 093 below — the exact linkage-resolution predicate
+and the durable reproducibility of the accepted evidence. The purpose gate is **CLOSED**; the
+linked-amendment gate is **OPEN pending E0 resolution**; **M3.3-E0 is AUTHORIZED and not yet
+started**; E1, E2, and M3.4 remain unauthorized; migration `0016` is not authorized; network/SEC/HTTP
+authority is NONE at `REQUEST_CEILING = 0` with new SEC requests 0. Earlier records stating the
+purpose gate open or E0 unauthorized state their position as at their own acceptance and are **not**
+rewritten.)*
+
+## Decision 093 — ACCEPTED (evidence durability, and the linkage-resolution predicate)
+
+[Decision 093](Decisions/decision_093_m3_3_review_evidence_durability_and_linkage_resolution.md)
+(`ACCEPTED — OWNER D091 REVIEW-EVIDENCE DURABILITY CLOSURE AND PRE-E0 LINKAGE-RESOLUTION RULING
+2026-08-15`) is the **twenty-fourth M3.3 record**. It makes the accepted D091 evidence durably
+reproducible, pins the exact linkage-resolution predicate **before** E0 runs, and records two
+read-only E0 preflight findings.
+
+**It executes nothing.** No document is re-reviewed, no judgment changes, no schema byte changes, E0
+is **not** started, and no network, SEC, or HTTP request is made.
+
+| Question | Controlling record |
+|---|---|
+| What the durability gap was | **Decision 093 §3.** The prose review artifact carries all 108 rows but only **123 of 302** span locations — not enough to reconstruct the accepted rows or reproduce the accepted digests. A **durability/reproducibility gap**, not a judgment or digest defect, and not a reopening of the review |
+| Where the accepted evidence now lives | **Decision 093 §4.** `Docs/m3/evidence/d091_review_a_d9c9d9c7/` — three canonical JSONL relations plus a manifest, exported from the frozen state with **no value invented and no timestamp generated**, and no document body, absolute path, evidence-root name, scratch path, session identifier, or personal name |
+| Whether the accepted digests reproduce | **Decision 093 §5 — yes.** From the exported files **alone**, with the built catalog deliberately not opened: `ARTIFACT_TABLE_SHA256 b84495a4…` and `REVIEW_A_TABLE_SHA256 d9c9d9c7…` both reproduce, alongside every per-row digest and the accepted content counts. **27 checks pass** |
+| Which date field resolves an amendment to its original | **Decision 093 §6 — the stated FILING date.** The candidate original's `filing_date` must **exactly equal** the issuer-stated `original_filing_date`. **`report_date` is NOT the matching field** — diagnostic only, and it may never create or destroy a match |
+| What registrant scope the resolver uses | **Decision 093 §6A.** The **complete established association set**, unioned over `pilot_candidate_accession_registrants`. The nullable `anchor_cik_numeric` is **never** the scope for a multi-registrant accession; an unestablished set fails closed as `UNESTABLISHED_ASSOCIATION_SET` |
+| What the input set is, and what the 6 partials do | **Decision 093 §6.** Exactly the **96** accepted form+date records. The **6** form-only partials are `NO_DATE / INELIGIBLE_FOR_LINKAGE_RESOLUTION`, carry no credit, and sit **outside the 96-match denominator** |
+| How acceptance ordering is decided | **Decision 093 §7.** R43 native authority only — never `filing_date`, `report_date`, retrieval, filesystem, or insertion time. `ORDERING_PASS` / `ORDERING_FAIL` / `ORDERING_UNAVAILABLE`, and **missing ordering evidence is never read as PASS** |
+| Whether E0 can supply the originals' acceptance timestamps | **Decision 093 §8 — `UNAVAILABLE`, and E0 is not blocked.** `census_accessions` is populated from the **lower-authority** submissions `acceptanceDateTime`; the native header exists only in the 108 D081 artifacts, which are the **amendments**. `REAL_ACCEPTANCE_ORDERING_ADEQUACY` **remains PENDING after E0** |
+| Where E0 writes | **Decision 093 §9 — established, not invented.** Catalog at `<accepted private evidence root>/catalogs/m3_2a_operational.sqlite3` (`OPERATIONAL_CATALOG_RELATIVE_PATH`), confined to **R17**'s fifteen tables plus the `census_plan_sources.parser_state` transition; receipt at `runs/<E0 namespace>/execution_receipt.json` (`OPERATOR_RECEIPT_FILENAME`), namespace operator-selected create-once **by accepted design** |
+| What E0 must obey when it runs | **Decision 093 §10 — six invariants.** Project Python 3.12 `.venv`; `connect()` used as a context manager; the private root resolved once and cached; **compute → validate → recompute every identity from persisted rows → verify integrity → then freeze**; **no digest computed from a preimage containing its own value**; per-column private-path validation with nonleakage never weakened |
+| What happens next | **Decision 093 §14** — return to Sol/GPT; **M3.3-E0 runs in a NEW session** under its accepted scope and these invariants, then the §6–§7 resolution returns to the owner |
+
+*(Current state: **the durability hold is CLOSED and the accepted D091 evidence is durably
+reproducible from the repository.** The controlling linkage resolver is the association set plus the
+stated filing date; `E0_ORIGINAL_ACCEPTANCE_TIMESTAMP_SOURCE` is **UNAVAILABLE** so
+`REAL_ACCEPTANCE_ORDERING_ADEQUACY` remains pending after E0; **M3.3-E0 is AUTHORIZED and executable
+in a new session but is not started**; E1, E2, M3.4, and migration `0016` remain unauthorized; the
+deferred level-1 `filing_level_metadata` native-header class is **not** activated; network/SEC/HTTP
+authority is NONE at `REQUEST_CEILING = 0`.)*
 
 ## Deviation register — where deviations are recorded
 

@@ -1,0 +1,53 @@
+{
+ "accepted_digests": {
+  "artifact_table_sha256": "b84495a40b23fdc77c70c537b8cf6c9bd7675b90493fc73d55841a2ac425174e",
+  "review_a_table_sha256": "d9c9d9c79a75d7808e09094fdafa189128ae522d884bb88c8fb28f0e40d89c4f"
+ },
+ "authority": {
+  "decision_091": "Docs/Decisions/decision_091_m3_3_single_pass_document_evidence_protocol.md",
+  "decision_092": "Docs/Decisions/decision_092_m3_3_d091_evidence_owner_adjudication_and_e0_authorization.md",
+  "decision_093": "Docs/Decisions/decision_093_m3_3_review_evidence_durability_and_linkage_resolution.md",
+  "review_artifact": "Docs/m3/reviews/m3_3_single_opus_document_evidence_review_d9c9d9c7.md"
+ },
+ "canonicalization": {
+  "digest_domains": "artifact_table_sha256 over document_evidence.ARTIFACT_COLUMNS; review_a_table_sha256 over document_evidence.REVIEW_RECORD_COLUMNS under REVIEW_A_TABLE_DOMAIN. Both are subsets of the exported columns; hash_table sorts rendered rows, so the digests are independent of export row order.",
+  "field_order": "migration 0015 column order per relation, preserved as JSON object key order",
+  "format": "UTF-8 JSON Lines, one logical row per line, newline-terminated",
+  "json": "json.dumps(obj, ensure_ascii=False, separators=(',',':')) — no spaces, no ASCII escaping",
+  "row_order": "the relation's declared UNIQUE business key: document_artifacts by (accession_plain, source_class); document_review_records by (accession_plain, reviewer_role); document_review_spans by the parent record's accession_plain then span_ordinal",
+  "values": "exact persisted governed values; NULL renders as JSON null; INTEGER columns render as JSON numbers. No value is invented and no timestamp is generated for this export."
+ },
+ "files": {
+  "document_artifacts": {
+   "bytes": 45056,
+   "rows": 108,
+   "sha256": "0fdd6d022cbaf53807fb950d8b3aba15c6274dc6945aa864faec87ad34a05291"
+  },
+  "document_review_records": {
+   "bytes": 80106,
+   "rows": 108,
+   "sha256": "f66135b0bcf16e69c589db1744eeca1f2272552e7527070e86b1e82ef4dbd007"
+  },
+  "document_review_spans": {
+   "bytes": 128014,
+   "rows": 302,
+   "sha256": "18b8fc6b7b2e4c728c2f0566a3092d5fe4b377a7784bb0de5412be3727dba5da"
+  }
+ },
+ "notes": [
+  "This is an export of already-frozen, owner-accepted evidence. No judgment, category, abstention, asserted form, asserted date, span, span text, or review epoch was changed.",
+  "document_adjudicated_evidence is empty by design: Review B and Claude adjudication were never executed and are not authorized.",
+  "No absolute path, private evidence-root locator, scratch path, raw session identifier, or personal reviewer name appears in any exported value."
+ ],
+ "protocol_version": "m3.3-document-evidence/1.0",
+ "review_epoch_id": "2a99c067d0df79421d4d52a1e46f863bccec8727db6a7b7de9b0ea55d18b2e62",
+ "review_pass": "A",
+ "reviewer_model": "claude-opus-5",
+ "reviewer_role": "review_a",
+ "row_counts": {
+  "document_adjudicated_evidence": 0,
+  "document_artifacts": 108,
+  "document_review_records": 108,
+  "document_review_spans": 302
+ }
+}

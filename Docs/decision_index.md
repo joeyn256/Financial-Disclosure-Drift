@@ -1013,10 +1013,37 @@ evidence is created, no migration is authorized, and no network, SEC, or HTTP re
 | Who may perform it | **Decision 089 §10.** **Claude Fable 5, maximum effort, a fresh `/clear` epoch.** The session that reviewed and then corrected this target **must not** perform the rereview, and no conclusion of that session is inherited |
 | What happens next | **Decision 089 §12** — run the fresh rereview, then return to Sol/GPT. Document Review A needs **both** a rereview **PASS** and **Sol/GPT final owner acceptance** |
 
-*(Current state: the corrected schema at `746648285…` awaits a **fresh independent rereview**.
-`D087_VERIFIED_EVIDENCE_SCHEMA` is **NOT YET OWNER ACCEPTED**; **OBS-1 is deferred and open**;
-**OBS-A is open for contract rereview**; **OBS-B is an accepted non-defect**; and Review A, Review B,
-the document adjudication, **M3.3-E0**, **E1**, **E2**, and **M3.4** all remain unauthorized.)*
+*(Current state: the commissioned rereview **ran and PASSED** at BLOCKER 0 / MAJOR 0 / MINOR 0 /
+OBSERVATION 4 (token `M3_3_D088_VERIFIED_EVIDENCE_FRESH_REREVIEW_PASSED_READY_FOR_OWNER_ACCEPTANCE`,
+immutable artifact `Docs/m3/reviews/m3_3_d088_verified_evidence_fresh_rereview_7466482.md`), with
+OBS-A determined **CLOSED / NON-DEFECT** and OBS-1 confirmed deferred — and **Sol/GPT then accepted
+the schema and authorized Document Review A. See Decision 090 below.**)*
+
+## Decision 090 — ACCEPTED (verified-evidence final acceptance and Review A authorization)
+
+[Decision 090](Decisions/decision_090_m3_3_verified_evidence_owner_acceptance_and_review_a_authorization.md)
+(`ACCEPTED — OWNER FINAL VERIFIED-EVIDENCE ACCEPTANCE AND DOCUMENT REVIEW A AUTHORIZATION
+2026-08-15`) is the **twenty-first M3.3 record**. It accepts the corrected verified-evidence
+infrastructure on the fresh rereview's PASS, and authorizes Document Review A.
+
+**It executes nothing.** No document is reviewed by the record, no real evidence row is written, no
+migration is authorized, and no network, SEC, or HTTP request is made. The recording governance
+session does not execute Review A.
+
+| Question | Controlling record |
+|---|---|
+| What was accepted, and on what basis | **Decision 090 §2.** The corrected infrastructure frozen at `746648285ec84d54a2ed7deaebc73f5c64b89d3d` (tree `1afd1c3b…`), on the fresh Fable 5 maximum rereview's **PASS at B0 / M0 / MIN0** — `M3_3_D088_VERIFIED_EVIDENCE_SCHEMA_OWNER_ACCEPTED`, `M3_3_MIGRATION_0015_OWNER_ACCEPTED`, `M3_3_VERIFIED_EVIDENCE_INFRASTRUCTURE_COMPLETE`. **No further D087/D088 correction or review is required** absent a genuinely new defect |
+| The four observations | **Decision 090 §3.** **OBS-1** OPEN / DEFERRED / NON-GATING — never silently closed; **OBS-A** CLOSED / NON-DEFECT (faithful to the D082 §12.6 / R64 / AP-1 routing); **OBS-B** accepted non-defect, kept as defence in depth; **OBS-C** accepted non-defect — agreement consistency is intentionally per-kind/value-scoped, and auxiliary-assertion disagreement belongs to the frozen R64/AP-7 protocol |
+| The frozen protocol boundary | **Decision 090 §4.** `m3.3-document-evidence/1.0` over **exactly** the 108 frozen D081 artifacts; Review A Opus 5 max, Review B Fable 5 max, adjudication Opus 5 max — three distinct fresh epochs; A and B mutually blind, adjudication seeing both only after their freeze |
+| What Review A may do | **Decision 090 §5.** OFFLINE review of the 108 frozen artifacts, one fresh Opus 5 maximum epoch, no subagents or delegation; ONLY the accepted M3.3-v1 questions (purpose over the frozen three categories; explicit-original evidence under X-1…X-6); every positive assertion span-backed; abstention preferable to inference; governed schema rows with an opaque epoch and no personal identity; frozen and digest-sealed **before Review B begins**; totality 108/108 or STOP |
+| What Review A may read | **Decision 090 §§5.3, 6.** The frozen artifact set and binding metadata only — READ-only private-root authority for the execution epoch, path never printed or persisted; no Review B/adjudication output, no answer set, no inherited D081 label; no SEC, no HTTP, no acquisition, no E0 |
+| What Review A does not do | **Decision 090 §7.** Closes no feasibility gate, grants no quota credit, authorizes nothing downstream; its diagnostics are labeled **REVIEW-A-ONLY** |
+| What stays unauthorized | **Decision 090 §8.** Review B, the adjudication, **M3.3-E0**, **E1**, **E2**, **M3.4**, all network/SEC/HTTP (`REQUEST_CEILING = 0`), and migration `0016` |
+| What happens next | **Decision 090 §9** — execute Review A in a fresh Claude Opus 5 maximum epoch, then return to Sol/GPT |
+
+*(Current state: **Document Review A is authorized and has not yet begun.** The verified-evidence
+infrastructure is owner-accepted and complete; Review B, the adjudication, E0, E1, E2, and M3.4
+remain unauthorized; network/SEC/HTTP authority is NONE at `REQUEST_CEILING = 0`.)*
 
 ## Deviation register — where deviations are recorded
 

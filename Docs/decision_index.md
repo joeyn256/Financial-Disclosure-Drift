@@ -987,10 +987,36 @@ request is made.
 | The required adversarial matrix | **Decision 088 §12 — VE-M1 … VE-M14 re-run, plus VE-R1 … VE-R10**, demonstrated rather than named |
 | What happens next | **Decision 088 §15** — correct the six findings, then **return to Sol/GPT**. **Successful correction is not acceptance** |
 
-*(Current state: the D087 implementation **failed** its independent review and is under **bounded
-correction**. `D087_VERIFIED_EVIDENCE_SCHEMA` is **NOT YET OWNER ACCEPTED**; **OBS-1 remains open**;
-and Review A, Review B, the document adjudication, **M3.3-E0**, **E1**, **E2**, and **M3.4** all
-remain unauthorized.)*
+*(Current state: the D087 implementation **failed** its independent review and was corrected under
+this authority. The corrections are now owner-adjudicated **for rereview** — see Decision 089
+below.)*
+
+## Decision 089 — ACCEPTED (D088 correction adjudication and the fresh rereview)
+
+[Decision 089](Decisions/decision_089_m3_3_d088_correction_owner_adjudication_and_rereview.md)
+(`ACCEPTED — OWNER ADJUDICATION OF THE D088 CORRECTIONS AND FRESH REREVIEW AUTHORIZATION
+2026-08-15`) is the **twentieth M3.3 record**. It adjudicates the Decision 088 corrections and
+commissions the fresh independent acceptance rereview.
+
+**It accepts no schema and grants no execution authority.** No document review runs, no real
+evidence is created, no migration is authorized, and no network, SEC, or HTTP request is made.
+
+| Question | Controlling record |
+|---|---|
+| What the D088 corrections bought | **Decision 089 §2.** Acceptance of the **correction work, for rereview only** — `M3_3_DECISION_088_VERIFIED_EVIDENCE_CORRECTIONS_OWNER_ACCEPTED_FOR_REREVIEW`. **Not** final acceptance of the schema |
+| What "closed for rereview" means | **Decision 089 §§3–4.** M-1, MIN-1, MIN-2, and MIN-3 are **CLOSED FOR REREVIEW**; OBS-2 and OBS-3 are **CLOSED**. The fresh reviewer **inherits no conclusion** and must independently re-prove the replacement door, both sides of the cross-accession binding, the `agreed`-state rule, and the candidate re-point guard |
+| OBS-1's status | **Decision 089 §5. OPEN / NON-GATING / DEFERRED**, no correction authorized. The reviewer **confirms rather than assumes** its four mitigations, and **classifies any defect normally** if they prove false |
+| OBS-A's status | **Decision 089 §6. OPEN FOR FRESH CONTRACT REREVIEW** — neither pre-accepted nor pre-condemned. The reviewer reads Decision 082 §§12.2/12.5/12.6, Decision 083 **R64**, and Decision 080 **AP-1**, evaluates the four abstention cases, and decides from the **contract** — **symmetry with `agreed` is not itself an argument**. MINOR or MAJOR on actual governed-state impact, or `OBS-A = CLOSED / NON-DEFECT` |
+| OBS-B's status | **Decision 089 §7. ACCEPTED NON-DEFECT OBSERVATION.** The hard-to-reach `document_adjudicated_evidence_requires_bound_artifact` **may remain** as defence in depth and is **not removed because another guard fires first**; no reachability requirement is imposed for style |
+| The expected identity movement | **Decision 089 §8.** Only the accepted policy chain may move, and the reviewer **independently reproduces** that the eight substantive manifest components stayed byte-identical. **No additional movement is authorized** |
+| What the rereview targets, and how widely | **Decision 089 §9.** Target `746648285ec84d54a2ed7deaebc73f5c64b89d3d` (tree `1afd1c3b…`), compared against `8c13fc79…`. **The rereview is not limited to the correction delta** — the **full** verified-evidence acceptance boundary is revalidated |
+| Who may perform it | **Decision 089 §10.** **Claude Fable 5, maximum effort, a fresh `/clear` epoch.** The session that reviewed and then corrected this target **must not** perform the rereview, and no conclusion of that session is inherited |
+| What happens next | **Decision 089 §12** — run the fresh rereview, then return to Sol/GPT. Document Review A needs **both** a rereview **PASS** and **Sol/GPT final owner acceptance** |
+
+*(Current state: the corrected schema at `746648285…` awaits a **fresh independent rereview**.
+`D087_VERIFIED_EVIDENCE_SCHEMA` is **NOT YET OWNER ACCEPTED**; **OBS-1 is deferred and open**;
+**OBS-A is open for contract rereview**; **OBS-B is an accepted non-defect**; and Review A, Review B,
+the document adjudication, **M3.3-E0**, **E1**, **E2**, and **M3.4** all remain unauthorized.)*
 
 ## Deviation register — where deviations are recorded
 

@@ -26,6 +26,15 @@ from typing import Final
 
 import pytest
 
+# The accepted census-layer builder fixture. **MR-M10A** is a derivation-layer
+# protection, so it has to run the real builder over a real census world; reusing that
+# suite's world is what keeps this module from carrying a second, drifting copy of it.
+import test_m3_candidate_snapshot as builder  # noqa: E402
+
+# The accepted S5 feasible plan, which owns the two joint fixture filings whose
+# pre-correction identities `_REBASELINED_MULTI_REGISTRANT_RANKS` re-baselines.
+import test_m23_accession_selection_store as s5  # noqa: E402
+
 from disclosure_drift import pilot_policy
 from disclosure_drift.m3.candidate_snapshot import (
     UNESTABLISHED_REGISTRANT_SET_REASON,
@@ -41,7 +50,12 @@ from disclosure_drift.sec.accession_selector import (
 )
 from disclosure_drift.sec.entity_selector import PILOT_SELECTION_SEED
 from disclosure_drift.storage.catalog import ELIGIBLE_FORM_TYPES
-from disclosure_drift.storage.sqlite import apply_migrations, connect, transaction
+from disclosure_drift.storage.sqlite import (
+    apply_migrations,
+    available_migrations,
+    connect,
+    transaction,
+)
 
 # --------------------------------------------------------------------------
 # Pre-correction baselines (Decision 083 §10 / R60)
@@ -53,6 +67,15 @@ from disclosure_drift.storage.sqlite import apply_migrations, connect, transacti
 # --------------------------------------------------------------------------
 
 #: ``SHA256(seed | 0000000001 | 0000000001-20-000001)`` at the frozen production seed.
+#:
+#: **Provenance** (Decision 085 §7). The pre-correction primitive was
+#: ``accession_selection_rank(anchor_cik_padded, accession_number_dashed, selection_seed)``
+#: -- the first parameter was literally named ``anchor_cik_padded`` -- over the preimage
+#: ``f"{selection_seed}|{anchor_cik_padded}|{accession_number_dashed}"``. Every literal
+#: below is therefore reproducible from the parent commit
+#: ``6fdec2ed685c3c6248e392b04cdf184e8f3549e3`` as
+#: ``accession_selection_rank(f"{cik:010d}", dashed, PILOT_SELECTION_SEED)``, and MR-M13
+#: asserts exactly that identity against today's primitive.
 _PRE_CORRECTION_SINGLE_REGISTRANT_RANKS: Final[dict[tuple[int, str], str]] = {
     (1, "0000000001-20-000001"): (
         "054107861c080cc678644e8ab137f714616146fcce95abfdb6ab1e8dc3205e02"
@@ -68,15 +91,39 @@ _PRE_CORRECTION_SINGLE_REGISTRANT_RANKS: Final[dict[tuple[int, str], str]] = {
 #: The intentionally re-baselined multi-registrant values (Decision 083 §10: "return
 #: exact before/after values for every intentionally changed governed digest"). The
 #: "before" column is the false-singleton digest the correction abolishes.
-_REBASELINED_MULTI_REGISTRANT_RANKS: Final[tuple[tuple[str, str, str], ...]] = (
+#:
+#: **Provenance, re-derived under Decision 085 §7.** These two accessions are the joint
+#: filings of the accepted S5 feasible fixture -- ``test_m23_accession_selection_store``
+#: slots 16 and 17, CIK 17 with co-registrant 917 and CIK 18 with co-registrant 918, both
+#: at ``dashed(cik, 2018, 2)``. The fixture is byte-identical in the pre-correction parent
+#: ``6fdec2ed685c3c6248e392b04cdf184e8f3549e3``, so each "before" is the value that
+#: commit's ``write_plan`` actually persisted into
+#: ``pilot_candidate_accessions.accession_tie_break_sha256`` at chain head ``0013``, where
+#: the anchor was mandatory and was the plan's own CIK. Reproduce either column from a
+#: disposable checkout of that parent with::
+#:
+#:     s5.write_plan(connection, s5.feasible_plan())
+#:     SELECT accession_tie_break_sha256 FROM pilot_candidate_accessions
+#:      WHERE accession_number_dashed = ?
+#:
+#: which yields ``anchor_cik_numeric`` 17 / 18, ``multi_registrant`` 1, and the "before"
+#: digests below -- the false-singleton state R58 abolishes, observed rather than
+#: asserted. The same query at chain head ``0014`` yields ``anchor_cik_numeric`` NULL and
+#: the "after" digests. ``test_the_multi_registrant_rebaseline_is_explicit_and_traceable``
+#: re-derives both columns from their stated preimages, so neither is an unchecked
+#: literal. **An earlier revision of this table carried an unreproducible second "before"
+#: value; it was replaced with the reproduced one, never patched for symmetry.**
+_REBASELINED_MULTI_REGISTRANT_RANKS: Final[tuple[tuple[int, str, str, str], ...]] = (
     (
+        17,
         "0000000017-18-000002",
         "8ac3c01ecd193aca6b66a4daaec00c22c99629475686a191abe23f9e4f13d61a",
         "29f00d58c0db00152f4c9dfec439e10fed91f045084cd8db40c7dd62fbfc05b7",
     ),
     (
+        18,
         "0000000018-18-000002",
-        "5f3f6a5726b1eb35cbe32cf4e9b7ee3c0f6d4dbd2c8a5b3f0d3d6a1c7e9b2f44",
+        "03e8736ec68b4f57776c2d8facc5b03a3313ebf813edac2aa49f9a0b272d9ce5",
         "ae4e009174a16afc305c49885587fe840cff75c4e99fc57ca80d8bd207740678",
     ),
 )
@@ -292,26 +339,101 @@ def test_mr_m9_the_census_scalar_is_not_reinstated_as_the_anchor(
 
 # ==========================================================================
 # MR-M10: an incomplete source must never read as a sole registrant
+#
+# **Two layers, and neither replaces the other** (Decision 085 §4). The mutation
+# MR-M10 names is a DERIVATION defect: the builder reads a source with rows omitted --
+# in the limit, with every row omitted -- and silently reports one substantive
+# registrant. The state that produces is fully lawful once written (an established
+# sole-registrant accession with a matching anchor), so the freeze and schema layers
+# structurally cannot see it. MR-M10A is therefore the load-bearing protection and
+# MR-M10B the backstop for a hand-seeded row that never went through the builder.
 # ==========================================================================
 
 
-def test_mr_m10_a_lossy_source_yields_unestablished_and_never_a_sole_registrant(
-    catalog: sqlite3.Connection,
+def test_mr_m10a_the_builder_never_reads_absent_evidence_as_a_sole_registrant(
+    tmp_path: Path,
 ) -> None:
-    """**MR-M10.** Derive the association set from a source with rows omitted.
+    """**MR-M10A.** Derive the association set from a source with rows omitted.
 
-    Killing assertion: ``registrant_set_completeness`` must be ``unestablished``, and a
-    silent single-registrant result fails. Under **Decision 083 R59** that state blocks
-    candidacy **entirely**, so the accession never reaches a snapshot at all -- which is
-    strictly stronger than recording it and hoping a downstream consumer notices.
+    Killing assertion (Decision 082 §10.13): ``registrant_set_completeness`` must be
+    ``unestablished``, and **a silent single-registrant result fails**. Under
+    **Decision 083 R59** that state blocks candidacy **entirely**, so the accession never
+    reaches a snapshot at all -- strictly stronger than recording it and hoping a
+    downstream consumer notices.
+
+    The census world is ``test_m3_candidate_snapshot``'s, not a second copy of it, and it
+    is exercised through the real ``build_and_freeze_candidate_snapshot``. The mutant this
+    kills is ``derive_candidate_snapshot`` treating ``associations is None`` as an empty
+    set and falling through to the scalar; under it every assertion below fails, because
+    the accession becomes an established sole-registrant candidate anchored on CIK
+    ``UNESTABLISHED_CIK``.
     """
     # The reason is registered and nameable, so the exclusion is explicit rather than a
     # silent drop (R59: "fail closed with an explicit accepted reason").
     assert UNESTABLISHED_REGISTRANT_SET_REASON in REASON_CODES
     assert REASON_CODES[UNESTABLISHED_REGISTRANT_SET_REASON].requires_manual_review
 
-    # An accession row whose registrant set was never established cannot be frozen, even
-    # though every other freeze obligation is satisfied.
+    database = builder.seed_catalog(tmp_path, unestablished=True)
+    plain = builder.UNESTABLISHED_ACCESSION_PLAIN
+    with connect(database) as connection:
+        # The scalar IS populated: the mutation is reading it as proof, not inventing it.
+        assert (
+            connection.execute(
+                "SELECT registrant_cik_numeric FROM census_accessions WHERE accession_plain = ?",
+                (plain,),
+            ).fetchone()[0]
+            == builder.UNESTABLISHED_CIK
+        )
+
+    frozen = builder.build_snapshot(database, tmp_path)
+
+    # 1. Excluded before candidate snapshot entry, and reported rather than dropped.
+    assert frozen.excluded_unestablished_registrant_set == 1  # type: ignore[attr-defined]
+    with connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accessions WHERE accession_plain = ?",
+                (plain,),
+            ).fetchone()[0]
+            == 0
+        )
+        # 2. No fabricated scalar registrant anywhere in the governed relation.
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accession_registrants "
+                "WHERE accession_plain = ?",
+                (plain,),
+            ).fetchone()[0]
+            == 0
+        )
+        # 3. No 'established' claim survives for it at the candidate layer.
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accessions "
+                "WHERE registrant_set_completeness <> 'established'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    # 4. No entity, history, or quota credit: the snapshot is byte-identical to one
+    #    built over a census that never carried the accession at all.
+    control_root = tmp_path / "control"
+    control = builder.build_snapshot(builder.seed_catalog(control_root), control_root)
+    assert frozen.snapshot_id == control.snapshot_id  # type: ignore[attr-defined]
+    assert frozen.accession_count == control.accession_count  # type: ignore[attr-defined]
+    assert dict(frozen.family_digests) == dict(control.family_digests)  # type: ignore[attr-defined]
+
+
+def test_mr_m10b_an_unestablished_candidate_row_can_never_be_frozen(
+    catalog: sqlite3.Connection,
+) -> None:
+    """**MR-M10B.** The persistence backstop, retained beside MR-M10A above.
+
+    Killing assertion: a hand-seeded ``unestablished`` candidate accession cannot reach a
+    frozen snapshot even when every other freeze obligation is satisfied. This layer
+    cannot see the derivation mutant -- the mutant's output is `established` and lawful --
+    which is exactly why MR-M10A exists and why this test does not stand alone.
+    """
     _seed_multi_registrant_candidate(catalog, unestablished=True)
     with pytest.raises(sqlite3.IntegrityError, match="established registrant set"):
         _freeze(catalog)
@@ -385,18 +507,56 @@ def test_mr_m13_every_single_registrant_tie_break_preimage_is_byte_identical() -
 def test_the_multi_registrant_rebaseline_is_explicit_and_traceable() -> None:
     """Decision 083 §10: changed multi-registrant identities are **re-baselined**.
 
-    Every changed digest is stated with its exact before and after value, and every
-    "after" is reproducible from the **R60** sentinel alone -- so the change is traceable
-    to R46 / R58-R62 semantics and to nothing else.
+    Every changed digest is stated with its exact before and after value, and **both**
+    columns are re-derived here from their stated preimages rather than merely compared
+    to each other (Decision 085 §7):
+
+    * "before" is the pre-correction rule -- the mandatory anchor CIK in the tie-break
+      slot -- so it is exactly what the parent commit persisted for this fixture;
+    * "after" is the **R60** sentinel alone, carrying no member CIK.
+
+    ``before != after`` is then a *consequence* of two independently reproduced values
+    rather than the only thing asserted, which is what makes the "before" column
+    evidence instead of decoration.
     """
-    for dashed, before, after in _REBASELINED_MULTI_REGISTRANT_RANKS:
-        assert before != after
+    for cik, dashed, before, after in _REBASELINED_MULTI_REGISTRANT_RANKS:
+        assert accession_selection_rank(f"{cik:010d}", dashed, PILOT_SELECTION_SEED) == before, (
+            f"{dashed} 'before' is not the pre-correction anchor rule at CIK {cik}"
+        )
         assert (
             accession_selection_rank(
                 MULTI_REGISTRANT_TIE_BREAK_SENTINEL, dashed, PILOT_SELECTION_SEED
             )
             == after
         )
+        assert before != after
+
+
+def test_the_rebaselined_accessions_are_the_accepted_joint_fixture_filings() -> None:
+    """The re-baseline table names real fixture accessions, not invented identities.
+
+    Decision 085 §7 requires enough provenance that a fresh reviewer can reproduce each
+    literal from the parent commit. The preimage half of that is the *identity*: these
+    two dashed forms must be exactly the joint filings the accepted S5 feasible fixture
+    builds, so the reproduction recipe in ``_REBASELINED_MULTI_REGISTRANT_RANKS`` points
+    at something that genuinely exists.
+    """
+    joint = {
+        entry.plain: entry
+        for entry in s5.feasible_plan().accessions
+        if entry.registrants is not None
+        and len({r.cik for r in entry.registrants if r.association_class == "substantive"}) > 1
+    }
+    assert {s5.dashed(cik, 2018, 2) for cik in (17, 18)} == {
+        s5.dashed(entry.cik, entry.year, entry.seq) for entry in joint.values()
+    }
+    for cik, dashed, _before, _after in _REBASELINED_MULTI_REGISTRANT_RANKS:
+        entry = joint[dashed.replace("-", "")]
+        assert entry.cik == cik
+        substantive = {
+            r.cik for r in (entry.registrants or []) if r.association_class == "substantive"
+        }
+        assert substantive == {cik, 900 + cik}
 
 
 def test_the_sentinel_can_never_collide_with_a_padded_cik() -> None:
@@ -846,3 +1006,281 @@ def test_the_four_preserved_identities_carry_no_registrant_field() -> None:
     from disclosure_drift.sec.entity_selector import selection_rank
 
     assert selection_rank("0000000001") == selection_rank("0000000001")
+
+
+# ==========================================================================
+# Decision 085 §6: the census layer cannot persist ESTABLISHED with zero relations
+#
+# 'established' claims the COMPLETE substantive association set is known, so it needs at
+# least one substantive relation row to stand on. Migration `0014` shipped with only the
+# UPDATE door closed; these tests hold all four shut, and hold the lawful ingest shape
+# open. Probes A-G of the accepted correction packet, as standing tests.
+# ==========================================================================
+
+_CENSUS_ESTABLISHED_REFUSAL: Final = "established requires at least one substantive association"
+
+
+def _seed_census_source(c: sqlite3.Connection, *ciks: int) -> None:
+    """The observation, parser run, parsed record, and registrants a census row needs."""
+    c.execute(
+        "INSERT INTO census_source_observations (observation_id, source_id, request_identity, "
+        "requested_url, purpose, retrieved_at_utc, outcome, logical_sha256, parser_version, "
+        "recorded_at_utc) VALUES ('obs-c', 'sec_bulk_submissions', 'req/c', "
+        "'https://example.invalid/c', 'census', ?, 'stored_new', ?, 'v/1.0', ?)",
+        (_AT, "c" * 64, _AT),
+    )
+    c.execute(
+        "INSERT INTO census_parser_runs (parser_run_id, source_observation_id, parser_id, "
+        "parser_version, started_at_utc, finished_at_utc, parsed_count, quarantined_count, "
+        "outcome, summary_json) VALUES ('pr-c', 'obs-c', 'p', 'v/1.0', ?, ?, 0, 0, "
+        "'completed', '{}')",
+        (_AT, _AT),
+    )
+    c.execute(
+        "INSERT INTO census_parsed_records (parsed_record_id, parser_run_id, "
+        "source_observation_id, native_identity, record_sha256, record_index, payload_json, "
+        "unknown_fields_json, warnings_json, reason_codes_json, duplicate_indicator, "
+        "conflict_indicator, recorded_at_utc) VALUES ('pd-c', 'pr-c', 'obs-c', 'n', ?, 0, "
+        "'{}', '[]', '[]', '[]', 0, 0, ?)",
+        ("d" * 64, _AT),
+    )
+    for cik in ciks:
+        c.execute(
+            "INSERT INTO census_registrants (cik_numeric, cik_padded, first_observed_at_utc, "
+            "latest_observed_at_utc) VALUES (?, ?, ?, ?)",
+            (cik, f"{cik:010d}", _AT, _AT),
+        )
+
+
+def _census_accession(
+    c: sqlite3.Connection,
+    plain: str,
+    *,
+    scalar: int | None,
+    completeness: str = "unestablished",
+) -> None:
+    c.execute(
+        "INSERT INTO census_accessions (accession_plain, accession_dashed, "
+        "registrant_cik_numeric, registrant_set_completeness, submitter_cik_numeric, form_type, "
+        "is_amendment, is_discovery_form, is_negative_control, source_observation_id, "
+        "parsed_record_id, first_observed_at_utc, latest_observed_at_utc) "
+        "VALUES (?, ?, ?, ?, 7, '10-K', 0, 1, 0, 'obs-c', 'pd-c', ?, ?)",
+        (plain, f"{plain[:10]}-{plain[10:12]}-{plain[12:]}", scalar, completeness, _AT, _AT),
+    )
+
+
+def _census_relation(
+    c: sqlite3.Connection, plain: str, cik: int, association_class: str = "substantive"
+) -> None:
+    c.execute(
+        "INSERT INTO census_accession_registrants (accession_plain, registrant_cik_numeric, "
+        "registrant_cik_padded, association_class, evidence_level, source_observation_id, "
+        "parsed_record_id, first_observed_at_utc, latest_observed_at_utc) "
+        "VALUES (?, ?, ?, ?, 'provisional', 'obs-c', 'pd-c', ?, ?)",
+        (plain, cik, f"{cik:010d}", association_class, _AT, _AT),
+    )
+
+
+@pytest.fixture
+def census(catalog: sqlite3.Connection) -> sqlite3.Connection:
+    """The migrated catalog plus the minimum census provenance a row needs."""
+    with transaction(catalog) as c:
+        _seed_census_source(c, 7, 8, 9)
+    return catalog
+
+
+def test_min2_a_the_lawful_established_single_registrant_write_succeeds(
+    census: sqlite3.Connection,
+) -> None:
+    """**A.** Accession, then relation, then the claim -- all inside one transaction.
+
+    This is the shape the foreign key already forces: ``census_accession_registrants``
+    references ``census_accessions``, so the accession row cannot come second. The guards
+    below must never make this sequence impossible, only make skipping its middle step
+    impossible.
+    """
+    with transaction(census) as c:
+        _census_accession(c, "000000000720000001", scalar=7)
+        _census_relation(c, "000000000720000001", 7)
+        c.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'established' "
+            "WHERE accession_plain = '000000000720000001'"
+        )
+    row = census.execute(
+        "SELECT registrant_cik_numeric, registrant_set_completeness FROM census_accessions"
+    ).fetchone()
+    assert row["registrant_cik_numeric"] == 7
+    assert row["registrant_set_completeness"] == "established"
+
+
+def test_min2_b_the_lawful_established_multi_registrant_write_succeeds(
+    census: sqlite3.Connection,
+) -> None:
+    """**B.** Two substantive registrants, a NULL scalar, and the claim still lands."""
+    with transaction(census) as c:
+        _census_accession(c, "000000000820000001", scalar=None)
+        _census_relation(c, "000000000820000001", 8)
+        _census_relation(c, "000000000820000001", 9)
+        c.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'established' "
+            "WHERE accession_plain = '000000000820000001'"
+        )
+    row = census.execute(
+        "SELECT registrant_cik_numeric, registrant_set_completeness FROM census_accessions"
+    ).fetchone()
+    assert row["registrant_cik_numeric"] is None
+    assert row["registrant_set_completeness"] == "established"
+
+
+def test_min2_c_an_unestablished_insert_is_always_permitted(census: sqlite3.Connection) -> None:
+    """**C.** Fail-closed is the DEFAULT state, so ingest is never blocked by it."""
+    with transaction(census) as c:
+        _census_accession(c, "000000000920000001", scalar=9)
+    assert (
+        census.execute("SELECT registrant_set_completeness FROM census_accessions").fetchone()[0]
+        == "unestablished"
+    )
+
+
+def test_min2_d_an_insert_cannot_assert_established_with_zero_relations(
+    census: sqlite3.Connection,
+) -> None:
+    """**D.** The door the shipped migration left open.
+
+    Its own comment said "the claim can never be made by assertion alone"; before this
+    correction an INSERT could do exactly that, because the guard fired only on UPDATE.
+    """
+    with (
+        pytest.raises(sqlite3.IntegrityError, match=_CENSUS_ESTABLISHED_REFUSAL),
+        transaction(census) as c,
+    ):
+        _census_accession(c, "000000000720000002", scalar=7, completeness="established")
+    assert census.execute("SELECT COUNT(*) FROM census_accessions").fetchone()[0] == 0
+
+
+def test_min2_e_the_last_substantive_relation_cannot_be_deleted(
+    census: sqlite3.Connection,
+) -> None:
+    """**E.** Emptying an established set from the relation side is refused too."""
+    with transaction(census) as c:
+        _census_accession(c, "000000000720000001", scalar=7)
+        _census_relation(c, "000000000720000001", 7)
+        c.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'established' "
+            "WHERE accession_plain = '000000000720000001'"
+        )
+    with (
+        pytest.raises(sqlite3.IntegrityError, match=_CENSUS_ESTABLISHED_REFUSAL),
+        transaction(census) as c,
+    ):
+        c.execute("DELETE FROM census_accession_registrants")
+    assert census.execute("SELECT COUNT(*) FROM census_accession_registrants").fetchone()[0] == 1
+
+
+def test_min2_e_the_last_substantive_relation_cannot_be_reclassified_away(
+    census: sqlite3.Connection,
+) -> None:
+    """**E**, the equivalent door: Decision 019 §6.2 says a submitter never establishes
+    the set, so demoting the last substantive row empties it exactly as a delete does."""
+    with transaction(census) as c:
+        _census_accession(c, "000000000720000001", scalar=7)
+        _census_relation(c, "000000000720000001", 7)
+        c.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'established' "
+            "WHERE accession_plain = '000000000720000001'"
+        )
+    with (
+        pytest.raises(sqlite3.IntegrityError, match=_CENSUS_ESTABLISHED_REFUSAL),
+        transaction(census) as c,
+    ):
+        c.execute("UPDATE census_accession_registrants SET association_class = 'submitter_only'")
+    assert (
+        census.execute("SELECT association_class FROM census_accession_registrants").fetchone()[0]
+        == "substantive"
+    )
+
+
+def test_min2_the_lawful_downgrade_then_delete_path_stays_open(
+    census: sqlite3.Connection,
+) -> None:
+    """Losing the evidence really does unestablish the set, so that path is not closed.
+
+    The guards refuse a false state, never a truthful transition. Downgrade first and the
+    relation rows may then be removed -- which is what a re-parse that no longer sees the
+    registrant would legitimately do.
+    """
+    with transaction(census) as c:
+        _census_accession(c, "000000000720000001", scalar=7)
+        _census_relation(c, "000000000720000001", 7)
+        c.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'established' "
+            "WHERE accession_plain = '000000000720000001'"
+        )
+    with transaction(census) as c:
+        c.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'unestablished' "
+            "WHERE accession_plain = '000000000720000001'"
+        )
+        c.execute("DELETE FROM census_accession_registrants")
+    assert census.execute("SELECT COUNT(*) FROM census_accession_registrants").fetchone()[0] == 0
+
+
+def test_min2_f_an_update_to_established_without_a_relation_is_refused(
+    census: sqlite3.Connection,
+) -> None:
+    """**F.** The original guard, still load-bearing and unchanged."""
+    with transaction(census) as c:
+        _census_accession(c, "000000000920000001", scalar=9)
+    with (
+        pytest.raises(sqlite3.IntegrityError, match=_CENSUS_ESTABLISHED_REFUSAL),
+        transaction(census) as c,
+    ):
+        c.execute("UPDATE census_accessions SET registrant_set_completeness = 'established'")
+    assert (
+        census.execute("SELECT registrant_set_completeness FROM census_accessions").fetchone()[0]
+        == "unestablished"
+    )
+
+
+def test_min2_the_r58_multi_scalar_guard_is_unaffected(census: sqlite3.Connection) -> None:
+    """The existing **R58** guard still fires: a multi set forces a NULL scalar."""
+    with transaction(census) as c:
+        _census_accession(c, "000000000720000001", scalar=7)
+        _census_relation(c, "000000000720000001", 7)
+    with (
+        pytest.raises(sqlite3.IntegrityError, match="must have a NULL registrant_cik_numeric"),
+        transaction(census) as c,
+    ):
+        _census_relation(c, "000000000720000001", 8)
+
+
+def test_min2_g_the_empty_table_precondition_still_refuses_a_populated_catalog(
+    tmp_path: Path,
+) -> None:
+    """**G.** Migration `0014` is still prospective: it refuses a non-empty census.
+
+    The added guards live inside the same script, so this proves they did not disturb
+    the Decision 082 §10.12 precondition that keeps `0014` from becoming a DATA
+    migration -- and that a catalog failing that gate is left intact at `0013`.
+    """
+    through_13 = tuple(m for m in available_migrations() if m.version <= 13)
+    database = tmp_path / "populated.sqlite3"
+    with connect(database, writer=True) as connection:
+        apply_migrations(connection, through_13)
+        with transaction(connection) as c:
+            _seed_census_source(c, 7)
+            c.execute(
+                "INSERT INTO census_accessions (accession_plain, accession_dashed, "
+                "registrant_cik_numeric, submitter_cik_numeric, form_type, is_amendment, "
+                "is_discovery_form, is_negative_control, source_observation_id, "
+                "parsed_record_id, first_observed_at_utc, latest_observed_at_utc) VALUES "
+                "('000000000720000009', '0000000007-20-000009', 7, 7, '10-K', 0, 1, 0, "
+                "'obs-c', 'pd-c', ?, ?)",
+                (_AT, _AT),
+            )
+    with connect(database, writer=True) as connection:
+        with pytest.raises(Exception, match="requires an empty census_accessions"):
+            apply_migrations(connection)
+        assert (
+            connection.execute("SELECT MAX(version) FROM ops_schema_migrations").fetchone()[0] == 13
+        )

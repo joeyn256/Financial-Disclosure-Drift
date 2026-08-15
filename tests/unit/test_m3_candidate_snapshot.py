@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from disclosure_drift.m3.candidate_snapshot import (
+    UNESTABLISHED_REGISTRANT_SET_REASON,
     CandidateSnapshotError,
     CandidateSnapshotInputs,
     build_and_freeze_candidate_snapshot,
@@ -37,7 +38,9 @@ _OBSERVATION = "obs-bulk-submissions-1"
 #: accession's complete substantive registrant set (Decision 072 R23 section 5.2).
 #: Under **Decision 083 R59** an accession without such evidence has an
 #: ``unestablished`` set and is blocked from candidacy entirely, so a realistic
-#: census fixture must carry it -- see ``test_group_r59`` for the absent case.
+#: census fixture must carry it -- see **Group R59** below for the absent case, and
+#: ``test_m3_3_multi_registrant_correction.test_mr_m10a_*`` for the mutation protection
+#: built on it (Decision 085 §4).
 _INDEX_OBSERVATION = "obs-full-index-company-1"
 _RUN = "job-census-1"
 _AT = "2026-01-01T00:00:00Z"
@@ -316,20 +319,56 @@ def _seed_census(connection: sqlite3.Connection) -> None:
         _accession(active, 2, 2018, 2)
 
 
-@pytest.fixture
-def catalog(tmp_path: Path) -> Iterator[Path]:
-    """A migrated catalog carrying only an accepted synthetic census layer."""
+#: **Decision 083 R59 / Decision 085 §4.** The Group-R59 accession: an otherwise
+#: candidate-eligible original 10-K for an accepted registrant, in cohort and in the
+#: coverage window, whose complete substantive registrant set the accepted evidence
+#: never established. Its census scalar registrant IS populated -- that is the whole
+#: point, because the mutation this guards against is reading that scalar as proof of a
+#: sole registrant when the establishing evidence is simply absent.
+UNESTABLISHED_CIK = 2
+UNESTABLISHED_ACCESSION_PLAIN = f"{UNESTABLISHED_CIK:010d}" + "19" + "000005"
+
+
+def seed_unestablished_accession(connection: sqlite3.Connection) -> str:
+    """Add the Group-R59 accession -- eligible in every way except establishment.
+
+    Public because ``test_m3_3_multi_registrant_correction`` builds **MR-M10A** on this
+    exact census world rather than keeping a second, drifting copy of it.
+    """
+    with transaction(connection) as active:
+        return _accession(active, UNESTABLISHED_CIK, 2019, 5, establish_registrant_set=False)
+
+
+def seed_catalog(tmp_path: Path, *, unestablished: bool = False) -> Path:
+    """A migrated catalog carrying only an accepted synthetic census layer.
+
+    With ``unestablished`` the world additionally carries
+    :data:`UNESTABLISHED_ACCESSION_PLAIN`; everything else is byte-identical, so any
+    difference between the two builds is attributable to establishment and nothing else.
+    """
     database = tmp_path / "catalog.sqlite3"
     with connect(database, writer=True) as connection:
         apply_migrations(connection)
         _seed_reference(connection)
         _seed_census(connection)
-    yield database
+        if unestablished:
+            seed_unestablished_accession(connection)
+    return database
 
 
-def _build(database: Path, tmp_path: Path, **kwargs: object) -> object:
+@pytest.fixture
+def catalog(tmp_path: Path) -> Iterator[Path]:
+    """A migrated catalog carrying only an accepted synthetic census layer."""
+    yield seed_catalog(tmp_path)
+
+
+def build_snapshot(database: Path, tmp_path: Path, **kwargs: object) -> object:
+    """Construct and freeze one snapshot through the real production entry point."""
     with CatalogWriter(database, tmp_path / "locks") as writer:
         return build_and_freeze_candidate_snapshot(writer=writer, inputs=_INPUTS, **kwargs)  # type: ignore[arg-type]
+
+
+_build = build_snapshot
 
 
 # ==========================================================================
@@ -895,3 +934,144 @@ def test_the_multi_registrant_quota_is_not_deferred() -> None:
     """**R24**: the only accepted M2.3 quota deferral stays the difficult-package key."""
     assert QUOTA_KEY_MULTI_REGISTRANT_ACCESSIONS not in APPROVED_DEFERRED_QUOTA_KEYS
     assert set(APPROVED_DEFERRED_QUOTA_KEYS) == {DEFERRED_QUOTA_KEY}
+
+
+# ==========================================================================
+# Group R59: an unestablished registrant set blocks candidacy at the BUILDER
+#
+# Decision 083 **R59** and Decision 085 §4. The census scalar registrant is populated
+# for every accession below, so nothing here is testing "the builder had no CIK to
+# use" -- it is testing that the builder refuses to treat the scalar as PROOF when the
+# evidence that establishes the substantive set is absent. That is the exact
+# pre-correction regression, and it is a derivation-layer property: the state a silent
+# single-registrant reading would produce is fully lawful downstream, so no schema
+# CHECK, no freeze trigger, and no loader guard can see it. It has to be killed here.
+# ==========================================================================
+
+
+def test_r59_an_accession_without_establishing_evidence_never_becomes_a_candidate(
+    tmp_path: Path,
+) -> None:
+    """The accession is excluded before candidate snapshot entry, and reported."""
+    database = seed_catalog(tmp_path, unestablished=True)
+    frozen = build_snapshot(database, tmp_path)
+
+    assert frozen.excluded_unestablished_registrant_set == 1  # type: ignore[attr-defined]
+    with connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accessions WHERE accession_plain = ?",
+                (UNESTABLISHED_ACCESSION_PLAIN,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_r59_no_registrant_row_is_fabricated_from_the_census_scalar(tmp_path: Path) -> None:
+    """The scalar is present and is still not written anywhere as a registrant.
+
+    Both halves matter: the census row really does carry ``registrant_cik_numeric``, and
+    the candidate registrant relation really does contain no row for the accession. A
+    silent single-registrant reading would produce exactly one ``anchor`` row here.
+    """
+    database = seed_catalog(tmp_path, unestablished=True)
+    with connect(database) as connection:
+        scalar = connection.execute(
+            "SELECT registrant_cik_numeric FROM census_accessions WHERE accession_plain = ?",
+            (UNESTABLISHED_ACCESSION_PLAIN,),
+        ).fetchone()[0]
+    assert scalar == UNESTABLISHED_CIK
+
+    build_snapshot(database, tmp_path)
+    with connect(database) as connection:
+        rows = connection.execute(
+            "SELECT role, registrant_cik_numeric, registrant_set_completeness "
+            "FROM pilot_candidate_accession_registrants WHERE accession_plain = ?",
+            (UNESTABLISHED_ACCESSION_PLAIN,),
+        ).fetchall()
+    assert rows == []
+
+
+def test_r59_the_exclusion_grants_no_entity_history_or_quota_credit(tmp_path: Path) -> None:
+    """An excluded accession leaves the snapshot byte-identical to one without it.
+
+    The strongest available statement of "no credit": the entity's eligible-original
+    annual-report count, its whole candidate row, and the snapshot's own identity are
+    all unchanged by the accession's presence in the census. Under a silent
+    single-registrant reading CIK 2 would gain a third original annual report, and every
+    identity below would move.
+    """
+    without = build_snapshot(seed_catalog(tmp_path / "a"), tmp_path / "a")
+    unestablished = build_snapshot(seed_catalog(tmp_path / "b", unestablished=True), tmp_path / "b")
+
+    assert without.excluded_unestablished_registrant_set == 0  # type: ignore[attr-defined]
+    assert unestablished.excluded_unestablished_registrant_set == 1  # type: ignore[attr-defined]
+    assert unestablished.accession_count == without.accession_count  # type: ignore[attr-defined]
+    assert unestablished.entity_count == without.entity_count  # type: ignore[attr-defined]
+    assert unestablished.snapshot_id == without.snapshot_id  # type: ignore[attr-defined]
+    assert (  # type: ignore[attr-defined]
+        unestablished.candidate_snapshot_sha256 == without.candidate_snapshot_sha256
+    )
+    assert dict(unestablished.family_digests) == dict(without.family_digests)  # type: ignore[attr-defined]
+
+    counts = []
+    for suffix in ("a", "b"):
+        with connect(tmp_path / suffix / "catalog.sqlite3") as connection:
+            counts.append(
+                connection.execute(
+                    "SELECT eligible_original_annual_report_count FROM "
+                    "pilot_candidate_entities WHERE cik_numeric = ?",
+                    (UNESTABLISHED_CIK,),
+                ).fetchone()[0]
+            )
+    assert counts[0] == counts[1]
+
+
+def test_r59_establishing_the_same_accession_makes_it_a_single_registrant_candidate(
+    tmp_path: Path,
+) -> None:
+    """The control: the fixture is eligible, and only the missing evidence excluded it.
+
+    Without this, Group R59 would prove nothing -- an accession excluded for some other
+    reason would satisfy every assertion above.
+    """
+    database = seed_catalog(tmp_path, unestablished=True)
+    with connect(database, writer=True) as connection, transaction(connection) as active:
+        active.execute(
+            "INSERT INTO census_accession_observations (accession_observation_id, "
+            "accession_plain, source_observation_id, parsed_record_id, field_name, "
+            "raw_value_json, observed_at_utc, conflict_indicator) "
+            "VALUES (?, ?, ?, ?, 'cik_padded', ?, ?, 0)",
+            (
+                f"ao-{UNESTABLISHED_ACCESSION_PLAIN}-idx-{UNESTABLISHED_CIK}",
+                UNESTABLISHED_ACCESSION_PLAIN,
+                _INDEX_OBSERVATION,
+                f"parsed-acc-{UNESTABLISHED_ACCESSION_PLAIN}",
+                f'"{UNESTABLISHED_CIK:010d}"',
+                _AT,
+            ),
+        )
+    frozen = build_snapshot(database, tmp_path)
+
+    assert frozen.excluded_unestablished_registrant_set == 0  # type: ignore[attr-defined]
+    with connect(database) as connection:
+        accession = connection.execute(
+            "SELECT anchor_cik_numeric, registrant_set_completeness, multi_registrant "
+            "FROM pilot_candidate_accessions WHERE accession_plain = ?",
+            (UNESTABLISHED_ACCESSION_PLAIN,),
+        ).fetchone()
+        registrants = connection.execute(
+            "SELECT role, registrant_cik_numeric FROM pilot_candidate_accession_registrants "
+            "WHERE accession_plain = ? ORDER BY registrant_cik_numeric",
+            (UNESTABLISHED_ACCESSION_PLAIN,),
+        ).fetchall()
+    assert accession["anchor_cik_numeric"] == UNESTABLISHED_CIK
+    assert accession["registrant_set_completeness"] == "established"
+    assert accession["multi_registrant"] == 0
+    assert [(str(row[0]), row[1]) for row in registrants] == [("anchor", UNESTABLISHED_CIK)]
+
+
+def test_r59_the_exclusion_reason_is_registered_and_review_required(tmp_path: Path) -> None:
+    """R59: "fail closed with an explicit accepted reason", not a silent drop."""
+    assert UNESTABLISHED_REGISTRANT_SET_REASON in REASON_CODES
+    assert REASON_CODES[UNESTABLISHED_REGISTRANT_SET_REASON].requires_manual_review

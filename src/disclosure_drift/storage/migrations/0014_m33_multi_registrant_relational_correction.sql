@@ -250,6 +250,11 @@ END;
 -- Decision 083 R59: 'established' is a claim that the COMPLETE substantive association
 -- set is known, so it requires at least one substantive relation row to stand on. An
 -- established set is never empty, and the claim can never be made by assertion alone.
+--
+-- Three triggers, not one, because the false state has three doors. The UPDATE guard is
+-- the original; the INSERT guard and the two emptying guards below close the rest. Every
+-- one of them refuses the SAME state -- 'established' with zero substantive relation
+-- rows -- and none of them invents a registrant to satisfy itself.
 CREATE TRIGGER census_accessions_established_requires_relation
 BEFORE UPDATE OF registrant_set_completeness ON census_accessions
 WHEN NEW.registrant_set_completeness = 'established'
@@ -257,6 +262,71 @@ BEGIN
     SELECT RAISE(ABORT,
         'census accession registrant_set_completeness = established requires at least one substantive association')
     WHERE NOT EXISTS (
+        SELECT 1 FROM census_accession_registrants
+        WHERE accession_plain = NEW.accession_plain AND association_class = 'substantive'
+    );
+END;
+
+-- Door 2: assertion at INSERT. Without this the claim really could be made by assertion
+-- alone -- the UPDATE guard never fires on a row that arrives already 'established'.
+--
+-- THE LAWFUL WRITE ORDER IS UNAFFECTED, and this trigger is deliberately shaped so it
+-- cannot become impossible. census_accession_registrants.accession_plain is a foreign key
+-- to census_accessions, so the relation rows CANNOT exist before the accession row: the
+-- only lawful ingest shape is accession first, relation rows second, and the completeness
+-- claim last. That last step is an UPDATE, inside the same transaction, governed by the
+-- trigger above. This guard does not forbid the lawful shape; it forbids skipping the
+-- middle of it. The condition is written as the real invariant rather than as an
+-- unconditional refusal so that it still states the truth, and still permits the write, if
+-- a future authorized writer ever establishes the relation rows first.
+CREATE TRIGGER census_accessions_established_requires_relation_insert
+BEFORE INSERT ON census_accessions
+WHEN NEW.registrant_set_completeness = 'established'
+BEGIN
+    SELECT RAISE(ABORT,
+        'census accession registrant_set_completeness = established requires at least one substantive association')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM census_accession_registrants
+        WHERE accession_plain = NEW.accession_plain AND association_class = 'substantive'
+    );
+END;
+
+-- Door 3: emptying the set from the relation side. Deleting the last substantive row of
+-- an established accession leaves exactly the state the two guards above refuse, reached
+-- from the other table. Downgrade the accession to 'unestablished' first -- which is
+-- always permitted, because losing the evidence really does unestablish the set -- and the
+-- delete then succeeds.
+CREATE TRIGGER census_accession_registrants_established_set_never_emptied_delete
+AFTER DELETE ON census_accession_registrants
+WHEN OLD.association_class = 'substantive'
+BEGIN
+    SELECT RAISE(ABORT,
+        'census accession registrant_set_completeness = established requires at least one substantive association')
+    WHERE EXISTS (
+        SELECT 1 FROM census_accessions
+        WHERE accession_plain = OLD.accession_plain
+          AND registrant_set_completeness = 'established'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM census_accession_registrants
+        WHERE accession_plain = OLD.accession_plain AND association_class = 'substantive'
+    );
+END;
+
+-- Door 4: emptying the set by reclassification. Demoting the last substantive row to
+-- 'submitter_only' empties the substantive set exactly as a delete does -- and Decision
+-- 019 section 6.2 is explicit that a submitter row never establishes the set, so the
+-- result would be an established accession with no registrant standing behind it.
+CREATE TRIGGER census_accession_registrants_established_set_never_emptied_update
+AFTER UPDATE OF association_class ON census_accession_registrants
+WHEN OLD.association_class = 'substantive' AND NEW.association_class <> 'substantive'
+BEGIN
+    SELECT RAISE(ABORT,
+        'census accession registrant_set_completeness = established requires at least one substantive association')
+    WHERE EXISTS (
+        SELECT 1 FROM census_accessions
+        WHERE accession_plain = NEW.accession_plain
+          AND registrant_set_completeness = 'established'
+    ) AND NOT EXISTS (
         SELECT 1 FROM census_accession_registrants
         WHERE accession_plain = NEW.accession_plain AND association_class = 'substantive'
     );
@@ -450,10 +520,32 @@ BEGIN SELECT RAISE(ABORT, 'pilot candidate accession delete requires a building 
 -- The candidate-layer relation already carried the full set, already collapsed duplicate
 -- rows to distinct canonical CIKs, and was already snapshot-scoped. It needed a
 -- completeness and association-class extension, not a redesign (Decision 082 section
--- 10.4). Both new columns enter REGISTRANT_TABLE_COLUMNS, so Decision 083 R61's
--- requirement that candidate_registrant_table_sha256 BIND the relation is satisfied by
--- construction: the completeness state and the substantive/submitter split are inside
--- the governed digest rather than beside it.
+-- 10.4).
+--
+-- NEITHER new column enters REGISTRANT_TABLE_COLUMNS. Accepted Decision 084 R67 leaves
+-- candidate_identity.py and its existing digest tuples UNCHANGED, precisely so that a
+-- pure single-registrant snapshot keeps E1-E5 byte-identical when no semantic change
+-- occurred. Decision 083 R61's requirement that candidate_registrant_table_sha256 BIND
+-- the relation is met through the EXISTING candidate registrant row representation
+-- instead, in three parts:
+--
+--   * MEMBERSHIP. accession_plain and registrant_cik_numeric are already digest columns
+--     and are this table's key, so adding, removing, or changing an association moves
+--     candidate_registrant_table_sha256. Reordering rows does not, because the digest
+--     sorts its rendered rows -- which is the correct invariance, not a gap.
+--   * THE SUBSTANTIVE / SUBMITTER SPLIT. association_class is not free: the table CHECK
+--     below makes (role = 'submitter_only') and (association_class = 'submitter_only')
+--     the same condition, and `role` IS a digest column. The split is therefore bound at
+--     identical extension by a column already inside the preimage; the new column names
+--     the rule rather than adding a fact the digest cannot see.
+--   * COMPLETENESS. registrant_set_completeness is bound by invariant rather than by
+--     preimage. Section 7's freeze trigger refuses any frozen snapshot whose accession is
+--     not 'established' and any registrant row whose state disagrees with its accession,
+--     so within a frozen snapshot -- the only state any identity is computed over -- the
+--     column is a constant and carries no distinguishing information.
+--
+-- Read together: the relational set is genuinely governed and genuinely bound, without
+-- widening a digest tuple and without moving one single-registrant identity.
 --
 -- The existing role vocabulary ('anchor', 'associated', 'submitter_only') is NOT
 -- widened. What changes is when 'anchor' may be used, never what the words mean.
@@ -475,8 +567,10 @@ CREATE TABLE pilot_candidate_accession_registrants_m0014 (
     -- column instead of re-deriving the rule from the role vocabulary.
     association_class       TEXT NOT NULL
         CHECK (association_class IN ('substantive', 'submitter_only')),
-    -- Decision 083 R59, carried per row so the relation is self-describing and the
-    -- state is inside the governed digest.
+    -- Decision 083 R59, carried per row so the relation is self-describing. The column
+    -- is NOT part of the candidate_registrant_table_sha256 preimage (Decision 084 R67);
+    -- section 7's freeze trigger is what binds it, by refusing a frozen snapshot in which
+    -- any accession is not 'established' or any registrant row disagrees with it.
     registrant_set_completeness TEXT NOT NULL
         CHECK (registrant_set_completeness IN ('established', 'unestablished')),
     evidence_level          TEXT NOT NULL

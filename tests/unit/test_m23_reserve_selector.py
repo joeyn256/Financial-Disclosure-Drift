@@ -43,7 +43,6 @@ from disclosure_drift.sec.accession_selector import (
     NameChangeEvidence,
     QuotaContributionMembership,
     accession_caps_satisfied,
-    accession_selection_rank,
     official_filing_year,
     solve_joint_selection,
 )
@@ -789,28 +788,53 @@ def test_a_spare_breaching_the_per_cik_base_cap_is_refused() -> None:
     assert construction.packages == ()
 
 
-def test_the_cap_gate_rejects_an_over_cap_bundle_on_its_own() -> None:
-    """The cap gate is load-bearing independently of the signature comparison."""
-    bundle = tuple(
-        ReserveAccession(
-            accession_plain=dashed(306, 2014 + offset, 10 + offset).replace("-", ""),
-            accession_number_dashed=dashed(306, 2014 + offset, 10 + offset),
-            accession_role="base",
-            accession_order=offset + 1,
-            accession_tie_break_sha256=accession_selection_rank(
-                "0000000306", dashed(306, 2014 + offset, 10 + offset)
-            ),
-        )
-        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK + 1)
+def _reserve_entry(accession: AccessionCandidate, order: int) -> ReserveAccession:
+    """One bundle entry for a candidate accession, at the accepted role and rank."""
+    role = (
+        "base"
+        if accession.base_eligible
+        else "stress"
+        if accession.stress_eligible
+        else "support"
+        if accession.support_eligible
+        else "control"
     )
+    return ReserveAccession(
+        accession_plain=accession.accession_plain,
+        accession_number_dashed=accession.accession_number_dashed,
+        accession_role=role,  # type: ignore[arg-type]
+        accession_order=order,
+        accession_tie_break_sha256=accession.rank,
+    )
+
+
+def _profile_for(
+    cik: int, accessions: list[AccessionCandidate]
+) -> tuple[_CandidateProfile, dict[str, AccessionCandidate]]:
+    """A replacement profile over exactly these accessions, plus their pool mapping."""
     profile = _CandidateProfile(
-        entity=EntityCandidate(mk_operating(306, PLAIN_SLOT), NameChangeEvidence()),
-        bundle=bundle,
+        entity=EntityCandidate(mk_operating(cik, PLAIN_SLOT), NameChangeEvidence()),
+        bundle=tuple(
+            _reserve_entry(accession, order) for order, accession in enumerate(accessions, start=1)
+        ),
         contributions=(),
         evidence_floor="provisional",
         signature="0" * 64,
     )
-    assert not _caps_preserved(profile, target_plains=set(), selected_roles={})
+    return profile, {a.accession_plain: a for a in accessions}
+
+
+def test_the_cap_gate_rejects_an_over_cap_bundle_on_its_own() -> None:
+    """The cap gate is load-bearing independently of the signature comparison."""
+    over_cap = [
+        mk_accession(306, 2014 + offset, 10 + offset, role="base", inline=True)
+        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK + 1)
+    ]
+    profile, pool = _profile_for(306, over_cap)
+    bundle = profile.bundle
+    assert not _caps_preserved(
+        profile, target_plains=set(), selected_roles={}, accession_by_plain=pool
+    )
     usage = _usage_from(
         {entry.accession_plain: (("0000000306",), entry.accession_role) for entry in bundle}
     )
@@ -823,7 +847,9 @@ def test_the_cap_gate_rejects_an_over_cap_bundle_on_its_own() -> None:
 
 
 def test_a_conforming_bundle_preserves_every_cap_under_substitution() -> None:
-    result, construction = construct(pool_with_plain_spare())
+    pool = pool_with_plain_spare()
+    by_plain = {a.accession_plain: a for a in pool.accessions}
+    result, construction = construct(pool)
     # **Decision 083 R62**: the cap key is the complete substantive association set, so a
     # joint base filing counts toward each of its registrants' per-CIK base caps.
     selected_roles = {
@@ -840,8 +866,11 @@ def test_a_conforming_bundle_preserves_every_cap_under_substitution() -> None:
             plain: entry for plain, entry in selected_roles.items() if plain not in target_plains
         }
         for entry in package.accessions:
+            # **Decision 085 §8**: the substituted world charges every truthful
+            # substantive registrant, exactly as the retained selections above are
+            # charged -- not the replacement alone.
             substituted[entry.accession_plain] = (
-                (package.replacement_cik_padded,),
+                by_plain[entry.accession_plain].substantive_registrants_padded,
                 entry.accession_role,
             )
         assert accession_caps_satisfied(_usage_from(substituted))
@@ -1396,3 +1425,188 @@ def test_reserve_records_are_immutable() -> None:
     uncovered = construction.no_compatible_reserve[0]
     with pytest.raises(dataclasses.FrozenInstanceError):
         uncovered.reason_code = "OTHER"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------
+# Decision 085 §8: the per-CIK cap attaches to every substantive registrant
+#
+# `max_base_per_cik` is the one ENTITY-DOMAIN cap of Decision 018 section 8's four, so
+# under **Decision 083 R62** a jointly filed base accession charges each of its truthful
+# substantive registrants -- in the substituted world exactly as in the retained one.
+# Attributing a joint bundle accession to the replacement alone understates a
+# co-registrant's usage and can admit a substitution that breaches their cap.
+# `base_total`, `stress_total`, and `accession_total` stay accession-domain and count the
+# joint filing once, because the substituted map is keyed by accession.
+# --------------------------------------------------------------------------
+
+#: The co-registrant of any joint fixture accession for CIK `n`, as `mk_accession` builds
+#: it: `_multi_registrant_set` returns `(None, (n, 900 + n))`.
+_JOINT_CO_REGISTRANT: Final = f"{_CO_REGISTRANT_OFFSET + 306:010d}"
+
+
+def _base_usage_for(cik_padded: str, roles: dict[str, object]) -> int:
+    """The per-CIK base count one CIK carries in a substituted world."""
+    return sum(
+        1
+        for registrants, role in roles.values()  # type: ignore[misc]
+        if role == "base" and cik_padded in registrants  # type: ignore[operator]
+    )
+
+
+def test_min4_a_joint_replacement_charges_both_substantive_registrants() -> None:
+    """**A.** A joint bundle accession reaches BOTH of its registrants' per-CIK caps."""
+    joint = mk_accession(306, 2018, 2, role="base", multi_registrant=True)
+    assert joint.substantive_registrants_padded == ("0000000306", _JOINT_CO_REGISTRANT)
+    profile, pool = _profile_for(306, [joint])
+
+    assert _caps_preserved(profile, target_plains=set(), selected_roles={}, accession_by_plain=pool)
+    substituted = {
+        joint.accession_plain: (joint.substantive_registrants_padded, "base"),
+    }
+    usage = _usage_from(substituted)  # type: ignore[arg-type]
+    assert usage.max_base_per_cik == 1
+    assert _base_usage_for("0000000306", substituted) == 1
+    assert _base_usage_for(_JOINT_CO_REGISTRANT, substituted) == 1
+
+
+def test_min4_b_and_c_a_co_registrant_at_the_cap_refuses_the_joint_replacement() -> None:
+    """**B** and **C.** The co-registrant is already at the cap, so the joint filing
+    that would take them past it is refused -- fail-closed, not undercounted.
+
+    This is the exact corner the review found: the co-registrant holds
+    ``MAX_BASE_ACCESSIONS_PER_CIK`` retained base selections of their own and is not a
+    registrant of any accession the target gives up, so nothing else in the substituted
+    world notices them. Attributing the bundle accession to the replacement alone leaves
+    their usage at the cap and admits the substitution.
+    """
+    at_cap = {
+        f"retained-{offset}": ((_JOINT_CO_REGISTRANT,), "base")
+        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK)
+    }
+    assert _usage_from(at_cap).max_base_per_cik == MAX_BASE_ACCESSIONS_PER_CIK  # type: ignore[arg-type]
+    assert accession_caps_satisfied(_usage_from(at_cap))  # type: ignore[arg-type]
+
+    joint = mk_accession(306, 2018, 2, role="base", multi_registrant=True)
+    profile, pool = _profile_for(306, [joint])
+    assert not _caps_preserved(
+        profile,
+        target_plains=set(),
+        selected_roles=at_cap,  # type: ignore[arg-type]
+        accession_by_plain=pool,
+    )
+
+    # And the pre-correction attribution is what would have let it through: charging the
+    # replacement alone leaves the co-registrant at exactly the cap.
+    replacement_only = dict(at_cap)
+    replacement_only[joint.accession_plain] = (("0000000306",), "base")
+    assert accession_caps_satisfied(_usage_from(replacement_only))  # type: ignore[arg-type]
+    assert _base_usage_for(_JOINT_CO_REGISTRANT, replacement_only) == MAX_BASE_ACCESSIONS_PER_CIK
+
+
+def test_min4_c_one_below_the_cap_still_admits_the_joint_replacement() -> None:
+    """**C**, the other side: the guard is a cap, not a blanket refusal of joint work."""
+    below_cap = {
+        f"retained-{offset}": ((_JOINT_CO_REGISTRANT,), "base")
+        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK - 1)
+    }
+    joint = mk_accession(306, 2018, 2, role="base", multi_registrant=True)
+    profile, pool = _profile_for(306, [joint])
+    assert _caps_preserved(
+        profile,
+        target_plains=set(),
+        selected_roles=below_cap,  # type: ignore[arg-type]
+        accession_by_plain=pool,
+    )
+
+
+def test_min4_d_a_joint_accession_is_counted_once_in_the_accession_domain() -> None:
+    """**D.** Two registrants, one filing: the accession-domain totals do not double."""
+    joint = mk_accession(306, 2018, 2, role="base", multi_registrant=True)
+    sole = mk_accession(306, 2019, 3, role="base", multi_registrant=False)
+    usage = _usage_from(
+        {
+            joint.accession_plain: (joint.substantive_registrants_padded, "base"),
+            sole.accession_plain: (sole.substantive_registrants_padded, "base"),
+        }  # type: ignore[arg-type]
+    )
+    assert usage.base_total == 2
+    assert usage.accession_total == 2
+    # ...while the entity-domain cap still sees the joint filing from both sides.
+    assert usage.max_base_per_cik == 2  # CIK 306 files both
+    assert (
+        _base_usage_for(
+            _JOINT_CO_REGISTRANT,
+            {
+                joint.accession_plain: (joint.substantive_registrants_padded, "base"),
+                sole.accession_plain: (sole.substantive_registrants_padded, "base"),
+            },
+        )
+        == 1
+    )
+
+
+def test_min4_e_the_order_of_associated_registrants_changes_no_decision() -> None:
+    """**E.** The substantive set is canonical, so no ordering can move the outcome."""
+    joint = mk_accession(306, 2018, 2, role="base", multi_registrant=True)
+    reversed_set = dataclasses.replace(
+        joint, substantive_registrant_ciks=tuple(reversed(joint.substantive_registrant_ciks))
+    )
+    assert reversed_set.substantive_registrants_padded == joint.substantive_registrants_padded
+    at_cap = {
+        f"retained-{offset}": ((_JOINT_CO_REGISTRANT,), "base")
+        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK)
+    }
+    decisions = set()
+    for variant in (joint, reversed_set):
+        profile, pool = _profile_for(306, [variant])
+        decisions.add(
+            _caps_preserved(
+                profile,
+                target_plains=set(),
+                selected_roles=at_cap,  # type: ignore[arg-type]
+                accession_by_plain=pool,
+            )
+        )
+    assert decisions == {False}
+
+
+def test_min4_f_single_registrant_reserve_behaviour_is_unchanged() -> None:
+    """**F.** A sole-registrant bundle charges exactly the replacement, as before.
+
+    The corrected attribution reduces to the old one when the set has cardinality 1,
+    which is why no single-registrant reserve identity moves.
+    """
+    sole = mk_accession(306, 2018, 2, role="base", multi_registrant=False)
+    assert sole.substantive_registrants_padded == ("0000000306",)
+    profile, pool = _profile_for(306, [sole])
+
+    # A co-registrant at the cap is irrelevant: they did not file this accession.
+    at_cap = {
+        f"retained-{offset}": ((_JOINT_CO_REGISTRANT,), "base")
+        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK)
+    }
+    assert _caps_preserved(
+        profile,
+        target_plains=set(),
+        selected_roles=at_cap,  # type: ignore[arg-type]
+        accession_by_plain=pool,
+    )
+    # The replacement's own cap still binds.
+    own_cap = {
+        f"retained-{offset}": (("0000000306",), "base")
+        for offset in range(MAX_BASE_ACCESSIONS_PER_CIK)
+    }
+    assert not _caps_preserved(
+        profile,
+        target_plains=set(),
+        selected_roles=own_cap,  # type: ignore[arg-type]
+        accession_by_plain=pool,
+    )
+
+
+def test_min4_a_bundle_accession_outside_the_candidate_pool_fails_closed() -> None:
+    """No silent fallback: an unreadable substantive set refuses rather than guesses."""
+    joint = mk_accession(306, 2018, 2, role="base", multi_registrant=True)
+    profile, _pool = _profile_for(306, [joint])
+    with pytest.raises(ValueError, match="absent from the candidate pool"):
+        _caps_preserved(profile, target_plains=set(), selected_roles={}, accession_by_plain={})

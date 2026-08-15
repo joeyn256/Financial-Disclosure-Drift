@@ -686,6 +686,7 @@ def build_reserve_packages(
             target_signature=target_signature,
             target_plains={entry.accession_plain for entry in target_bundle},
             selected_roles=selected_roles,
+            accession_by_plain=accession_by_plain,
             selection_seed=selection_seed,
         )
         if chosen is None:
@@ -806,6 +807,7 @@ def _rank_one_replacement(
     target_signature: str,
     target_plains: set[str],
     selected_roles: Mapping[str, tuple[tuple[str, ...], AccessionRole]],
+    accession_by_plain: Mapping[str, AccessionCandidate],
     selection_seed: str,
 ) -> _CandidateProfile | None:
     """The first compatible replacement under the accepted initial-selection tie-break.
@@ -824,7 +826,12 @@ def _rank_one_replacement(
             continue
         if profile.signature != target_signature:
             continue
-        if not _caps_preserved(profile, target_plains=target_plains, selected_roles=selected_roles):
+        if not _caps_preserved(
+            profile,
+            target_plains=target_plains,
+            selected_roles=selected_roles,
+            accession_by_plain=accession_by_plain,
+        ):
             continue
         _require_unique_within_target(profile)
         return profile
@@ -836,6 +843,7 @@ def _caps_preserved(
     *,
     target_plains: set[str],
     selected_roles: Mapping[str, tuple[tuple[str, ...], AccessionRole]],
+    accession_by_plain: Mapping[str, AccessionCandidate],
 ) -> bool:
     """Whether substituting this one package for the target keeps every cap satisfied.
 
@@ -844,17 +852,35 @@ def _caps_preserved(
     The four Decision 018 section 8 caps are evaluated by the accepted
     :func:`accession_caps_satisfied` helper, so a cap can never be read one way
     here and another way in the selection that produced the incumbent.
+
+    **Decision 083 R62, and Decision 085 §8.** A bundle accession enters the substituted
+    world under its **complete truthful substantive registrant set**, not under the
+    replacement alone. A reserve package substitutes one *entity* for one entity, but a
+    jointly filed accession is genuinely part of every co-registrant's history, so
+    ``max_base_per_cik`` -- the one entity-domain cap of the four -- must charge each of
+    them, exactly as :func:`_usage_from` already does for the retained selections it is
+    compared against. Attributing a joint filing to the replacement alone would understate
+    a co-registrant's usage and could admit a substitution that breaches their cap.
+    ``base_total``, ``stress_total``, and ``accession_total`` stay accession-domain and
+    count the joint filing once, because the map is keyed by accession.
     """
     substituted = {
         plain: entry for plain, entry in selected_roles.items() if plain not in target_plains
     }
-    replacement_cik = profile.entity.cik_padded
     for entry in profile.bundle:
         if entry.accession_plain in substituted:
             return False
-        # The replacement supplies the accession under its own single substantive
-        # registrancy: a reserve package is one entity substituting for one entity.
-        substituted[entry.accession_plain] = ((replacement_cik,), entry.accession_role)
+        accession = accession_by_plain.get(entry.accession_plain)
+        if accession is None:
+            message = (
+                f"reserve bundle accession {entry.accession_number_dashed!r} is absent from the "
+                "candidate pool, so its substantive registrant set cannot be read"
+            )
+            raise ValueError(message)
+        substituted[entry.accession_plain] = (
+            accession.substantive_registrants_padded,
+            entry.accession_role,
+        )
     return accession_caps_satisfied(_usage_from(substituted))
 
 

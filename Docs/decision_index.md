@@ -875,6 +875,32 @@ the existing uncommitted working tree is the continuation baseline and is **pres
 | The narrower identity implementation | **Decision 084 §4 — R67. ACCEPTED.** `src/disclosure_drift/m3/candidate_identity.py` is **not** modified solely to widen `ACCESSION_TABLE_COLUMNS`, `REGISTRANT_TABLE_COLUMNS`, or `SNAPSHOT_CONTENT_FIELDS`, because widening them would move identities for **pure single-registrant** snapshots with no semantic change. The accepted stronger requirement: a pure single-registrant snapshot keeps **E1**–**E5** **byte-identical**, and a multi-registrant snapshot moves **only** what **R58**–**R62** require. The independent review **must verify** the relational set is genuinely bound — or the session **STOPS** |
 | What happens next | **Decision 084 §6** — apply **R65** and **R66**, validate, commit the complete implementation as one commit parented on this governance commit, push once, and **return to Sol/GPT**. Migration `0015`, Review A, Review B, the adjudication, **E0**, **E1**, **E2**, and **M3.4** all remain unauthorized at `REQUEST_CEILING` 0 |
 
+*(Current state: the **R46** implementation and migration `0014` are **committed** at
+`09ee4422…` and the fresh formal independent acceptance review of that target **FAILED**. Accepted
+Decision 085 disposes of its findings — see below.)*
+
+## Decision 085 — ACCEPTED (D083/D084 formal-review findings and their correction)
+
+[Decision 085](Decisions/decision_085_m3_3_d083_d084_formal_review_corrections.md)
+(`ACCEPTED — OWNER ACCEPTANCE OF THE FORMAL REVIEW FINDINGS AND CORRECTION AUTHORIZATION
+2026-08-15`) is the **sixteenth M3.3 record**. It accepts a **failed** review as a truthful review
+result and authorizes the correction of **exactly its five findings**.
+
+**It reopens nothing.** Decisions 083 and 084 are **not modified**, **R58**–**R67** are **not**
+redesigned, the reviewed target `09ee4422…` **stands as committed**, and the frozen review artifact
+is **immutable**.
+
+| Question | Controlling record |
+|---|---|
+| What the formal review returned | **Decision 085 §2.** **FAIL** at **BLOCKER 0 / MAJOR 1 / MINOR 4** against frozen target `09ee4422…`, artifact [`m3_3_d083_d084_r46_formal_independent_acceptance_09ee442.md`](m3/reviews/m3_3_d083_d084_r46_formal_independent_acceptance_09ee442.md). Production behaviour was independently confirmed faithful to **R58**–**R62** and **R65**–**R67**, so the acceptance failure is primarily a **verification defect** |
+| Which findings are corrected, and which are not | **Decision 085 §3.** **M-1** accepted, correction required, **acceptance-gating**; **MIN-1**–**MIN-4** accepted, correct now; **OBS-1**–**OBS-6** **not** authorized for correction. No other defect is corrected unless discovered while fixing one of the five and inseparable from it — a material unrelated defect is a **STOP** |
+| The MR-M10 builder protection | **Decision 085 §4 — M-1.** The shipped MR-M10 test exercises only the freeze/schema backstop, and the exact derivation mutant inside `derive_candidate_snapshot` — absent establishment evidence silently read as **one** substantive registrant — **survived** every builder-invoking test. A dedicated **builder-level** test must exclude such an accession before snapshot entry, record `PILOT_ACCESSION_REGISTRANT_SET_UNESTABLISHED`, grant **no** entity/history/quota credit, and **fabricate no** scalar registrant; the exact mutant is then executed and must be **KILLED**. **MR-M10A** (builder) and **MR-M10B** (schema/freeze) are both retained |
+| The migration comments | **Decision 085 §5 — MIN-1.** Migration `0014`'s claim that the new relational columns enter `REGISTRANT_TABLE_COLUMNS` is **false as to mechanism** under **R67**: the relational set is governed through the existing candidate registrant row representation and its digest. Only the comments change — no digest tuple is widened and **no executable semantics change** |
+| The established-with-zero-relation state | **Decision 085 §6 — MIN-2.** The guard covers **UPDATE** only, so an **INSERT** can assert `established` with zero substantive relations. Because `0014` is not owner-accepted and touches no real E0 state, it is corrected **prospectively** so that false state cannot survive the completed transaction — the **real writer transaction is inspected first**, insertion ordering is respected, no impossible immediate trigger is created, the **narrowest** mechanism is used, **no fake registrant** is introduced, and probes **A–G** are required |
+| The re-baseline provenance | **Decision 085 §7 — MIN-3.** An unverifiable "before" literal is **not retained**. The pre-correction state is independently reproduced from a **disposable** worktree of `6fdec2ed…`; either the exact reproduced value replaces the literal, or the false historical framing is removed. **No predecessor hash is fabricated**, every retained literal carries reproducible provenance, and `UNVERIFIABLE_PRECORRECTION_DIGESTS = 0` |
+| The reserve per-CIK cap | **Decision 085 §8 — MIN-4.** `reserve_selector._caps_preserved` must attach an established multi-registrant bundle accession to **every** truthful substantive registrant for per-CIK / entity-domain cap accounting — never to the replacement, an anchor, the first registrant, the min/max CIK, or the submitter — while **accession-domain accounting still counts the filing once**. The cap value and research policy are **unchanged**; a policy-constant change is a **STOP** |
+| What happens next | **Decision 085 §12** — commit this record as one governance-only commit, implement only **M-1** and **MIN-1**–**MIN-4**, re-run **MR-M1**–**MR-M14** including the exact MR-M10 mutant, run targeted and static validation and exactly one `make check-fast`, commit once, push once, and **return to Sol/GPT**. **R49** condition B stays **unsatisfied** until a fresh **genuine Claude Fable 5 maximum** review passes and Sol/GPT accepts; migration `0015`, Review A, Review B, the adjudication, **E0**, **E1**, **E2**, and **M3.4** all remain unauthorized at `REQUEST_CEILING` 0 |
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

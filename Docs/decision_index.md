@@ -1041,9 +1041,40 @@ session does not execute Review A.
 | What stays unauthorized | **Decision 090 §8.** Review B, the adjudication, **M3.3-E0**, **E1**, **E2**, **M3.4**, all network/SEC/HTTP (`REQUEST_CEILING = 0`), and migration `0016` |
 | What happens next | **Decision 090 §9** — execute Review A in a fresh Claude Opus 5 maximum epoch, then return to Sol/GPT |
 
-*(Current state: **Document Review A is authorized and has not yet begun.** The verified-evidence
-infrastructure is owner-accepted and complete; Review B, the adjudication, E0, E1, E2, and M3.4
-remain unauthorized; network/SEC/HTTP authority is NONE at `REQUEST_CEILING = 0`.)*
+*(Current state: **the §4/§5 dual-Claude execution workflow was prospectively superseded before any
+review began — see Decision 091 below.** The schema/migration acceptance and all four observation
+dispositions recorded here remain fully valid. The controlling execution protocol is now one Claude
+Opus 5 maximum review followed by Sol/GPT owner adjudication.)*
+
+## Decision 091 — ACCEPTED (the single-pass document-evidence protocol)
+
+[Decision 091](Decisions/decision_091_m3_3_single_pass_document_evidence_protocol.md)
+(`ACCEPTED — OWNER PROTOCOL CORRECTION: SINGLE-PASS DOCUMENT-EVIDENCE REVIEW 2026-08-15`) is the
+**twenty-second M3.3 record**. It prospectively retires the dual-Claude Review A → Review B →
+Claude-adjudication execution workflow — **before any review began, with zero real review rows in
+existence** — and adopts one Claude Opus 5 maximum review followed by **Sol/GPT owner
+adjudication**.
+
+**It executes nothing and reopens nothing.** Migration `0015` and the accepted schema are
+untouched, Decision 090's acceptance and observation dispositions remain fully valid, and no
+network, SEC, or HTTP request is made.
+
+| Question | Controlling record |
+|---|---|
+| What was retired, and from what factual state | **Decision 091 §3.** The dual-Claude A/B/adjudication execution sequence, superseded **prospectively**: Review A, Review B, and the adjudication had all NOT started and no real review row existed — nothing produced is invalidated |
+| The controlling sequence now | **Decision 091 §4.** One Claude review over all 108 frozen D081 artifacts → freeze/content-address → return to Sol/GPT → **owner adjudication** (which replaces the retired Claude adjudication) → only then any feasibility/E0 determination |
+| Who reviews | **Decision 091 §5.** **Claude Opus 5, maximum effort, one fresh `/clear` epoch**, no subagents, no delegation, no parallel workflows |
+| What stays frozen | **Decision 091 §6.** `m3.3-document-evidence/1.0` unchanged: categories, X-1…X-6, span requirements, abstention vocabulary, applicability, verified semantics. **Only the workflow changes** |
+| How a single pass fits the accepted schema | **Decision 091 §6.1 — confirmed by execution.** The pass carries on the existing `reviewer_role = 'review_a'` identity; Review-B/adjudication rows remain absent; no review-layer trigger requires a second pass; the pass freezes under `REVIEW_A_TABLE_DOMAIN`. Migration `0015` is **not** altered. Recorded consequence: `document_adjudicated_evidence` itself mechanically needs both passes, so persisting owner-adjudicated results there would need its own future authorization |
+| The replacement authority | **Decision 091 §7.** `M3_3_SINGLE_DOCUMENT_EVIDENCE_REVIEW_AUTHORIZED` supersedes the Decision 090 §5 Review-A authorization: offline only, private-root READ ONLY for the execution epoch, totality 108/108 or STOP, output frozen with full counts and digest, path never printed |
+| Sol/GPT's adjudication role | **Decision 091 §8.** Owner determines run acceptability, abstention/conflict disposition, verified-evidence acceptance, three-category witness, the 8-entity linkage standard, gate closure, and any E0 authorization |
+| What the review may not do | **Decision 091 §9.** No self-granted verified credit, no gate closure, no E0, no candidate selection, no root approval |
+| What happens next | **Decision 091 §11** — execute the single review in a fresh Opus 5 maximum epoch, then return the frozen output to Sol/GPT |
+
+*(Current state: **the single document-evidence review is authorized and has not yet begun.**
+Review B and Claude adjudication are not required and not authorized; Sol/GPT owner adjudication is
+pending review completion; E0, E1, E2, and M3.4 remain unauthorized; network/SEC/HTTP authority is
+NONE at `REQUEST_CEILING = 0`.)*
 
 ## Deviation register — where deviations are recorded
 

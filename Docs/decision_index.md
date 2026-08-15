@@ -956,8 +956,41 @@ offline parse begins, and no network, SEC, or HTTP request is made.
 | What happens next | **Decision 087 §18** — implement `0015` and its authorized infrastructure, then **return to Sol/GPT**. The implementing session does **not** self-review and does **not** start Review A, Review B, the adjudication, or **E0** |
 
 *(Current state: **R46 is owner accepted**, `M3_3_R49_CONDITION_B_SATISFIED`, and the pre-E0
-multi-registrant hold is **closed**. Migration `0015` and the verified-evidence infrastructure are the
-**one authorized implementation stage**; everything else named in §17 remains unauthorized.)*
+multi-registrant hold is **closed**. Migration `0015` and the verified-evidence infrastructure were
+implemented under this authority, and the fresh independent review of that implementation returned
+**FAIL** — see Decision 088 below.)*
+
+## Decision 088 — ACCEPTED (D087 review adjudication and the bounded correction)
+
+[Decision 088](Decisions/decision_088_m3_3_d087_verified_evidence_review_corrections.md)
+(`ACCEPTED — OWNER ADJUDICATION OF THE D087 INDEPENDENT REVIEW AND BOUNDED CORRECTION AUTHORIZATION
+2026-08-15`) is the **nineteenth M3.3 record**. It adjudicates the failed independent review of the
+Decision 087 implementation and authorizes exactly one bounded correction stage.
+
+**It accepts nothing and grants no execution authority.** The verified-evidence schema is **not**
+owner-accepted, no document review runs, no real evidence is created, and no network, SEC, or HTTP
+request is made.
+
+| Question | Controlling record |
+|---|---|
+| What the D087 independent review found | **Decision 088 §1. `FAIL` — BLOCKER 0 / MAJOR 1 / MINOR 3 / OBSERVATION 3** at frozen target `8c13fc79…` (tree `80dc6c05…`), token `M3_3_DECISION_087_VERIFIED_EVIDENCE_SCHEMA_INDEPENDENT_REVIEW_FAIL`. **The verdict is frozen and immutable**, reached before any correction authority existed. The review also confirmed the accepted architecture is sound, so **no redesign is authorized** |
+| How each finding is disposed | **Decision 088 §2.** **M-1** accepted, correction required, **acceptance-gating**; **MIN-1**, **MIN-2**, **MIN-3** accepted, correct now; **OBS-2** comment only; **OBS-3** strengthen validation now; **OBS-1** non-gating and **deferred** |
+| Why `INSERT OR REPLACE` is a defect and how it is closed | **Decision 088 §3.** The implicit delete fires no `BEFORE DELETE` trigger without `PRAGMA recursive_triggers`, which this project never sets. Closed by the accepted migration-`0013` **`BEFORE INSERT` replacement-guard** pattern over **every** unique route of **all four** relations, refusing `INSERT OR REPLACE`, a duplicate `INSERT`, and a silent `INSERT OR IGNORE`. The `BEFORE UPDATE`/`BEFORE DELETE` protections are **kept** |
+| Cross-accession artifact binding | **Decision 088 §4.** Reviews and adjudications must bind an artifact whose **registered** accession matches their own. **No new accession identity is invented** |
+| What `agreed` means | **Decision 088 §5.** Both contributing reviews must be **non-abstaining** and carry the asserted adjudicated value per kind (Decision 082 §12.6). **Abstention is not turned into a negative assertion.** The `verified` ⇒ `agreed`/`resolved` CHECK gains a **dedicated negative test** |
+| The verified-candidate re-point door | **Decision 088 §6.** The guard must also fire when `accession_plain` changes while the level stays `verified` — by naming the column, **not** by candidate-identity redesign. Verified applicability is **not** widened |
+| OBS-2 and OBS-3 | **Decision 088 §7.** The `0015` §1 comment is corrected (**comment only**); `span_location` becomes strict `bytes:<decimal>-<decimal>`, with **no fuzzy source-location semantics** |
+| OBS-1's status | **Decision 088 §8.** **NON-GATING / DEFERRED / OPEN.** It must **never** be reported as fixed or closed |
+| Who may correct, and who may accept | **Decision 088 §9.** The failed review's own epoch is reused **only** as the correction executor and is **not eligible** to accept its own corrected target. The acceptance rereview must be a **fresh `/clear` epoch** |
+| Which paths the correction may touch | **Decision 088 §10.** Migration `0015` is corrected **in place**; **migration `0016` is not authorized** |
+| The expected identity movement | **Decision 088 §11.** Only the accepted **R68** chain path may move; eight named components must stay **byte-identical**, and anything else moving is a **STOP** |
+| The required adversarial matrix | **Decision 088 §12 — VE-M1 … VE-M14 re-run, plus VE-R1 … VE-R10**, demonstrated rather than named |
+| What happens next | **Decision 088 §15** — correct the six findings, then **return to Sol/GPT**. **Successful correction is not acceptance** |
+
+*(Current state: the D087 implementation **failed** its independent review and is under **bounded
+correction**. `D087_VERIFIED_EVIDENCE_SCHEMA` is **NOT YET OWNER ACCEPTED**; **OBS-1 remains open**;
+and Review A, Review B, the document adjudication, **M3.3-E0**, **E1**, **E2**, and **M3.4** all
+remain unauthorized.)*
 
 ## Deviation register — where deviations are recorded
 

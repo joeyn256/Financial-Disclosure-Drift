@@ -827,8 +827,10 @@ classifies **zero** real filings, resolves **zero** real parentage, and grants *
 | The future adjudication protocol | **Decision 082 §12 — PENDING OWNER ACCEPTANCE, not executed.** Sequential **Review A → Review B → adjudication** in separate fresh epochs over the **already stored** D081 artifacts at **zero** new SEC requests; no parallel sessions required. Defines review fields, allowed abstentions, the three verbatim categories, extraction rules X-1–X-6, span-citation and fail-closed rules, agreement and third-adjudication rules, five frozen hashes, and both feasibility-witness calculations. **No real filing is classified** |
 | What happens next | **Decision 082 §15** — **owner adjudication of the three contracts**, and nothing else. No session may begin the R46 implementation, write any migration, execute any document review, or begin M3.3-E0 on the strength of this record |
 
-*(Current state: all three contracts are **owner accepted** by accepted Decision 083 §2, and only the
-**R46** contract is authorized for implementation — see below.)*
+*(Current state: all three contracts are **owner accepted** by accepted Decision 083 §2. The **R46**
+contract was implemented and is now **owner accepted** (Decision 087 §2); the **verified-evidence
+schema** contract is now **implementation authorized** with `MIGRATION_AUTHORIZED = 0015 only`
+(Decision 087 §4); the **adjudication protocol** remains **execution deferred** — see below.)*
 
 ## Decision 083 — ACCEPTED (pre-E0 multi-registrant relational correction)
 
@@ -856,7 +858,9 @@ unauthorized, and network, SEC, and HTTP authority remains **NONE** at `REQUEST_
 | What happens next | **Decision 083 §13** — implement **R46** and `0014`, then **return to Sol/GPT**. Successful implementation is **not** acceptance: **R49** condition B needs a fresh independent review **and** owner acceptance. The implementing session does not self-review for formal acceptance |
 
 *(Current state: the **R46** implementation and migration `0014` are **written and proved** but hit
-one narrow owner-action stop at final validation. Accepted Decision 084 disposes of it — see below.)*
+one narrow owner-action stop at final validation. Accepted Decision 084 disposes of it — see below.
+**R63**'s implementation deferral has since been **lifted** by accepted Decision 087 §4, so migration
+`0015` is now authorized; **R64** remains **execution deferred**.)*
 
 ## Decision 084 — ACCEPTED (bounded continuation of the D083 correction)
 
@@ -922,6 +926,38 @@ Decisions 083, 084, and 085 are **not modified**, and no implementation byte cha
 | Which model the next formal review must be | **Decision 086 §5.** **Claude Fable 5 at maximum effort, in a genuine epoch.** The reviewer reports its actual harness/model identity **before** substantive review and **STOPS** with `M3_3_D085_R46_REREVIEW_INVALID_NOT_GENUINE_FABLE` on any mismatch. **Opus is never substituted for Fable**, and a mismatch is never handled by continuing and disclosing it afterward. The prior review's findings remain valid evidence even though its epoch did not satisfy this requirement |
 | What the rereview targets | **Decision 086 §6.** Frozen target `1c5b0150…` at tree `1994e8bf…`; **this governance commit is authority about that target and never becomes it**. The rereviewer compares the original reviewed target `09ee4422…` to the corrected one, verifies the correction is **bounded** to **M-1** and **MIN-1**–**MIN-4** plus truthful governance publication, and **revalidates every formal acceptance property, not only the delta** |
 | What happens next | **Decision 086 §8** — commit this record, push once, and **return to Sol/GPT**. The Fable rereview is **not** started in the Opus session that produced it. **R49** condition B stays **unsatisfied** until a genuine Fable 5 maximum review **passes** and Sol/GPT accepts the corrected implementation; migration `0015`, Review A, Review B, the adjudication, **E0**, **E1**, **E2**, and **M3.4** all remain unauthorized at `REQUEST_CEILING` 0 |
+
+*(Current state: the commissioned genuine Fable 5 maximum rereview **ran and PASSED**, and Sol/GPT
+**accepted** the corrected R46 implementation by accepted Decision 087 — see below.)*
+
+## Decision 087 — ACCEPTED (final R46 owner acceptance and the verified-evidence schema authorization)
+
+[Decision 087](Decisions/decision_087_m3_3_r46_owner_acceptance_and_verified_evidence_schema.md)
+(`ACCEPTED — OWNER FINAL R46 ACCEPTANCE AND VERIFIED-EVIDENCE SCHEMA IMPLEMENTATION AUTHORIZATION
+2026-08-15`) is the **eighteenth M3.3 record**. It closes the R46 correction and opens exactly one new
+implementation stage.
+
+**It grants no execution authority.** No document review runs, no filing is classified, no real
+amendment parentage is resolved, no quota credit is granted, no feasibility gate closes, no real
+offline parse begins, and no network, SEC, or HTTP request is made.
+
+| Question | Controlling record |
+|---|---|
+| Whether R46 is accepted | **Decision 087 §2. ACCEPTED.** The corrected implementation frozen at `1c5b0150…` (tree `1994e8bf…`) is owner-accepted on the genuine Fable 5 maximum rereview's **PASS** at BLOCKER 0 / MAJOR 0 / MINOR 0. `M3_3_R49_CONDITION_B_SATISFIED`; `M3_3_PRE_E0_MULTI_REGISTRANT_HOLD_CLOSED`. No further R46 correction or review is required unless a later stage finds a genuinely **new** defect |
+| What that acceptance does **not** grant | **Decision 087 §3.** R49 condition B is one precondition, not E0 authorization. **M3.3-E0, M3.3-E1, M3.3-E2, and M3.4 all remain NOT AUTHORIZED**; network/SEC/HTTP is **NONE** at `REQUEST_CEILING = 0` |
+| Whether the verified-evidence schema may be built | **Decision 087 §4.** The Decision 083 **R63** implementation deferral is **LIFTED**. `VERIFIED_EVIDENCE_SCHEMA_CONTRACT = OWNER ACCEPTED / IMPLEMENTATION AUTHORIZED`; `MIGRATION_AUTHORIZED = 0015 only`, separate from `0014`, which is neither rewritten nor squashed |
+| What the four relations mean | **Decision 087 §5**, restating Decision 083 **R63** items A–D: `document_artifacts` is **catalog metadata only** with the artifact bytes staying in the private evidence root and **no `EV_ROOT` path persisted**; `document_review_records` must **mechanically distinguish** Review A / Review B / adjudication by durable **opaque epoch identifiers** plus role and model, with no personal name; `document_review_spans` carries exact source-span provenance with **no classifier invented**; `document_adjudicated_evidence` authorizes `verified` **only** for amendment purpose and linkage/explicit-original |
+| Linkage semantics | **Decision 087 §6.** **No `verified_amends_original` state is invented.** The relationship reuses `amendment_linkage_state = amends_original`; verification strength lives in `evidence_level = verified` with its provenance |
+| The evidence-level widening | **Decision 087 §7.** The Decision 080 §9.3 widening is implemented **for the authorized amendment-purpose dimension only**. No other dimension's validation is weakened, and no existing synthetic or rehearsal row is reinterpreted |
+| Immutability | **Decision 087 §8.** Append-only and immutable once frozen, at the Decision 082 §11.2 statement. **No delete/update flexibility is invented for convenience** |
+| Identity discipline | **Decision 087 §9.** New hash domains only, through the existing `release/hashing.py`; **no frozen column tuple widened** (accepted **R67**); the migration-chain movement along the **R68** path (`selector_policy_sha256`, `root_manifest_sha256`, `manifest_id`, block-5 row count) must be enumerated and distinguished from evidence-content movement; widening an owner-frozen candidate identity tuple is a **STOP** |
+| Which paths the implementation may touch | **Decision 087 §13.** Decision 082 §11 states no path list, so §13 supplies one. It includes `FINAL_MIGRATION_VERSION` **14 → 15** in `acquisition.py` — that constant and nothing else in that file — on the identical owner interpretation accepted for **R65** |
+| The required adversarial matrix | **Decision 087 §14 — VE-M1 … VE-M14**, demonstrated rather than named |
+| What happens next | **Decision 087 §18** — implement `0015` and its authorized infrastructure, then **return to Sol/GPT**. The implementing session does **not** self-review and does **not** start Review A, Review B, the adjudication, or **E0** |
+
+*(Current state: **R46 is owner accepted**, `M3_3_R49_CONDITION_B_SATISFIED`, and the pre-E0
+multi-registrant hold is **closed**. Migration `0015` and the verified-evidence infrastructure are the
+**one authorized implementation stage**; everything else named in §17 remains unauthorized.)*
 
 ## Deviation register — where deviations are recorded
 

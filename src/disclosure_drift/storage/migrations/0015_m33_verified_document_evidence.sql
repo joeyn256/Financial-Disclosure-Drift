@@ -46,7 +46,7 @@
 -- optional compile-time extension. The arithmetic below is exact -- see section 6 -- and
 -- it holds on every build the floor admits.
 --
--- Seven sections:
+-- Eight sections:
 --   1. Preconditions -- every table this migration rebuilds, and their children, empty
 --   2. document_artifacts                                            (CREATE TABLE)
 --   3. document_review_records                                       (CREATE TABLE)
@@ -54,6 +54,7 @@
 --   5. document_adjudicated_evidence                                 (CREATE TABLE)
 --   6. Adjudication provenance -- artifact binding, review binding, span backing
 --   7. Immutability -- append-only, frozen at insert, for all four relations
+--   7.1. Replacement guards -- the conflict-resolution half of that same rule
 --   8. The evidence-level extension -- pilot_candidate_accessions rebuild
 PRAGMA legacy_alter_table = ON;
 
@@ -66,10 +67,21 @@ PRAGMA legacy_alter_table = ON;
 -- pilot_candidate_accession_reasons, pilot_selected_accessions, and
 -- pilot_reserve_accessions -- so the drop is safe only when the whole family is empty.
 --
--- The list below is migration 0014's own precondition set plus those three additional
--- children. A non-empty table means a real identity exists; RAISE(ABORT) inside the
--- migration transaction rolls the whole script back, so a catalog that fails this gate is
--- left byte-identical at 0014. Decision 087 section 15 item I makes any requirement to
+-- The list below is exactly the nine tables THIS migration's rebuild can reach: the rebuilt
+-- pilot_candidate_accessions, the pilot_candidate_snapshots it references, the five
+-- relations carrying a composite foreign key into it, and the pilot_selection_runs and
+-- pilot_manifest_versions rows a populated selection would have produced from them.
+--
+-- It is NOT migration 0014's list. That list also names census_parsed_records and
+-- census_parser_runs, because 0014 rebuilt census relations; migration 0015 rebuilds no
+-- census table and reads no census row, so requiring those two to be empty would refuse
+-- catalogs this migration is safe on. Stating the enforced list plainly is the point: a
+-- precondition comment that describes some other migration's guard is worse than no comment
+-- (accepted Decision 088 section 7).
+--
+-- A non-empty table means a real identity exists; RAISE(ABORT) inside the migration
+-- transaction rolls the whole script back, so a catalog that fails this gate is left
+-- byte-identical at 0014. Decision 087 section 15 item I makes any requirement to
 -- reinterpret accepted real evidence a STOP rather than a migration path.
 -- --------------------------------------------------------------------------
 
@@ -270,6 +282,29 @@ BEGIN
     );
 END;
 
+-- A review binds the artifact REGISTERED TO ITS OWN ACCESSION (accepted Decision 088
+-- section 4). The foreign key constrains only that the artifact exists, and the adjudication
+-- trigger in section 6 constrains only that an accession's reviews agree WITH EACH OTHER --
+-- so a uniformly cross-bound set satisfied both, and the D087 independent review executed
+-- exactly that: a complete lifecycle for one accession provenanced to another accession's
+-- artifact, ending in a verified candidate level.
+--
+-- document_artifacts.accession_plain is already the registered fact, so this invents no new
+-- accession identity; it requires the review layer to agree with the registration. An
+-- artifact that is not registered at all fails here too, which is the same fail-closed
+-- answer the foreign key would give a moment later.
+CREATE TRIGGER document_review_records_bind_their_own_accession
+BEFORE INSERT ON document_review_records
+BEGIN
+    SELECT RAISE(ABORT,
+        'a review must bind an artifact registered to its own accession')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM document_artifacts
+        WHERE artifact_sha256 = NEW.artifact_sha256
+          AND accession_plain = NEW.accession_plain
+    );
+END;
+
 -- --------------------------------------------------------------------------
 -- Section 4. document_review_spans -- Decision 082 section 11.2, relation 3
 --
@@ -296,11 +331,28 @@ CREATE TABLE document_review_spans (
         CHECK (span_role IN (
             'amendment_purpose', 'original_form', 'original_filing_date', 'original_accession')),
     span_text_verbatim  TEXT NOT NULL CHECK (length(span_text_verbatim) > 0),
-    -- 'bytes:START-END' into the frozen artifact. Two CHECKs, because the first alone would
-    -- admit stray characters between the digits.
+    -- 'bytes:START-END' into the frozen artifact, where START and END are ASCII DECIMAL
+    -- DIGITS ONLY.
+    --
+    -- The original pair of CHECKs admitted 'bytes:1a-2b': the leading GLOB pins only the
+    -- first character of each endpoint, and the negated class permitted every lowercase
+    -- letter so that the literal 'bytes:' prefix could pass through it. Decision 080 AP-9
+    -- fails a non-locatable span closed at consumption, but a malformed location should
+    -- never reach consumption in the first place (accepted Decision 088 section 7).
+    --
+    -- The four clauses below are exact. The prefix is matched literally, so the letters live
+    -- there and nowhere else; the remainder admits digits and one hyphen only, which rejects
+    -- letters, spaces, signs, decimal points, and every path character; exactly one hyphen
+    -- separates the endpoints; and neither endpoint may be empty. Nothing here interprets
+    -- the range -- no ordering, no artifact length, no fuzzy source location. It is strict
+    -- decimal validation and only that.
     span_location       TEXT NOT NULL
-        CHECK (span_location GLOB 'bytes:[0-9]*-[0-9]*'
-               AND span_location NOT GLOB '*[^0-9a-z:-]*'),
+        CHECK (substr(span_location, 1, 6) = 'bytes:'
+               AND substr(span_location, 7) NOT GLOB '*[^0-9-]*'
+               AND length(substr(span_location, 7))
+                   - length(replace(substr(span_location, 7), '-', '')) = 1
+               AND substr(span_location, 7) NOT GLOB '-*'
+               AND substr(span_location, 7) NOT GLOB '*-'),
     span_sha256         TEXT NOT NULL
         CHECK (length(span_sha256) = 64 AND span_sha256 NOT GLOB '*[^0-9a-f]*'),
     PRIMARY KEY (review_id, span_ordinal)
@@ -419,6 +471,13 @@ CREATE INDEX idx_document_adjudicated_evidence_artifact
 
 -- Artifact binding: every review this accession has must name the SAME artifact the
 -- adjudication names. A cross-artifact adjudication is not an adjudication of anything.
+--
+-- This is now defence in depth rather than the only barrier. The registered-accession guard
+-- immediately below, and its counterpart on document_review_records, together make an
+-- accession's reviews and its adjudication bind the one artifact registered to that
+-- accession -- so a set that disagrees with itself can no longer be assembled in the first
+-- place. The trigger is KEPT because it states an independent invariant, and a protection
+-- that has become hard to reach is not a protection worth deleting.
 CREATE TRIGGER document_adjudicated_evidence_requires_bound_artifact
 BEFORE INSERT ON document_adjudicated_evidence
 BEGIN
@@ -428,6 +487,20 @@ BEGIN
         SELECT 1 FROM document_review_records AS r
         WHERE r.accession_plain = NEW.accession_plain
           AND r.artifact_sha256 <> NEW.artifact_sha256
+    );
+END;
+
+-- Registered-accession binding (accepted Decision 088 section 4), the adjudication half.
+-- The artifact an adjudicated row names must be REGISTERED TO THE ACCESSION IT ADJUDICATES.
+CREATE TRIGGER document_adjudicated_evidence_binds_its_own_accession
+BEFORE INSERT ON document_adjudicated_evidence
+BEGIN
+    SELECT RAISE(ABORT,
+        'adjudicated evidence must bind an artifact registered to its own accession')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM document_artifacts
+        WHERE artifact_sha256 = NEW.artifact_sha256
+          AND accession_plain = NEW.accession_plain
     );
 END;
 
@@ -456,6 +529,46 @@ BEGIN
         WHERE accession_plain = NEW.accession_plain
           AND artifact_sha256 = NEW.artifact_sha256
           AND reviewer_role = 'adjudication'
+    );
+END;
+
+-- 'agreed' means what Decision 082 section 12.6 says it means: A and B agreed EXACTLY, on
+-- the category and on every extracted assertion. The D087 independent review showed the
+-- schema admitted 'agreed' + 'verified' over TWO ABSTAINING reviews with zero spans -- the
+-- span-backing guard below quantifies over non-abstaining records, so two abstentions
+-- satisfied it vacuously -- which is evidence manufactured from absence.
+--
+-- This refuses an 'agreed' outcome unless BOTH independent passes are non-abstaining AND
+-- assert the value being adjudicated, per evidence kind. The review-provenance trigger
+-- already requires both passes to exist; this one requires them to have actually agreed.
+--
+-- It does NOT turn an abstention into a negative assertion (accepted Decision 088 section 5):
+-- an abstention remains a recorded outcome under Decision 080 AP-1 totality, and the
+-- 'abstained', 'conflicting', and 'resolved' routes are untouched. 'resolved' is precisely
+-- the route for passes that did NOT agree, and it keeps its own requirement -- the third
+-- adjudication record -- immediately above.
+CREATE TRIGGER document_adjudicated_evidence_agreed_requires_agreeing_passes
+BEFORE INSERT ON document_adjudicated_evidence
+WHEN NEW.agreement_state = 'agreed'
+BEGIN
+    SELECT RAISE(ABORT,
+        'an agreed outcome requires both independent passes to be non-abstaining and to assert the adjudicated value')
+    WHERE EXISTS (
+        SELECT 1 FROM document_review_records AS r
+        WHERE r.accession_plain = NEW.accession_plain
+          AND r.artifact_sha256 = NEW.artifact_sha256
+          AND r.reviewer_role IN ('review_a', 'review_b')
+          AND (
+            r.abstained = 1
+            OR (NEW.evidence_kind = 'amendment_purpose'
+                AND (r.purpose_category IS NULL
+                     OR r.purpose_category <> NEW.adjudicated_value))
+            OR (NEW.evidence_kind = 'explicit_original'
+                AND (r.original_form_asserted IS NULL
+                     OR r.original_filing_date_asserted IS NULL
+                     OR r.original_form_asserted || '|' || r.original_filing_date_asserted
+                        <> NEW.adjudicated_value))
+          )
     );
 END;
 
@@ -528,11 +641,13 @@ END;
 -- and this is the shape of that prohibition: UPDATE and DELETE are refused outright on all
 -- four relations.
 --
--- That single rule discharges four of the five Decision 087 section 8 protections at once:
--- a frozen review cannot be mutated in place, span provenance cannot be rewritten, an
--- artifact SHA cannot change after review, and reviewer role and epoch cannot change after
--- freeze. The fifth -- an adjudicated result changing after final freeze -- is the same
--- refusal on the fourth table.
+-- Refusing UPDATE and DELETE is necessary for all five Decision 087 section 8 protections --
+-- a frozen review mutated in place, rewritten span provenance, an artifact SHA changed after
+-- review, a reviewer role or epoch changed after freeze, and an adjudicated result changed
+-- after final freeze -- but it is NOT SUFFICIENT for any of them, which the D087 independent
+-- review proved by rewriting all five through INSERT OR REPLACE while these eight triggers
+-- stayed silent. Section 7.1's replacement guards are the other half; the two halves
+-- together are what discharges the five protections, and neither half is redundant.
 -- --------------------------------------------------------------------------
 
 CREATE TRIGGER document_artifacts_are_immutable_update
@@ -577,6 +692,98 @@ BEGIN
          AND a.artifact_sha256 = r.artifact_sha256
         WHERE r.review_id = NEW.review_id
     );
+END;
+
+-- --------------------------------------------------------------------------
+-- Section 7.1. Replacement guards -- the conflict-resolution door
+--
+-- The eight triggers above are necessary and NOT sufficient, which the D087
+-- independent review proved by executing the bypass rather than reasoning about it: SQLite
+-- resolves an INSERT OR REPLACE conflict by DELETING the conflicting row and inserting the
+-- new one, and that implicit delete fires no BEFORE DELETE trigger unless PRAGMA
+-- recursive_triggers is on -- which this project never sets. A frozen adjudicated result, a
+-- review record's role and epoch, span provenance, and bound artifact metadata were each
+-- rewritten that way while every protection above stayed silent.
+--
+-- Accepted migration 0013 met this exact defect on pilot_manifest_versions and
+-- pilot_selection_runs and answered it the same way, in that record's own words: "A BEFORE
+-- INSERT trigger fires before conflict resolution can delete anything, so each predicate
+-- below holds on every connection whatever the pragma settings are." The four guards below
+-- are that accepted pattern applied to every unique route of all four evidence relations
+-- (accepted Decision 088 section 3).
+--
+-- Each guard refuses THREE idioms at once, which is the accepted 0013 behaviour rather than
+-- an extension of it: INSERT OR REPLACE (which would rewrite), an ordinary duplicate INSERT
+-- (which would otherwise raise a less specific constraint error), and INSERT OR IGNORE
+-- (which would silently no-op and let a caller believe it had written). A genuinely new row
+-- is unaffected, and the lawful append order is untouched.
+--
+-- The UPDATE and DELETE triggers above are KEPT. They are the direct-mutation half of the
+-- rule; these are the conflict-resolution half.
+-- --------------------------------------------------------------------------
+
+CREATE TRIGGER document_artifacts_replacement_guard
+BEFORE INSERT ON document_artifacts
+BEGIN
+    -- Route 1 -- the TEXT PRIMARY KEY. Rewriting an artifact's metadata under its own
+    -- content hash is the substitution this relation exists to prevent.
+    SELECT RAISE(ABORT,
+        'document artifact insert conflicts with an existing artifact_sha256; a governed artifact row is never replaced or re-inserted')
+    WHERE EXISTS (
+        SELECT 1 FROM document_artifacts WHERE artifact_sha256 = NEW.artifact_sha256);
+    -- Route 2 -- UNIQUE (accession_plain, source_class), the artifact-substitution guard.
+    SELECT RAISE(ABORT,
+        'document artifact insert conflicts with the existing artifact for this accession and source class; a bound artifact is never replaced')
+    WHERE EXISTS (
+        SELECT 1 FROM document_artifacts
+        WHERE accession_plain = NEW.accession_plain
+          AND source_class = NEW.source_class);
+END;
+
+CREATE TRIGGER document_review_records_replacement_guard
+BEFORE INSERT ON document_review_records
+BEGIN
+    -- Route 1 -- the TEXT PRIMARY KEY.
+    SELECT RAISE(ABORT,
+        'document review insert conflicts with an existing review_id; a frozen review record is never replaced or re-inserted')
+    WHERE EXISTS (
+        SELECT 1 FROM document_review_records WHERE review_id = NEW.review_id);
+    -- Route 2 -- UNIQUE (accession_plain, reviewer_role). Without this predicate a
+    -- replacement could retire one pass's record and stand another in its place under the
+    -- same accession and role, carrying a different epoch, model, artifact, or category.
+    SELECT RAISE(ABORT,
+        'document review insert conflicts with the existing record for this accession and reviewer role; a frozen review record is never replaced')
+    WHERE EXISTS (
+        SELECT 1 FROM document_review_records
+        WHERE accession_plain = NEW.accession_plain
+          AND reviewer_role = NEW.reviewer_role);
+END;
+
+CREATE TRIGGER document_review_spans_replacement_guard
+BEFORE INSERT ON document_review_spans
+BEGIN
+    -- The composite PRIMARY KEY is this relation's only unique route.
+    SELECT RAISE(ABORT,
+        'document review span insert conflicts with an existing span ordinal for this review; span provenance is never replaced or re-inserted')
+    WHERE EXISTS (
+        SELECT 1 FROM document_review_spans
+        WHERE review_id = NEW.review_id
+          AND span_ordinal = NEW.span_ordinal);
+END;
+
+CREATE TRIGGER document_adjudicated_evidence_replacement_guard
+BEFORE INSERT ON document_adjudicated_evidence
+BEGIN
+    -- The composite PRIMARY KEY is this relation's only unique route, and this is the
+    -- protection Decision 087 section 8 item 5 asks for in the form the review proved is
+    -- actually required: a frozen adjudicated result is never repaired into a better one,
+    -- by any idiom.
+    SELECT RAISE(ABORT,
+        'adjudicated evidence insert conflicts with the existing frozen result for this accession and evidence kind; a frozen adjudication is never replaced or re-adjudicated')
+    WHERE EXISTS (
+        SELECT 1 FROM document_adjudicated_evidence
+        WHERE accession_plain = NEW.accession_plain
+          AND evidence_kind = NEW.evidence_kind);
 END;
 
 -- A review record cannot join an accession whose evidence is already frozen, for the same
@@ -798,6 +1005,13 @@ BEGIN SELECT RAISE(ABORT, 'pilot candidate accession delete requires a building 
 --
 -- accession_plain in the candidate layer is the 18-digit plain accession, which is the same
 -- key document_adjudicated_evidence uses, so the join is direct and needs no translation.
+--
+-- The UPDATE trigger watches TWO columns, not one. Watching only the evidence level left the
+-- door the D087 independent review walked through: leave the level at 'verified' and change
+-- the ACCESSION it depends on, and a verified claim silently re-points at an accession with
+-- no adjudicated evidence at all. Naming accession_plain in the UPDATE OF list closes it
+-- exactly (accepted Decision 088 section 6) -- no candidate identity is redesigned, no
+-- column is added, and verified applicability is not widened.
 CREATE TRIGGER pilot_candidate_accessions_verified_purpose_requires_evidence_insert
 BEFORE INSERT ON pilot_candidate_accessions
 WHEN NEW.amendment_purpose_evidence_level = 'verified'
@@ -813,7 +1027,7 @@ BEGIN
 END;
 
 CREATE TRIGGER pilot_candidate_accessions_verified_purpose_requires_evidence_update
-BEFORE UPDATE OF amendment_purpose_evidence_level ON pilot_candidate_accessions
+BEFORE UPDATE OF amendment_purpose_evidence_level, accession_plain ON pilot_candidate_accessions
 WHEN NEW.amendment_purpose_evidence_level = 'verified'
 BEGIN
     SELECT RAISE(ABORT,

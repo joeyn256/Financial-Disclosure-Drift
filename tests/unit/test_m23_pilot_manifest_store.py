@@ -779,6 +779,20 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
     fixture**, so nothing here reflects evidence CONTENT; the movement is caused solely by
     the migration chain, which is the distinction Decision 087 §9 requires to be stated
     rather than assumed.
+
+    **Re-baselined a fourth time, under accepted Decision 088 §11, on the same one component
+    and for the same one reason.** Correcting migration ``0015`` for the six accepted D087
+    review findings changed that file's bytes, so its ``checksum_sha256`` moved
+    (``c5328894…`` to ``d7f22999…``), so ``selector_policy_sha256`` moved (``2f675005…`` to
+    ``2de6fd30…``) and carried ``root_manifest_sha256`` (``317edeb1…`` to ``8c4fff82…``) and
+    ``manifest_id`` (``bd9cbce6…`` to ``5f3d0462…``) with it. It is the same accepted **R68**
+    path, one link earlier.
+
+    **The canonical-JSON length does NOT move this time, and that is the tell.** It stays at
+    ``275721``: the previous re-baseline ADDED a block-5 row, while this one only changes an
+    existing row's checksum value, and a SHA-256 is 64 characters however its bytes turn out.
+    The same eight components remain byte-identical, so the movement is again caused solely
+    by the migration chain and not by evidence content -- of which there is still none.
     """
     manifest = _seal_and_build(catalog)
     assert manifest.components == pm.ManifestComponents(
@@ -787,7 +801,7 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
         ),
         candidate_tables_sha256="b882a148be763ded3531509d7b91d800ca7b5f838865a6bfb5cd06988e775a83",
         quota_definitions_sha256="0a2fd409cb7eaad47fbd6cb4c1b3cf11cffa1a56af5716acdb4aacb801ac616d",
-        selector_policy_sha256="2f675005c9796c5285d4d698c4764c958d129bb0760bad53f68d6b4624599f1f",
+        selector_policy_sha256="2de6fd3096df95a674dbfbd7f2fa03930181b89ffedb23a33606248c9533bf49",
         selected_entities_sha256="86a18dac1629d83ee5d8e8f9bb8ad3a606ae0de7ec8c527079b080c8e113d963",
         selected_accessions_sha256="541bbf7b55b3b355b3e5fcbe15572be2a96df35877f25083ba20f4ba78d7ca87",
         reserves_sha256="ac83550bc6168b5d933d8dc1e3abdd451689c39576f1f08ab49abe6950fc935d",
@@ -799,11 +813,11 @@ def test_reserve_bearing_manifest_is_byte_identical_after_the_clarification(
     )
     assert (
         manifest.root_manifest_sha256
-        == "317edeb19635a91b0f48842e23ac004a8f7d9709dcf7f862a6b5baf608efa893"
+        == "8c4fff82c4ebff94ff530cc29a970a8546c23cef63e23ce89f434a41910f56b8"
     )
     assert (
         manifest.identity.manifest_id
-        == "bd9cbce677d4841b394629bbf09ec466eb78866f14d903be7211b154779cd761"
+        == "5f3d04629b61bd32a3fda0975fa1a495f61c7699555b813ca53036c963bbeef0"
     )
     assert len(manifest.canonical_json) == 275721
 

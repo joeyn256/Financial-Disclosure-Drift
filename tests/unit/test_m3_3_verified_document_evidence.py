@@ -140,9 +140,10 @@ def _artifact(
     source_url: str | None = None,
     receipt: str = "d081-receipt-0001",
     source_class: str = "complete_submission_text",
+    verb: str = "INSERT",
 ) -> None:
     connection.execute(
-        "INSERT INTO document_artifacts (artifact_sha256, accession_plain, source_class, "
+        f"{verb} INTO document_artifacts (artifact_sha256, accession_plain, source_class, "  # noqa: S608
         "byte_length, retrieved_at_utc, source_url, retrieval_receipt_id) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
@@ -170,11 +171,12 @@ def _review(
     reviewer_model: str = "claude-opus-5",
     protocol_version: str = de.DOCUMENT_EVIDENCE_PROTOCOL_VERSION,
     review_pass: str | None = None,
+    verb: str = "INSERT",
 ) -> str:
     """Write one review pass and return its ``review_id``."""
     identifier = review_id or _REVIEW_ID[role]
     connection.execute(
-        "INSERT INTO document_review_records (review_id, review_epoch_id, reviewer_role, "
+        f"{verb} INTO document_review_records (review_id, review_epoch_id, reviewer_role, "  # noqa: S608
         "reviewer_model, review_pass, artifact_sha256, accession_plain, protocol_version, "
         "decided_at_utc, purpose_category, abstained, abstention_reason, "
         "original_form_asserted, original_filing_date_asserted, original_accession_asserted, "
@@ -208,9 +210,10 @@ def _span(
     span_role: str = "amendment_purpose",
     text: str = "This Amendment is filed solely to furnish Exhibit 101.",
     location: str = "bytes:1204-1258",
+    verb: str = "INSERT",
 ) -> None:
     connection.execute(
-        "INSERT INTO document_review_spans (review_id, span_ordinal, span_role, "
+        f"{verb} INTO document_review_spans (review_id, span_ordinal, span_role, "  # noqa: S608
         "span_text_verbatim, span_location, span_sha256) VALUES (?, ?, ?, ?, ?, ?)",
         (review_id, ordinal, span_role, text, location, "e" * 64),
     )
@@ -227,6 +230,7 @@ def _adjudicate(
     evidence_level: str = "verified",
     review_ids: Sequence[str] | None = None,
     review_ids_json: str | None = None,
+    verb: str = "INSERT",
 ) -> None:
     contributors = (
         review_ids_json
@@ -238,7 +242,7 @@ def _adjudicate(
         )
     )
     connection.execute(
-        "INSERT INTO document_adjudicated_evidence (accession_plain, evidence_kind, "
+        f"{verb} INTO document_adjudicated_evidence (accession_plain, evidence_kind, "  # noqa: S608
         "artifact_sha256, adjudicated_value, agreement_state, contributing_review_ids_json, "
         "evidence_level, adjudication_sha256, frozen_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
@@ -776,25 +780,41 @@ def test_ve_m7_verification_strength_and_relationship_are_separate_columns(
 # ==========================================================================
 
 
-def test_ve_m8_an_adjudication_must_bind_the_artifact_every_review_bound(
+def test_ve_m8_a_review_can_never_disagree_with_its_accessions_artifact(
     catalog: sqlite3.Connection,
 ) -> None:
-    """**VE-M8, isolated.** A and B agree on the artifact; the third record does not.
+    """**VE-M8, at the layer that now decides it.** A record cannot bind another artifact.
 
-    The fixture is built so both independent passes exist for the named artifact and the
-    contributing set is exact -- so the review-provenance and review-id guards both pass, and
-    the artifact-binding trigger is provably what refuses the row.
+    This test used to build a third record bound to a *different* accession's artifact and
+    then assert that the adjudication refused it. Decision 088 §4 moves the refusal one layer
+    earlier: the cross-bound review record itself is now impossible, so the fixture that used
+    to construct the defect is the thing that fails. Both facts are asserted here —
+    the review-layer refusal, and that
+    ``document_adjudicated_evidence_requires_bound_artifact`` is **kept** as the independent
+    invariant it always was, rather than deleted because it became hard to reach.
     """
     _artifact(catalog)
     _artifact(catalog, artifact_sha256=_OTHER_ARTIFACT, accession=_OTHER_ACCESSION)
-    a = _review(catalog, "review_a")
-    _span(catalog, a)
-    b = _review(catalog, "review_b")
-    _span(catalog, b)
-    third = _review(catalog, "adjudication", artifact_sha256=_OTHER_ARTIFACT)
-    _span(catalog, third)
-    with pytest.raises(sqlite3.IntegrityError, match="must bind the same artifact"):
-        _adjudicate(catalog, "amendment_purpose", review_ids=(a, b))
+    _span(catalog, _review(catalog, "review_a"))
+    _span(catalog, _review(catalog, "review_b"))
+    with pytest.raises(sqlite3.IntegrityError, match="registered to its own accession"):
+        _review(catalog, "adjudication", artifact_sha256=_OTHER_ARTIFACT)
+
+    kept = catalog.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+        "AND name = 'document_adjudicated_evidence_requires_bound_artifact'"
+    ).fetchone()[0]
+    assert kept == 1
+
+    # And the adjudication side refuses a cross-bound artifact too. Which of the two
+    # adjudication guards speaks first is SQLite's choice, so both refusals are accepted;
+    # what the test pins is that no such row is ever written.
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="registered to its own accession|must bind the same artifact|enumerate exactly",
+    ):
+        _adjudicate(catalog, "amendment_purpose", artifact_sha256=_OTHER_ARTIFACT)
+    assert catalog.execute("SELECT COUNT(*) FROM document_adjudicated_evidence").fetchone()[0] == 0
 
 
 def test_ve_m8_an_adjudication_cannot_name_an_unbound_artifact(
@@ -927,8 +947,18 @@ def test_ve_m10_the_three_epochs_of_an_accession_are_necessarily_distinct(
         )
     )
     assert len(set(epochs)) == 3
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+    # A second record for the same accession and role is refused. Since Decision 088 §3 the
+    # refusal arrives from the replacement guard, which fires before constraint checking; the
+    # UNIQUE route it protects is asserted structurally just below.
+    with pytest.raises(sqlite3.IntegrityError, match="this accession and reviewer role"):
         _review(catalog, "review_a", review_id="c" * 64, epoch="d" * 64)
+    definition = str(
+        catalog.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'document_review_records'"
+        ).fetchone()["sql"]
+    )
+    assert "UNIQUE (accession_plain, reviewer_role)" in definition
 
 
 def test_ve_m10_one_epoch_may_lawfully_review_many_accessions(
@@ -978,13 +1008,21 @@ def test_ve_m10_a_review_pass_cannot_disagree_with_its_role(
 def test_ve_m11_a_review_identity_cannot_be_rebound_to_another_artifact(
     catalog: sqlite3.Connection,
 ) -> None:
-    """**VE-M11.** Both doors: the same ``review_id``, and the same accession-and-role."""
+    """**VE-M11.** Both doors: the same ``review_id``, and the same accession-and-role.
+
+    Since Decision 088 each door is now closed twice — by the replacement guard on its unique
+    route, and by the registered-accession binding that makes the substituted artifact
+    unbindable in the first place. SQLite chooses which ``BEFORE INSERT`` trigger speaks, so
+    the assertion accepts either refusal and pins what matters: the bound record is unchanged
+    and no second record exists.
+    """
     _artifact(catalog)
     _artifact(catalog, artifact_sha256=_OTHER_ARTIFACT, accession=_OTHER_ACCESSION)
     _review(catalog, "review_a")
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+    refusal = "existing review_id|this accession and reviewer role|registered to its own accession"
+    with pytest.raises(sqlite3.IntegrityError, match=refusal):
         _review(catalog, "review_a", artifact_sha256=_OTHER_ARTIFACT)
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+    with pytest.raises(sqlite3.IntegrityError, match=refusal):
         _review(
             catalog,
             "review_a",
@@ -992,16 +1030,31 @@ def test_ve_m11_a_review_identity_cannot_be_rebound_to_another_artifact(
             review_id="c" * 64,
             epoch=_EPOCH["review_a"],
         )
+    bound = catalog.execute(
+        "SELECT review_id, artifact_sha256 FROM document_review_records"
+    ).fetchall()
+    assert [tuple(row) for row in bound] == [(_REVIEW_ID["review_a"], _ARTIFACT)]
 
 
 def test_ve_m11_an_accession_cannot_acquire_a_competing_artifact(
     catalog: sqlite3.Connection,
 ) -> None:
-    """**VE-M11.** One accession has at most one artifact per source class."""
+    """**VE-M11.** One accession has at most one artifact per source class.
+
+    The refusal now comes from the replacement guard, which fires before constraint checking
+    and therefore also covers the ``INSERT OR REPLACE`` form VE-R4 attacks. The UNIQUE route
+    it protects is asserted structurally.
+    """
     _artifact(catalog)
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+    with pytest.raises(sqlite3.IntegrityError, match="this accession and source class"):
         _artifact(catalog, artifact_sha256=_OTHER_ARTIFACT)
     assert catalog.execute("SELECT COUNT(*) FROM document_artifacts").fetchone()[0] == 1
+    definition = str(
+        catalog.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'document_artifacts'"
+        ).fetchone()["sql"]
+    )
+    assert "UNIQUE (accession_plain, source_class)" in definition
 
 
 def test_ve_m11_an_unaccepted_source_class_is_refused(catalog: sqlite3.Connection) -> None:
@@ -1588,3 +1641,428 @@ def test_the_module_vocabularies_match_the_migration_vocabularies(
         assert f"'{span_role}'" in definitions["document_review_spans"]
     for source_class in de.SOURCE_CLASSES:
         assert f"'{source_class}'" in definitions["document_artifacts"]
+
+
+# ==========================================================================
+# VE-R1 … VE-R10 — the Decision 088 correction matrix
+#
+# Each test below applies a defect the D087 independent review DEMONSTRATED against the
+# uncorrected schema, and asserts the exact condition that now kills it. The review's own
+# words are the specification: every one of these was executed and succeeded before the
+# correction, so a test that passes here is a test whose subject genuinely changed.
+#
+# The isolation discipline of the VE-M block is unchanged: each fixture is lawful in every
+# respect except the mutation, and where SQLite's unspecified BEFORE-INSERT trigger order
+# admits more than one lawful refusal, the assertion accepts exactly those and additionally
+# pins the state that must not have moved.
+# ==========================================================================
+
+
+def test_ve_r1_a_frozen_adjudicated_row_cannot_be_replaced(catalog: sqlite3.Connection) -> None:
+    """**VE-R1.** ``INSERT OR REPLACE`` cannot rewrite a frozen adjudication.
+
+    This is the defect that made the D087 review a FAIL. SQLite resolves the conflict by
+    deleting the existing row and inserting the new one, and that implicit delete fires no
+    ``BEFORE DELETE`` trigger unless ``PRAGMA recursive_triggers`` is on — which this project
+    never sets — so the immutability triggers stayed silent while the result changed.
+    """
+    _both_passes(catalog)
+    _adjudicate(catalog, "amendment_purpose")
+    with pytest.raises(sqlite3.IntegrityError, match="never replaced or re-adjudicated"):
+        _adjudicate(
+            catalog,
+            "amendment_purpose",
+            adjudicated_value="narrative_or_governance",
+            verb="INSERT OR REPLACE",
+        )
+    row = catalog.execute(
+        "SELECT adjudicated_value, evidence_level, adjudication_sha256 "
+        "FROM document_adjudicated_evidence"
+    ).fetchone()
+    assert tuple(row) == ("administrative_or_exhibit", "verified", "d" * 64)
+
+
+def test_ve_r1_a_silent_ignore_cannot_stand_in_for_a_frozen_result(
+    catalog: sqlite3.Connection,
+) -> None:
+    """**VE-R1.** ``INSERT OR IGNORE`` is refused rather than silently doing nothing.
+
+    The accepted migration-`0013` pattern refuses this too, so a caller can never believe it
+    wrote an adjudication that the database quietly discarded.
+    """
+    _both_passes(catalog)
+    _adjudicate(catalog, "amendment_purpose")
+    with pytest.raises(sqlite3.IntegrityError, match="never replaced or re-adjudicated"):
+        _adjudicate(
+            catalog,
+            "amendment_purpose",
+            adjudicated_value="narrative_or_governance",
+            verb="INSERT OR IGNORE",
+        )
+
+
+@pytest.mark.parametrize("verb", ("INSERT", "INSERT OR REPLACE", "INSERT OR IGNORE"))
+def test_ve_r2_a_review_record_cannot_be_replaced_before_adjudication(
+    catalog: sqlite3.Connection,
+    verb: str,
+) -> None:
+    """**VE-R2.** A frozen review record survives every conflict idiom, on both routes.
+
+    Pre-adjudication is the interesting window: the append-after-consumption guard is not yet
+    armed, so before Decision 088 this was the door through which a record's role, epoch,
+    model, and category could all be rewritten.
+    """
+    _artifact(catalog)
+    _review(catalog, "review_a")
+    with pytest.raises(sqlite3.IntegrityError, match="existing review_id"):
+        _review(catalog, "adjudication", review_id=_REVIEW_ID["review_a"], verb=verb)
+    with pytest.raises(sqlite3.IntegrityError, match="this accession and reviewer role"):
+        _review(catalog, "review_a", review_id="c" * 64, epoch="d" * 64, verb=verb)
+    row = catalog.execute(
+        "SELECT reviewer_role, review_epoch_id, review_pass FROM document_review_records"
+    ).fetchone()
+    assert tuple(row) == ("review_a", _EPOCH["review_a"], "A")
+
+
+@pytest.mark.parametrize("verb", ("INSERT", "INSERT OR REPLACE", "INSERT OR IGNORE"))
+def test_ve_r3_span_provenance_cannot_be_replaced_before_adjudication(
+    catalog: sqlite3.Connection,
+    verb: str,
+) -> None:
+    """**VE-R3.** A span's verbatim text and location are fixed the moment they are written."""
+    _artifact(catalog)
+    identifier = _review(catalog, "review_a")
+    _span(catalog, identifier)
+    with pytest.raises(sqlite3.IntegrityError, match="never replaced or re-inserted"):
+        _span(
+            catalog,
+            identifier,
+            ordinal=1,
+            text="an entirely different citation",
+            location="bytes:9-10",
+            verb=verb,
+        )
+    row = catalog.execute(
+        "SELECT span_text_verbatim, span_location FROM document_review_spans"
+    ).fetchone()
+    assert tuple(row) == (
+        "This Amendment is filed solely to furnish Exhibit 101.",
+        "bytes:1204-1258",
+    )
+
+
+@pytest.mark.parametrize("verb", ("INSERT", "INSERT OR REPLACE", "INSERT OR IGNORE"))
+def test_ve_r4_artifact_metadata_cannot_be_replaced(
+    catalog: sqlite3.Connection,
+    verb: str,
+) -> None:
+    """**VE-R4.** Both artifact routes hold, before any review and after adjudication.
+
+    The same-SHA case matters as much as the substitution case: rewriting ``byte_length`` or
+    the retrieval receipt under an unchanged content hash silently re-describes the artifact
+    a frozen review already cited.
+    """
+    _artifact(catalog)
+    with pytest.raises(sqlite3.IntegrityError, match="this accession and source class"):
+        _artifact(catalog, artifact_sha256=_OTHER_ARTIFACT, receipt="forged-receipt", verb=verb)
+    with pytest.raises(sqlite3.IntegrityError, match="existing artifact_sha256"):
+        _artifact(catalog, receipt="forged-receipt", verb=verb)
+
+    _span(catalog, _review(catalog, "review_a"))
+    _span(catalog, _review(catalog, "review_b"))
+    _adjudicate(catalog, "amendment_purpose")
+    with pytest.raises(sqlite3.IntegrityError, match="existing artifact_sha256"):
+        _artifact(catalog, receipt="forged-receipt", verb=verb)
+    row = catalog.execute(
+        "SELECT byte_length, retrieval_receipt_id, source_url FROM document_artifacts"
+    ).fetchone()
+    assert tuple(row) == (4096, "d081-receipt-0001", _ARTIFACT_URL)
+
+
+def test_ve_r5_a_review_cannot_bind_another_accessions_artifact(
+    catalog: sqlite3.Connection,
+) -> None:
+    """**VE-R5, isolated.** Both artifacts are lawfully registered; only the pairing is wrong.
+
+    Before Decision 088 §4 this succeeded, and a complete lifecycle for one accession could be
+    provenanced entirely to another accession's document.
+    """
+    _artifact(catalog)
+    _artifact(catalog, artifact_sha256=_OTHER_ARTIFACT, accession=_OTHER_ACCESSION)
+    with pytest.raises(sqlite3.IntegrityError, match="registered to its own accession"):
+        _review(catalog, "review_a", accession=_OTHER_ACCESSION, artifact_sha256=_ARTIFACT)
+    # The lawful pairing of the very same rows is accepted, so the guard is not simply
+    # refusing everything.
+    _review(catalog, "review_a")
+    _review(
+        catalog,
+        "review_a",
+        accession=_OTHER_ACCESSION,
+        artifact_sha256=_OTHER_ARTIFACT,
+        review_id="c" * 64,
+        epoch=_EPOCH["review_a"],
+    )
+    assert catalog.execute("SELECT COUNT(*) FROM document_review_records").fetchone()[0] == 2
+
+
+def test_ve_r5_a_review_cannot_bind_an_unregistered_artifact(
+    catalog: sqlite3.Connection,
+) -> None:
+    """**VE-R5.** An artifact that was never registered fails closed at the same guard."""
+    _artifact(catalog)
+    with pytest.raises(sqlite3.IntegrityError, match="registered to its own accession"):
+        _review(catalog, "review_a", artifact_sha256="c" * 64)
+
+
+def test_ve_r6_an_adjudication_cannot_bind_another_accessions_artifact(
+    catalog: sqlite3.Connection,
+) -> None:
+    """**VE-R6.** The adjudication half of the registered-accession invariant.
+
+    With VE-R5 in force this row is over-determined — the reviews of this accession already
+    cannot name the other artifact — so more than one guard may legitimately speak first. The
+    test pins the refusal and the empty table, and asserts that the adjudication-side guard
+    exists as its own independent invariant rather than relying on the review layer.
+    """
+    _artifact(catalog)
+    _artifact(catalog, artifact_sha256=_OTHER_ARTIFACT, accession=_OTHER_ACCESSION)
+    _span(catalog, _review(catalog, "review_a"))
+    _span(catalog, _review(catalog, "review_b"))
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="registered to its own accession|must bind the same artifact|enumerate exactly",
+    ):
+        _adjudicate(catalog, "amendment_purpose", artifact_sha256=_OTHER_ARTIFACT)
+    assert catalog.execute("SELECT COUNT(*) FROM document_adjudicated_evidence").fetchone()[0] == 0
+    present = catalog.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+        "AND name = 'document_adjudicated_evidence_binds_its_own_accession'"
+    ).fetchone()[0]
+    assert present == 1
+
+
+def test_ve_r7_agreed_cannot_rest_on_two_abstentions(catalog: sqlite3.Connection) -> None:
+    """**VE-R7.** The defect exactly as the review demonstrated it.
+
+    Both passes abstain, no span exists anywhere, and the row still claimed ``agreed`` and
+    ``verified`` — because the span-backing guard quantifies over non-abstaining records and
+    was therefore vacuously satisfied. Decision 088 §5: ``agreed`` means both passes
+    substantively asserted the adjudicated value.
+    """
+    _artifact(catalog)
+    _review(catalog, "review_a", abstained=True)
+    _review(catalog, "review_b", abstained=True)
+    with pytest.raises(
+        sqlite3.IntegrityError, match="both independent passes to be non-abstaining"
+    ):
+        _adjudicate(catalog, "amendment_purpose")
+    assert catalog.execute("SELECT COUNT(*) FROM document_adjudicated_evidence").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("abstaining", ("review_a", "review_b"))
+def test_ve_r7_agreed_cannot_rest_on_one_abstention(
+    catalog: sqlite3.Connection,
+    abstaining: str,
+) -> None:
+    """**VE-R7.** One abstention is not agreement either — that is the ``resolved`` route."""
+    _artifact(catalog)
+    for role in ("review_a", "review_b"):
+        identifier = _review(catalog, role, abstained=role == abstaining)
+        if role != abstaining:
+            _span(catalog, identifier)
+    with pytest.raises(
+        sqlite3.IntegrityError, match="both independent passes to be non-abstaining"
+    ):
+        _adjudicate(catalog, "amendment_purpose")
+
+
+def test_ve_r7_agreed_cannot_paper_over_a_disagreement(catalog: sqlite3.Connection) -> None:
+    """**VE-R7.** Two substantive passes that assert *different* values are not ``agreed``.
+
+    Both passes carry a matching ``amendment_purpose`` span, so the span-backing guard is
+    satisfied and the agreement guard is provably what refuses the row. Whichever of the two
+    asserted categories the adjudication claims, it is not what *both* passes said.
+    """
+    _artifact(catalog)
+    _span(catalog, _review(catalog, "review_a", purpose_category="administrative_or_exhibit"))
+    _span(catalog, _review(catalog, "review_b", purpose_category="narrative_or_governance"))
+    for claimed in ("administrative_or_exhibit", "narrative_or_governance"):
+        with pytest.raises(
+            sqlite3.IntegrityError, match="both independent passes to be non-abstaining"
+        ):
+            _adjudicate(catalog, "amendment_purpose", adjudicated_value=claimed)
+    # The lawful disposition of a genuine disagreement is `resolved`, with its third record.
+    third = _review(catalog, "adjudication", purpose_category="administrative_or_exhibit")
+    _span(catalog, third)
+    _adjudicate(
+        catalog,
+        "amendment_purpose",
+        agreement_state="resolved",
+        review_ids=(_REVIEW_ID["review_a"], _REVIEW_ID["review_b"], third),
+    )
+    row = catalog.execute(
+        "SELECT agreement_state, evidence_level FROM document_adjudicated_evidence"
+    ).fetchone()
+    assert tuple(row) == ("resolved", "verified")
+
+
+def test_ve_r7_a_genuinely_agreeing_pair_is_still_admitted(catalog: sqlite3.Connection) -> None:
+    """**VE-R7, the permissive direction.** The guard must not refuse real agreement.
+
+    Without this, VE-R7 would be satisfiable by a schema that had simply abolished ``agreed``.
+    """
+    _both_passes(catalog)
+    _adjudicate(catalog, "amendment_purpose")
+    _adjudicate(catalog, "explicit_original", adjudicated_value="10-K|2020-03-01")
+    states = tuple(
+        row["agreement_state"]
+        for row in catalog.execute(
+            "SELECT agreement_state FROM document_adjudicated_evidence ORDER BY evidence_kind"
+        )
+    )
+    assert states == ("agreed", "agreed")
+
+
+@pytest.mark.parametrize("state", ("conflicting", "abstained"))
+def test_ve_r8_verified_requires_an_agreed_or_resolved_outcome(
+    catalog: sqlite3.Connection,
+    state: str,
+) -> None:
+    """**VE-R8.** The dedicated negative test the CHECK never had.
+
+    The D087 review removed ``CHECK (evidence_level <> 'verified' OR agreement_state IN
+    ('agreed', 'resolved'))`` and every existing test still passed, which made a load-bearing
+    rule an unproven one. The fixture carries full spans so the span-backing trigger is
+    satisfied and the CHECK is provably what refuses the row (Decision 082 §12.6: a
+    ``conflicting`` or ``abstained`` outcome fails closed and earns nothing).
+    """
+    _both_passes(catalog)
+    with pytest.raises(sqlite3.IntegrityError, match="evidence_level <> 'verified'"):
+        _adjudicate(
+            catalog,
+            "amendment_purpose",
+            adjudicated_value=None,
+            agreement_state=state,
+            evidence_level="verified",
+        )
+    assert catalog.execute("SELECT COUNT(*) FROM document_adjudicated_evidence").fetchone()[0] == 0
+
+
+def test_ve_r9_a_verified_candidate_cannot_be_repointed_to_another_accession(
+    catalog: sqlite3.Connection,
+) -> None:
+    """**VE-R9.** The evidence-level guard follows the accession the evidence depends on.
+
+    The old trigger watched ``amendment_purpose_evidence_level`` alone, so leaving the level at
+    ``verified`` and changing ``accession_plain`` carried a verified claim — and its quota
+    credit — to an accession with no adjudicated evidence at all.
+    """
+    _both_passes(catalog)
+    _adjudicate(catalog, "amendment_purpose")
+    _candidate(catalog, purpose_level="verified", quota_eligible=1)
+    with pytest.raises(sqlite3.IntegrityError, match="requires frozen adjudicated document"):
+        catalog.execute(
+            "UPDATE pilot_candidate_accessions SET accession_plain = ?, "
+            "accession_number_dashed = ? WHERE accession_plain = ?",
+            (_OTHER_ACCESSION, f"{_OTHER_ACCESSION}-dashed", _ACCESSION),
+        )
+    row = catalog.execute(
+        "SELECT accession_plain, amendment_purpose_evidence_level, "
+        "amendment_purpose_quota_eligible FROM pilot_candidate_accessions"
+    ).fetchone()
+    assert tuple(row) == (_ACCESSION, "verified", 1)
+
+
+def test_ve_r9_lawful_candidate_writes_are_unaffected(catalog: sqlite3.Connection) -> None:
+    """**VE-R9, the permissive direction.** The added column narrows nothing else.
+
+    A verified row backed by real evidence is still writable, a non-evidence column is still
+    updatable, and a non-verified row may still move accession — the guard's ``WHEN`` clause
+    is what keeps it to the case Decision 088 §6 names.
+    """
+    _both_passes(catalog)
+    _adjudicate(catalog, "amendment_purpose")
+    _candidate(catalog, purpose_level="verified", quota_eligible=1)
+    catalog.execute("UPDATE pilot_candidate_accessions SET detail = 'a note'")
+
+    _candidate(catalog, accession=_OTHER_ACCESSION, purpose_level="unproven")
+    catalog.execute(
+        "UPDATE pilot_candidate_accessions SET accession_plain = ? WHERE accession_plain = ?",
+        ("000000000320000003", _OTHER_ACCESSION),
+    )
+    moved = catalog.execute(
+        "SELECT amendment_purpose_evidence_level FROM pilot_candidate_accessions "
+        "WHERE accession_plain = ?",
+        ("000000000320000003",),
+    ).fetchone()
+    assert moved[0] == "unproven"
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        "bytes:1a-2b",
+        "bytes:a1-2",
+        "bytes:1-b2",
+        "bytes:+1-2",
+        "bytes:1 -2",
+        "bytes:1- 2",
+        "bytes:/1-2",
+        "bytes:1.0-2",
+        "bytes:1-2-3",
+        "bytes:-1-2",
+        "bytes:1-",
+        "BYTES:1-2",
+        "bytes:1204",
+    ),
+)
+def test_ve_r10_a_malformed_byte_range_is_refused(
+    catalog: sqlite3.Connection,
+    location: str,
+) -> None:
+    """**VE-R10.** ``span_location`` is strict decimal, not merely path-free.
+
+    The original CHECK pinned only the first character of each endpoint and had to admit every
+    lowercase letter so its own ``bytes:`` prefix could pass, so ``bytes:1a-2b`` was accepted.
+    Decision 080 **AP-9** would fail such a span closed at consumption; Decision 088 §7 keeps
+    it out of the table in the first place.
+    """
+    _artifact(catalog)
+    identifier = _review(catalog, "review_a")
+    with pytest.raises(sqlite3.IntegrityError, match="span_location"):
+        _span(catalog, identifier, location=location)
+
+
+@pytest.mark.parametrize("location", ("bytes:0-1", "bytes:123-456", "bytes:1204-1258"))
+def test_ve_r10_a_canonical_byte_range_is_admitted(
+    catalog: sqlite3.Connection,
+    location: str,
+) -> None:
+    """**VE-R10, the permissive direction.** Canonical ranges, including a zero start."""
+    _artifact(catalog)
+    identifier = _review(catalog, "review_a")
+    _span(catalog, identifier, location=location)
+    assert (
+        catalog.execute("SELECT span_location FROM document_review_spans").fetchone()[0] == location
+    )
+
+
+def test_obs_1_remains_open_and_is_not_reported_as_fixed() -> None:
+    """**OBS-1 is DEFERRED, and this test says so out loud** (Decision 088 §8).
+
+    The contributing-set arithmetic still admits a non-canonical encoding of the same length
+    and quote count. That is recorded, not repaired: the authoritative membership set is
+    ``document_review_records``, the module emits canonical sorted identities, and no false
+    hash-derived membership is constructible. This test pins the *serializer's* canonical
+    behaviour and deliberately does not assert that the schema rejects the degenerate form —
+    if a later authorized stage closes OBS-1, this test is where that changes.
+    """
+    canonical = de.contributing_review_ids_json((_REVIEW_ID["review_b"], _REVIEW_ID["review_a"]))
+    assert canonical == '["' + _REVIEW_ID["review_a"] + '","' + _REVIEW_ID["review_b"] + '"]'
+    degenerate = '["' + _REVIEW_ID["review_a"] + _REVIEW_ID["review_b"] + '",""]'
+    assert len(degenerate) == len(canonical)
+    assert degenerate.count('"') == canonical.count('"')
+    # The module never emits it, which is the mitigation OBS-1 rests on.
+    assert de.contributing_review_ids_json((_REVIEW_ID["review_a"], _REVIEW_ID["review_b"])) != (
+        degenerate
+    )

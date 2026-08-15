@@ -254,15 +254,18 @@ metadata before any selection runs, per Decision 013 §2 (D2).
 
 | Concern | Where it lives |
 |---|---|
-| The four relations, their constraints, and their sixteen triggers | `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` |
+| The four relations, their constraints, and their twenty-three triggers | `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` |
 | Frozen vocabularies, the verified-applicability gate, the private-path validator, the new hash domains | `src/disclosure_drift/m3/document_evidence.py` |
 | Field-level description | [`Docs/sec_data_dictionary.md`](sec_data_dictionary.md) §15 |
 | Governing records | Decision 082 §§11–12; Decision 083 **R63**/**R64**; Decision 087 §§4–9 |
 
-**Status: schema exists, writer does not.** The relations ship **empty**. Their writer is the
-Decision 083 **R64** protocol `m3.3-document-evidence/1.0`, which is **owner accepted and EXECUTION
-DEFERRED** — Review A, Review B, and the document adjudication are all **unauthorized**, and the 108
-real Decision-081 artifacts are neither read nor stored.
+**Status: schema exists, writer does not, and the schema is not yet accepted.** The relations ship
+**empty**. Their writer is the Decision 083 **R64** protocol `m3.3-document-evidence/1.0`, which is
+**owner accepted and EXECUTION DEFERRED** — Review A, Review B, and the document adjudication are all
+**unauthorized**, and the 108 real Decision-081 artifacts are neither read nor stored. The migration
+itself **failed its first independent review** (one MAJOR, three MINOR) and was corrected under
+accepted [Decision 088](Decisions/decision_088_m3_3_d087_verified_evidence_review_corrections.md); it
+awaits a **fresh** independent acceptance rereview.
 
 **Two properties this layer is defined by.** The document bytes stay in the **private external
 evidence root** and never enter SQLite, with no governed value able to carry a filesystem path; and

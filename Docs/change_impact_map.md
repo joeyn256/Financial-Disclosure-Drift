@@ -810,7 +810,7 @@ and migrations `0001`–`0014` are byte-unchanged.
 
 | Surface touched | Change | Checks |
 |---|---|---|
-| `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` | **new** — the four relations, sixteen triggers, and the two-constraint evidence-level widening | `tests/unit/test_m3_3_verified_document_evidence.py`, `test_migration_provenance.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py` |
+| `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` | **new** — the four relations, twenty-three triggers, and the two-constraint evidence-level widening (corrected under accepted Decision 088 for M-1, MIN-1, MIN-2, MIN-3, OBS-2, and OBS-3) | `tests/unit/test_m3_3_verified_document_evidence.py`, `test_migration_provenance.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py` |
 | `src/disclosure_drift/m3/document_evidence.py` | **new** — frozen vocabularies, the verified-applicability gate, the private-path validator, and the new hash domains | `tests/unit/test_m3_3_verified_document_evidence.py` |
 | `src/disclosure_drift/m3/acquisition.py` | `FINAL_MIGRATION_VERSION` **14 → 15**, that constant and nothing else (accepted Decision 084 **R65** interpretation) | `tests/unit/test_m3_acquisition.py`, `test_m3_3_multi_registrant_correction.py` |
 | `tests/unit/test_m3_3_verified_document_evidence.py` | **new** — VE-M1…VE-M14 plus the migration-safety and identity-nonchange proofs | itself |
@@ -833,6 +833,40 @@ one document length in the reserve-bearing fixture — `selector_policy_sha256`,
 particular `candidate_tables_sha256` and `selection_result_sha256` are byte-identical. That movement
 is caused **solely by the migration chain**; **no verified evidence content exists anywhere**, which
 is the distinction Decision 087 §9 requires to be stated rather than assumed.
+
+## Decision 088 — the D087 review corrections (real impact)
+
+[Decision 088](Decisions/decision_088_m3_3_d087_verified_evidence_review_corrections.md)
+(`ACCEPTED — OWNER ADJUDICATION OF THE D087 INDEPENDENT REVIEW AND BOUNDED CORRECTION AUTHORIZATION
+2026-08-15`) adjudicates the **failed** independent review of the Decision 087 implementation and
+authorizes a bounded correction. Migration `0015` is corrected **in place**; **no migration `0016`**
+is authorized, and **no new relation, column, or evidence dimension is added**.
+
+**What it does not touch.** No research definition, quota, selector, cohort, or seed. No
+candidate-selection methodology, offline parse, reserve selector, or manifest construction. No
+network, acquisition, or transport module. `cohorts.py`, `pilot_policy.py`, `candidate_identity.py`,
+`candidate_snapshot.py`, `release/hashing.py`, `acquisition.py`, `src/disclosure_drift/m3/document_evidence.py`,
+and migrations `0001`–`0014` are **byte-unchanged**.
+
+| Surface touched | Change | Checks |
+|---|---|---|
+| `src/disclosure_drift/storage/migrations/0015_m33_verified_document_evidence.sql` | **corrected in place** — four `BEFORE INSERT` replacement guards (M-1); two registered-accession binding triggers (MIN-1); the `agreed`-consistency trigger (MIN-2); `accession_plain` added to the verified-candidate `UPDATE OF` list (MIN-3); the §1 precondition comment (OBS-2); strict decimal `span_location` (OBS-3) | `tests/unit/test_m3_3_verified_document_evidence.py`, `test_migration_provenance.py`, `test_storage_catalog.py`, `test_m23_pilot_schema.py` |
+| `tests/unit/test_m3_3_verified_document_evidence.py` | **VE-R1…VE-R10** added; four VE-M assertions repaired where the new guards changed which refusal arrives first; OBS-1 pinned as **open** | itself |
+| `tests/unit/test_m23_pilot_manifest_store.py` | the **R68** policy-chain re-baseline: `selector_policy_sha256`, `root_manifest_sha256`, `manifest_id` | itself |
+| `Docs/sec_data_dictionary.md`, `Docs/architecture_map.md`, `Docs/change_impact_map.md`, `Docs/decision_index.md`, `Docs/Decisions/decision_registry.md`, `Milestones/STATUS.md` | truthful current state, including OBS-1's open status | Markdown link-check only |
+
+**Which tests to run for it.** Exactly the Decision 087 set — the correction changes no module and
+no interface, only the migration's guards. Direct:
+`tests/unit/test_m3_3_verified_document_evidence.py`. Identity neighbour, because the migration bytes
+move the policy chain: `test_m23_pilot_manifest_store.py`.
+
+**Expected identity movement, and its exact bound.** Correcting `0015` changes its
+`checksum_sha256` (`c5328894…` → `d7f22999…`), so the accepted **R68** path moves
+`selector_policy_sha256`, `root_manifest_sha256`, and `manifest_id`. **The canonical-JSON length does
+NOT move** — it stays `275721`, because this re-baseline changes an existing block-5 row's value
+rather than adding a row. The eight components Decision 088 §11 names — including
+`candidate_tables_sha256` and `selection_result_sha256` — are **byte-identical**, and no frozen
+identity tuple is widened.
 
 ## Notes on reading this table
 

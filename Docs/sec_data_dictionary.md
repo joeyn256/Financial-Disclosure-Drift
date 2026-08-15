@@ -669,7 +669,7 @@ requires of every Milestone 3 phase — none of which has begun or is authorized
 | `0012_m23_selection_entity_reasons` | **1 pilot table + 4 triggers** | **9, 12** |
 | `0013_m23_manifest_lifecycle_guards` | **8 triggers** | **9, 13.2** |
 | `0014_m33_multi_registrant_relational_correction` | **1 census relation + 4 table rebuilds + 8 triggers** | **10, 11** (see note) |
-| `0015_m33_verified_document_evidence` | **4 evidence relations + 1 table rebuild + 16 triggers** | **15** |
+| `0015_m33_verified_document_evidence` | **4 evidence relations + 1 table rebuild + 23 triggers** | **15** |
 
 **Coverage is complete for `0001`–`0013` and `0015`.**
 
@@ -711,8 +711,8 @@ Every text column carries a shape CHECK that a filesystem path violates.
 | Table | PK | Key uniqueness / FKs | Material CHECKs | Role |
 |---|---|---|---|---|
 | `document_artifacts` | `artifact_sha256` (64-hex) | **UNIQUE (`accession_plain`,`source_class`)** — one artifact per accession per class, which is the artifact-substitution guard; idx on `accession_plain`. No FK to `census_accessions`: the D081 artifacts have no census row until **E0**, which is unauthorized | `accession_plain` is 18 digits; `source_class` ∈ {`complete_submission_text`} (Decision 080 **R45**, Decision 082 **R56**); `byte_length` > 0; `source_url` GLOB `https://www.sec.gov/Archives/*` with no space or backslash; `retrieval_receipt_id` charset excludes `/`, `\`, `:` and space; UTC timestamp shape | Binds one document artifact by content hash and public source identity |
-| `document_review_records` | `review_id` (64-hex) | **UNIQUE (`accession_plain`,`reviewer_role`)** — one record per pass per accession; FK `artifact_sha256` → `document_artifacts`; idx on (`accession_plain`,`artifact_sha256`) and on `review_epoch_id` | `reviewer_role` ∈ {`review_a`,`review_b`,`adjudication`} and must agree with `review_pass` ∈ {`A`,`B`,`ADJUDICATION`}; `protocol_version` = `m3.3-document-evidence/1.0`; `purpose_category` is Decision 014 §6's three frozen categories; `abstention_reason` is Decision 082 §12.2's four allowed abstentions and exists exactly when `abstained` = 1; an abstention asserts nothing; `original_form_asserted` ∈ {`10-K`,`10-KT`} (**X-2**/**R44**); `reviewer_model` charset excludes spaces, so **no personal name** can be recorded | One independent review pass |
-| `document_review_spans` | (`review_id`,`span_ordinal`) | FK → `document_review_records`; idx on (`review_id`,`span_role`) | `span_ordinal` ≥ 1; `span_role` ∈ {`amendment_purpose`,`original_form`,`original_filing_date`,`original_accession`}; `span_text_verbatim` non-empty; `span_location` is `bytes:START-END` into the frozen artifact — a shape no filesystem path satisfies | Exact source-span provenance (Decision 082 §12.5) |
+| `document_review_records` | `review_id` (64-hex) | **UNIQUE (`accession_plain`,`reviewer_role`)** — one record per pass per accession; FK `artifact_sha256` → `document_artifacts`, which must additionally be **registered to this review's own accession** (Decision 088 §4); idx on (`accession_plain`,`artifact_sha256`) and on `review_epoch_id` | `reviewer_role` ∈ {`review_a`,`review_b`,`adjudication`} and must agree with `review_pass` ∈ {`A`,`B`,`ADJUDICATION`}; `protocol_version` = `m3.3-document-evidence/1.0`; `purpose_category` is Decision 014 §6's three frozen categories; `abstention_reason` is Decision 082 §12.2's four allowed abstentions and exists exactly when `abstained` = 1; an abstention asserts nothing; `original_form_asserted` ∈ {`10-K`,`10-KT`} (**X-2**/**R44**); `reviewer_model` charset excludes spaces, so **no personal name** can be recorded | One independent review pass |
+| `document_review_spans` | (`review_id`,`span_ordinal`) | FK → `document_review_records`; idx on (`review_id`,`span_role`) | `span_ordinal` ≥ 1; `span_role` ∈ {`amendment_purpose`,`original_form`,`original_filing_date`,`original_accession`}; `span_text_verbatim` non-empty; `span_location` is strictly `bytes:<decimal>-<decimal>` into the frozen artifact, ASCII digits only (Decision 088 §7) — a shape no filesystem path, sign, space, or letter satisfies | Exact source-span provenance (Decision 082 §12.5) |
 | `document_adjudicated_evidence` | (`accession_plain`,`evidence_kind`) | FK `artifact_sha256` → `document_artifacts`; idx on `artifact_sha256` | **`evidence_kind` ∈ {`amendment_purpose`,`explicit_original`} — this is where R63 item C is enforced**; `agreement_state` ∈ {`agreed`,`resolved`,`conflicting`,`abstained`}; `evidence_level` ∈ {`verified`,`conflicting`,`unavailable`} and `verified` requires `agreed` or `resolved`; a value exists exactly when the outcome is `agreed` or `resolved`; per-kind value shapes; `contributing_review_ids_json` is the canonical sorted array | The frozen final adjudication result |
 
 ### 15.1 Where `verified` is authorized, and where it is not
@@ -762,14 +762,30 @@ Three roles therefore force three distinct epochs for any accession. The rule is
 
 ### 15.4 Adjudication provenance
 
-Four triggers make an adjudicated row unwritable unless its evidence is present:
+Six triggers make an adjudicated row unwritable unless its evidence is present:
 
 | Trigger | Refuses |
 |---|---|
 | `document_adjudicated_evidence_requires_bound_artifact` | an adjudication whose artifact is not the one every review of that accession bound |
+| `document_adjudicated_evidence_binds_its_own_accession` | an adjudication naming an artifact **registered to another accession** (Decision 088 §4) |
 | `document_adjudicated_evidence_requires_review_provenance` | a missing Review A or Review B; and a `resolved` outcome with no third adjudication record |
+| `document_adjudicated_evidence_agreed_requires_agreeing_passes` | an **`agreed`** outcome where either pass abstained or asserted a different value (Decision 088 §5) |
 | `document_adjudicated_evidence_review_ids_are_exact` | a contributing set that is not exactly the reviews of that accession and artifact |
 | `document_adjudicated_evidence_verified_requires_spans` | `verified` where any non-abstaining review lacks a span of the matching role (Decision 082 §12.5) |
+
+**What `agreed` means, and what it does not.** Decision 082 §12.6 defines `agreed` as A and B
+agreeing exactly, so both passes must be non-abstaining and must carry the adjudicated value — the
+purpose category, or the `<FORM>|<DATE>` pair. Without that rule the span-backing trigger above is
+**vacuous over two abstentions**, and the D087 review demonstrated exactly that: `agreed` +
+`verified` with zero spans anywhere. **Abstention is still never a negative assertion** — an
+abstention remains a recorded outcome under Decision 080 **AP-1** totality, and the `abstained`,
+`conflicting`, and `resolved` routes are unchanged. A genuine disagreement's lawful disposition is
+`resolved`, with its third adjudication record.
+
+The registered-accession invariant is enforced on **both** sides — here, and on
+`document_review_records` by `document_review_records_bind_their_own_accession`. Each does
+independent work: with the review-side guard removed, the adjudication-side guard still refuses a
+cross-bound row.
 
 The contributing set is validated by **arithmetic, not `json1`**: for `n` reviews the canonical array
 is `1 + 67n` characters with `2n` quotes, and every identity must appear inside it. The repository's
@@ -780,15 +796,25 @@ written to hold on every build that floor admits.
 
 Decision 082 §11.2: each relation is "append-only and immutable once frozen". Every row here is
 written **already frozen**, so "immutable once frozen" and "immutable" are the same rule and **no
-lifecycle transition is invented** (Decision 087 §8). `UPDATE` and `DELETE` are refused outright on
-all four relations by eight unconditional triggers, which discharges all five Decision 087 §8
-protections: a frozen review cannot be mutated, span provenance cannot be rewritten, an artifact SHA
-cannot change after review, reviewer role and epoch cannot change after freeze, and an adjudicated
-result cannot change after final freeze.
+lifecycle transition is invented** (Decision 087 §8).
 
-Two further triggers close the append-after-consumption door:
-`document_review_spans_never_appended_after_adjudication` and
-`document_review_records_never_added_after_adjudication`.
+Three mechanisms enforce it, and **all three are required**:
+
+| Mechanism | Triggers | Closes |
+|---|---|---|
+| Direct mutation refused | eight unconditional `BEFORE UPDATE` / `BEFORE DELETE` triggers, two per relation | `UPDATE` and `DELETE` on all four relations |
+| **Conflict resolution refused** | four `BEFORE INSERT` **replacement guards**, one per relation, covering **every unique route** | `INSERT OR REPLACE`, a duplicate `INSERT`, and a silent `INSERT OR IGNORE` |
+| Append-after-consumption refused | `document_review_spans_never_appended_after_adjudication` and `document_review_records_never_added_after_adjudication` | growing a review's evidentiary basis after its evidence was consumed |
+
+**Why the middle row exists.** The D087 independent review proved that the eight `UPDATE`/`DELETE`
+triggers are **necessary but not sufficient**: SQLite resolves an `INSERT OR REPLACE` conflict by
+deleting the conflicting row and inserting the new one, and that implicit delete fires no
+`BEFORE DELETE` trigger unless `PRAGMA recursive_triggers` is on — **which this project never sets**.
+A frozen adjudicated result, a review record's role and epoch, span provenance, and bound artifact
+metadata were each rewritten that way while every other protection stayed silent. Accepted migration
+`0013` met the same defect on `pilot_manifest_versions` and `pilot_selection_runs`; Decision 088 §3
+applies that accepted pattern here. Together the three mechanisms discharge all five Decision 087 §8
+protections; **no one of them does so alone**.
 
 ### 15.6 Hash domains
 
@@ -803,8 +829,28 @@ Their executable home is `src/disclosure_drift/m3/document_evidence.py`.
 widened** (accepted Decision 084 **R67**). That is why the evidence layer disturbs no accepted
 candidate, registrant, snapshot, or selection identity.
 
+### 15.7 Open observation — non-canonical contributor encodings (OBS-1)
+
+**This is recorded as open, not fixed.** `contributing_review_ids_json` is validated by arithmetic
+rather than by `json1` (§15.4), and that arithmetic admits a **non-canonical encoding** of the same
+length and quote count — for example two identities concatenated inside one pair of quotes beside an
+empty string. The D087 independent review reported it, and accepted
+[Decision 088](Decisions/decision_088_m3_3_d087_verified_evidence_review_corrections.md) §8 ruled it
+**NON-GATING and DEFERRED** on these grounds:
+
+* the **authoritative** membership set is `document_review_records`, never the JSON string;
+* `document_evidence.contributing_review_ids_json` emits canonically sorted, deduplicated,
+  hex-validated identities, so nothing in this repository produces the degenerate form;
+* **no false hash-derived membership** is constructible — a 64-hex identity cannot be smuggled in;
+* a clean fix without JSON1, under the declared SQLite 3.37 floor, may cost complexity
+  disproportionate to the current risk.
+
+**It must not be described as closed** until a future authorized record takes it up.
+
 **State class:** Operational-only (§9.1).
 
 **Future-stage boundary. Documenting this table family authorizes nothing.** Review A, Review B, the
 document adjudication, **M3.3-E0**, **M3.3-E1**, **M3.3-E2**, and **M3.4** all remain
-**UNAUTHORIZED**, and network, SEC, and HTTP authority is **NONE** at `REQUEST_CEILING = 0`.
+**UNAUTHORIZED**, and network, SEC, and HTTP authority is **NONE** at `REQUEST_CEILING = 0`. The
+schema itself is **NOT YET OWNER ACCEPTED**: it failed its first independent review, was corrected
+under Decision 088, and awaits a **fresh** independent acceptance rereview.

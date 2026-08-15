@@ -1071,10 +1071,43 @@ network, SEC, or HTTP request is made.
 | What the review may not do | **Decision 091 §9.** No self-granted verified credit, no gate closure, no E0, no candidate selection, no root approval |
 | What happens next | **Decision 091 §11** — execute the single review in a fresh Opus 5 maximum epoch, then return the frozen output to Sol/GPT |
 
-*(Current state: **the single document-evidence review is authorized and has not yet begun.**
-Review B and Claude adjudication are not required and not authorized; Sol/GPT owner adjudication is
-pending review completion; E0, E1, E2, and M3.4 remain unauthorized; network/SEC/HTTP authority is
-NONE at `REQUEST_CEILING = 0`.)*
+*(Current state: **the single document-evidence review RAN and its output is owner accepted — see
+Decision 092 below.** Review B and Claude adjudication were never required and were never executed;
+Sol/GPT owner adjudication is complete; **M3.3-E0 is now authorized** while E1, E2, and M3.4 remain
+unauthorized; network/SEC/HTTP authority is NONE at `REQUEST_CEILING = 0`.)*
+
+## Decision 092 — ACCEPTED (the evidence acceptance, the purpose gate, and E0)
+
+[Decision 092](Decisions/decision_092_m3_3_d091_evidence_owner_adjudication_and_e0_authorization.md)
+(`ACCEPTED — OWNER ADJUDICATION OF THE D091 DOCUMENT EVIDENCE, PURPOSE-GATE CLOSURE, AND M3.3-E0
+AUTHORIZATION 2026-08-15`) is the **twenty-third M3.3 record**. It accepts the frozen single-Opus
+document evidence, **closes the real amendment-purpose feasibility gate**, and **authorizes
+M3.3-E0** — the first M3.3 execution authorization since the milestone opened.
+
+**It executes nothing.** No document is re-reviewed, no evidence row is rewritten, no schema byte
+changes, E0 is **not** started by this record, and no network, SEC, or HTTP request is made.
+
+| Question | Controlling record |
+|---|---|
+| Whether the D091 review run is accepted | **Decision 092 §2 — yes.** `M3_3_DECISION_091_SINGLE_OPUS_EVIDENCE_REVIEW_OWNER_ACCEPTED` and `M3_3_REVIEW_A_DIGEST_D9C9D9C7_OWNER_ACCEPTED` at digest `d9c9d9c7…`, on 108/108 artifacts, 302 spans, and BLOCKER 0 / MAJOR 0 / MINOR 0 |
+| What became of the disclosed freeze correction | **Decision 092 §3.** The preliminary digest `f88213ca…` is an **INVALID PRELIMINARY FREEZE ATTEMPT, NEVER OWNER ACCEPTED, SUPERSEDED BEFORE STAGE ACCEPTANCE**; `d9c9d9c7…` is the sole accepted digest. Ratified as a **NONBLOCKING PROCESS DEVIATION** — no judgment, category, assertion, abstention, or span text changed. The historical disclosure is **not** deleted |
+| Which interpretive standards govern purpose | **Decision 092 §4.** **S-1** — independent co-equal purposes in different frozen categories ⇒ abstain `ambiguous_text`, with **no owner dominance rule added**. **S-2** — exhibit-only ⇒ `administrative_or_exhibit` unless the exhibit supplies or corrects substantive financial-statement, accounting, restatement, or XBRL content. **No new category is created** |
+| Whether the amendment-purpose gate closes | **Decision 092 §6 — CLOSED.** `M3_3_REAL_AMENDMENT_PURPOSE_FEASIBILITY_GATE_CLOSED`. All three frozen categories are witnessed by direct unflagged source-backed evidence, so the gate does **not** depend on the 32 high-judgment cases. **No claim is made that every amendment in the population is classifiable** |
+| What the 96 form+date assertions are, and are not | **Decision 092 §7.** **OWNER ACCEPTED AS R52-ELIGIBLE REVIEW ASSERTIONS** — not verified linkage, not `amends_original`, no quota credit. The 6 form-only partials cannot contribute under **R48** and stay partial review evidence only |
+| How form renderings normalize | **Decision 092 §8.** `Form 10KT` ⇒ `10-KT` and `Form 10–K` ⇒ `10-K` as identity-preserving typography **for this frozen evidence set only**; the informal `the Company 10-K` is accepted **case-specifically**. **No fuzzy form inference and no generic loose-text form parser is authorized** |
+| Whether exhibit-index evidence and prior-amendment references are usable | **Decision 092 §9.** The exhibit-index footnote is accepted **X-1** evidence — the protocol never required an explanatory note; a prior-amendment reference does **not** invalidate a separate original-identifying statement, and **no transitive parentage is inferred** |
+| The linkage gate | **Decision 092 §10 — still OPEN.** `M3_3_REAL_LINKED_AMENDMENT_FEASIBILITY_GATE_OPEN_PENDING_E0_R52_RESOLUTION`. D081 **M9 must not be used**, and no inference from shared CIK, shared report date, `/A` suffix, nearest prior filing, accession ordering, filing proximity, or name similarity |
+| Why E0 is authorized now | **Decision 092 §11.** The remaining linkage uncertainty is **exact catalog resolution, not source discovery**, and R52 cannot complete until the accepted E0 originals catalog exists. `M3_3_E0_OWNER_AUTHORIZED` under the **already-accepted frozen E0 scope only** — no methodology broadening, no new SEC request, no network, accepted stored M3.2 source objects only |
+| What happens after E0 | **Decision 092 §12.** A **READ-ONLY R52 resolution diagnostic** over exactly the 96 accepted assertions under the exact accepted semantics, reporting ZERO / EXACTLY_ONE / MULTIPLE plus the frozen NO_DATE state. **No verified linkage persisted, no quota credit granted**; only Sol/GPT may close the linkage gate |
+| The persistence bridge | **Decision 092 §13.** `DEFERRED_PENDING_E0_R52` — no fabricated Review B, no fabricated adjudication, migration `0015` **not** modified |
+| What happens next | **Decision 092 §16** — return to Sol/GPT; **M3.3-E0 runs in a separate session** under its accepted frozen scope, then the §12 R52 diagnostic returns to the owner |
+
+*(Current state: **this is the controlling current-state record on the amendment-purpose gate and on
+E0 authorization.** The purpose gate is **CLOSED**; the linked-amendment gate is **OPEN pending
+E0/R52**; **M3.3-E0 is AUTHORIZED and not yet started**; E1, E2, and M3.4 remain unauthorized;
+migration `0016` is not authorized; network/SEC/HTTP authority is NONE at `REQUEST_CEILING = 0` with
+new SEC requests 0. Earlier records stating the purpose gate open or E0 unauthorized state their
+position as at their own acceptance and are **not** rewritten.)*
 
 ## Deviation register — where deviations are recorded
 

@@ -1275,6 +1275,27 @@ disposition.
 *(Current state: **the one final post-D098 PRE-E0 correction is authorized and not yet
 accepted.** E0 remains operationally **HELD during correction**.)*
 
+## Decision 100 — ACCEPTED (category-A commit-before-event representability)
+
+[Decision 100](Decisions/decision_100_m3_3_commit_before_event_representability.md)
+dispositions the one residual Decision-094 §9.2 gap: a durable category-A database boundary the
+failed set was required to state and the schema forbade it from stating.
+
+| Question | Controlling answer |
+|---|---|
+| What was the gap | **Decision 100 §1, R99.** `run_offline_metadata_parse` commits one category-A plan-row boundary *per source, inside the call*, while every disposition event is appended after it returns. A failure in between left durable boundaries that the derivation dropped (it gated on the caller's in-flight interruption variable) and that a `failed` status could not state (§8.1 permits `interruption_state` only when interrupted) |
+| How is membership decided now | **Decision 100 §2, R100.** From durable evidence alone: every durable `SOURCE_DISPOSITION_RECORDED` event plus every independently observed category-A `census_plan_sources.parser_state` boundary lacking one, deduplicated toward the event. No gate on the call stack |
+| Which interruption state is used | **Decision 100 §2, R100.** The existing accepted §10.2 value `after_e0_source_commit_before_event`, derived from the resulting rows and disclosed ahead of the tail event. **No vocabulary amendment**: `INTERRUPTION_STATES_V4` and `m3/receipt.py` are unchanged |
+| When may a failed terminal state it | **Decision 100 §2, R100.** Exactly when the record carries a `ledger_event_present = false` row, which is §9.3's own mandate. With no boundary row, §8.1's "iff interrupted" rule still governs, and the validator still refuses any other value wherever a boundary row appears |
+| What about the receipt | **Decision 100 §2, R100.** Unchanged. §10.1 conditions the receipt's own field on an interrupted status, so a failed run states the window on the terminal and omits it from the receipt |
+| What else was fixed | **Decision 100 §3, R101.** The tail `INTERRUPTED` event was copied from the terminal's `failure` object, carrying `catalog_state_observed`, which §10.2's closed projection refuses — so every append was refused and swallowed and an interrupted run recorded no `INTERRUPTED` event. It is now projected to the exact key set |
+| Is anything representable but unstatable | **Decision 100 §4.** No. Rows A–F cover every lawful combination, and rows C and D hold on `failed` and `interrupted` runs alike |
+| What may the executor edit | **Decision 100 §5.** `m3/e0.py`, `test_m3_e0.py`, and the E0 execution-record spec, plus this record and its registry/index rows; nothing else |
+| What remains prohibited | **Decision 100 §8.** Private-root access, accepted-catalog migration/transition, E0, activation, linkage, bridge, `0016`, later stages, network/SEC/HTTP, push, and tag; request ceiling 0 |
+
+*(Current state: **the residual §9.2 representability gap is closed and the corrected PRE-E0 target
+awaits Sol owner acceptance.** E0 remains operationally **HELD**.)*
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

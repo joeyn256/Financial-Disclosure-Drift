@@ -3114,3 +3114,872 @@ def test_a_namespace_parent_the_operator_does_not_own_refuses(
     assert not report.passed
     assert any(expected in item for item in report.refusals), report.refusals
     assert report.facts["runs_parent"] == "unsound"
+
+
+# ==========================================================================
+# Decision 099 final review MAJOR-1: the catalog-observed failure window
+#
+# `catalog_state_observed` conditions a whole §8.1/§9.2 field group. The transition loop used
+# to claim the observation **before** the two database reads that produce that group, so a read
+# that raised left a create-once terminal declaring the claim while the group was missing --
+# which `_load_terminal` refuses. Two independently sufficient guards now close it: every
+# execute path exposes the validated complete projection before it sets the flag, and
+# `_disclose_failure` claims the observation only when that complete group is actually present.
+# ==========================================================================
+
+_CATALOG_OBSERVED_GROUP = ("applied_migrations", "post_migration_chain", "post_integrity")
+
+
+def _raise_after_first_commit(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    """Make the first post-commit catalog read raise, at exactly the vulnerable boundary."""
+    import disclosure_drift.storage.sqlite as sqlite_module
+
+    original_apply = sqlite_module.apply_migrations
+    original_target = getattr(e0, target)
+    state = {"committed": False, "fired": False}
+
+    def apply(*args: object, **kwargs: object) -> object:
+        result = original_apply(*args, **kwargs)  # type: ignore[arg-type]
+        state["committed"] = True
+        return result
+
+    def guarded(connection: sqlite3.Connection) -> object:
+        if state["committed"] and not state["fired"]:
+            state["fired"] = True
+            message = f"injected disposable-fixture {target} failure"
+            raise sqlite3.OperationalError(message)
+        return original_target(connection)
+
+    monkeypatch.setattr(sqlite_module, "apply_migrations", apply)
+    monkeypatch.setattr(e0, target, guarded)
+
+
+def _stall_the_chain_after_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a head that did not move, so the in-loop refusal fires after a real observation."""
+    import disclosure_drift.storage.sqlite as sqlite_module
+
+    original_apply = sqlite_module.apply_migrations
+    original_versions = e0.applied_versions
+    state = {"committed": False}
+
+    def apply(*args: object, **kwargs: object) -> object:
+        result = original_apply(*args, **kwargs)  # type: ignore[arg-type]
+        state["committed"] = True
+        return result
+
+    def guarded(connection: sqlite3.Connection) -> tuple[int, ...]:
+        if state["committed"]:
+            return tuple(range(1, e0.TRANSITION_SOURCE_HEAD + 1))
+        return original_versions(connection)
+
+    monkeypatch.setattr(sqlite_module, "apply_migrations", apply)
+    monkeypatch.setattr(e0, "applied_versions", guarded)
+
+
+def _failure_of(document: Mapping[str, object]) -> Mapping[str, object]:
+    failure = document["failure"]
+    assert isinstance(failure, Mapping)
+    return failure
+
+
+@pytest.mark.parametrize("target", ["applied_versions", "integrity_report"])
+def test_a_transition_catalog_read_failure_never_claims_a_catalog_observation(
+    evidence_root: Path,
+    catalog: Path,
+    bound: M32World,
+    config: _Config,
+    activated_transition: None,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    """MAJOR-1 negative controls: each formerly vulnerable read is failed independently.
+
+    The commit has happened and cannot be un-happened, but no **observation** of it exists, so
+    the record must not claim one. The production loader is the assertion: a record claiming the
+    observation without its group is refused there rather than reported field by field.
+    """
+    _raise_after_first_commit(monkeypatch, target)
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        _run_transition(evidence_root, config)
+
+    document, _ = _reopen_terminal(evidence_root, "TRANSITION")
+    assert document["status"] == "failed"
+    failure = _failure_of(document)
+    assert failure["catalog_state_observed"] is False
+    for field in _CATALOG_OBSERVED_GROUP:
+        assert field not in document, field
+    # Original failure semantics survive, and nothing invented a chain, an integrity verdict,
+    # or an applied-migration record to satisfy a claim that was never earned.
+    assert failure["reason_code"] == "PRE_E0_CATALOG_TRANSITION_FAILED"
+    assert "OperationalError" in str(failure["reason_detail"])
+
+    report = e0.transition_verify(evidence_root=evidence_root)
+    assert report.determined
+    assert not report.passed
+
+
+def test_a_refusal_after_a_complete_catalog_observation_claims_it_truthfully(
+    evidence_root: Path,
+    catalog: Path,
+    bound: M32World,
+    config: _Config,
+    activated_transition: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR-1 positive control: a genuine observation is claimed **with** its whole group."""
+    _stall_the_chain_after_commit(monkeypatch)
+    with pytest.raises(e0.PreflightRefusalError, match="did not move the chain head"):
+        _run_transition(evidence_root, config)
+
+    document, _ = _reopen_terminal(evidence_root, "TRANSITION")
+    assert document["status"] == "failed"
+    assert _failure_of(document)["catalog_state_observed"] is True
+    for field in _CATALOG_OBSERVED_GROUP:
+        assert field in document, field
+    assert document["post_migration_chain"] == list(range(1, e0.TRANSITION_SOURCE_HEAD + 1))
+    assert document["applied_migrations"] == []
+
+
+def test_the_e0_catalog_observation_has_no_nonzero_preassignment_gap(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The equivalent E0 path: the claim and its one conditioned field arrive together.
+
+    E0 reads nothing between them -- the chain it discloses was measured under its own lease
+    before the window opens -- so the first failure after the claim finds the field already
+    present. Failing the first disposition append lands exactly there.
+    """
+    _fail_the_append(monkeypatch, "SOURCE_DISPOSITION_RECORDED")
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, events = _reopen_terminal(evidence_root, "E0")
+    assert _failure_of(document)["catalog_state_observed"] is True
+    assert document["post_migration_chain"] == list(range(1, 16))
+    assert "SOURCE_DISPOSITION_RECORDED" not in events
+
+
+@pytest.mark.parametrize("standing", ["ordering_only", "derivation_only"])
+def test_either_catalog_observed_guard_alone_still_produces_a_lawful_terminal(
+    evidence_root: Path,
+    catalog: Path,
+    bound: M32World,
+    config: _Config,
+    activated_transition: None,
+    monkeypatch: pytest.MonkeyPatch,
+    standing: str,
+) -> None:
+    """Each guard closes the window on its own, which is why the mutation below removes both."""
+    if standing == "ordering_only":
+        # The disclosure-time derivation is disabled; the execute path's expose-then-claim
+        # ordering is the only thing left, and the claim it makes is true.
+        monkeypatch.setattr(
+            e0, "_CATALOG_OBSERVED_FIELDS", {"catalog_transition": (), "m3_3_e0_offline_parse": ()}
+        )
+        expect_claimed = True
+    else:
+        # The pre-fix ordering is restored -- claim first, expose later -- and the derivation
+        # alone must refuse to claim an observation whose group never arrived.
+        monkeypatch.setattr(e0, "_catalog_observation", lambda record_type, values: {})
+        expect_claimed = False
+
+    _stall_the_chain_after_commit(monkeypatch)
+    with pytest.raises(e0.PreflightRefusalError, match="did not move the chain head"):
+        _run_transition(evidence_root, config)
+
+    document, _ = _reopen_terminal(evidence_root, "TRANSITION")
+    assert _failure_of(document)["catalog_state_observed"] is expect_claimed
+    for field in _CATALOG_OBSERVED_GROUP:
+        assert (field in document) is expect_claimed, field
+
+
+def test_reintroducing_the_catalog_observed_window_makes_the_proof_fail(
+    evidence_root: Path,
+    catalog: Path,
+    bound: M32World,
+    config: _Config,
+    activated_transition: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MAJOR-1 non-vacuity control: with both guards gone, the defect returns exactly.
+
+    `_catalog_observation` exposing nothing is the pre-fix ordering -- the flag is set while the
+    group is still absent -- and the emptied conditioned-field table removes the disclosure-time
+    derivation that would otherwise decline the claim. The run then freezes a create-once record
+    its own validator refuses, which is what the reviewer reproduced.
+    """
+    monkeypatch.setattr(e0, "_catalog_observation", lambda record_type, values: {})
+    monkeypatch.setattr(
+        e0, "_CATALOG_OBSERVED_FIELDS", {"catalog_transition": (), "m3_3_e0_offline_parse": ()}
+    )
+    _stall_the_chain_after_commit(monkeypatch)
+    with pytest.raises(e0.PreflightRefusalError, match="did not move the chain head"):
+        _run_transition(evidence_root, config)
+
+    expected = r"(applied_migrations|post_migration_chain|post_integrity) is required"
+    with pytest.raises(e0.TerminalValidationError, match=expected):
+        _reopen_terminal(evidence_root, "TRANSITION")
+    assert e0.transition_verify(evidence_root=evidence_root).determined
+
+
+# ==========================================================================
+# Decision 099 final review MAJOR-2: the failed E0 source-result totality
+#
+# §9.2 fixes the failed set as "every durable event plus any independently observed category-A
+# database boundary lacking its event; no other row". A handled failure used to default it to
+# `[]` with all-zero counts even after every disposition had already become durable.
+# ==========================================================================
+
+
+def _interrupt_at_disposition(monkeypatch: pytest.MonkeyPatch, *, occurrence: int) -> None:
+    """Interrupt exactly at the Nth category-A disposition append, inside the window."""
+    original = e0.EventLedger.append
+    seen = {"count": 0}
+
+    def guarded(
+        self: e0.EventLedger,
+        kind: str,
+        details: Mapping[str, object],
+        *,
+        observed_at_utc: str,
+    ) -> Mapping[str, object]:
+        if kind == "SOURCE_DISPOSITION_RECORDED" and details["disposition"] == "E0_REQUIRED_PARSE":
+            seen["count"] += 1
+            if seen["count"] == occurrence:
+                message = "injected disposable-fixture operator interrupt"
+                raise KeyboardInterrupt(message)
+        return original(self, kind, details, observed_at_utc=observed_at_utc)
+
+    monkeypatch.setattr(e0.EventLedger, "append", guarded)
+
+
+def _details(event: Mapping[str, object]) -> Mapping[str, object]:
+    details = event["details"]
+    assert isinstance(details, Mapping)
+    return details
+
+
+def _durable_disposition_keys(evidence_root: Path) -> set[tuple[str, str]]:
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    events = e0.read_event_ledger(directory / e0.E0_EVENTS_FILENAME, kind="E0")
+    return {
+        (str(_details(event)["census_run_id"]), str(_details(event)["source_instance_id"]))
+        for event in events
+        if str(event["event_type"]) == "SOURCE_DISPOSITION_RECORDED"
+    }
+
+
+def _rows_of(document: Mapping[str, object]) -> list[Mapping[str, object]]:
+    results = document["source_results"]
+    assert isinstance(results, list)
+    rows = []
+    for row in results:
+        assert isinstance(row, Mapping)
+        rows.append(row)
+    return rows
+
+
+def _row_keys(document: Mapping[str, object]) -> list[tuple[str, str]]:
+    return [
+        (str(row["census_run_id"]), str(row["source_instance_id"])) for row in _rows_of(document)
+    ]
+
+
+def _assert_counts_reconcile(document: Mapping[str, object]) -> None:
+    """Proof F: the closed count object is reproduced from the rows, never carried beside them."""
+    rows = _rows_of(document)
+    counts = document["source_result_counts"]
+    assert isinstance(counts, Mapping)
+    disposition_total = (
+        int(counts["required_parse_count"])
+        + int(counts["accepted_unavailable_count"])
+        + int(counts["validation_or_provenance_only_count"])
+    )
+    assert disposition_total == len(rows)
+    assert int(counts["parsed_record_count"]) == sum(int(row["parsed_records"]) for row in rows)
+    assert int(counts["quarantined_record_count"]) == sum(
+        int(row["quarantined_records"]) for row in rows
+    )
+    assert int(counts["planned_source_count"]) == e0.PLANNED_SOURCE_COUNT
+
+
+def test_a_failure_after_many_durable_dispositions_reports_all_of_them(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proofs A and F: durable dispositions must not freeze as an empty set with zero counts."""
+    _fail_the_append(monkeypatch, "FULL_INDEX_OBSERVATIONS_MATERIALIZED")
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    durable = _durable_disposition_keys(evidence_root)
+    assert len(durable) == e0.PLANNED_SOURCE_COUNT
+    assert _row_keys(document) == sorted(durable)
+    assert all(row["ledger_event_present"] is True for row in _rows_of(document))
+    _assert_counts_reconcile(document)
+
+
+def test_a_failure_before_any_durable_boundary_invents_no_source_result(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proof B: absent durable evidence stays absent; it is never turned into a result.
+
+    Injected at the backup boundary, which is genuinely *before* any category-A commit. The
+    first disposition append is **not** that boundary and no longer stands in for it: accepted
+    Decision 100 established that by the time it runs every category-A plan row has already
+    committed durably, so an empty set there understates the run rather than describing it. That
+    case is now proved as row C of the representability table instead.
+    """
+    _fail_the_append(monkeypatch, "BACKUP_VERIFIED")
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    assert document["source_results"] == []
+    counts = document["source_result_counts"]
+    assert isinstance(counts, Mapping)
+    assert int(counts["required_parse_count"]) == 0
+    assert int(counts["parsed_record_count"]) == 0
+    # The plan itself is still observed truthfully; only the *results* are empty.
+    assert int(counts["planned_source_count"]) == e0.PLANNED_SOURCE_COUNT
+    # Measured, not assumed: nothing had crossed a boundary, so there was nothing to represent.
+    assert _moved_plan_rows(evidence_root) == {}
+    assert "interruption_state" not in _failure_of(document)
+
+
+def test_a_boundary_without_its_event_joins_the_failed_set_exactly_once(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proofs C and D: the union is correct, deduplicated, and never double counted."""
+    _interrupt_at_disposition(monkeypatch, occurrence=2)
+    with pytest.raises(KeyboardInterrupt, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    assert _failure_of(document)["interruption_state"] == "after_e0_source_commit_before_event"
+
+    durable = _durable_disposition_keys(evidence_root)
+    keys = _row_keys(document)
+    # Proof D: exactly one row per pair. The first category-A source is present both durably and
+    # in boundary state, and it appears once, attributed to its durable event.
+    assert len(keys) == len(set(keys))
+    assert keys == sorted(keys)
+    assert durable <= set(keys)
+    assert durable, "the interrupt left no durable disposition to corroborate"
+
+    boundary = [row for row in _rows_of(document) if row["ledger_event_present"] is False]
+    assert boundary, "the interrupt left no boundary lacking its durable event"
+    with strictly_read_only_connection(_catalog_path(evidence_root)) as connection:
+        observed = {
+            (str(row["census_run_id"]), str(row["source_instance_id"])): str(row["parser_state"])
+            for row in connection.execute(
+                "SELECT census_run_id, source_instance_id, parser_state FROM census_plan_sources"
+            ).fetchall()
+        }
+    # Proof C: every boundary row is a category-A source the catalog itself reports as moved,
+    # carrying the state the catalog reports rather than one inferred here.
+    for row in boundary:
+        key = (str(row["census_run_id"]), str(row["source_instance_id"]))
+        assert key not in durable
+        assert row["disposition"] == "E0_REQUIRED_PARSE"
+        assert observed[key] != "not_started"
+        assert row["parser_state_after"] == observed[key]
+    # No row is invented for a source that never crossed a boundary and has no durable event.
+    for key in set(observed) - set(keys):
+        assert observed[key] == "not_started"
+    _assert_counts_reconcile(document)
+
+
+def test_an_unverifiable_e0_ledger_manufactures_no_failed_set(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proof E: fail-closed wins over a manufactured set when the evidence cannot be verified."""
+    original = e0.EventLedger.append
+
+    def guarded(
+        self: e0.EventLedger,
+        kind: str,
+        details: Mapping[str, object],
+        *,
+        observed_at_utc: str,
+    ) -> Mapping[str, object]:
+        if kind == "FULL_INDEX_OBSERVATIONS_MATERIALIZED":
+            self.path.chmod(0o600)
+            with self.path.open("ab") as handle:
+                handle.write(b"not a canonical event\n")
+            message = "injected disposable-fixture FULL_INDEX append failure"
+            raise e0.E0Error(message)
+        return original(self, kind, details, observed_at_utc=observed_at_utc)
+
+    monkeypatch.setattr(e0.EventLedger, "append", guarded)
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    assert not (directory / e0.E0_TERMINAL_FILENAME).exists()
+    report = e0.e0_verify(evidence_root=evidence_root)
+    assert not report.determined
+    assert not report.passed
+
+
+@pytest.mark.parametrize("mutant", ["restore_the_empty_default", "drop_the_durable_derivation"])
+def test_removing_the_durable_failed_set_derivation_makes_the_proof_fail(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+    mutant: str,
+) -> None:
+    """The MAJOR-2 non-vacuity control: the derivation is what produces the failed set."""
+    if mutant == "restore_the_empty_default":
+        monkeypatch.setattr(
+            e0,
+            "_failed_source_results",
+            lambda *_a, **_k: ([], dict.fromkeys(e0.SOURCE_RESULT_COUNT_KEYS, 0)),
+        )
+    else:
+        monkeypatch.setattr(e0, "_failed_source_results", lambda *_a, **_k: None)
+
+    _fail_the_append(monkeypatch, "FULL_INDEX_OBSERVATIONS_MATERIALIZED")
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    if mutant == "drop_the_durable_derivation":
+        # Declining to derive is fail-closed, so no terminal survives at all.
+        assert not (directory / e0.E0_TERMINAL_FILENAME).exists()
+        return
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    # Schema-valid but untruthful: every disposition durable, none reported. This is the exact
+    # defect, so the MAJOR-2 proofs above must fail whenever this default is restored.
+    assert document["source_results"] == []
+    assert len(_durable_disposition_keys(evidence_root)) == e0.PLANNED_SOURCE_COUNT
+
+
+# ==========================================================================
+# Accepted Decision 100: the commit-before-event representability gap
+#
+# `run_offline_metadata_parse` commits one category-A plan-row boundary **per source**, inside
+# the call. The outer interruption variable only advances to
+# `after_e0_source_commit_before_event` once that call *returns*, so a failure between a source's
+# durable commit and its ledger append left the run reading `during_e0_source_parse` -- and the
+# derivation gated boundary rows on exactly that reading. §9.2 required the row; the gate dropped
+# it. Separately, §8.1 permits `interruption_state` only on an interrupted status, so even after
+# the parser returned, a *failed* run could not state the window §9.3 requires for the row.
+#
+# D100 makes the disclosure describe the actual durable boundary: membership comes from the
+# evidence, the interruption state is derived from the resulting rows, and the failure shape
+# permits that state exactly where §9.3 mandates it.
+# ==========================================================================
+
+_COMMIT_BEFORE_EVENT = "after_e0_source_commit_before_event"
+
+
+def _moved_plan_rows(evidence_root: Path) -> dict[tuple[str, str], str]:
+    """Every plan row whose ``parser_state`` has left ``not_started``, read from the catalog."""
+    with strictly_read_only_connection(_catalog_path(evidence_root)) as connection:
+        return {
+            (str(row["census_run_id"]), str(row["source_instance_id"])): str(row["parser_state"])
+            for row in connection.execute(
+                "SELECT census_run_id, source_instance_id, parser_state FROM census_plan_sources"
+            ).fetchall()
+            if str(row["parser_state"]) != "not_started"
+        }
+
+
+def _planned_dispositions(evidence_root: Path) -> dict[tuple[str, str], str]:
+    """Each planned source's R18 disposition, from the production classifier, not a guess."""
+    with strictly_read_only_connection(_catalog_path(evidence_root)) as connection:
+        observations = {item.observation_id: item for item in op.load_observations(connection)}
+        return {
+            (source.census_run_id, source.source_instance_id): op.classify_planned_source(
+                source,
+                None if source.observation_id is None else observations.get(source.observation_id),
+            )
+            for source in op.load_planned_sources(connection)
+        }
+
+
+def _fail_inside_the_parser(monkeypatch: pytest.MonkeyPatch, *, occurrence: int) -> None:
+    """Fail the Nth category-A parse, after N-1 boundaries have durably committed.
+
+    ``_parse_source`` is the accepted per-source entry point, and ``materialize_source_layer``
+    commits that source's ``census_parser_runs`` row and its ``census_plan_sources.parser_state``
+    transition before moving to the next one. Raising here therefore lands inside
+    ``run_offline_metadata_parse`` with a real durable boundary already behind it and no
+    ``SOURCE_DISPOSITION_RECORDED`` event anywhere -- the exact window D100 governs.
+    """
+    original = op._parse_source
+    seen = {"count": 0}
+
+    def guarded(connection: object, store: object, observation: object) -> object:
+        seen["count"] += 1
+        if seen["count"] == occurrence:
+            message = "injected disposable-fixture mid-parse failure"
+            raise op.OfflineParseError(message)
+        return original(connection, store, observation)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(op, "_parse_source", guarded)
+
+
+def _assert_boundary_rows_match_the_catalog(
+    document: Mapping[str, object], evidence_root: Path
+) -> list[Mapping[str, object]]:
+    """Every boundary row corresponds to a moved plan row, carrying the catalog's own state."""
+    moved = _moved_plan_rows(evidence_root)
+    durable = _durable_disposition_keys(evidence_root)
+    boundary = [row for row in _rows_of(document) if row["ledger_event_present"] is False]
+    for row in boundary:
+        key = (str(row["census_run_id"]), str(row["source_instance_id"]))
+        assert key in moved, key
+        assert key not in durable, key
+        assert row["parser_state_before"] == "not_started"
+        assert row["parser_state_after"] == moved[key]
+        assert row["disposition"] == "E0_REQUIRED_PARSE"
+    # No moved boundary is omitted, and no unmoved source is invented.
+    assert set(_row_keys(document)) == set(moved) | durable
+    return boundary
+
+
+def test_a_failure_inside_the_parser_states_its_durable_boundary(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Row D, and D100 proofs 1, 2 and 6: the durable boundary is stated, not hidden.
+
+    The run dies *inside* ``run_offline_metadata_parse``, so the outer variable still reads
+    ``during_e0_source_parse`` and the status is ``failed`` rather than ``interrupted`` -- the
+    two conditions that together made this record unstatable before. The production loader is
+    the assertion: ``_reopen_terminal`` validates, so an unlawful record fails the test here
+    rather than being asserted about field by field.
+    """
+    _fail_inside_the_parser(monkeypatch, occurrence=2)
+    with pytest.raises(op.OfflineParseError, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    # The premise, measured rather than assumed: one durable boundary, and no durable event.
+    moved = _moved_plan_rows(evidence_root)
+    assert len(moved) == 1, moved
+    assert _durable_disposition_keys(evidence_root) == set()
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    assert document["status"] == "failed"
+    failure = _failure_of(document)
+    assert failure["reason_code"] == "M3_3_E0_OFFLINE_PARSE_FAILED"
+    # Derived from the durable boundary, not from the call-stack position the run died at --
+    # which is what `reason_detail` would otherwise have reported here.
+    assert failure["interruption_state"] == _COMMIT_BEFORE_EVENT
+
+    boundary = _assert_boundary_rows_match_the_catalog(document, evidence_root)
+    assert len(_rows_of(document)) == 1
+    assert len(boundary) == 1
+    _assert_counts_reconcile(document)
+
+
+def test_a_boundary_row_carries_the_parser_run_the_catalog_recorded(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row reports the boundary's own durable output rather than defaulting it to zero."""
+    _fail_inside_the_parser(monkeypatch, occurrence=2)
+    with pytest.raises(op.OfflineParseError, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    (row,) = _rows_of(document)
+    with strictly_read_only_connection(_catalog_path(evidence_root)) as connection:
+        runs = [dict(item) for item in connection.execute("SELECT * FROM census_parser_runs")]
+    assert len(runs) == 1, runs
+    assert row["parser_run_id"] == runs[0]["parser_run_id"]
+    assert int(row["parsed_records"]) == int(runs[0]["parsed_count"])
+    assert int(row["quarantined_records"]) == int(runs[0]["quarantined_count"])
+    assert row["observation_id"] == runs[0]["source_observation_id"]
+
+
+def test_a_failure_after_the_parser_returns_states_every_boundary(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Row C: the parser returned, no event is durable yet, and the status is ``failed``.
+
+    Every category-A boundary has committed by the time the first disposition append runs, so
+    §9.2 requires all of them. Before D100 this froze an empty set, because a failed terminal
+    could not state the window §9.3 requires for the rows.
+    """
+    _fail_the_append(monkeypatch, "SOURCE_DISPOSITION_RECORDED")
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    moved = _moved_plan_rows(evidence_root)
+    assert moved, "the parser returned without committing a single boundary"
+    assert _durable_disposition_keys(evidence_root) == set()
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    assert document["status"] == "failed"
+    assert _failure_of(document)["interruption_state"] == _COMMIT_BEFORE_EVENT
+    boundary = _assert_boundary_rows_match_the_catalog(document, evidence_root)
+    assert len(boundary) == len(moved)
+    _assert_counts_reconcile(document)
+
+
+def test_a_durable_event_and_its_own_boundary_produce_exactly_one_row(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Row E, and D100 proof 3: the union deduplicates toward the durable event.
+
+    The interrupt lands in the disposition loop, so the first category-A source is present
+    **both** durably in the ledger and as a moved plan row. It must appear once, attributed to
+    its event, while the sources whose events never landed appear once as boundary rows.
+    """
+    _interrupt_at_disposition(monkeypatch, occurrence=2)
+    with pytest.raises(KeyboardInterrupt, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    durable = _durable_disposition_keys(evidence_root)
+    moved = _moved_plan_rows(evidence_root)
+    assert durable, "the interrupt left no durable disposition to corroborate"
+    # The overlap is the point: these keys are attested twice and must still be stated once.
+    # `durable` is not a subset of `moved`: category B and C also receive a disposition event,
+    # and they deliberately receive no `parser_state` transition to go with it.
+    overlap = durable & set(moved)
+    assert overlap, "the interrupt left no source attested both durably and in boundary state"
+
+    keys = _row_keys(document)
+    assert len(keys) == len(set(keys))
+    assert set(keys) == set(moved) | durable
+    for row in _rows_of(document):
+        key = (str(row["census_run_id"]), str(row["source_instance_id"]))
+        assert row["ledger_event_present"] is (key in durable), key
+    _assert_boundary_rows_match_the_catalog(document, evidence_root)
+    _assert_counts_reconcile(document)
+
+
+def test_no_non_category_a_source_gains_the_boundary_exception(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D100 proof 5: the exception reaches category A only, by the accepted write set itself.
+
+    Category B and C receive no ``census_plan_sources.parser_state`` transition, so they have no
+    database boundary that could be observed independently of their ledger event. That is
+    measured against the production classifier rather than assumed from the source ids.
+    """
+    _fail_inside_the_parser(monkeypatch, occurrence=2)
+    with pytest.raises(op.OfflineParseError, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    dispositions = _planned_dispositions(evidence_root)
+    others = {key for key, value in dispositions.items() if value != "E0_REQUIRED_PARSE"}
+    assert others, "the fixture plan holds no non-category-A source to prove the exclusion with"
+
+    moved = _moved_plan_rows(evidence_root)
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    stated = set(_row_keys(document))
+    for key in others:
+        assert key not in moved, key
+        assert key not in stated, key
+    assert all(row["disposition"] == "E0_REQUIRED_PARSE" for row in _rows_of(document))
+
+
+def test_unreadable_boundary_evidence_manufactures_no_failed_set(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Row F: unverifiable boundary evidence fails closed exactly as an unverifiable ledger does."""
+
+    def unreadable(catalog_path: Path) -> object:
+        message = "injected disposable-fixture boundary-evidence read failure"
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(e0, "_plan_boundary_evidence", unreadable)
+    _fail_inside_the_parser(monkeypatch, occurrence=2)
+    with pytest.raises(op.OfflineParseError, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    assert not (directory / e0.E0_TERMINAL_FILENAME).exists()
+    report = e0.e0_verify(evidence_root=evidence_root)
+    assert not report.determined
+    assert not report.passed
+
+
+def test_an_interrupted_run_records_its_interrupted_event(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§10.2's tail event is projected to its closed key set, so it can actually become durable.
+
+    Copying the whole failure object carried ``catalog_state_observed``, which is a terminal
+    field and not a permitted ``INTERRUPTED`` detail key. Every append was therefore refused and
+    the refusal swallowed, leaving an interrupted run with no ``INTERRUPTED`` event at all. The
+    ledger and the terminal must state one interruption state, so the event must exist to state
+    it -- which is why D100 fixes it alongside the derivation.
+    """
+    _interrupt_at_disposition(monkeypatch, occurrence=2)
+    with pytest.raises(KeyboardInterrupt, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    events = e0.read_event_ledger(directory / e0.E0_EVENTS_FILENAME, kind="E0")
+    tail = [event for event in events if str(event["event_type"]) == "INTERRUPTED"]
+    assert len(tail) == 1, [str(event["event_type"]) for event in events]
+    details = _details(tail[0])
+    assert set(details) == {"reason_code", "reason_detail", "interruption_state"}
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    # The two durable records of one run agree, which is the whole reason the state is derived
+    # before the tail event rather than after it.
+    assert details["interruption_state"] == _failure_of(document)["interruption_state"]
+    assert details["interruption_state"] == _COMMIT_BEFORE_EVENT
+
+
+def test_a_failed_run_states_no_interruption_state_without_a_boundary_row(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The widening is bounded: §8.1's rule still governs everywhere §9.3 does not override it.
+
+    A failed run with no boundary row states no interruption state, its ``FAILED`` event carries
+    only §10.2's two keys, and the receipt omits the field its own §10.1 schema conditions on an
+    interrupted status.
+    """
+    _fail_the_append(monkeypatch, "FULL_INDEX_OBSERVATIONS_MATERIALIZED")
+    with pytest.raises(e0.E0Error, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    assert document["status"] == "failed"
+    assert all(row["ledger_event_present"] is True for row in _rows_of(document))
+    assert "interruption_state" not in _failure_of(document)
+
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    events = e0.read_event_ledger(directory / e0.E0_EVENTS_FILENAME, kind="E0")
+    (tail,) = [event for event in events if str(event["event_type"]) == "FAILED"]
+    assert set(_details(tail)) == {"reason_code", "reason_detail"}
+    receipt = inspect_receipt(directory / OPERATOR_RECEIPT_FILENAME)
+    assert "interruption_state" not in receipt
+
+
+def test_a_failed_terminal_may_not_state_an_interruption_state_it_has_not_earned(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The widening cannot be borrowed: without a boundary row the §8.1 rule still refuses."""
+    _fail_inside_the_parser(monkeypatch, occurrence=2)
+    with pytest.raises(op.OfflineParseError, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    document, _ = _reopen_terminal(evidence_root, "E0")
+    stripped = dict(document)
+    stripped["source_results"] = [
+        dict(row) for row in _rows_of(document) if row["ledger_event_present"]
+    ]
+    raw_counts = document["source_result_counts"]
+    assert isinstance(raw_counts, Mapping)
+    counts = dict(raw_counts)
+    counts["required_parse_count"] = 0
+    counts["parsed_record_count"] = 0
+    counts["quarantined_record_count"] = 0
+    counts["parser_completed_count"] = 0
+    stripped["source_result_counts"] = counts
+    with pytest.raises(e0.TerminalValidationError, match="interruption_state"):
+        e0.validate_e0_terminal(stripped, event_types=frozenset({"PREFLIGHT_PASSED", "FAILED"}))
+
+
+@pytest.mark.parametrize("mutant", ["regate_on_the_outer_state", "restore_the_section_8_1_rule"])
+def test_restoring_the_pre_d100_behavior_makes_the_targeted_proof_fail(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+    mutant: str,
+) -> None:
+    """The D100 non-vacuity control: each half of the pre-D100 rule reproduces the defect.
+
+    ``regate_on_the_outer_state`` restores the removed derivation gate. Inside the parser the
+    caller's variable reads ``during_e0_source_parse``, so the gate dropped every boundary row
+    and the derivation returned the empty set -- which is exactly the value asserted below.
+    ``restore_the_section_8_1_rule`` restores "``interruption_state`` iff interrupted", leaving a
+    frozen record whose own production loader refuses it.
+    """
+    if mutant == "regate_on_the_outer_state":
+        monkeypatch.setattr(
+            e0,
+            "_failed_source_results",
+            lambda *_a, **_k: (
+                [],
+                {
+                    **dict.fromkeys(e0.SOURCE_RESULT_COUNT_KEYS, 0),
+                    "planned_source_count": e0.PLANNED_SOURCE_COUNT,
+                },
+            ),
+        )
+    else:
+        monkeypatch.setattr(e0, "_states_a_source_boundary", lambda _document: False)
+
+    _fail_inside_the_parser(monkeypatch, occurrence=2)
+    with pytest.raises(op.OfflineParseError, match="injected"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    # The durable boundary exists under either mutant; only the disclosure of it is broken.
+    assert len(_moved_plan_rows(evidence_root)) == 1
+
+    if mutant == "regate_on_the_outer_state":
+        document, _ = _reopen_terminal(evidence_root, "E0")
+        assert document["source_results"] == []
+        assert "interruption_state" not in _failure_of(document)
+        return
+    expected = r"failure carries key\(s\) \('interruption_state',\) outside its closed set"
+    with pytest.raises(e0.TerminalValidationError, match=expected):
+        _reopen_terminal(evidence_root, "E0")

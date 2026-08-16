@@ -1375,6 +1375,13 @@ _BACKUP_KEYS: Final[tuple[str, ...]] = (
     "integrity",
 )
 _LEDGER_KEYS: Final[tuple[str, ...]] = ("relative_path", "event_count", "head_event_sha256")
+#: The one §10.2 vocabulary value §9.3 names by hand: the state in which a category-A source
+#: commit is durable and its ``SOURCE_DISPOSITION_RECORDED`` event is not. It is a statement
+#: about durable evidence, not about where the process happened to be, which is why accepted
+#: Decision 100 derives it from the evidence rather than from an in-flight variable. It is
+#: referenced from :data:`~disclosure_drift.m3.receipt.INTERRUPTION_STATES_V4` and never added
+#: to it: the accepted vocabulary already represents this state and is unchanged.
+_E0_COMMIT_BEFORE_EVENT: Final[str] = "after_e0_source_commit_before_event"
 _FAILURE_KEYS: Final[tuple[str, ...]] = (
     "reason_code",
     "reason_detail",
@@ -1408,6 +1415,12 @@ SOURCE_RESULT_COUNT_KEYS: Final[tuple[str, ...]] = (
     "accession_resolution_count",
     "submissions_membership_observation_count",
     "substantive_membership_observation_count",
+)
+#: The two §9.3 aggregates a durable ``FULL_INDEX_OBSERVATIONS_MATERIALIZED`` event carries, so a
+#: failed terminal reports them from the ledger instead of defaulting them to zero.
+_FULL_INDEX_COUNT_KEYS: Final[tuple[str, ...]] = (
+    "full_index_registrant_observation_count",
+    "full_index_unbound_accession_count",
 )
 SOURCE_DISPOSITIONS: Final[tuple[str, ...]] = (
     "E0_REQUIRED_PARSE",
@@ -1534,10 +1547,39 @@ def _conditional_presence(
         raise TerminalValidationError(message)
 
 
-def _failure_shape(document: Mapping[str, object]) -> Mapping[str, object]:
-    """The §8.1 closed failure object, with ``interruption_state`` iff interrupted."""
+def _states_a_source_boundary(document: Mapping[str, object]) -> bool:
+    """Whether the record states a category-A boundary row lacking its durable event.
+
+    Read tolerantly and ahead of the closed-object checks, because it only ever *widens* what
+    the failure object may carry: a malformed ``source_results`` answers ``False`` here and is
+    then refused on its own terms below, rather than being refused for the wrong reason.
+    """
+    results = document.get("source_results")
+    if not isinstance(results, list):
+        return False
+    return any(
+        isinstance(entry, Mapping) and entry.get("ledger_event_present") is False
+        for entry in results
+    )
+
+
+def _failure_shape(
+    document: Mapping[str, object], *, boundary_disclosed: bool = False
+) -> Mapping[str, object]:
+    """The §8.1 closed failure object, with ``interruption_state`` where §8.1/§9.3 permit it.
+
+    §8.1 conditions the field on an interrupted status. §9.3 independently *requires* it, at
+    exactly ``after_e0_source_commit_before_event``, on any terminal stating a category-A row
+    without its durable event -- and accepted Decision 100 dispositions the two together, because
+    a plan-row commit inside the parser is followed by a failure at least as often as by an
+    operator interrupt. Reading §8.1 alone left that record unstatable while §9.2 required its
+    row, which is the representability gap Decision 100 closes. The widening is exactly
+    co-extensive with §9.3's mandate: with no boundary row, a failed terminal still may not carry
+    an interruption state, and :func:`validate_e0_terminal` still refuses any value but that one
+    wherever a boundary row appears.
+    """
     status = document["status"]
-    optional = ("interruption_state",) if status == "interrupted" else ()
+    optional = ("interruption_state",) if status == "interrupted" or boundary_disclosed else ()
     failure = _require_closed_object(
         "failure", document["failure"], _FAILURE_KEYS, optional=optional
     )
@@ -1559,8 +1601,14 @@ def _validate_common(
     always: Sequence[str],
     conditional: Sequence[str],
     event_types: frozenset[str],
+    boundary_disclosed: bool = False,
 ) -> tuple[str, bool]:
-    """Validate the parts both terminal schemas share; return ``(status, catalog_observed)``."""
+    """Validate the parts both terminal schemas share; return ``(status, catalog_observed)``.
+
+    ``boundary_disclosed`` carries the one §9.3 widening of the §8.1 failure shape and is
+    therefore false for a transition record, which has no ``source_results`` and no category-A
+    boundary to disclose.
+    """
     _require_closed_object(f"{record_type} terminal record", document, always, optional=conditional)
     _require_no_placeholder(document)
     if document["schema_version"] != schema_version:
@@ -1593,7 +1641,7 @@ def _validate_common(
     _conditional_presence(document, field_name="failure", required=status != "complete")
     catalog_observed = True
     if status != "complete":
-        failure = _failure_shape(document)
+        failure = _failure_shape(document, boundary_disclosed=boundary_disclosed)
         catalog_observed = bool(failure["catalog_state_observed"])
         state = failure.get("interruption_state")
         if state is not None and state not in INTERRUPTION_STATES_V4:
@@ -1726,6 +1774,7 @@ def validate_e0_terminal(document: Mapping[str, object], *, event_types: frozens
         always=_E0_ALWAYS,
         conditional=_E0_CONDITIONAL,
         event_types=event_types,
+        boundary_disclosed=_states_a_source_boundary(document),
     )
     complete = status == "complete"
     _require_chain(document["pre_migration_chain"], "pre_migration_chain")
@@ -1836,13 +1885,11 @@ def validate_e0_terminal(document: Mapping[str, object], *, event_types: frozens
         declared = _as_object(document.get("failure", {}), "failure").get("interruption_state")
         for entry in results:
             record = _as_object(entry, "source_results entry")
-            if not record["ledger_event_present"] and (
-                declared != "after_e0_source_commit_before_event"
-            ):
+            if not record["ledger_event_present"] and declared != _E0_COMMIT_BEFORE_EVENT:
                 message = (
                     "a source_results row without its durable ledger event is lawful only in "
                     "the disclosed commit-before-event window, which must be stated as the "
-                    "interruption state 'after_e0_source_commit_before_event'"
+                    f"interruption state {_E0_COMMIT_BEFORE_EVENT!r}"
                 )
                 raise TerminalValidationError(message)
 
@@ -2970,8 +3017,8 @@ def _freeze(
     )
 
 
-def _durable_event_types(path: Path, *, kind: str) -> frozenset[str] | None:
-    """The event types the ledger **durably** holds, or ``None`` if it cannot be verified.
+def _durable_events(path: Path, *, kind: str) -> tuple[Mapping[str, object], ...] | None:
+    """The events the ledger **durably** holds, or ``None`` if it cannot be verified.
 
     An absent ledger file is not an unverifiable one: it is the verified fact that no event
     became durable, and the projection below then permits no event-conditioned field at all. A
@@ -2980,12 +3027,215 @@ def _durable_event_types(path: Path, *, kind: str) -> frozenset[str] | None:
     must not manufacture a terminal record over it (accepted Decision 099 R96).
     """
     if not path.exists():
-        return frozenset()
+        return ()
     try:
-        events = read_event_ledger(path, kind=kind)
+        return read_event_ledger(path, kind=kind)
     except (E0Error, OSError):
         return None
-    return frozenset(str(event["event_type"]) for event in events)
+
+
+def _plan_boundary_evidence(
+    catalog_path: Path,
+) -> tuple[list[Mapping[str, object]], dict[str, tuple[str, int, int] | None]]:
+    """The accepted plan rows and their durable parser runs, read strictly read-only.
+
+    This is the "independently observed category-A database boundary" evidence §9.2 names: a
+    plan row whose ``parser_state`` has left ``not_started`` crossed its boundary whether or not
+    its ledger event survived, and ``census_parser_runs`` carries what that boundary produced.
+    An observation carrying more than one parser run is ambiguous evidence, so it is attributed
+    ``None`` rather than one run being guessed.
+    """
+    with _read_only(catalog_path) as connection:
+        plan_rows: list[Mapping[str, object]] = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT census_run_id, source_instance_id, source_id, observation_id, "
+                "parser_state FROM census_plan_sources"
+            ).fetchall()
+        ]
+        runs: dict[str, tuple[str, int, int] | None] = {}
+        for row in connection.execute(
+            "SELECT source_observation_id, parser_run_id, parsed_count, quarantined_count "
+            "FROM census_parser_runs"
+        ).fetchall():
+            observation = str(row["source_observation_id"])
+            runs[observation] = (
+                None
+                if observation in runs
+                else (
+                    str(row["parser_run_id"]),
+                    int(row["parsed_count"]),
+                    int(row["quarantined_count"]),
+                )
+            )
+    return plan_rows, runs
+
+
+def _failed_source_results(
+    events: Sequence[Mapping[str, object]],
+    *,
+    catalog_path: Path,
+    already_present: Mapping[tuple[str, str], int],
+) -> tuple[list[Mapping[str, object]], dict[str, int]] | None:
+    """Decision 094 §9.2's failed source-result set, derived from durable evidence.
+
+    §9.2 fixes the failed set exactly: "every durable event plus any independently observed
+    category-A database boundary lacking its event; no other row". Defaulting it to the empty
+    list therefore understates a run that recorded many durable dispositions before it failed,
+    which is the reproduced Decision-099-review MAJOR-2 defect. The set is derived here from the
+    ledger that was just read back and verified from disk, never from the parser's in-memory
+    report -- in-memory state is not evidence that anything became durable, and it never decides
+    membership. A pair present both durably and in boundary state is one row, never two.
+
+    **Accepted Decision 100.** Membership is decided by the durable evidence alone, never by the
+    caller's in-flight interruption variable. That variable names the outer call-stack position,
+    and a category-A boundary commits *inside*
+    :func:`~disclosure_drift.m3.offline_parse.run_offline_metadata_parse` -- one plan-row
+    transition per source -- so a failure between a source's commit and its ledger append leaves
+    the variable reading ``during_e0_source_parse`` while the durable boundary already exists.
+    Gating on it therefore dropped exactly the rows §9.2 requires. The state the terminal
+    discloses is now derived *from* this set instead: see :func:`_disclose_failure`.
+
+    Returns:
+        The ordered records and their closed count object, or ``None`` when the boundary
+        evidence cannot be read at all. That is the same stop condition R96 already applies to
+        an unverifiable ledger -- the surviving artifacts stay ``UNDETERMINED / NOT COMPLETE``
+        rather than carrying a set that silently understates what the run did.
+    """
+    rows: dict[tuple[str, str], dict[str, object]] = {}
+    ledger_counts: dict[str, int] = {}
+    for event in events:
+        event_type = str(event["event_type"])
+        details = _as_object(event["details"], f"{event_type} details")
+        if event_type == "FULL_INDEX_OBSERVATIONS_MATERIALIZED":
+            ledger_counts.update(
+                {key: _as_count(details[key], key) for key in _FULL_INDEX_COUNT_KEYS}
+            )
+            continue
+        if event_type == "ACCESSION_RESOLUTIONS_PERSISTED":
+            ledger_counts["accession_resolution_count"] = _as_count(
+                details["accession_resolution_count"], "accession_resolution_count"
+            )
+            continue
+        if event_type != "SOURCE_DISPOSITION_RECORDED":
+            continue
+        key = (str(details["census_run_id"]), str(details["source_instance_id"]))
+        entry: dict[str, object] = {
+            "census_run_id": key[0],
+            "source_instance_id": key[1],
+            "source_id": str(details["source_id"]),
+            "disposition": str(details["disposition"]),
+            # §9.1 refuses preflight, and the under-lease recheck refuses again, unless every
+            # accepted plan row is still `not_started`. This is therefore the state the run
+            # measured under its own lease, not a value invented at disclosure time.
+            "parser_state_before": "not_started",
+            "parser_state_after": str(details["parser_state_after"]),
+            "parsed_records": _as_count(details.get("parsed_records", 0), "parsed_records"),
+            "quarantined_records": _as_count(
+                details.get("quarantined_records", 0), "quarantined_records"
+            ),
+            # §10.2's `details` projection is closed and cannot carry `already_present`, so the
+            # §9.3 report field is filled from the run's own measurement of the row the durable
+            # event already governs. It decides no membership and overrides no durable value.
+            "already_present": int(already_present.get(key, 0)),
+            "ledger_event_present": True,
+        }
+        parser_run_id = details.get("parser_run_id")
+        if parser_run_id is not None:
+            entry["parser_run_id"] = str(parser_run_id)
+        rows[key] = entry
+
+    try:
+        plan_rows, parser_runs = _plan_boundary_evidence(catalog_path)
+    except (sqlite3.Error, OSError, E0Error):
+        return None
+
+    for row in plan_rows:
+        key = (str(row["census_run_id"]), str(row["source_instance_id"]))
+        observation_id = row["observation_id"]
+        if key in rows:
+            # Governed by its durable event already; the boundary corroborates that row rather
+            # than adding a second one for the same source.
+            if observation_id is not None:
+                rows[key]["observation_id"] = str(observation_id)
+            continue
+        if str(row["parser_state"]) == "not_started":
+            # No boundary was crossed, so there is nothing to represent and nothing is invented.
+            # §9.1 preflight and the under-lease recheck both refuse unless *every* accepted plan
+            # row is still `not_started`, so a row that has moved was moved by this run: the
+            # observation is this run's own durable evidence, not a predecessor's residue.
+            continue
+        # Only a category-A source receives a `census_plan_sources.parser_state` transition, so
+        # a moved boundary is an `E0_REQUIRED_PARSE` source by the accepted write set itself.
+        # Category B and C have no database boundary and so can never reach this branch.
+        run = parser_runs.get(str(observation_id)) if observation_id is not None else None
+        entry = {
+            "census_run_id": key[0],
+            "source_instance_id": key[1],
+            "source_id": str(row["source_id"]),
+            "disposition": "E0_REQUIRED_PARSE",
+            "parser_state_before": "not_started",
+            "parser_state_after": str(row["parser_state"]),
+            "parsed_records": 0 if run is None else run[1],
+            "quarantined_records": 0 if run is None else run[2],
+            "already_present": int(already_present.get(key, 0)),
+            "ledger_event_present": False,
+        }
+        if observation_id is not None:
+            entry["observation_id"] = str(observation_id)
+        if run is not None:
+            entry["parser_run_id"] = run[0]
+        rows[key] = entry
+
+    records: list[Mapping[str, object]] = [rows[key] for key in sorted(rows)]
+    counts = dict.fromkeys(SOURCE_RESULT_COUNT_KEYS, 0)
+    counts["planned_source_count"] = len(plan_rows)
+    counts.update(ledger_counts)
+    for record in records:
+        disposition = record["disposition"]
+        if disposition == "E0_REQUIRED_PARSE":
+            counts["required_parse_count"] += 1
+        elif disposition == "E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE":
+            counts["accepted_unavailable_count"] += 1
+        else:
+            counts["validation_or_provenance_only_count"] += 1
+        if "parser_run_id" in record:
+            state = record["parser_state_after"]
+            if state == "quarantined":
+                counts["parser_quarantined_count"] += 1
+            elif state == "failed":
+                counts["parser_failed_count"] += 1
+            else:
+                counts["parser_completed_count"] += 1
+        counts["parsed_record_count"] += _as_count(record["parsed_records"], "parsed_records")
+        counts["quarantined_record_count"] += _as_count(
+            record["quarantined_records"], "quarantined_records"
+        )
+    return records, counts
+
+
+def _catalog_observation(record_type: str, values: Mapping[str, object]) -> dict[str, object]:
+    """Validate a **complete** catalog-observed projection before it is exposed.
+
+    §8.1 and §9.2 condition a fixed field group on ``failure.catalog_state_observed``, so the
+    claim and the group must become available together. Every execute path therefore derives
+    the whole group, validates it here, exposes it, and only then sets the in-memory flag.
+    Deriving the group after the flag is what produced the reproduced failure window: a read
+    that raised in between left the claim true and the group absent.
+
+    Raises:
+        E0Error: the projection does not cover its record type's whole conditioned group.
+    """
+    missing = tuple(
+        name for name in _CATALOG_OBSERVED_FIELDS[record_type] if values.get(name) is None
+    )
+    if missing:
+        message = (
+            f"the {record_type} catalog-observed projection is incomplete: {missing}; a "
+            f"catalog observation is never claimed from a partial measurement"
+        )
+        raise E0Error(message)
+    return dict(values)
 
 
 def _project_failure_terminal(
@@ -3031,6 +3281,8 @@ def _disclose_failure(
     interruption: str | None,
     catalog_observed: bool,
     migration_chain_head: str,
+    catalog_path: Path | None = None,
+    already_present: Mapping[tuple[str, str], int] | None = None,
 ) -> None:
     """Record a failed or interrupted run truthfully, then let the exception propagate.
 
@@ -3045,6 +3297,14 @@ def _disclose_failure(
     interrupted = isinstance(exc, (KeyboardInterrupt, SystemExit))
     status = "interrupted" if interrupted else "failed"
     is_transition = record_type == "catalog_transition"
+    # An in-memory flag is not evidence either. The observation is claimed only when the
+    # **complete** field group §8.1/§9.2 condition on it is actually present, so no terminal can
+    # declare `catalog_state_observed` true while a field that claim makes mandatory is missing.
+    # A catalog read that raised before a complete governed observation existed simply does not
+    # produce a claim -- which is the truthful statement, since nothing was observed.
+    observed = catalog_observed and all(
+        name in terminal for name in _CATALOG_OBSERVED_FIELDS[record_type]
+    )
     reason_code = (
         "PRE_E0_CATALOG_TRANSITION_INTERRUPTED"
         if is_transition and interrupted
@@ -3054,43 +3314,82 @@ def _disclose_failure(
         if interrupted
         else "M3_3_E0_OFFLINE_PARSE_FAILED"
     )
+    completed = _utc_now()
+
+    # **Accepted Decision 100.** `after_e0_source_commit_before_event` names a *durable state* --
+    # "a category-A source commit is durable and its `SOURCE_DISPOSITION_RECORDED` event is not"
+    # -- and §9.3 states it in exactly those terms. It is not a call-stack position, so it is
+    # derived from the evidence rather than read off the caller's in-flight variable, which still
+    # says `during_e0_source_parse` when the failure happened between a plan-row commit inside
+    # the parser and the append that would have recorded it. The derivation runs *here*, ahead of
+    # the failure object and ahead of the tail event, so all three durable records of this run --
+    # the tail event, the receipt, and the terminal -- state one interruption state rather than
+    # two. The R96 read-back below is deliberately left where it is and is not this read.
+    derived: tuple[list[Mapping[str, object]], dict[str, int]] | None = None
+    e0_catalog = None if is_transition else catalog_path
+    if e0_catalog is not None:
+        prior = _durable_events(ledger.path, kind="E0")
+        if prior is not None:
+            derived = _failed_source_results(
+                prior,
+                catalog_path=e0_catalog,
+                already_present={} if already_present is None else already_present,
+            )
+        if derived is not None and any(not row["ledger_event_present"] for row in derived[0]):
+            interruption = _E0_COMMIT_BEFORE_EVENT
+
     # One short non-secret sentence. The exception's own text may name a path, so only its
     # class is reported -- a refusal message is not worth leaking a private root for.
     detail = f"{type(exc).__name__} at boundary {interruption or 'unknown'}"
-    completed = _utc_now()
     failure: dict[str, object] = {
         "reason_code": reason_code,
         "reason_detail": detail,
-        "catalog_state_observed": catalog_observed,
+        "catalog_state_observed": observed,
     }
-    if interrupted and interruption is not None:
+    if interruption is not None and (interrupted or interruption == _E0_COMMIT_BEFORE_EVENT):
+        # §8.1 conditions `interruption_state` on an interrupted status. §9.3 independently
+        # requires it -- at exactly this value -- whenever the record states a category-A
+        # boundary without its durable event, and that boundary is left by a *failure* just as
+        # readily as by an operator interrupt. Decision 100 dispositions the two together: an
+        # interrupted run states where it stopped, and any run disclosing a boundary row states
+        # the window that makes the row lawful. No other failed run may state one at all.
         failure["interruption_state"] = interruption
     terminal["status"] = status
     terminal["completed_at_utc"] = completed
     terminal["failure"] = failure
 
+    # §10.2 fixes the tail event's `details` at exactly these keys. `catalog_state_observed` is a
+    # terminal field and not one of them, so the failure object is *projected* rather than copied
+    # -- copying it made every `INTERRUPTED` append refuse against the closed projection, and the
+    # refusal was swallowed here, leaving an interrupted run with no INTERRUPTED event at all.
+    tail: dict[str, object] = {"reason_code": reason_code, "reason_detail": detail}
+    if interrupted:
+        tail["interruption_state"] = interruption
     with suppress(E0Error, OSError):
-        ledger.append(
-            "INTERRUPTED" if interrupted else "FAILED",
-            dict(failure) if interrupted else {"reason_code": reason_code, "reason_detail": detail},
-            observed_at_utc=completed,
-        )
+        ledger.append("INTERRUPTED" if interrupted else "FAILED", tail, observed_at_utc=completed)
 
     # Accepted Decision 099 R96. The ledger is read back and fully verified from disk before a
     # terminal is written over it, and the record's event-conditioned fields are derived from
     # the events that are actually durable there.
     kind = "TRANSITION" if is_transition else "E0"
-    durable = _durable_event_types(ledger.path, kind=kind)
-    if durable is None:
+    events = _durable_events(ledger.path, kind=kind)
+    if events is None:
         # The ledger cannot be verified, so which events are durable is unknown and no lawful
         # terminal can be projected. The surviving artifacts stay UNDETERMINED / NOT COMPLETE,
         # which is what §5.4 already requires, and the original exception still propagates.
         return
+    if e0_catalog is not None:
+        # §9.2's failed set is derived from durable evidence, never defaulted to empty. Boundary
+        # evidence that cannot be read at all is the same stop condition an unverifiable ledger
+        # already is: no set is manufactured and no terminal is written over it.
+        if derived is None:
+            return
+        terminal["source_results"], terminal["source_result_counts"] = derived
     _project_failure_terminal(
         terminal,
         record_type=record_type,
-        event_types=durable,
-        catalog_observed=catalog_observed,
+        event_types=frozenset(str(event["event_type"]) for event in events),
+        catalog_observed=observed,
     )
 
     receipt = ExecutionReceiptV4(
@@ -3105,7 +3404,11 @@ def _disclose_failure(
         completion_status=status,
         reason_code=reason_code,
         reason_detail=detail,
-        interruption_state=failure.get("interruption_state"),  # type: ignore[arg-type]
+        # §10.1 conditions the *receipt's* field on an interrupted status and refuses it
+        # otherwise, and that vocabulary is accepted and untouched here. A failed run therefore
+        # states the window on the terminal, which §9.3 governs, and omits it from the receipt,
+        # which §10.1 governs; neither record states anything untrue about the other.
+        interruption_state=interruption if interrupted else None,
         parser_versions=None if is_transition else {"offline_parse": E0_COMMAND_VERSION},
         cohort_definition_digest=None if is_transition else _cohort_digest(),
     )
@@ -3246,21 +3549,33 @@ def transition_execute(
                 # whose timestamped INSERT OR REPLACE writes would alter pre-existing rows.
                 prefix = tuple(item for item in inventory if item.version <= migration.version)
                 apply_migrations(writer.connection, prefix)
-                catalog_observed = True
+                # The commit has moved the catalog, but nothing has *observed* it yet. Both reads
+                # below go to the database and can raise, so the complete §8.1 catalog-observed
+                # projection is derived and validated first and the claim is made only after it
+                # has been exposed. Claiming first would leave a window in which a failure
+                # freezes a record declaring `catalog_state_observed` true while the three
+                # fields that claim makes mandatory are missing -- which its own loader refuses.
                 chain = applied_versions(writer.connection)
                 report = integrity_report(writer.connection)
-                # `catalog_state_observed` is now true, and §8.1 conditions these three fields on
-                # exactly that. They are recorded **before** the two refusals below, so a refusal
-                # that fires after a commit discloses the state it actually observed instead of
-                # leaving a create-once record its own validator refuses. The success path
-                # recomputes and overwrites all three from the post-loop measurement.
-                terminal["applied_migrations"] = list(applied_records)
-                terminal["post_migration_chain"] = list(chain)
-                terminal["post_integrity"] = {
-                    "quick_check": report.quick_check,
-                    "integrity_check": report.integrity_check,
-                    "foreign_key_violations": report.foreign_key_violations,
-                }
+                terminal.update(
+                    _catalog_observation(
+                        "catalog_transition",
+                        {
+                            "applied_migrations": list(applied_records),
+                            "post_migration_chain": list(chain),
+                            "post_integrity": {
+                                "quick_check": report.quick_check,
+                                "integrity_check": report.integrity_check,
+                                "foreign_key_violations": report.foreign_key_violations,
+                            },
+                        },
+                    )
+                )
+                catalog_observed = True
+                # Recorded **before** the two refusals below, so a refusal that fires after a
+                # commit discloses the state it actually observed rather than leaving a
+                # create-once record its own validator refuses. The success path recomputes and
+                # overwrites all three from the post-loop measurement.
                 if chain[-1] != migration.version:
                     message = f"applying {migration.version:04d} did not move the chain head"
                     raise PreflightRefusalError(message)
@@ -3600,6 +3915,9 @@ def e0_execute(
     catalog_observed = False
     directory: Path | None = None
     ledger: EventLedger | None = None
+    #: The one §9.3 report field §10.2's closed event projection cannot carry, kept per source
+    #: as each disposition event becomes durable so a disclosed failure can still report it.
+    already_present: dict[tuple[str, str], int] = {}
 
     with CatalogWriter(catalog_path, catalog_path.parent) as writer:
         try:
@@ -3653,16 +3971,31 @@ def e0_execute(
             )
 
             interruption = "during_e0_source_parse"
-            catalog_observed = True
             # §9.2 conditions `post_migration_chain` on `failure.catalog_state_observed`, which
-            # is now true for the whole remaining run. E0 applies no migration, so the chain the
-            # run observed under its own lease is the chain to disclose; recording it here is
-            # what makes every failure from this point on representable rather than a record its
-            # own validator refuses. The success path re-measures and overwrites it.
-            terminal["post_migration_chain"] = list(measured.applied)
+            # becomes true for the whole remaining run here. E0 applies no migration, so the
+            # chain the run observed under its own lease is the chain to disclose. The exposure
+            # precedes the claim -- the same ordering law the transition loop follows -- so
+            # there is no instant at which the claim is true and the field it makes mandatory is
+            # absent. The success path re-measures and overwrites it.
+            terminal.update(
+                _catalog_observation(
+                    "m3_3_e0_offline_parse",
+                    {"post_migration_chain": list(measured.applied)},
+                )
+            )
+            catalog_observed = True
             tree = DataTree(evidence_root if data_root is None else data_root)
             report = run_offline_metadata_parse(writer=writer, tree=tree)
 
+            # Every category-A boundary has now committed; none of their events is durable yet.
+            # §10.2 has an exact name for that window, so the state is declared here rather than
+            # left at `during_e0_source_parse`, which would be untrue. This assignment is a
+            # narrative convenience, **not** the guarantee: the call above commits one plan-row
+            # boundary per source, so a failure inside it is already in this window while this
+            # line has not run. Accepted Decision 100 therefore derives the disclosed state from
+            # the durable evidence in `_disclose_failure`, and this assignment only agrees with
+            # what that derivation independently concludes.
+            interruption = _E0_COMMIT_BEFORE_EVENT
             recorded: dict[tuple[str, str], bool] = {}
             plan_run_ids = {
                 str(row["source_instance_id"]): str(row["census_run_id"])
@@ -3685,7 +4018,9 @@ def e0_execute(
                     details["parser_run_id"] = str(outcome.parser_run_id)
                 ledger.append("SOURCE_DISPOSITION_RECORDED", details, observed_at_utc=_utc_now())
                 recorded[(run_id, outcome.source_instance_id)] = True
+                already_present[(run_id, outcome.source_instance_id)] = int(outcome.already_present)
 
+            interruption = "during_e0_full_index_observation_materialization"
             ledger.append(
                 "FULL_INDEX_OBSERVATIONS_MATERIALIZED",
                 {
@@ -3785,8 +4120,6 @@ def e0_execute(
         except BaseException as exc:
             if directory is None or ledger is None:
                 raise
-            terminal.setdefault("source_results", [])
-            terminal.setdefault("source_result_counts", dict.fromkeys(SOURCE_RESULT_COUNT_KEYS, 0))
             _disclose_failure(
                 directory=directory,
                 ledger=ledger,
@@ -3798,6 +4131,8 @@ def e0_execute(
                 interruption=interruption,
                 catalog_observed=catalog_observed,
                 migration_chain_head=f"{TRANSITION_TARGET_HEAD:04d}",
+                catalog_path=catalog_path,
+                already_present=already_present,
             )
             raise
 

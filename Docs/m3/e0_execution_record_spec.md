@@ -306,10 +306,16 @@ present:
 
 `applied_migrations`, `post_migration_chain`, and the transition's `post_integrity` stay governed by
 `failure.catalog_state_observed` exactly as before — `applied_migrations` deliberately so, since §8.1
-lets it lead the ledger by one migration inside the disclosed commit-before-event window. Each
-execute path records its catalog-observed fields at the moment that flag becomes true, so a refusal
-*after* a commit discloses the state it observed instead of leaving a record its own validator
-refuses.
+lets it lead the ledger by one migration inside the disclosed commit-before-event window.
+
+That claim is ordered and derived rather than asserted. Each execute path measures the **complete**
+catalog-observed group, validates that it covers the whole conditioned set, and exposes it *before*
+it records that a catalog observation is available — so no instant exists in which the claim is true
+and a field it makes mandatory is absent. Independently, the disclosure claims the observation only
+when that complete group is actually present on the record, so a catalog read that raised after the
+commit produces a truthful `catalog_state_observed = false` rather than a create-once record its own
+validator refuses. A refusal that fires *after* a genuine observation still discloses the state it
+observed.
 
 **If the ledger itself cannot be verified, no terminal is manufactured over it.** A truncated,
 malformed, reordered, or unchained ledger means the durable event set is unknown; the surviving
@@ -319,6 +325,52 @@ The E0 terminal additionally carries `source_results` — one closed record per 
 `(census_run_id, source_instance_id)` pair, ordered by that pair, **76/76 on a complete run** — the
 closed `source_result_counts` object, the §9.5 `association_totality`, one `table_hashes` record per
 §6 table in name order, `plan_parser_state_hash`, and `e0_catalog_state_sha256`.
+
+On a **failed or interrupted** run that set is derived from durable evidence, never defaulted to
+empty: every `SOURCE_DISPOSITION_RECORDED` event the verified ledger actually holds, plus any
+independently observed category-A `census_plan_sources.parser_state` boundary that lacks one. A pair
+present both durably and in boundary state is one row attributed to its durable event, never two,
+and `source_result_counts` is reproduced from the resulting set rather than carried beside it. When
+that boundary evidence cannot be read at all, no set is manufactured: the run stays
+`UNDETERMINED / NOT COMPLETE`, exactly as an unverifiable ledger already does.
+
+**Membership follows the durable boundary, not the call stack** (accepted **Decision 100**).
+`run_offline_metadata_parse` commits one plan-row boundary **per category-A source**, inside the
+call, and the events that record them are appended only after it returns. A failure between a
+source's commit and its append is therefore already in the commit-before-event window while the
+run's own in-flight interruption variable still reads `during_e0_source_parse`. Deciding membership
+from that variable dropped exactly the rows §9.2 requires, so the dependency is inverted: the rows
+are derived from the evidence, and the state the terminal discloses is derived from the rows.
+
+`after_e0_source_commit_before_event` is the accepted §10.2 value for that state and is used
+unchanged — the vocabulary already represents it, and Decision 100 adds nothing to it. It names a
+**durable state** — a category-A commit is durable and its event is not — rather than a position in
+the call stack, which is what makes it derivable at disclosure time. The derivation runs ahead of
+the tail `FAILED`/`INTERRUPTED` event, so the ledger event and the terminal state one interruption
+state rather than two.
+
+Its presence rule is §8.1's, widened by exactly §9.3's mandate and no further. §8.1 conditions
+`failure.interruption_state` on an interrupted status; §9.3 independently *requires* it, at exactly
+this value, on any terminal stating a category-A row without its durable event — and such a boundary
+is left by a failure at least as readily as by an operator interrupt. A terminal carrying a boundary
+row therefore states the window whatever its status; one carrying none may still state it only when
+interrupted. The receipt is untouched: §10.1 conditions its own `interruption_state` on an
+interrupted status, so a failed run states the window on the terminal and omits it from the receipt,
+and neither record says anything untrue about the other.
+
+Every lawful combination is representable, which is the property this rule exists to hold:
+
+| | Durable boundary | Durable event | Disclosed |
+|---|---|---|---|
+| A | no | no | no row; nothing is invented |
+| B | — | yes | one row, `ledger_event_present = true` |
+| C | yes, parser returned | no | one row, `ledger_event_present = false`, window stated |
+| D | yes, still inside the parser | no | identical to C; the outer variable does not govern |
+| E | yes | yes | exactly one row, attributed to the event |
+| F | unreadable ledger **or** unreadable boundary evidence | — | no terminal; `UNDETERMINED / NOT COMPLETE` |
+
+Rows C and D hold on a `failed` run and on an `interrupted` one alike. No accepted durable evidence
+is left unstatable, and no row is stated that durable evidence does not carry.
 
 `association_totality` fixes six counts at zero: `established_zero_relation_count`,
 `singleton_scalar_mismatch_count`, `multi_nonnull_scalar_count`, `orphan_relation_count`,
@@ -390,7 +442,14 @@ nothing.
 
 The interruption vocabulary is closed and is listed in
 [`execution_receipt_spec.md`](execution_receipt_spec.md) §12.2 alongside the `4.0` schema that
-carries it.
+carries it. Accepted Decision 100 changed which state a run *discloses*, never which states exist:
+the sixteen values are unchanged, and `after_e0_source_commit_before_event` is used for the state it
+already named.
+
+A tail `FAILED` or `INTERRUPTED` event is projected to §10.2's closed `details` key set rather than
+copied from the terminal's `failure` object, which carries a `catalog_state_observed` field that key
+set does not permit. Copying it made every `INTERRUPTED` append refuse against that projection, and
+the refusal was swallowed, so an interrupted run recorded no `INTERRUPTED` event at all.
 
 ## 12. What this document does not do
 

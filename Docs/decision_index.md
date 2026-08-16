@@ -1188,8 +1188,29 @@ epoch.
 | What is authorized now | **Decision 095 §§6–8, R82.** One fresh attested Opus 5 Maximum normal bounded remediation on D094 §12.1 plus the exact D095 additions; all D094 proofs plus D095 controls; one local implementation commit only after a passing final gate; no push |
 | What remains held | **Decision 095 §§9–10.** Both execute constants `None`; no accepted-catalog migration, transition, E0, linkage, bridge, `0016`, later stage, network, SEC, HTTP, push, or tag |
 
-*(Current state: **the Decision-095 remediation is the next authorized action.** E0 is
-operationally **HELD** and `REQUEST_CEILING = 0`.)*
+*(Position at D095 acceptance: its one remediation was next. That run has since stopped blocked
+with no commit; accepted Decision 096 below now controls the final correction/remediation boundary.
+E0 remains operationally **HELD**.)*
+
+## Decision 096 — ACCEPTED (final bounded PRE-E0 rehearsal correction and remediation)
+
+[Decision 096](Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md)
+(`ACCEPTED — OWNER FINAL BOUNDED CORRECTION AND SINGLE REMEDIATION AUTHORITY 2026-08-16`) is the
+**twenty-seventh M3.3 record**. It accepts no implementation bytes and changes no Decision-094/095
+production semantic.
+
+| Question | Controlling record |
+|---|---|
+| What happened to the D095 remediation | **Decision 096 §1.** Fresh actual `claude-opus-5`; blocked with no commit; ten modified tracked files plus new `m3/e0.py` preserved as unaccepted WIP. Sol/GPT reproduced 79 passed / 4 failed |
+| Where malformed full-index CIK refusal now belongs | **Decision 096 §3, R83.** At the pre-association E0 projection, not candidate derivation. Remove the stale E2 candidate-layer expectation and require a positive/adversarial `invalid_cik_rendering_count` proof in `test_m3_e0.py`, with no fallback or entity invention |
+| How the R28 mutation is attributed | **Decision 096 §4, R84.** Canonical-relation `multi_registrant` stays unchanged after a post-projection observation mutation; the bridge must fail through `candidate_accession_evidence_sha256`, with the stale attribution absent |
+| What model and effort evidence is required | **Decision 096 §5, R85.** Fresh Maximum parent dispatch plus actual `claude-opus-5` attestation. The absent CLI-visible effort flag is a disclosed, non-invalidating observability limitation and must not be fabricated |
+| What path is added | **Decision 096 §6.1, R86.** Only `src/disclosure_drift/m3/execution_rehearsal.py`; the two affected test files were already authorized. `rehearsal_snapshot.py` is not added |
+| What is authorized now | **Decision 096 §§6–7.** One final fresh bounded remediation; every remaining D094/D095 deliverable and proof; one successful `make check-fast`; one conditional local implementation commit; no push. No further autonomous remediation follows |
+| What remains held | **Decision 096 §§8–9.** Both execute constants `None`; no private-root access, accepted-catalog migration, transition, E0, linkage diagnostic, persistence bridge, `0016`, later stage, network, SEC, HTTP, push, or tag |
+
+*(Current state: **the Decision-096 final remediation is the next authorized action.** E0 is
+operationally **HELD**, `REQUEST_CEILING = 0`, and no later remediation is implicitly authorized.)*
 
 ## Deviation register — where deviations are recorded
 

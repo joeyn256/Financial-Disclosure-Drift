@@ -1,6 +1,6 @@
 # Milestones/contracts/ — purpose and structure
 
-> **CURRENT STATE, 2026-08-15 — DECISION 095 BOUNDED PRE-E0 CORRECTION IS OWNER-ACCEPTED; ONE REMEDIATION IS NEXT; E0 IS HELD.** [Decision 095](../../Docs/Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) preserves Decision 094's production rules and authorizes only its exact fixture/runtime-root/import-boundary correction plus one fresh Opus 5 Maximum remediation with both execute constants `None`. Real migration/E0 and every later or networked act remain unauthorized.
+> **CURRENT STATE, 2026-08-16 — DECISION 096 FINAL BOUNDED PRE-E0 CORRECTION IS OWNER-ACCEPTED; ONE FINAL REMEDIATION IS NEXT; E0 IS HELD.** [Decision 096](../../Docs/Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md) preserves Decisions 094–095 production rules, moves one stale malformed-full-index proof to its E0 owner, corrects the R28 evidence-digest attribution, and adds only `m3/execution_rehearsal.py` for one fresh Opus 5 Maximum final remediation. Both execute constants remain `None`; no further autonomous remediation, real migration/E0, private-root access, or later/networked act is authorized.
 
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS

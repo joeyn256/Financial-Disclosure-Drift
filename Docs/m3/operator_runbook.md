@@ -1,6 +1,6 @@
 # Milestone 3 — Mac Operator Runbook
 
-> **CURRENT OPERATOR STATE, 2026-08-15 — DO NOT RUN E0 OR THE CATALOG TRANSITION.** [Decision 095](../Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) authorizes only one bounded remediation of the Decision-094 implementation. The future `prepare-e0-catalog` and `offline-parse` execute modes must land disabled (`None`); no operator command in this runbook presently authorizes real migration, E0, linkage, later stages, or network.
+> **CURRENT OPERATOR STATE, 2026-08-16 — DO NOT RUN E0 OR THE CATALOG TRANSITION.** [Decision 096](../Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md) authorizes only one final bounded remediation of the Decision-094/095 implementation, including the relocated malformed-full-index proof and corrected R28 attribution. The future `prepare-e0-catalog` and `offline-parse` execute modes must land disabled (`None`); no private-root access or operator command in this runbook presently authorizes real migration, E0, linkage, later stages, or network, and no further autonomous remediation follows.
 
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS

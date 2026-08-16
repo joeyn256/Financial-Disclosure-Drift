@@ -1,6 +1,6 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
-> **CURRENT STATE, 2026-08-15 — DECISION 095 BOUNDED PRE-E0 CORRECTION IS OWNER-ACCEPTED; ONE REMEDIATION IS NEXT; E0 IS HELD.** [Decision 095](../Docs/Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) preserves Decision 094's transition, relation, operator, durability, recovery, and freeze contracts while authorizing only the exact fixture/runtime-root/import-boundary correction and one fresh Opus 5 Maximum remediation. Applying `0014`/`0015`, E0, linkage, bridge, `0016`, later stages, and network remain unauthorized.
+> **CURRENT STATE, 2026-08-16 — DECISION 096 FINAL BOUNDED PRE-E0 CORRECTION IS OWNER-ACCEPTED; ONE FINAL REMEDIATION IS NEXT; E0 IS HELD.** [Decision 096](../Docs/Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md) preserves Decisions 094–095 transition, relation, operator, durability, recovery, and freeze contracts; relocates one stale malformed-full-index proof to E0; corrects the R28 evidence-digest attribution; and adds only `m3/execution_rehearsal.py` for one final Opus 5 Maximum remediation. No further autonomous remediation, private-root access, applying `0014`/`0015`, E0, linkage, bridge, `0016`, later stage, or network act is authorized.
 
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS

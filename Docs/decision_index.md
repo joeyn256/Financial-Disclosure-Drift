@@ -1272,8 +1272,9 @@ disposition.
 | What happens on success | **Decision 099 §9.** Sol may owner-accept PRE-E0 if no BLOCKER/MAJOR or failed frozen proof remains, stop optimizing, and proceed to the separately governed transition/E0 sequence |
 | What remains prohibited during correction | **Decision 099 §11.** Private-root access, accepted-catalog migration/transition, E0, activation, linkage, bridge, `0016`, later stages, network/SEC/HTTP, push, and tag; request ceiling 0 |
 
-*(Current state: **the one final post-D098 PRE-E0 correction is authorized and not yet
-accepted.** E0 remains operationally **HELD during correction**.)*
+*(Current state: **the correction this record authorized was made, reviewed, and owner-accepted at
+`3e8c82d1…`** by
+[Decision 101](Decisions/decision_101_m3_3_d100_owner_acceptance_and_transition_e0_authorization.md).)*
 
 ## Decision 100 — ACCEPTED (category-A commit-before-event representability)
 
@@ -1294,7 +1295,27 @@ failed set was required to state and the schema forbade it from stating.
 | What remains prohibited | **Decision 100 §8.** Private-root access, accepted-catalog migration/transition, E0, activation, linkage, bridge, `0016`, later stages, network/SEC/HTTP, push, and tag; request ceiling 0 |
 
 *(Current state: **the residual §9.2 representability gap is closed and the corrected PRE-E0 target
-awaits Sol owner acceptance.** E0 remains operationally **HELD**.)*
+is owner-accepted** by
+[Decision 101](Decisions/decision_101_m3_3_d100_owner_acceptance_and_transition_e0_authorization.md).)*
+
+## Decision 101 — ACCEPTED (D100 owner acceptance, and transition/E0 authority)
+
+[Decision 101](Decisions/decision_101_m3_3_d100_owner_acceptance_and_transition_e0_authorization.md)
+closes the PRE-E0 remediation chain and issues the two execution instruments Decision 094 §12.4
+reserved for a later exact owner act.
+
+| Question | Controlling answer |
+|---|---|
+| Is the PRE-E0 implementation accepted | **Decision 101 §1.** Yes — `M3_3_D100_PRE_E0_IMPLEMENTATION_OWNER_ACCEPTED` at implementation `3e8c82d1…`, tree `67564d3f…`, zero BLOCKER and zero MAJOR, on Sol's direct Decision 099 §9 review. The chain is **CLOSED**; no further PRE-E0 review, optimization, or re-run of the accepted validation evidence precedes execution |
+| What happened to the review's MINORs | **Decision 101 §§2–4.** **R102** ratifies the catalog-observed claim/exposure correction as valid D099-R96-preserving work needing no further code change; **R103** defers the failure-only aggregate limitation; **R104** defers the interruption-state regression test. Neither deferral delays execution |
+| How must a zeroed aggregate be read | **Decision 101 §3, R103.** On a **failed or interrupted** terminal, `submissions_membership_observation_count` and `substantive_membership_observation_count` are never authoritative measured values — the durable `source_results`, event ledger, catalog state, and `association_totality` are. On a **COMPLETE** run the limitation does not apply at all |
+| Is the catalog transition authorized | **Decision 101 §7.** Yes — the exact `0013 -> 0014 -> 0015` transition through the accepted operator surface, enabled by a constant-only activation of `PRE_E0_CATALOG_TRANSITION_AUTHORITY`. Every Decision 094 §5.2 predicate and the under-lease recheck are required; migration `0016` is never selected |
+| Is M3.3-E0 authorized | **Decision 101 §8.** Yes, **conditionally** — one invocation, if and only if the transition completes and verifies, enabled by its own constant-only activation of `M3_3_E0_EXECUTION_AUTHORITY`. Every Decision 091–100 evidence, relation, no-fallback, projection, provenance, and identity rule is preserved |
+| What is published, and when | **Decision 101 §§5–6.** One ordinary push of `main` to `origin/main` **before** the private catalog is touched; private-root access only afterwards, resolved through the accepted mechanism and never disclosed. No force push, rebase, amend, or tag |
+| Where does the sequence stop | **Decision 101 §9.** After verified E0. No migration `0016`, persistence bridge, E1, E2, or M3.4. The read-only R52 linkage diagnostic may run only under unambiguous existing authority, and its results never become a new owner ruling |
+
+*(Current state: **the PRE-E0 chain is closed and execution is authorized.** Network, SEC, and HTTP
+authority remain **NONE** at request ceiling **0** throughout.)*
 
 ## Deviation register — where deviations are recorded
 

@@ -157,7 +157,9 @@ field, and no path-discovery rule; the catalog is always exactly this path benea
 resolved private root. It is also not permission to edit the acquisition constant.
 """
 
-PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = None
+PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = (
+    "M3_3_D101_PRE_E0_CATALOG_TRANSITION_AUTHORIZED"
+)
 """The governed token authorizing one real ``0013 -> 0014 -> 0015`` transition.
 
 ``None`` means the transition ``execute`` mode is **not enabled** and returns exit ``3``

@@ -5021,12 +5021,27 @@ def test_a_reconciliation_never_checkpoints_a_pending_write_ahead_log(
 # Accepted Decision 094 §7 — the two PRE-E0 operator surfaces
 #
 # These drive the real CLI as a subprocess with every `DISCLOSURE_DRIFT_*` variable
-# stripped, so the operator's own private root is never read, resolved, or named. Both
-# `execute` modes must return exit 3 while their source-bound activation constants are
-# `None`, and nothing any mode prints may carry an absolute path or an SEC identity.
+# stripped, so the operator's own private root is never read, resolved, or named. An
+# `execute` mode must return exit 3 while its source-bound activation constant is `None`,
+# and nothing any mode prints may carry an absolute path or an SEC identity.
+#
+# Accepted Decision 101 §7 activated the transition constant; §8 governs the E0 constant
+# separately. `_EXECUTE_ENABLED` is therefore read from the shipped module rather than
+# hardcoded, so these tests restate themselves against whatever the governing record has
+# activated instead of going stale or vacuous the next time one changes.
 # --------------------------------------------------------------------------- #
 _PRE_E0_COMMANDS = ("prepare-e0-catalog", "offline-parse")
 EXIT_STAGE_NOT_ENABLED = 3
+
+
+def _execute_enabled() -> Mapping[str, bool]:
+    """Which PRE-E0 `execute` modes the shipped constants currently enable."""
+    from disclosure_drift.m3 import e0
+
+    return {
+        "prepare-e0-catalog": e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY is not None,
+        "offline-parse": e0.M3_3_E0_EXECUTION_AUTHORITY is not None,
+    }
 
 
 def test_both_pre_e0_commands_are_registered(repo_root: Path) -> None:
@@ -5069,11 +5084,21 @@ def test_a_pre_e0_command_takes_only_config_and_mode(repo_root: Path, command: s
 def test_execute_is_not_enabled_by_the_current_boundary(
     repo_root: Path, shipped_config: Path, command: str
 ) -> None:
-    """Decision 094 §7.2: exit ``3``, with no runtime root set and none consulted."""
-    result = _run(["m3", command, "--config", str(shipped_config), "--mode", "execute"], repo_root)
+    """Decision 094 §7.2, restated per Decision 101 §7 against the activated state.
 
-    assert result.returncode == EXIT_STAGE_NOT_ENABLED, result.stdout + result.stderr
+    A command whose constant is still ``None`` exits ``3`` and consults no runtime root. A
+    command its own instrument has activated passes that check and is then refused by the
+    **next** gate — here, with no variable set, root resolution itself at exit ``1``. That is
+    the property either way: activation is necessary and never sufficient.
+    """
+    result = _run(["m3", command, "--config", str(shipped_config), "--mode", "execute"], repo_root)
     combined = result.stdout + result.stderr
+
+    if _execute_enabled()[command]:
+        assert result.returncode == EXIT_CONFIG_ERROR, combined
+        assert "is not set" in combined
+        return
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED, combined
     assert "is None" in combined
     assert "not enabled" in combined
 
@@ -5082,14 +5107,25 @@ def test_execute_is_not_enabled_by_the_current_boundary(
 def test_execute_stays_disabled_even_with_a_runtime_root_present(
     repo_root: Path, shipped_config: Path, evidence_root: Path, command: str
 ) -> None:
-    """§7.2: no environment value can substitute for the source-bound constant."""
+    """§7.2, restated per Decision 101 §7: an environment value is never authority.
+
+    Disabled, the answer is exit ``3`` whatever the environment holds. Activated, the
+    environment value still buys nothing: the frozen predicates are measured against that
+    root, refuse it at exit ``4``, and leave no run namespace behind — which is the same
+    claim from the other side.
+    """
     result = _run(
         ["m3", command, "--config", str(shipped_config), "--mode", "execute"],
         repo_root,
         env={"DISCLOSURE_DRIFT_EVIDENCE_ROOT": str(evidence_root)},
     )
+    combined = result.stdout + result.stderr
 
-    assert result.returncode == EXIT_STAGE_NOT_ENABLED, result.stdout + result.stderr
+    if _execute_enabled()[command]:
+        assert result.returncode == EXIT_GATE_FAILURE, combined
+        assert not (evidence_root / "runs").exists()
+        return
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED, combined
 
 
 @pytest.mark.parametrize("command", _PRE_E0_COMMANDS)

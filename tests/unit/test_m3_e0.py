@@ -9,15 +9,18 @@ directory.
 Two conventions carry most of the weight, and both are deliberate.
 
 **Test-scoped activation.** :data:`~disclosure_drift.m3.e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY`
-and :data:`~disclosure_drift.m3.e0.M3_3_E0_EXECUTION_AUTHORITY` ship as ``None``, so the two
-``execute`` state machines are unreachable in the shipped source — which is exactly what
-``test_both_activation_constants_are_none_in_the_shipped_source`` and its neighbours assert
-against the *file*, not against a runtime value. Decision 094 §12.3 items 1-2 and 8-10
-nonetheless require those machines to be proved non-vacuously, so the tests that exercise them
-override the module attribute for the duration of one test. That is a harness override of an
-in-memory constant against a disposable catalog; it activates nothing, it changes no shipped
-byte, and it is the only mechanism by which "the code exists and is correct but is disabled"
-can be a checked claim rather than an assertion.
+and :data:`~disclosure_drift.m3.e0.M3_3_E0_EXECUTION_AUTHORITY` gate the two ``execute`` state
+machines, and each carries exactly the value its governing record gives it — which is what
+``test_the_shipped_activation_constants_match_the_governing_record`` asserts against the *file*,
+not against a runtime value. Accepted Decision 101 §7 activated the transition constant to its
+governed token; the E0 constant is a separate owner act and remains ``None`` until its own
+instrument lands. Decision 094 §12.3 items 1-2 and 8-10 require both machines to be proved
+non-vacuously whatever the shipped values are, so a test that needs a machine reachable
+overrides the attribute for the duration of one test, and a test about the gate itself disables
+it the same way. That is a harness override of an in-memory constant against a disposable
+catalog; it changes no shipped byte, and it is the only mechanism by which "this machine is
+correct" and "this machine is unreachable when its constant is ``None``" can both be checked
+claims rather than assertions.
 
 **Fail-closed reading.** Where a test asserts an absence — no namespace, no lease, no page, no
 invented entity — it measures the absence directly rather than trusting a return value.
@@ -498,37 +501,56 @@ def _environ(root: Path) -> Mapping[str, str]:
 
 
 # ==========================================================================
-# Family 13 + Decision 096 §6.2: both constants disabled, both modes exit 3
+# Family 13 + Decision 096 §6.2: a disabled constant makes its mode exit 3
 # ==========================================================================
 
 
-def test_both_activation_constants_are_none_in_the_shipped_source() -> None:
-    """§7.2, and Decision 096 §6.2: the shipped literals, asserted against the file.
+def test_the_shipped_activation_constants_match_the_governing_record() -> None:
+    """§7.2, Decision 096 §6.2, and accepted Decision 101 §7: the shipped literals.
 
     The runtime attribute is asserted too, but the **source** assertion is the load-bearing
     one: a runtime check alone would pass against a module some other test had already
     overridden, and this is the one property no test may leave ambiguous.
+
+    Decision 101 §7 activated the transition constant to its governed token. The E0 constant
+    is a separate owner act under §8 and remains ``None`` here, which is exactly the
+    independence §7.2 requires: transition activation cannot enable E0.
     """
-    assert e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY is None
+    governed_transition_value = "M3_3_D101_PRE_E0_CATALOG_TRANSITION_AUTHORIZED"
+    assert governed_transition_value == e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY
     assert e0.M3_3_E0_EXECUTION_AUTHORITY is None
     source = Path(e0.__file__).read_text(encoding="utf-8")
-    assert "PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = None" in source
+    assert f'"{governed_transition_value}"' in source
     assert "M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None" in source
 
 
 @pytest.mark.parametrize(
-    "runner",
-    [e0.run_prepare_e0_catalog_command, e0.run_offline_parse_command],
+    ("runner", "constant"),
+    [
+        (e0.run_prepare_e0_catalog_command, "PRE_E0_CATALOG_TRANSITION_AUTHORITY"),
+        (e0.run_offline_parse_command, "M3_3_E0_EXECUTION_AUTHORITY"),
+    ],
 )
 def test_execute_returns_exit_three_whatever_the_environment_holds(
-    runner: object, evidence_root: Path, catalog: Path, config: _Config, tmp_path: Path
+    runner: object,
+    constant: str,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    catalog: Path,
+    config: _Config,
+    tmp_path: Path,
 ) -> None:
     """§7.2: no environment value, catalog state, receipt, namespace, or flag substitutes.
 
     The same refusal is required with the runtime root present and absent, with the catalog
     at its lawful head and at another, and with a namespace already on disk — because each of
     those is a thing an operator might reasonably expect to change the answer, and none may.
+
+    The stage's own constant is disabled here rather than assumed: the claim under test is
+    that the constant is the *sole* gate, which has to hold whatever value the shipped source
+    currently carries.
     """
+    monkeypatch.setattr(e0, constant, None)
     namespace = e0.runs_directory(evidence_root) / e0.TRANSITION_RUN_NAMESPACE
     namespace.mkdir(parents=True)
     for environ in (_environ(evidence_root), {}, {EVIDENCE_ROOT_ENV: ""}):
@@ -543,9 +565,18 @@ def test_execute_returns_exit_three_whatever_the_environment_holds(
 
 
 def test_a_passing_preflight_does_not_enable_execute(
-    evidence_root: Path, bound: M32World, config: _Config, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_root: Path,
+    bound: M32World,
+    config: _Config,
+    tmp_path: Path,
 ) -> None:
-    """§7.2: a preflight result is a measurement, never an authorization."""
+    """§7.2: a preflight result is a measurement, never an authorization.
+
+    The constant is disabled here for the same reason as its neighbour above: the property is
+    that a passing preflight never substitutes for the gate, whatever the gate currently says.
+    """
+    monkeypatch.setattr(e0, "PRE_E0_CATALOG_TRANSITION_AUTHORITY", None)
     report = e0.transition_preflight(evidence_root=evidence_root, config=config)
     assert report.passed, report.refusals
     assert report.facts["transition_execute_enabled"] is False

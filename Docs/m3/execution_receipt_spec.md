@@ -22,6 +22,11 @@ vocabulary, the canonicalization rule, and the `receipt_id` digest preimage are 
 > readable, and usable in a mixed-version chain. Where this document says `2.0` below it is
 > describing the schema it was written against; the version dispatch, not this text, is the
 > contract.
+>
+> **Readers additionally accept `m3-execution-receipt/4.0` (accepted Decision 094 §10.1).** It is
+> emitted **only** by the two PRE-E0 operator commands, its vocabulary is version-scoped so none of
+> it can enter a `2.0`/`3.0` validator, and the writer constant for every pre-existing command is
+> unchanged at `3.0`. See §12.2.
 **Plan:** [`Milestones/milestone_03_master_plan.md`](../../Milestones/milestone_03_master_plan.md).
 
 ---
@@ -493,6 +498,57 @@ The complete `3.0` delta over `2.0` — nothing else is added, removed, retyped,
 | Meaning and condition restated | `consumed_request_count_carried_forward` — now *cumulative attempts before this invocation*, required for a resume **and** for a clean carry-in root, omitted for an ordinary zero-baseline fresh root |
 | Added | `carry_in_authority_sha256` — required only on a clean carry-in root |
 | Accounting rule added, `3.0`-only | carried-forward **plus** actual may not exceed the approved ceiling; `2.0` keeps its former `actual`-alone bound |
+
+### 12.2 The `4.0` successor — version-scoped, for the two PRE-E0 commands only
+
+Accepted
+[Decision 094](../Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) §10.1 adds **exactly
+one** further backward-compatible reader/writer successor:
+
+```
+m3-execution-receipt/4.0
+```
+
+**Nothing that existed before changed.** `2.0` and `3.0` receipts stay byte-unchanged, keep their
+existing validators and writer behaviour, and every pre-existing command still emits `3.0`. The
+writer constant in §12 item 2 is unmoved. Only `m3 prepare-e0-catalog` and `m3 offline-parse` call
+the explicit v4 builder, and they use a **separate class** — `ExecutionReceiptV4` cannot express a v3
+field, `ExecutionReceipt` cannot express a v4 mode, and neither can be relabelled as the other
+because both write their own `receipt_schema_version`.
+
+**Every v4 vocabulary object is version-scoped.** The rule table, phase, invocation-mode tuple,
+zero-network tuple, interruption tuple, and reason vocabulary are attached to the `4.0` schema, not
+to a module-level tuple that a common checker consults. That is what makes the isolation mechanical
+rather than conventional: a `3.0` document naming a v4-only mode or interruption state is refused by
+the `3.0` table.
+
+The complete `4.0` delta:
+
+| Change | Detail |
+|---|---|
+| `phase` | fixed at `M3.3B` — the already-accepted real-execution phase, deliberately **not** a new project phase |
+| Invocation modes | `offline_catalog_transition`, `offline_parse`; both are zero-network, so both counts are fixed at `0` |
+| Field set | `offline_catalog_transition` permits only the common identity, migration, timing, zero-network, completion, reason, interruption, and predecessor fields; `offline_parse` additionally requires `parser_versions` and `cohort_definition_digest`. Every selection, quota, manifest, drift, route, classification, and transport field is **absent from the closed set entirely** |
+| Completion statuses | `complete`, `failed`, `interrupted`. There is no `stopped_at_ceiling` — the ceiling is zero and nothing is attempted — and no `stopped_by_gate`: a refused predicate is a `failed` run with its own reason code |
+| Reason vocabulary | closed and **stage-scoped**: `PRE_E0_CATALOG_TRANSITION_FAILED`, `PRE_E0_CATALOG_TRANSITION_INTERRUPTED`, `M3_3_E0_OFFLINE_PARSE_FAILED`, `M3_3_E0_OFFLINE_PARSE_INTERRUPTED`. These are deliberately **not** added to `disclosure_drift.reasons`; a `2.0`/`3.0` receipt still validates its `reason_code` against the repository registry exactly as before |
+| Interruption states | the sixteen values below, `4.0`-only |
+
+```text
+before_backup                                    during_e0_source_parse
+during_backup                                    after_e0_source_commit_before_event
+after_backup_before_migration                    during_e0_full_index_observation_materialization
+after_migration_0014_before_0015                 after_e0_full_index_observations_before_resolution
+after_migration_0014_commit_before_event         during_e0_accession_resolution
+after_migration_0015_commit_before_event         after_e0_resolution_before_association_materialization
+after_migration_0015_before_transition_freeze    during_e0_association_materialization
+                                                 after_e0_materialization_before_validation
+                                                 after_e0_validation_before_freeze
+```
+
+**No terminal-record field appears in a receipt.** The relationship is deliberately one-way: the
+receipt is written **first**, and the terminal record binds its `receipt_id`. That ordering is what
+prevents a receipt/terminal identity cycle. The records those two commands produce are specified in
+[`e0_execution_record_spec.md`](e0_execution_record_spec.md).
 
 ## 13. The single receipt integrity identity
 

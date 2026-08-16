@@ -73,7 +73,7 @@ authorize any phase.
 > | Network window | **closed**; tracked switches `false` / `false` |
 > | Audit projection | **77 / 77** — an exact deterministic reconstruction of the authoritative SQLite rows |
 > | Source registry authority | **`m2.2-source-registry/1.1`** (Decision 062 §5) |
-> | Execution receipt authority | writer **`m3-execution-receipt/3.0`**; readers accept `2.0` and `3.0` |
+> | Execution receipt authority | writer **`m3-execution-receipt/3.0`** for every command except the two Decision 094 PRE-E0 surfaces, which emit **`4.0`**; readers accept `2.0`, `3.0`, and `4.0` (§12.2 of the receipt spec) |
 > | Request plan | successor `f77e003c…`; predecessor `19be7bdc…` retired |
 > | `sec_sic_code_list` exact path | the successor path SEC published; the retired `/corpfin/…` path is gone |
 > | Gate H | **PASSED and owner-accepted** (Decision 065 §3), on the 30-of-30 applicable-item candidate `PASS` reproduced offline 2026-08-11 and the independent final audit |
@@ -81,6 +81,8 @@ authorize any phase.
 > | M3.2B | **not executed / not required for accepted M3.2 completion — closed by Decision 065 §4**; not pending, no latent acquisition or network authority, never resurrectable from a historical M3.2 authorization |
 > | M3.3 | **not begun; implementation not authorized** — its contract is **ACCEPTED** (accepted Decision 069, 2026-08-13, on frozen target `7bb36b8…` and the passing fresh rereview at B0/M0/MIN0) and is now the active stage contract, with **every executable-authority flag still closed**. History: Decisions 067 and 068 (both 2026-08-13) ruled OR-1/OR-2 and R13–R16, the fresh independent review of the 067-corrected text **FAILED** (B0/M1/MIN1), Decision 068 issued **R17** (fifteen-table E0 write footprint), **R18** (per-planned-source E0 dispositions), and **R16-C1**, and the rereview of the corrected text **PASSED**. **Acceptance is not implementation authorization**: the next act is a **separate owner M3.3-I/R implementation + rehearsal authorization packet** |
 > | Census parse layer | **EMPTY**; `parser_state` `not_started` for all 76 plan sources. **M3.3 Owner Ruling R13** makes a bounded **offline** metadata parse the prerequisite for a real snapshot — **not** a reason to reacquire. Real execution is the separately owner-gated **M3.3-E0** (step 28a) |
+> | Accepted catalog migration head | **`0013`**; current software requires `0015`. The only lawful transition is `0013 -> 0014 -> 0015` (accepted Decision 094 §5), it is **implemented and disabled**, and applying it needs a later exact owner instrument. Migration `0016` does not exist and is unauthorized |
+> | PRE-E0 operator surfaces | `m3 prepare-e0-catalog` and `m3 offline-parse` **exist**; `preflight`/`verify` are read-only and usable, both `execute` modes return exit **`3`** while their source constants are `None` (step 28a) |
 >
 > **A separate owner gate sits on each side of M3.3-E0.** One authorization to run the real offline
 > parse, an independent read-only verification of it, then a **separate** authorization to freeze a
@@ -1077,7 +1079,46 @@ rule 12).
 
 ## 28a. The real offline metadata parse — M3.3-E0
 
-**`PLANNED — NOT YET IMPLEMENTED (M3.3)`** · **`SEPARATE OWNER GATE`**
+**`IMPLEMENTED AND DISABLED (Decision 094)`** · **`SEPARATE OWNER GATE`**
+
+> **Current state, accepted Decision 094 §7 as corrected by Decisions 095–096.** The two operator
+> surfaces below **exist and are wired**. `preflight` and `verify` are strictly read-only and do real
+> work. **`execute` returns exit `3`** on both, because each is gated by its own source constant and
+> both ship as `None`:
+>
+> ```python
+> PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = None
+> M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None
+> ```
+>
+> ```bash
+> ./.venv/bin/disclosure-drift m3 prepare-e0-catalog --config configs/project.yaml \
+>     --mode {preflight,execute,verify}
+>
+> ./.venv/bin/disclosure-drift m3 offline-parse --config configs/project.yaml \
+>     --mode {preflight,execute,verify}
+> ```
+>
+> **Neither command takes a path option of any kind.** The accepted private root is read from the
+> fixed, unlogged environment variable `DISCLOSURE_DRIFT_EVIDENCE_ROOT`; the catalog is always
+> `catalogs/m3_2a_operational.sqlite3` beneath it; and both run namespaces are internal constants.
+> There is no `--evidence-root`, `--catalog`, `--data-root`, `--run-namespace`, migration list,
+> force, resume, overwrite, repair, network, or output option, and the variable's **value** never
+> appears in output, a log, a receipt, a ledger event, or a terminal record.
+>
+> **The accepted catalog is at migration head `0013` and current software requires `0015`.** The only
+> lawful transition is `0013 -> 0014 -> 0015`, and it needs a **later exact owner instrument** before
+> `prepare-e0-catalog execute` becomes reachable. E0 additionally requires an owner-accepted COMPLETE
+> transition terminal and its own separate one-invocation release.
+>
+> **Reading order for these two commands:**
+> [`e0_execution_record_spec.md`](e0_execution_record_spec.md) for the durable records, exit codes,
+> write sets, identities, and recovery law; [`execution_receipt_spec.md`](execution_receipt_spec.md)
+> §12.2 for the `m3-execution-receipt/4.0` schema they emit.
+>
+> **What a passing preflight means:** the predicates it measured were true when it measured them. It
+> creates nothing, it authorizes nothing, and it must be repeated under the writer lease by any later
+> authorized `execute`.
 
 **The census parse layer is empty.** M3.2 acquired and stored the objects; it parsed none of them,
 and `parser_state` is `not_started` for all 76 plan sources. **M3.3 Owner Ruling R13** (accepted
@@ -1093,14 +1134,20 @@ unavailable **stays** failed or unavailable.
 
 **Its durable write set is fixed by Owner Ruling R17** (accepted
 [Decision 068](../Decisions/decision_068_m3_3_e0_contract_correction.md) §3; contract §10.2
-item 2): **exactly fifteen tables** — the nine census parse-layer tables plus the six companion
-tables the reusable accepted persistence path legitimately writes — plus the
+item 2), **as narrowly amended by accepted
+[Decision 094](../Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) §6.1**: **exactly
+sixteen tables** — the former fifteen plus only `census_accession_registrants`, the Decision 083
+**R58** canonical relation whose writer migration `0014` assigns to E0 — plus the
 `census_plan_sources.parser_state` transition for category-A sources. `census_qa_metrics` and every
-index-side table stay unwritten. **Every planned source receives exactly one report-level R18
+index-side table stay unwritten, and the addition is one table forced by a later accepted decision,
+never a general permission to widen E0. **Every planned source receives exactly one report-level R18
 disposition** (Decision 068 §4): `E0_REQUIRED_PARSE`, `E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE`, or
-`E0_NOT_REQUIRED_VALIDATION_OR_PROVENANCE_ONLY` — the 70 quarterly full-index sources are the
-third category and are **deliberately untouched**, with no fabricated parser run and no
-`parser_state` mutation merely to complete a ledger.
+`E0_NOT_REQUIRED_VALIDATION_OR_PROVENANCE_ONLY` — with no fabricated parser run and no
+`parser_state` mutation merely to complete a ledger. *(The 70 quarterly full-index sources were
+category C under Decision 068; accepted
+[Decision 072](../Decisions/decision_072_m3_3_full_index_multi_registrant_source_correction.md) §2
+superseded that one classification — `sec_full_index_company` is candidate-substantive, category A
+when usable and category B when accepted unavailable, and never category C.)*
 
 **Do not run E0 until all of:**
 
@@ -1108,8 +1155,13 @@ third category and are **deliberately untouched**, with no fabricated parser run
 - the offline parse driver implemented and rehearsed **on fixtures or disposable isolated copies
   only**, with the accepted real private catalog untouched;
 - the M3.3A independent review passed;
+- the accepted catalog carried to head `0015` by the `prepare-e0-catalog` transition, under **its
+  own** later exact owner instrument, with a COMPLETE and owner-accepted transition terminal;
+- `M3_3_E0_EXECUTION_AUTHORITY` replaced by a governed token in a **separate, reviewed,
+  constant-only** source change — no flag, environment value, catalog state, receipt, or namespace
+  substitutes for it;
 - **separate, explicit Sol/GPT authorization naming E0** — contract acceptance is not it, a passing
-  rehearsal is not it, and a green suite is not it.
+  rehearsal is not it, a passing preflight is not it, and a green suite is not it.
 
 **After E0, before anything else:** an **independent read-only verification** to the **R3** standard.
 **There is no automatic progression from M3.3-E0 to M3.3-E1.** A partial or interrupted E0 is
@@ -1228,13 +1280,16 @@ the strength of any published record (Decision 064 §9).
 **Exit codes for every command above follow the accepted convention:** `0` success, `1`
 configuration error, `2` usage, `3` stage not enabled, `4` gate failure.
 
-**Planned and not yet existing.** The M3.3 command surface — the **offline metadata parse** command
-(**R13**; step 28a), the snapshot builder/freeze command, the E1–E8 rehearsal command, the execution
-command, and the manifest output command Decision 021 §16 deferred — is specified in the corrected
-[M3.3 contract](../../Milestones/contracts/m3_3.md) §19 and **does not exist**. **None may be
-typed**, and none becomes typeable on the strength of the corrected contract, which is **not
-accepted**. The offline parse command, when it exists, **constructs no transport on any code path**
-and is never admitted to the network-gated command set.
+**Implemented and disabled.** The two Decision 094 §7 PRE-E0 surfaces — `m3 prepare-e0-catalog` and
+`m3 offline-parse`, each `--config … --mode {preflight,execute,verify}` — **exist**. Their
+`preflight` and `verify` modes are strictly read-only and may be typed; both `execute` modes return
+exit `3` while their source constants are `None` (step 28a). Neither constructs a transport on any
+code path, and neither is admitted to the network-gated command set.
+
+**Planned and not yet existing.** The rest of the M3.3 command surface — the snapshot builder/freeze
+command, the execution command, and the manifest output command Decision 021 §16 deferred — is
+specified in the accepted [M3.3 contract](../../Milestones/contracts/m3_3.md) §19 and **does not
+exist**. **None may be typed**, and none becomes typeable on the strength of an accepted contract.
 
 ## Appendix C — the stop rule
 

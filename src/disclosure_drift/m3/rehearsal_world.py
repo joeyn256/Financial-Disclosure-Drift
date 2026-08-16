@@ -120,6 +120,12 @@ _SIC_AUTHORITY: Final[tuple[str, ...]] = tuple(
     sorted({*_INDUSTRY_SIC.values(), *_CONTROL_SIC.values()})
 )
 
+#: The SIC a support-only co-registrant declares. Deliberately one the design already uses,
+#: so :data:`_SIC_AUTHORITY` and the stored SIC document stay byte-identical: a support-only
+#: registrant exists to be *bindable*, and inventing an industry for it would be a second
+#: change riding along with accepted Decision 095 R79's one.
+_SUPPORT_ONLY_SIC: Final = "3571"
+
 
 class RehearsalWorldError(DisclosureDriftError):
     """The synthetic base case could not be materialized. Never worked around."""
@@ -234,6 +240,68 @@ class RehearsalWorld:
 # --------------------------------------------------------------------------
 
 
+def _co_registrant_name(cik: int) -> str:
+    """How ``company.idx`` names a co-registrant, in one place.
+
+    :func:`_company_index` renders exactly this for any listed CIK that is not the filing's
+    own registrant, so a support-only entity's stored submissions document must declare the
+    same name or the two accepted sources would disagree about one registrant's identity.
+    """
+    return f"Synthetic Co-Registrant {cik}"
+
+
+def _support_only_entities(entities: Sequence[EntitySpec]) -> tuple[EntitySpec, ...]:
+    """One support-only registrant per co-registrant CIK no entity already declares.
+
+    **Accepted Decision 095 R79.** The design's two joint filings name co-registrant CIKs in
+    the accepted-shaped ``company.idx``, and nothing else in the fixture supplied a
+    submissions document for them -- so ``census_registrants`` carried no row, Decision 094
+    §6.2 condition 3 correctly refused to bind the member, both accessions correctly stayed
+    ``unestablished``, and the hard ``multi_registrant_accessions = 2`` quota was genuinely
+    infeasible. **That production rule is preserved exactly.** What was wrong was the fixture:
+    it asserted a co-registrant that no accepted source described.
+
+    Each entity produced here therefore gets:
+
+    * exactly **one** accepted-shaped ``sec_submissions_entity`` stored object, parsed by the
+      production parser -- never a hand-written ``census_registrants`` INSERT, because the
+      whole point is that the production path creates the row from accepted evidence;
+    * **zero accessions of its own**, so it invents no filing, no quota witness, no event, no
+      candidate row, and no selection credit. :func:`_company_index` iterates each entity's
+      own accessions, so an entity with none contributes no index line of its own either; and
+    * the same name ``company.idx`` already renders for it, so the two sources agree.
+
+    The existing ``company.idx`` remains the **only** source associating a support-only CIK
+    with a joint accession. Production code is still forbidden to synthesize a registrant from
+    a full-index row, and removing either stored object must fail its joint accession closed.
+
+    The set is derived from the design rather than hardcoded, so a design that stopped
+    declaring a co-registrant could not leave an orphan support entity behind, and one that
+    declared a new co-registrant could not silently reintroduce the unbindable state.
+    """
+    declared = {entity.cik for entity in entities}
+    support = sorted(
+        {
+            co_registrant
+            for entity in entities
+            for accession in entity.accessions
+            for co_registrant in accession.co_registrants
+        }
+        - declared
+    )
+    return tuple(
+        EntitySpec(
+            cik=cik,
+            name=_co_registrant_name(cik),
+            sic=_SUPPORT_ONLY_SIC,
+            category=None,
+            entity_type="operating",
+            accessions=(),
+        )
+        for cik in support
+    )
+
+
 def base_case_design() -> WorldDesign:
     """The frozen synthetic base case both tracks are constructed from.
 
@@ -255,6 +323,10 @@ def base_case_design() -> WorldDesign:
       real materialization path rather than declared.
     * **Four boundary controls**, one per frozen kind, each established by exactly one
       **R20** predicate.
+    * **Two support-only co-registrants** (accepted Decision 095 R79), each with an
+      accepted-shaped submissions object and **zero filings of its own**, so the joint
+      filings' second members are bindable through the production parser instead of being
+      asserted by an index row alone. See :func:`_support_only_entities`.
     """
     entities: list[EntitySpec] = []
     for slot in range(20):
@@ -297,6 +369,9 @@ def base_case_design() -> WorldDesign:
                 accessions=tuple(accessions),
             )
         )
+    # Decision 095 R79, last so it observes every declared co-registrant: the joint filings'
+    # second members become bindable through the production parser, and nothing else moves.
+    entities.extend(_support_only_entities(entities))
     return WorldDesign(entities=tuple(entities))
 
 
@@ -523,7 +598,7 @@ def _company_index(design: WorldDesign) -> bytes:
     for entity in design.entities:
         for item in entity.accessions:
             for cik in (item.cik, *item.co_registrants):
-                name = entity.name if cik == item.cik else f"Synthetic Co-Registrant {cik}"
+                name = entity.name if cik == item.cik else _co_registrant_name(cik)
                 lines.append(
                     f"{name:<30}{item.form:<12}{cik:<12}{item.filing_date:<12}"
                     f"edgar/data/{cik}/{item.dashed}.txt\n"

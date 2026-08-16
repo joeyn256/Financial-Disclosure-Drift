@@ -9,10 +9,13 @@ from typing import Any
 import pytest
 
 from disclosure_drift.config import (
+    BACKUP_ROOT_ENV,
     CONFIG_PATH_ENV,
     ENV_OVERRIDES,
+    EVIDENCE_ROOT_ENV,
     FROZEN_CONFIG_SECTIONS,
     RECOGNIZED_ENV_VARS,
+    RUNTIME_ROOT_ENV_VARS,
     SEC_USER_AGENT_ENV,
     SECRET_ENV_VARS,
     ConfigValidationError,
@@ -32,6 +35,78 @@ def test_secret_variable_is_recognized_but_is_not_an_override() -> None:
     assert SEC_USER_AGENT_ENV in SECRET_ENV_VARS
     assert SEC_USER_AGENT_ENV in RECOGNIZED_ENV_VARS
     assert SEC_USER_AGENT_ENV not in ENV_OVERRIDES
+
+
+def test_the_evidence_root_is_a_recognized_runtime_root_and_not_an_override() -> None:
+    """Accepted **Decision 095 R80** items 1-3: recognized centrally, applied by nothing here.
+
+    The Decision 094 operator surface requires this variable, and the central loader rejects
+    every unrecognized ``DISCLOSURE_DRIFT_*`` name before a command dispatches — so without
+    central recognition the two PRE-E0 commands would exit ``1`` before resolving anything.
+    Recognition is all it gets: it is a **runtime root**, not a configuration override, and
+    it appears in no override table, no secret set, and no tracked configuration section.
+    """
+    assert EVIDENCE_ROOT_ENV == "DISCLOSURE_DRIFT_EVIDENCE_ROOT"
+    assert EVIDENCE_ROOT_ENV in RUNTIME_ROOT_ENV_VARS
+    assert EVIDENCE_ROOT_ENV in RECOGNIZED_ENV_VARS
+    assert EVIDENCE_ROOT_ENV not in ENV_OVERRIDES
+    assert EVIDENCE_ROOT_ENV not in SECRET_ENV_VARS
+    assert BACKUP_ROOT_ENV in RUNTIME_ROOT_ENV_VARS
+
+
+def test_the_evidence_root_changes_no_configuration_value_and_is_never_rendered(
+    config_file: Path,
+) -> None:
+    """**R80** items 3-4: ``load_config`` learns the name and stops.
+
+    The value is a machine-local absolute path. It must not reach a model field, a
+    configuration fingerprint, or a ``repr`` — so the loaded configuration is compared
+    field-for-field against one loaded without the variable, and the synthetic value is
+    searched for in the rendering.
+    """
+    synthetic = "/synthetic/not-a-real-evidence-root"
+    baseline = load_config(config_file, env={})
+    config = load_config(config_file, env={EVIDENCE_ROOT_ENV: synthetic})
+    without_path = {"config_path"}
+
+    assert config.model_dump(exclude=without_path) == baseline.model_dump(exclude=without_path)
+    assert synthetic not in repr(config)
+    assert "not-a-real-evidence-root" not in repr(config)
+
+
+def test_recognition_comes_from_the_runtime_roots_and_not_from_a_command_bypass() -> None:
+    """**R80** item 7 and Decision 095 §7 proof 5: the mutation control.
+
+    ``RECOGNIZED_ENV_VARS`` is the union the loader consults, so removing the entry from
+    ``RUNTIME_ROOT_ENV_VARS`` must stop the name being recognized — while an unrelated
+    unknown ``DISCLOSURE_DRIFT_*`` name stays rejected either way. That difference is what
+    separates "centrally recognized" from "the allowlist was loosened".
+    """
+    assert (
+        frozenset(ENV_OVERRIDES)
+        | SECRET_ENV_VARS
+        | RUNTIME_ROOT_ENV_VARS
+        | frozenset({CONFIG_PATH_ENV})
+    ) == RECOGNIZED_ENV_VARS
+    mutated = frozenset(RUNTIME_ROOT_ENV_VARS - {EVIDENCE_ROOT_ENV})
+    recomputed = frozenset(ENV_OVERRIDES) | SECRET_ENV_VARS | mutated | frozenset({CONFIG_PATH_ENV})
+    assert EVIDENCE_ROOT_ENV not in recomputed
+    assert "DISCLOSURE_DRIFT_NOT_A_REAL_SETTING" not in recomputed
+    assert "DISCLOSURE_DRIFT_NOT_A_REAL_SETTING" not in RECOGNIZED_ENV_VARS
+
+
+def test_the_evidence_root_is_not_filtered_out_at_cli_dispatch() -> None:
+    """**R80** item 7: a command-local bypass is prohibited, so no command may delete it.
+
+    Asserted against ``cli.py``'s own source, because the prohibited implementation is a
+    specific one — filtering or deleting the variable from the environment mapping at
+    dispatch — and its absence is exactly what makes the central contract load-bearing.
+    """
+    import disclosure_drift.cli as cli_module
+
+    source = Path(cli_module.__file__).read_text(encoding="utf-8")
+    assert EVIDENCE_ROOT_ENV not in source
+    assert "EVIDENCE_ROOT_ENV" not in source
 
 
 def test_data_root_override(config_file: Path) -> None:

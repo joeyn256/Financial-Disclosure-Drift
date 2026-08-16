@@ -322,6 +322,23 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         help="Where to write this command's receipt, relative to --evidence-root.",
     )
 
+    # Decision 094 §7.1. Both take exactly --config and --mode: there is no --evidence-root,
+    # --catalog, --data-root, --run-namespace, migration list, force, resume, overwrite,
+    # repair, network, or output option, because none of those is an operator choice. The
+    # private root comes from the fixed unlogged environment variable and nowhere else.
+    for name, summary, detail in _M3_3_PRE_E0_COMMANDS:
+        pre_e0 = m3_subparsers.add_parser(name, help=summary, description=detail)
+        _add_config_argument(pre_e0)
+        pre_e0.add_argument(
+            "--mode",
+            required=True,
+            choices=("preflight", "execute", "verify"),
+            help=(
+                "preflight validates every predicate and creates nothing; execute is the only "
+                "write mode and is not enabled; verify validates a durable namespace read-only."
+            ),
+        )
+
     for name, gate, summary in _M3_3_GATED_COMMANDS:
         gated = m3_subparsers.add_parser(
             name,
@@ -1339,15 +1356,37 @@ _M3_COMMAND_VERSIONS: Final[Mapping[str, str]] = {
 #: independently greppable line rather than being abbreviated or merged.
 _M3_3A_SUMMARY_LABEL_WIDTH: Final = 39
 
+#: Decision 094 §7's two PRE-E0 operator surfaces. Unlike the gated commands below, these are
+#: **implemented**: `preflight` and `verify` do real read-only work and can pass, while
+#: `execute` is present and unreachable because its source-bound activation constant is `None`.
+#: That distinction is the point of the redesign -- the old unconditional refusal made the
+#: transition and E0 unexecutable even after an owner authorized them.
+_M3_3_PRE_E0_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        "prepare-e0-catalog",
+        "Run the exact accepted-catalog 0013 -> 0014 -> 0015 transition (Decision 094 §5).",
+        "Validates, and when separately authorized performs, the only lawful pre-E0 catalog "
+        "transition. The private root is read from the fixed unlogged environment variable, "
+        "the catalog and run namespace are internal constants, and preflight and verify are "
+        "strictly read-only. execute returns exit 3 until a later exact owner instrument "
+        "replaces PRE_E0_CATALOG_TRANSITION_AUTHORITY. Constructs no transport on any path.",
+    ),
+    (
+        "offline-parse",
+        "Derive the census parse layer from accepted stored objects, offline (M3.3-E0).",
+        "Validates, and when separately authorized performs, the real M3.3-E0 offline "
+        "metadata parse into the Decision 094 §6.1 sixteen-table footprint plus the "
+        "category-A parser_state transition. execute returns exit 3 until a later exact "
+        "owner instrument replaces M3_3_E0_EXECUTION_AUTHORITY. A passing preflight is not "
+        "authorization, and a complete run is not M3.3-E1 authority. No transport is "
+        "constructed on any path.",
+    ),
+)
+
 #: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
 #: the command set is complete and each **refuses**: the owner gate it names has not been
 #: issued, and no acceptance, rehearsal, suite, commit, or tag issues one.
 _M3_3_GATED_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
-    (
-        "offline-parse",
-        "M3.3-E0",
-        "Derive the census parse layer from accepted stored objects, offline.",
-    ),
     (
         "build-candidate-snapshot",
         "M3.3-E1",
@@ -1495,6 +1534,13 @@ def _m3_command(
     configuration error rather than a gate failure: a root inside the checkout is a mistake in the
     invocation, not a finding about the run.
     """
+    # Decision 094 §7.1: the two PRE-E0 surfaces take no --evidence-root, so they are routed
+    # before the shared resolution below. They read the fixed unlogged environment variable
+    # through the accepted external-root boundary instead, and the value never reaches this
+    # module -- which is why nothing here can print, log, or persist it.
+    if command in {name for name, _, _ in _M3_3_PRE_E0_COMMANDS}:
+        return _m3_pre_e0_command(command, args, config, logger)
+
     try:
         evidence_root = require_external_evidence_root(args.evidence_root, _repository_root())
     except EvidenceRootError as exc:
@@ -1542,6 +1588,41 @@ def _m3_command(
 def _repository_root() -> Path:
     """The repository checkout this package is installed from."""
     return Path(__file__).resolve().parents[2]
+
+
+def _m3_pre_e0_command(
+    command: str,
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+) -> int:
+    """Dispatch one Decision 094 §7 PRE-E0 surface.
+
+    This function does no work of its own beyond routing and rendering. Every predicate,
+    write boundary, identity, and refusal lives in :mod:`disclosure_drift.m3.e0`, so the
+    operator surface cannot become a second place where authority is decided.
+
+    Nothing printed here can carry the private root: the module returns rendered lines built
+    from counts, digests, enum tokens, and root-relative names, and the environment value is
+    never returned to this layer at all.
+    """
+    from disclosure_drift.m3.e0 import run_offline_parse_command, run_prepare_e0_catalog_command
+
+    mode = str(args.mode)
+    runner = (
+        run_prepare_e0_catalog_command
+        if command == "prepare-e0-catalog"
+        else run_offline_parse_command
+    )
+    result = runner(mode=mode, config=config, repository_root=_repository_root())
+    stream = sys.stdout if result.exit_code == EXIT_OK else sys.stderr
+    for line in result.lines:
+        print(line, file=stream)
+    if result.exit_code == EXIT_STAGE_NOT_ENABLED:
+        logger.error("m3 %s --mode %s is not enabled by the current boundary", command, mode)
+    elif result.exit_code != EXIT_OK:
+        logger.error("m3 %s --mode %s did not pass", command, mode)
+    return result.exit_code
 
 
 def _m3_rehearse_command(

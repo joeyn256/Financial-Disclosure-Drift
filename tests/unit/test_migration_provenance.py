@@ -60,6 +60,32 @@ def test_packaged_chain_is_contiguous_and_ends_at_0015() -> None:
     assert inventory[-3].name == "m23_manifest_lifecycle_guards"
 
 
+def test_the_transition_target_digests_are_the_ones_decision_094_measured() -> None:
+    """Accepted **Decision 094** §1.1 and §5.1, pinned where migration provenance lives.
+
+    The transition applies exactly ``0014`` then ``0015``, and it applies them **by digest**:
+    a migration file edited after Decision 094 measured it must be refused rather than
+    applied and discovered afterwards. The values are asserted here, against the packaged
+    inventory, as well as inside the transition's own selection — because a pin that lived
+    only beside the code it guards could be changed in the same edit that broke it.
+    """
+    from disclosure_drift.m3.e0 import PACKAGED_MIGRATION_SHA256, TRANSITION_TARGET_HEAD
+
+    packaged = {
+        f"{migration.version:04d}": migration.checksum_sha256
+        for migration in available_migrations()
+    }
+    assert packaged["0014"] == "0490ea4e76cc365f03b851bd44a3b918f37109c97258abf5fb98d8070ccff9f1"
+    assert packaged["0015"] == "d7f22999cb3e6736c765de72a1031c170f2cb5547ccaccf7469a2d3be018835f"
+    assert dict(PACKAGED_MIGRATION_SHA256) == {
+        "0014": packaged["0014"],
+        "0015": packaged["0015"],
+    }
+    # Decision 094 §5.1: ``0016`` is absent and unauthorized, so nothing may select it.
+    assert "0016" not in packaged
+    assert max(migration.version for migration in available_migrations()) == TRANSITION_TARGET_HEAD
+
+
 def test_migration_0011_provenance_is_recorded_in_order(tmp_path: Path) -> None:
     path = _migrated_database(tmp_path)
     packaged = next(m for m in available_migrations() if m.version == 11)

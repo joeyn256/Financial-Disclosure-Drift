@@ -37,13 +37,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections import defaultdict
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Final, Literal
+from dataclasses import dataclass, fields
+from typing import ClassVar, Final, Literal
 
 from disclosure_drift.errors import DisclosureDriftError
 from disclosure_drift.paths import DataTree
+from disclosure_drift.sec.accession_resolution import AUTHORITY_LEVEL, authority_for_source
 from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
 
 # ``_stable_id`` is the accepted census identifier convention. It is imported rather
@@ -74,15 +76,24 @@ __all__ = [
     "E0_PERMITTED_PLAN_COLUMNS",
     "E0_PERMITTED_TABLES",
     "E0_PROHIBITED_TABLES",
+    "FULL_INDEX_MEMBERSHIP_FIELDS",
+    "FULL_INDEX_MEMBERSHIP_SOURCE_IDS",
     "PROHIBITED_IMPORT_PREFIXES",
+    "SUBMISSIONS_MEMBERSHIP_FIELDS",
+    "SUBMISSIONS_MEMBERSHIP_SOURCE_IDS",
     "VALIDATION_OR_PROVENANCE_ONLY_SOURCE_IDS",
+    "AssociationTotality",
     "OfflineParseError",
     "OfflineParseReport",
     "PlannedSource",
+    "SourceLayerPhase",
     "PlannedSourceOutcome",
     "SourceDisposition",
     "classify_planned_source",
     "load_planned_sources",
+    "materialize_census_associations",
+    "materialize_source_layer",
+    "membership_observation_sources",
     "run_offline_metadata_parse",
     "unavailable_source_ids",
     "write_containment",
@@ -100,10 +111,14 @@ SourceDisposition = Literal[
 ]
 """**R18** report-level vocabulary. No database enum, no schema change, no migration."""
 
-#: The complete fifteen-table durable write footprint **R17** fixes: the nine census
-#: parse-layer tables plus the six companion tables the same reusable persistence path
-#: unavoidably and legitimately writes. Not a wish list — it is the mechanically
-#: verified footprint of ``CensusCatalog``, and adding to it needs a new owner ruling.
+#: The complete **sixteen**-table durable write footprint. **R17** originally fixed
+#: fifteen: the nine census parse-layer tables plus the six companion tables the same
+#: reusable persistence path unavoidably and legitimately writes. Accepted
+#: **Decision 094 §6.1** narrowly amends R17 by adding exactly one more —
+#: ``census_accession_registrants``, the later accepted **Decision 083 R58** canonical
+#: relation whose writer migration ``0014`` assigns to this driver. That is an explicit
+#: one-table widening forced by a later accepted decision, not a general permission to
+#: widen E0: adding anything else still needs a new owner ruling.
 E0_PERMITTED_TABLES: Final[frozenset[str]] = frozenset(
     {
         "census_parser_runs",
@@ -111,6 +126,7 @@ E0_PERMITTED_TABLES: Final[frozenset[str]] = frozenset(
         "census_structural_observations",
         "census_accessions",
         "census_accession_observations",
+        "census_accession_registrants",
         "census_registrants",
         "census_registrant_observations",
         "census_accession_field_resolutions",
@@ -210,6 +226,40 @@ VALIDATION_OR_PROVENANCE_ONLY_SOURCE_IDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: **Decision 094 §6.2** -- the sources whose plan-bound accepted usable observations
+#: contribute ``S_submissions``. A submissions document states the registrant of its own
+#: filings; it cannot by itself state a co-registrant.
+SUBMISSIONS_MEMBERSHIP_SOURCE_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "sec_bulk_submissions",
+        "sec_submissions_entity",
+        "sec_submissions_historical",
+    }
+)
+
+#: **Decision 094 §6.2** -- the source whose plan-bound accepted usable observations
+#: contribute ``S_full_index``. ``company.idx`` emits one row per registrant per
+#: accession, so it is the only accepted evidence that a filing is joint.
+FULL_INDEX_MEMBERSHIP_SOURCE_IDS: Final[frozenset[str]] = frozenset({"sec_full_index_company"})
+
+#: The persisted ``census_accession_observations.field_name`` values each side reads.
+#: Both are canonical membership fields; neither is a company name, ticker, filename,
+#: source order, row order, or proximity heuristic, all of which are prohibited.
+SUBMISSIONS_MEMBERSHIP_FIELDS: Final[tuple[str, ...]] = ("cik", "cik_padded")
+FULL_INDEX_MEMBERSHIP_FIELDS: Final[tuple[str, ...]] = ("cik_padded",)
+
+#: The two Decision 012 fields whose resolution must be ``resolved`` or
+#: ``resolved_by_correction`` with ``blocks_dependents = 0`` before an accession's
+#: substantive association set may be called established (**Decision 094 §6.2** item 5).
+_MEMBERSHIP_BLOCKING_FIELDS: Final[tuple[str, ...]] = ("form", "official_filing_date")
+
+_RESOLVED_STATUSES: Final[frozenset[str]] = frozenset({"resolved", "resolved_by_correction"})
+
+#: Migration ``0014``'s relation vocabulary, restated where this writer uses it.
+_SUBSTANTIVE: Final = "substantive"
+_ESTABLISHED: Final = "established"
+_UNESTABLISHED: Final = "unestablished"
+
 _USABLE_RETRIEVAL_STATES: Final[frozenset[str]] = frozenset({"retrieved", "reused"})
 _UNAVAILABLE_RETRIEVAL_STATES: Final[frozenset[str]] = frozenset(
     {"not_retrieved", "failed", "blocked", "unavailable", "unknown", "quarantined"}
@@ -262,6 +312,77 @@ class PlannedSourceOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class AssociationTotality:
+    """**Decision 094 §9.5** -- the closed association-totality object, exactly.
+
+    Six of the fifteen counts are invariants rather than measurements: a violated one is
+    a totality failure, never a reportable state. The first three counts must partition
+    every census accession, and **no assertion is made that all accessions are
+    established** -- ``unestablished`` is a lawful, expected, fail-closed outcome.
+    """
+
+    census_accession_count: int = 0
+    established_accession_count: int = 0
+    unestablished_accession_count: int = 0
+    substantive_relation_count: int = 0
+    established_zero_relation_count: int = 0
+    established_singleton_count: int = 0
+    established_multi_count: int = 0
+    singleton_scalar_mismatch_count: int = 0
+    multi_nonnull_scalar_count: int = 0
+    orphan_relation_count: int = 0
+    invalid_cik_rendering_count: int = 0
+    association_provenance_failure_count: int = 0
+    submissions_member_missing_full_index_count: int = 0
+    unbindable_registrant_member_count: int = 0
+    unestablished_membership_conflict_count: int = 0
+
+    #: The six counts §9.5 fixes at zero. Named so a validator states which invariant
+    #: failed rather than reporting a generic mismatch.
+    MUST_BE_ZERO: ClassVar[tuple[str, ...]] = (
+        "established_zero_relation_count",
+        "singleton_scalar_mismatch_count",
+        "multi_nonnull_scalar_count",
+        "orphan_relation_count",
+        "invalid_cik_rendering_count",
+        "association_provenance_failure_count",
+    )
+
+    def as_record(self) -> dict[str, int]:
+        """The §9.5 object as a plain mapping, in the record's declared key order."""
+        return {field.name: int(getattr(self, field.name)) for field in fields(self)}
+
+    def violations(self) -> tuple[str, ...]:
+        """Every §9.5 invariant this totality breaks, in declaration order."""
+        broken = [name for name in self.MUST_BE_ZERO if int(getattr(self, name)) != 0]
+        if (
+            self.established_accession_count + self.unestablished_accession_count
+            != self.census_accession_count
+        ):
+            broken.append("census_accession_count")
+        if self.established_singleton_count + self.established_multi_count != (
+            self.established_accession_count
+        ):
+            broken.append("established_accession_count")
+        return tuple(broken)
+
+    def require(self) -> None:
+        """Raise unless every §9.5 invariant holds.
+
+        Raises:
+            OfflineParseError: an invariant the accepted totality fixes was broken.
+        """
+        broken = self.violations()
+        if not broken:
+            return
+        message = (
+            "census association totality failed its Decision 094 §9.5 invariants: "
+            f"{', '.join(broken)}"
+        )
+        raise OfflineParseError(message)
+
+
+@dataclass(frozen=True, slots=True)
 class OfflineParseReport:
     """The E0 completeness proof: one disposition per planned source, and the counts."""
 
@@ -272,6 +393,11 @@ class OfflineParseReport:
     #: Accessions the index listed that the authoritative layer does not carry. Reported
     #: as a diagnostic and never created (**R23** §5.1).
     full_index_unbound_accessions: tuple[str, ...] = ()
+    #: **Decision 094 §§6.2-6.4, 9.5** -- the canonical relation's totality.
+    association_totality: AssociationTotality = AssociationTotality()
+    #: Persisted membership observations each side of §6.2's set definition read.
+    submissions_membership_observations: int = 0
+    substantive_membership_observations: int = 0
     requests_made: int = 0
     transports_constructed: int = 0
 
@@ -304,6 +430,9 @@ class OfflineParseReport:
             "accession_resolutions": self.accession_resolutions,
             "full_index_registrant_observations": self.full_index_registrant_observations,
             "full_index_unbound_accessions": len(self.full_index_unbound_accessions),
+            "submissions_membership_observations": self.submissions_membership_observations,
+            "substantive_membership_observations": self.substantive_membership_observations,
+            "association_totality": self.association_totality.as_record(),
             "requests_made": self.requests_made,
             "transports_constructed": self.transports_constructed,
         }
@@ -682,6 +811,608 @@ def _index_identity(payload: Mapping[str, object]) -> tuple[str | None, str | No
         return None, None
 
 
+# --------------------------------------------------------------------------
+# Decision 094 §§6.2-6.4 -- the canonical census association projection
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _MembershipWitness:
+    """One persisted observation supporting one accession-registrant membership.
+
+    Ordered by **Decision 094 §6.3**'s deterministic tie-break: Decision 012's existing
+    source-authority level first, then ``source_observation_id``, then the nullable
+    ``parsed_record_id`` with a missing identity sorting **after** every present one.
+    """
+
+    authority_level: int
+    source_observation_id: str
+    parsed_record_id: str | None
+    observed_at_utc: str
+    conflicting: bool
+
+    @property
+    def rank(self) -> tuple[int, str, int, str]:
+        """The total order §6.3 fixes. Nothing here reads recency or row order."""
+        return (
+            self.authority_level,
+            self.source_observation_id,
+            1 if self.parsed_record_id is None else 0,
+            self.parsed_record_id or "",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MembershipGroup:
+    """One canonical accession's complete membership evidence, and nothing else.
+
+    Exactly one of these is alive at a time (**Decision 094 §6.4**): the streaming loop
+    yields a group, the projection consumes it, and the next group replaces it. No
+    all-catalog membership map is ever materialized.
+    """
+
+    accession_plain: str
+    submissions: frozenset[int]
+    full_index: frozenset[int]
+    witnesses: Mapping[int, tuple[_MembershipWitness, ...]]
+    invalid_renderings: int
+
+    @property
+    def union(self) -> tuple[int, ...]:
+        """``U = S_submissions union S_full_index``, ordered by canonical numeric CIK only."""
+        return tuple(sorted(self.submissions | self.full_index))
+
+
+def membership_observation_sources(
+    connection: sqlite3.Connection,
+) -> Mapping[str, str]:
+    """The plan-bound accepted usable observations §6.2's two sets may be read through.
+
+    Membership is joined through ``census_plan_sources.observation_id`` exclusively
+    (**R13**), so an observation the accepted plan does not bind contributes nothing even
+    if it is present in the catalog. The mapping is observation id to source id, which is
+    all the projection needs to decide which side of §6.2 a row belongs to.
+    """
+    rows = connection.execute(
+        "SELECT DISTINCT p.observation_id, s.source_id FROM census_plan_sources AS p "
+        "JOIN census_source_observations AS s ON s.observation_id = p.observation_id "
+        "WHERE p.observation_id IS NOT NULL "
+        "ORDER BY p.observation_id"
+    ).fetchall()
+    eligible: dict[str, str] = {}
+    for row in rows:
+        observation_id = str(row["observation_id"])
+        source_id = str(row["source_id"])
+        if source_id in SUBMISSIONS_MEMBERSHIP_SOURCE_IDS | FULL_INDEX_MEMBERSHIP_SOURCE_IDS:
+            eligible[observation_id] = source_id
+    return eligible
+
+
+def _membership_cik(raw_value_json: object) -> int | None:
+    """One persisted membership value as a canonical numeric CIK, or ``None``.
+
+    A value that does not normalize **exactly** contributes nothing and is counted as an
+    invalid rendering. It is never repaired by inference, and it never becomes a guessed
+    member (**Decision 094 §6.2**).
+    """
+    try:
+        decoded = json.loads(str(raw_value_json))
+    except (TypeError, ValueError):
+        return None
+    if isinstance(decoded, bool) or not isinstance(decoded, (str, int)):
+        return None
+    try:
+        return normalize_cik(decoded)[0]
+    except IdentifierError:
+        return None
+
+
+def _stream_membership_groups(
+    connection: sqlite3.Connection,
+    eligible: Mapping[str, str],
+) -> Iterator[_MembershipGroup]:
+    """Yield one accession's membership group at a time, in canonical accession order.
+
+    The cursor is consumed lazily and the accumulator is reset at every accession
+    boundary, so peak memory is one accession's membership and provenance rather than the
+    whole catalog's (**Decision 094 §6.4**).
+    """
+    cursor = connection.execute(
+        "SELECT o.accession_plain, o.field_name, o.raw_value_json, o.source_observation_id, "
+        "o.parsed_record_id, o.observed_at_utc, o.conflict_indicator "
+        "FROM census_accession_observations AS o "
+        "WHERE o.field_name IN (?, ?) "
+        "ORDER BY o.accession_plain, o.accession_observation_id",
+        SUBMISSIONS_MEMBERSHIP_FIELDS,
+    )
+    current: str | None = None
+    submissions: set[int] = set()
+    full_index: set[int] = set()
+    witnesses: dict[int, list[_MembershipWitness]] = defaultdict(list)
+    invalid = 0
+
+    def _finish(accession: str) -> _MembershipGroup:
+        return _MembershipGroup(
+            accession_plain=accession,
+            submissions=frozenset(submissions),
+            full_index=frozenset(full_index),
+            witnesses={
+                cik: tuple(sorted(items, key=lambda item: item.rank))
+                for cik, items in sorted(witnesses.items())
+            },
+            invalid_renderings=invalid,
+        )
+
+    for row in cursor:
+        accession = str(row["accession_plain"])
+        if accession != current:
+            if current is not None:
+                yield _finish(current)
+            current = accession
+            submissions = set()
+            full_index = set()
+            witnesses = defaultdict(list)
+            invalid = 0
+        source_id = eligible.get(str(row["source_observation_id"]))
+        if source_id is None:
+            continue
+        field = str(row["field_name"])
+        submissions_side = (
+            source_id in SUBMISSIONS_MEMBERSHIP_SOURCE_IDS
+            and field in SUBMISSIONS_MEMBERSHIP_FIELDS
+        )
+        full_index_side = (
+            source_id in FULL_INDEX_MEMBERSHIP_SOURCE_IDS and field in FULL_INDEX_MEMBERSHIP_FIELDS
+        )
+        if not (submissions_side or full_index_side):
+            continue
+        numeric = _membership_cik(row["raw_value_json"])
+        if numeric is None:
+            invalid += 1
+            continue
+        if submissions_side:
+            submissions.add(numeric)
+        if full_index_side:
+            full_index.add(numeric)
+        parsed_record_id = row["parsed_record_id"]
+        witnesses[numeric].append(
+            _MembershipWitness(
+                authority_level=AUTHORITY_LEVEL[authority_for_source(source_id)],
+                source_observation_id=str(row["source_observation_id"]),
+                parsed_record_id=None if parsed_record_id is None else str(parsed_record_id),
+                observed_at_utc=str(row["observed_at_utc"]),
+                conflicting=bool(row["conflict_indicator"]),
+            )
+        )
+    if current is not None:
+        yield _finish(current)
+
+
+def _blocking_field_states(connection: sqlite3.Connection) -> Mapping[str, bool]:
+    """Whether each accession's latest Decision 012 resolutions clear §6.2 item 5.
+
+    ``form`` and ``official_filing_date`` must each be ``resolved`` or
+    ``resolved_by_correction`` with ``blocks_dependents = 0``. A missing resolution is a
+    failure, not a pass: silence about a material field never establishes a set.
+
+    The latest resolution per ``(accession, field)`` wins, matching the accepted reader
+    in ``candidate_snapshot`` -- ordering by ``resolved_at_utc`` and taking the last.
+    """
+    latest: dict[tuple[str, str], bool] = {}
+    for row in connection.execute(
+        "SELECT accession_plain, field_name, status, blocks_dependents "
+        "FROM census_accession_field_resolutions "
+        "WHERE field_name IN (?, ?) "
+        "ORDER BY accession_plain, field_name, resolved_at_utc",
+        _MEMBERSHIP_BLOCKING_FIELDS,
+    ).fetchall():
+        key = (str(row["accession_plain"]), str(row["field_name"]))
+        latest[key] = str(row["status"]) in _RESOLVED_STATUSES and not int(row["blocks_dependents"])
+    accessions = {accession for accession, _ in latest}
+    return {
+        accession: all(
+            latest.get((accession, field), False) for field in _MEMBERSHIP_BLOCKING_FIELDS
+        )
+        for accession in accessions
+    }
+
+
+def _evidence_level_for(
+    witnesses: Sequence[_MembershipWitness],
+    *,
+    fields_clear: bool,
+) -> str:
+    """**Decision 094 §6.3** -- the relation row's evidence level.
+
+    ``provisional`` is reserved for a valid, internally consistent accepted metadata
+    witness. Everything weaker keeps the existing migration-``0014`` fail-closed
+    vocabulary, and no weaker state can establish completeness.
+    """
+    if not witnesses:
+        return "unavailable"
+    if any(item.conflicting for item in witnesses):
+        return "conflicting"
+    if not fields_clear:
+        return "review_required"
+    return "provisional"
+
+
+def _existing_relation_row(
+    connection: sqlite3.Connection, accession_plain: str, cik: int
+) -> sqlite3.Row | None:
+    """The persisted relation row for one membership, or ``None``."""
+    row: sqlite3.Row | None = connection.execute(
+        "SELECT registrant_cik_padded, association_class, evidence_level, "
+        "source_observation_id, parsed_record_id, first_observed_at_utc, latest_observed_at_utc "
+        "FROM census_accession_registrants "
+        "WHERE accession_plain = ? AND registrant_cik_numeric = ?",
+        (accession_plain, cik),
+    ).fetchone()
+    return row
+
+
+def materialize_census_associations(
+    connection: sqlite3.Connection,
+    *,
+    eligible_observations: Mapping[str, str] | None = None,
+) -> AssociationTotality:
+    """Write the canonical **Decision 083 R58** relation and its completeness state.
+
+    This is **Decision 094 §§6.2-6.4** exactly, and it is the capability migration ``0014``'s
+    own comment assigns to E0. Membership is a **set union** of the plan-bound submissions and
+    full-index evidence -- never a scalar, an anchor, a first write, a company name, a row
+    count, or any proximity heuristic. Distinct valid CIKs are co-registrants, not a conflict.
+    The submitter stays a submission fact and is never promoted here.
+
+    Everything is written **and checked** in one transaction, so SQLite rollback makes the
+    projection all-or-nothing: neither an interruption before commit nor a broken §9.5
+    invariant can leave an ``established`` incomplete set, a partial relation, or a persisted
+    projection behind. Completeness is written **last**, after the relation is total, and a member
+    the accepted evidence names but no ``census_registrants`` row describes is recorded as
+    unbindable and **fails its accession closed** -- no entity is invented.
+
+    **Create-once, and re-enterable.** §6.4 item 3 forbids a replacement write, and contract
+    §10.2 item 5 requires a reparse of the same accepted observation set to be deterministic.
+    Both hold together the same way the accepted receipt writer resolves the same tension: an
+    existing row that is byte-for-byte what this run would write is a **collision by identity**
+    and is left exactly as it is, while an existing row that differs **fails closed**. Nothing
+    is ever overwritten, and a second identical parse changes no durable byte.
+
+    Args:
+        connection: The writing connection, already inside the E0 write containment.
+        eligible_observations: Plan-bound observation id to source id. Derived from the catalog
+            when omitted, which is what a read-only reconstruction needs.
+
+    Returns:
+        The §9.5 totality, already checked against its own invariants.
+
+    Raises:
+        OfflineParseError: a §9.5 totality invariant was broken, or a persisted relation row
+            disagrees with the projection this evidence produces.
+    """
+    eligible = (
+        membership_observation_sources(connection)
+        if eligible_observations is None
+        else eligible_observations
+    )
+    known_registrants = {
+        int(row["cik_numeric"])
+        for row in connection.execute("SELECT cik_numeric FROM census_registrants").fetchall()
+    }
+    known_accessions = {
+        str(row["accession_plain"])
+        for row in connection.execute("SELECT accession_plain FROM census_accessions").fetchall()
+    }
+    fields_clear = _blocking_field_states(connection)
+
+    # Bounded accumulators only. Each holds one small tuple per accession -- never a membership
+    # or provenance group -- so §6.4's "at most one accession's group in memory" still holds
+    # while completeness is genuinely written last, after the whole relation is total.
+    established: list[tuple[str, int | None]] = []
+    relation_rows = 0
+    invalid_renderings = 0
+    provenance_failures = 0
+    orphans = 0
+    missing_corroboration = 0
+    unbindable_members = 0
+    membership_conflicts = 0
+    singletons = 0
+    multi = 0
+
+    with transaction(connection) as active:
+        for group in _stream_membership_groups(connection, eligible):
+            invalid_renderings += group.invalid_renderings
+            if group.accession_plain not in known_accessions:
+                # A full-index row never creates an accession (**R23** §5.1). Membership
+                # evidence bound to an accession the authoritative layer does not carry is
+                # reported, never repaired into a relation row.
+                orphans += 1
+                continue
+            members = group.union
+            if not members:
+                continue
+            bindable = tuple(cik for cik in members if cik in known_registrants)
+            unbindable = len(members) - len(bindable)
+            unbindable_members += unbindable
+            clear = fields_clear.get(group.accession_plain, False)
+
+            if len(bindable) > 1:
+                # §6.4 item 2: the scalar must already be NULL when the second substantive
+                # relation row is inserted, which is exactly when migration ``0014``'s trigger
+                # becomes able to observe the cardinality. Clearing it before the first insert
+                # reaches the same state and needs no ordering assumption.
+                active.execute(
+                    "UPDATE census_accessions SET registrant_cik_numeric = NULL "
+                    "WHERE accession_plain = ? AND registrant_cik_numeric IS NOT NULL",
+                    (group.accession_plain,),
+                )
+
+            levels: list[str] = []
+            conflicting = False
+            for cik in bindable:
+                witnesses = group.witnesses.get(cik, ())
+                if not witnesses:
+                    provenance_failures += 1
+                    continue
+                conflicting = conflicting or any(item.conflicting for item in witnesses)
+                chosen = witnesses[0]
+                level = _evidence_level_for(witnesses, fields_clear=clear)
+                levels.append(level)
+                candidate = (
+                    normalize_cik(cik)[1],
+                    _SUBSTANTIVE,
+                    level,
+                    chosen.source_observation_id,
+                    chosen.parsed_record_id,
+                    min(item.observed_at_utc for item in witnesses),
+                    max(item.observed_at_utc for item in witnesses),
+                )
+                existing = _existing_relation_row(active, group.accession_plain, cik)
+                if existing is not None:
+                    persisted = tuple(existing)
+                    if persisted != candidate:
+                        message = (
+                            f"the persisted association row for accession "
+                            f"{group.accession_plain!r} registrant {cik} disagrees with the "
+                            f"projection this evidence produces; the relation is create-once "
+                            f"and a correction is a new run, never a replacement write"
+                        )
+                        raise OfflineParseError(message)
+                    relation_rows += 1
+                    continue
+                active.execute(
+                    "INSERT INTO census_accession_registrants "
+                    "(accession_plain, registrant_cik_numeric, registrant_cik_padded, "
+                    "association_class, evidence_level, source_observation_id, "
+                    "parsed_record_id, first_observed_at_utc, latest_observed_at_utc) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (group.accession_plain, cik, *candidate),
+                )
+                relation_rows += 1
+
+            # §6.2 condition 2. Counted in **members**, which is what the §9.5 name says: an
+            # accession missing three corroborations is a bigger evidence gap than one missing
+            # a single member, and collapsing both to "1 accession" would hide that.
+            uncorroborated = group.submissions - group.full_index
+            missing_corroboration += len(uncorroborated)
+            if conflicting:
+                # A conflict is an accepted observation carrying the conflict indicator -- not
+                # merely a blocked resolution, and never two distinct valid CIKs, which §9.5
+                # says explicitly may not increment a conflict count.
+                membership_conflicts += 1
+            is_established = (
+                bool(group.submissions)
+                and bool(group.full_index)
+                and not uncorroborated
+                and unbindable == 0
+                and group.invalid_renderings == 0
+                and clear
+                and len(bindable) == len(members)
+                and bool(levels)
+                and all(level == "provisional" for level in levels)
+            )
+            if is_established:
+                established.append(
+                    (group.accession_plain, bindable[0] if len(bindable) == 1 else None)
+                )
+                if len(bindable) == 1:
+                    singletons += 1
+                else:
+                    multi += 1
+
+        # §6.4 item 5: completeness is written last, after every relation row exists, so no
+        # window can be observed in which an accession claims a complete set it has not yet
+        # materialized. Migration ``0014``'s own trigger refuses the claim from the other
+        # direction; this ordering is what keeps the lawful write shape available at all.
+        for accession_plain, scalar in established:
+            active.execute(
+                "UPDATE census_accessions SET registrant_cik_numeric = ? WHERE accession_plain = ?",
+                (scalar, accession_plain),
+            )
+            active.execute(
+                "UPDATE census_accessions SET registrant_set_completeness = ? "
+                "WHERE accession_plain = ?",
+                (_ESTABLISHED, accession_plain),
+            )
+
+        # §6.4: the projection transaction is all-or-nothing, so the totality is measured
+        # and required **inside** it. Measuring after the commit would still detect a
+        # violation, but it would detect one that had already been persisted -- an
+        # `established` completeness written beside a broken §9.5 invariant is exactly the
+        # durable state the rollback rule exists to make unreachable.
+        totality = _measure_association_totality(
+            active,
+            invalid_renderings=invalid_renderings,
+            provenance_failures=provenance_failures,
+            orphans=orphans,
+            missing_corroboration=missing_corroboration,
+            unbindable_members=unbindable_members,
+            membership_conflicts=membership_conflicts,
+            expected_singletons=singletons,
+            expected_multi=multi,
+            expected_relation_rows=relation_rows,
+        )
+        totality.require()
+    return totality
+
+
+def _membership_observation_counts(connection: sqlite3.Connection) -> tuple[int, int]:
+    """How many persisted observations each side of §6.2's set definition reads.
+
+    Reported as evidence that the two sets were derived from real durable rows rather
+    than asserted: a zero submissions count with a non-empty relation would be visible
+    immediately. Returns ``(submissions, substantive)`` where the second total counts
+    every membership observation on either side.
+    """
+    eligible = membership_observation_sources(connection)
+    submissions = 0
+    substantive = 0
+    for row in connection.execute(
+        "SELECT source_observation_id, field_name FROM census_accession_observations "
+        "WHERE field_name IN (?, ?)",
+        SUBMISSIONS_MEMBERSHIP_FIELDS,
+    ).fetchall():
+        source_id = eligible.get(str(row["source_observation_id"]))
+        if source_id is None:
+            continue
+        field = str(row["field_name"])
+        if (
+            source_id in SUBMISSIONS_MEMBERSHIP_SOURCE_IDS
+            and field in SUBMISSIONS_MEMBERSHIP_FIELDS
+        ):
+            submissions += 1
+            substantive += 1
+        elif (
+            source_id in FULL_INDEX_MEMBERSHIP_SOURCE_IDS and field in FULL_INDEX_MEMBERSHIP_FIELDS
+        ):
+            substantive += 1
+    return submissions, substantive
+
+
+def _measure_association_totality(
+    connection: sqlite3.Connection,
+    *,
+    invalid_renderings: int,
+    provenance_failures: int,
+    orphans: int,
+    missing_corroboration: int,
+    unbindable_members: int,
+    membership_conflicts: int,
+    expected_singletons: int,
+    expected_multi: int,
+    expected_relation_rows: int,
+) -> AssociationTotality:
+    """Read the §9.5 counts back from the persisted rows, not from the writer's tallies.
+
+    The six zero-fixed invariants are measured against the database so a writer bug shows
+    up as a totality failure rather than as a self-consistent report. The three
+    ``unestablished``-only counts are the writer's own dispositions, because they describe
+    why a set was refused and no persisted row records a refusal.
+    """
+    accessions = int(connection.execute("SELECT COUNT(*) FROM census_accessions").fetchone()[0])
+    established = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM census_accessions WHERE registrant_set_completeness = ?",
+            (_ESTABLISHED,),
+        ).fetchone()[0]
+    )
+    relation_rows = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM census_accession_registrants WHERE association_class = ?",
+            (_SUBSTANTIVE,),
+        ).fetchone()[0]
+    )
+    cardinality = {
+        str(row["accession_plain"]): int(row["members"])
+        for row in connection.execute(
+            "SELECT accession_plain, COUNT(*) AS members FROM census_accession_registrants "
+            "WHERE association_class = ? GROUP BY accession_plain",
+            (_SUBSTANTIVE,),
+        ).fetchall()
+    }
+    zero_relation = 0
+    singleton = 0
+    multi = 0
+    singleton_mismatch = 0
+    multi_nonnull = 0
+    for row in connection.execute(
+        "SELECT accession_plain, registrant_cik_numeric FROM census_accessions "
+        "WHERE registrant_set_completeness = ? ORDER BY accession_plain",
+        (_ESTABLISHED,),
+    ).fetchall():
+        plain = str(row["accession_plain"])
+        scalar = row["registrant_cik_numeric"]
+        members = cardinality.get(plain, 0)
+        if members == 0:
+            zero_relation += 1
+        elif members == 1:
+            singleton += 1
+            sole = int(
+                connection.execute(
+                    "SELECT registrant_cik_numeric FROM census_accession_registrants "
+                    "WHERE accession_plain = ? AND association_class = ?",
+                    (plain, _SUBSTANTIVE),
+                ).fetchone()[0]
+            )
+            if scalar is None or int(scalar) != sole:
+                singleton_mismatch += 1
+        else:
+            multi += 1
+            if scalar is not None:
+                multi_nonnull += 1
+    orphan_rows = orphans + int(
+        connection.execute(
+            "SELECT COUNT(*) FROM census_accession_registrants AS r "
+            "WHERE NOT EXISTS (SELECT 1 FROM census_accessions AS a "
+            "WHERE a.accession_plain = r.accession_plain)"
+        ).fetchone()[0]
+    )
+    invalid = invalid_renderings + int(
+        connection.execute(
+            "SELECT COUNT(*) FROM census_accession_registrants "
+            "WHERE registrant_cik_padded <> printf('%010d', registrant_cik_numeric)"
+        ).fetchone()[0]
+    )
+    provenance = provenance_failures + int(
+        connection.execute(
+            "SELECT COUNT(*) FROM census_accession_registrants AS r "
+            "WHERE NOT EXISTS (SELECT 1 FROM census_source_observations AS s "
+            "WHERE s.observation_id = r.source_observation_id) "
+            "OR (r.parsed_record_id IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM census_parsed_records AS p "
+            "WHERE p.parsed_record_id = r.parsed_record_id))"
+        ).fetchone()[0]
+    )
+    if (singleton, multi, relation_rows) != (
+        expected_singletons,
+        expected_multi,
+        expected_relation_rows,
+    ):
+        message = (
+            "the persisted association projection disagrees with what the writer recorded: "
+            f"persisted singleton/multi/rows {(singleton, multi, relation_rows)} versus "
+            f"written {(expected_singletons, expected_multi, expected_relation_rows)}"
+        )
+        raise OfflineParseError(message)
+    return AssociationTotality(
+        census_accession_count=accessions,
+        established_accession_count=established,
+        unestablished_accession_count=accessions - established,
+        substantive_relation_count=relation_rows,
+        established_zero_relation_count=zero_relation,
+        established_singleton_count=singleton,
+        established_multi_count=multi,
+        singleton_scalar_mismatch_count=singleton_mismatch,
+        multi_nonnull_scalar_count=multi_nonnull,
+        orphan_relation_count=orphan_rows,
+        invalid_cik_rendering_count=invalid,
+        association_provenance_failure_count=provenance,
+        submissions_member_missing_full_index_count=missing_corroboration,
+        unbindable_registrant_member_count=unbindable_members,
+        unestablished_membership_conflict_count=membership_conflicts,
+    )
+
+
 def _parser_state_for(outcome: ParseOutcome) -> str:
     """The accepted ``parser_state`` terminal for one completed parse.
 
@@ -695,6 +1426,134 @@ def _parser_state_for(outcome: ParseOutcome) -> str:
     if outcome.quarantined:
         return "quarantined"
     return "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceLayerPhase:
+    """Everything E0 writes **before** the Decision 094 §6.4 association projection.
+
+    Decision 094 §6.4 fixes an order rather than a preference: the projection runs strictly
+    after every category-A parse, after full-index observation materialization, and after
+    ``resolve_persisted_accessions()``, because membership evidence may bind only to an
+    accession the submissions layer has already established and because §6.2 item 5 reads
+    the resolver's own output.
+
+    Naming that boundary makes the ordering a structure instead of a comment, so the
+    dependency can be exercised directly at exactly the state the projection consumes.
+    """
+
+    outcomes: tuple[PlannedSourceOutcome, ...]
+    accession_resolutions: int
+    full_index_registrant_observations: int
+    full_index_unbound_accessions: tuple[str, ...]
+
+
+def materialize_source_layer(
+    *,
+    writer: CatalogWriter,
+    tree: DataTree,
+    approved_2024_transitions: Mapping[str, bool] | None = None,
+) -> SourceLayerPhase:
+    """Parse every planned source, materialize the full index, and resolve accessions.
+
+    This is the whole of E0's durable database work **except** the §6.4 association
+    projection, and it is a phase of one ``CatalogWriter`` invocation rather than a second
+    catalog writer: :func:`run_offline_metadata_parse` calls it inside the same
+    :func:`write_containment`, and a caller reaching it directly must do the same.
+
+    Raises:
+        OfflineParseError: any fail-closed condition, always before a durable write.
+    """
+    connection = writer.connection
+    planned = load_planned_sources(connection)
+    observations = _observations_by_id(connection)
+    store = SnapshotStore(tree)
+    store.adopt(observations.values())
+    catalog = CensusCatalog(writer, approved_2024_transitions=approved_2024_transitions)
+
+    dispositions: list[tuple[PlannedSource, SourceDisposition]] = []
+    for source in planned:
+        bound = None if source.observation_id is None else observations.get(source.observation_id)
+        dispositions.append((source, classify_planned_source(source, bound)))
+
+    outcomes: list[PlannedSourceOutcome] = []
+    index_runs: list[tuple[SourceObservation, str]] = []
+    index_observations = 0
+    index_unbound: set[str] = set()
+    parsed_any = False
+    for source, disposition in dispositions:
+        if disposition != "E0_REQUIRED_PARSE":
+            outcomes.append(
+                PlannedSourceOutcome(
+                    source_instance_id=source.source_instance_id,
+                    source_id=source.source_id,
+                    disposition=disposition,
+                    parser_state_before=source.parser_state,
+                    parser_state_after=source.parser_state,
+                    detail=(
+                        "accepted source preserved as failed or unavailable"
+                        if disposition == "E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE"
+                        else "deliberately untouched: parser output is not used by "
+                        "the authoritative candidate builder"
+                    ),
+                )
+            )
+            continue
+        bound_id = source.observation_id
+        if bound_id is None or bound_id not in observations:
+            message = (
+                f"planned source {source.source_instance_id!r} lost its plan-bound "
+                "observation between classification and parse"
+            )
+            raise OfflineParseError(message)
+        observation = observations[bound_id]
+        outcome, references = _parse_source(connection, store, observation)
+        result = catalog.persist(
+            outcome,
+            historical_references=references,
+            source_observation_id=observation.observation_id,
+        )
+        parsed_any = True
+        after = _parser_state_for(outcome)
+        with transaction(connection) as active:
+            active.execute(
+                "UPDATE census_plan_sources SET parser_state = ? "
+                "WHERE census_run_id = ? AND source_instance_id = ?",
+                (after, source.census_run_id, source.source_instance_id),
+            )
+        if source.source_id == "sec_full_index_company":
+            index_runs.append((observation, result.parser_run_id))
+        outcomes.append(
+            PlannedSourceOutcome(
+                source_instance_id=source.source_instance_id,
+                source_id=source.source_id,
+                disposition=disposition,
+                parser_run_id=result.parser_run_id,
+                parsed_records=result.parsed,
+                quarantined_records=result.quarantined,
+                parser_state_before=source.parser_state,
+                parser_state_after=after,
+                already_present=result.already_present,
+            )
+        )
+    # R23: materialization runs only after every category-A parse, because a
+    # company.idx row may bind only to an accession the submissions layer has
+    # already established. Ordering by plan row would make binding depend on plan
+    # order, which is exactly what the accepted source binding forbids.
+    recorded = utc_now()
+    for observation, run_id in index_runs:
+        written, unbound = _materialize_full_index_registrants(
+            connection, observation=observation, parser_run_id=run_id, recorded=recorded
+        )
+        index_observations += written
+        index_unbound.update(unbound)
+    resolutions = len(catalog.resolve_persisted_accessions()) if parsed_any else 0
+    return SourceLayerPhase(
+        outcomes=tuple(outcomes),
+        accession_resolutions=resolutions,
+        full_index_registrant_observations=index_observations,
+        full_index_unbound_accessions=tuple(sorted(index_unbound)),
+    )
 
 
 def run_offline_metadata_parse(
@@ -719,96 +1578,27 @@ def run_offline_metadata_parse(
         OfflineParseError: any fail-closed condition, always before a durable write.
     """
     connection = writer.connection
-    planned = load_planned_sources(connection)
-    observations = _observations_by_id(connection)
-    store = SnapshotStore(tree)
-    store.adopt(observations.values())
-    catalog = CensusCatalog(writer, approved_2024_transitions=approved_2024_transitions)
-
-    dispositions: list[tuple[PlannedSource, SourceDisposition]] = []
-    for source in planned:
-        bound = None if source.observation_id is None else observations.get(source.observation_id)
-        dispositions.append((source, classify_planned_source(source, bound)))
-
-    outcomes: list[PlannedSourceOutcome] = []
-    index_runs: list[tuple[SourceObservation, str]] = []
-    index_observations = 0
-    index_unbound: set[str] = set()
-    parsed_any = False
     with write_containment(connection):
-        for source, disposition in dispositions:
-            if disposition != "E0_REQUIRED_PARSE":
-                outcomes.append(
-                    PlannedSourceOutcome(
-                        source_instance_id=source.source_instance_id,
-                        source_id=source.source_id,
-                        disposition=disposition,
-                        parser_state_before=source.parser_state,
-                        parser_state_after=source.parser_state,
-                        detail=(
-                            "accepted source preserved as failed or unavailable"
-                            if disposition == "E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE"
-                            else "deliberately untouched: parser output is not used by "
-                            "the authoritative candidate builder"
-                        ),
-                    )
-                )
-                continue
-            bound_id = source.observation_id
-            if bound_id is None or bound_id not in observations:
-                message = (
-                    f"planned source {source.source_instance_id!r} lost its plan-bound "
-                    "observation between classification and parse"
-                )
-                raise OfflineParseError(message)
-            observation = observations[bound_id]
-            outcome, references = _parse_source(connection, store, observation)
-            result = catalog.persist(
-                outcome,
-                historical_references=references,
-                source_observation_id=observation.observation_id,
-            )
-            parsed_any = True
-            after = _parser_state_for(outcome)
-            with transaction(connection) as active:
-                active.execute(
-                    "UPDATE census_plan_sources SET parser_state = ? "
-                    "WHERE census_run_id = ? AND source_instance_id = ?",
-                    (after, source.census_run_id, source.source_instance_id),
-                )
-            if source.source_id == "sec_full_index_company":
-                index_runs.append((observation, result.parser_run_id))
-            outcomes.append(
-                PlannedSourceOutcome(
-                    source_instance_id=source.source_instance_id,
-                    source_id=source.source_id,
-                    disposition=disposition,
-                    parser_run_id=result.parser_run_id,
-                    parsed_records=result.parsed,
-                    quarantined_records=result.quarantined,
-                    parser_state_before=source.parser_state,
-                    parser_state_after=after,
-                    already_present=result.already_present,
-                )
-            )
-        # R23: materialization runs only after every category-A parse, because a
-        # company.idx row may bind only to an accession the submissions layer has
-        # already established. Ordering by plan row would make binding depend on plan
-        # order, which is exactly what the accepted source binding forbids.
-        recorded = utc_now()
-        for observation, run_id in index_runs:
-            written, unbound = _materialize_full_index_registrants(
-                connection, observation=observation, parser_run_id=run_id, recorded=recorded
-            )
-            index_observations += written
-            index_unbound.update(unbound)
-        resolutions = len(catalog.resolve_persisted_accessions()) if parsed_any else 0
+        phase = materialize_source_layer(
+            writer=writer, tree=tree, approved_2024_transitions=approved_2024_transitions
+        )
+        # **Decision 094 §6.4**: the association projection runs strictly after every
+        # category-A parse, after full-index materialization, and after canonical
+        # accession resolution — because membership evidence may bind only to an
+        # accession the submissions layer has already established, and because §6.2
+        # item 5 reads the resolver's own output. It is part of *this* CatalogWriter
+        # invocation and is not a second catalog writer (contract §20, D094 §6.1 item 4).
+        membership = _membership_observation_counts(connection)
+        totality = materialize_census_associations(connection)
 
     report = OfflineParseReport(
-        outcomes=tuple(outcomes),
-        accession_resolutions=resolutions,
-        full_index_registrant_observations=index_observations,
-        full_index_unbound_accessions=tuple(sorted(index_unbound)),
+        outcomes=phase.outcomes,
+        accession_resolutions=phase.accession_resolutions,
+        full_index_registrant_observations=phase.full_index_registrant_observations,
+        full_index_unbound_accessions=phase.full_index_unbound_accessions,
+        association_totality=totality,
+        submissions_membership_observations=membership[0],
+        substantive_membership_observations=membership[1],
     )
     if not report.is_complete:
         message = "every planned source must receive exactly one E0 disposition"

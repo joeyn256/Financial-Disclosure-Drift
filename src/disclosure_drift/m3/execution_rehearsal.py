@@ -525,6 +525,14 @@ def _run_e2(workspace: Path) -> ScenarioOutcome:
     with _paired(workspace, "e2") as pair:
         # Each variant violates exactly one governing obligation, in isolation, and must
         # fail for its own reason rather than incidentally.
+        #
+        # **Accepted Decision 096 R83.** The malformed full-index CIK variant is deliberately
+        # not here. Accepted Decision 094 §6.5 moved that invariant's owner: the candidate
+        # layer no longer rereads `census_accession_observations` at all, so a mutation of a
+        # source observation after the canonical relation exists is correctly invisible to
+        # it. The invariant is not weakened -- it is enforced one layer earlier, at the
+        # pre-association E0 projection, where a malformed rendering fails closed on
+        # `invalid_cik_rendering_count`. Its proof lives in `tests/unit/test_m3_e0.py`.
         variants: tuple[tuple[str, Callable[[sqlite3.Connection], None], str], ...] = (
             (
                 "plain/dashed disagreement",
@@ -540,11 +548,6 @@ def _run_e2(workspace: Path) -> ScenarioOutcome:
                 "company name absent",
                 _remove_company_name,
                 "filing_time_name",
-            ),
-            (
-                "non-canonical full-index CIK",
-                _corrupt_full_index_cik,
-                "non-canonical CIK",
             ),
             (
                 "accession without a registrant row",
@@ -614,17 +617,6 @@ def _remove_company_name(connection: sqlite3.Connection) -> None:
     connection.execute(
         "DELETE FROM census_registrant_observations WHERE observation_kind = 'company_name' "
         "AND cik_numeric = (SELECT MIN(cik_numeric) FROM census_registrants)"
-    )
-
-
-def _corrupt_full_index_cik(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        "UPDATE census_accession_observations SET raw_value_json = '\"not-a-cik\"' "
-        "WHERE field_name = 'cik_padded' AND source_observation_id IN "
-        "(SELECT observation_id FROM census_source_observations "
-        "WHERE source_id = 'sec_full_index_company') AND accession_plain = "
-        "(SELECT MIN(accession_plain) FROM census_accession_observations "
-        "WHERE field_name = 'cik_padded')"
     )
 
 

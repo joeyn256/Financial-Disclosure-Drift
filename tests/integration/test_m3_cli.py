@@ -5015,3 +5015,140 @@ def test_a_reconciliation_never_checkpoints_a_pending_write_ahead_log(
     )
     assert document["reconciliation"]["out_of_plan"] == []
     assert document["reconciliation"]["superseded_out_of_plan"] == [["sec_sic_code_list", retired]]
+
+
+# --------------------------------------------------------------------------- #
+# Accepted Decision 094 §7 — the two PRE-E0 operator surfaces
+#
+# These drive the real CLI as a subprocess with every `DISCLOSURE_DRIFT_*` variable
+# stripped, so the operator's own private root is never read, resolved, or named. Both
+# `execute` modes must return exit 3 while their source-bound activation constants are
+# `None`, and nothing any mode prints may carry an absolute path or an SEC identity.
+# --------------------------------------------------------------------------- #
+_PRE_E0_COMMANDS = ("prepare-e0-catalog", "offline-parse")
+EXIT_STAGE_NOT_ENABLED = 3
+
+
+def test_both_pre_e0_commands_are_registered(repo_root: Path) -> None:
+    result = _run(["m3", "--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    normalized = " ".join(result.stdout.split())
+    for command in _PRE_E0_COMMANDS:
+        assert command in normalized
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_a_pre_e0_command_takes_only_config_and_mode(repo_root: Path, command: str) -> None:
+    """Decision 094 §7.1: no ``--evidence-root``, ``--catalog``, force, resume, or repair.
+
+    Each absent option is named individually rather than the help text being compared as a
+    blob, because the point is that none of these is an operator choice — not that the help
+    happens to be worded a particular way today.
+    """
+    result = _run(["m3", command, "--help"], repo_root)
+
+    assert result.returncode == EXIT_OK
+    normalized = " ".join(result.stdout.split())
+    assert "--mode" in normalized
+    assert "--config" in normalized
+    for prohibited in (
+        "--evidence-root",
+        "--catalog",
+        "--data-root",
+        "--run-namespace",
+        "--force",
+        "--resume",
+        "--overwrite",
+        "--repair",
+    ):
+        assert prohibited not in normalized
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_execute_is_not_enabled_by_the_current_boundary(
+    repo_root: Path, shipped_config: Path, command: str
+) -> None:
+    """Decision 094 §7.2: exit ``3``, with no runtime root set and none consulted."""
+    result = _run(["m3", command, "--config", str(shipped_config), "--mode", "execute"], repo_root)
+
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert "is None" in combined
+    assert "not enabled" in combined
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_execute_stays_disabled_even_with_a_runtime_root_present(
+    repo_root: Path, shipped_config: Path, evidence_root: Path, command: str
+) -> None:
+    """§7.2: no environment value can substitute for the source-bound constant."""
+    result = _run(
+        ["m3", command, "--config", str(shipped_config), "--mode", "execute"],
+        repo_root,
+        env={"DISCLOSURE_DRIFT_EVIDENCE_ROOT": str(evidence_root)},
+    )
+
+    assert result.returncode == EXIT_STAGE_NOT_ENABLED, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_an_unset_runtime_root_is_a_configuration_error_for_a_read_only_mode(
+    repo_root: Path, shipped_config: Path, command: str
+) -> None:
+    """§7.3 exit ``1``: the private root comes from that variable alone, with no default."""
+    result = _run(
+        ["m3", command, "--config", str(shipped_config), "--mode", "preflight"], repo_root
+    )
+
+    assert result.returncode == EXIT_CONFIG_ERROR, result.stdout + result.stderr
+    assert "DISCLOSURE_DRIFT_EVIDENCE_ROOT" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_verify_reports_undetermined_rather_than_success_for_an_absent_namespace(
+    repo_root: Path, shipped_config: Path, evidence_root: Path, command: str
+) -> None:
+    """§9.1: absence of a valid terminal is UNDETERMINED / NOT COMPLETE, never success."""
+    result = _run(
+        ["m3", command, "--config", str(shipped_config), "--mode", "verify"],
+        repo_root,
+        env={"DISCLOSURE_DRIFT_EVIDENCE_ROOT": str(evidence_root)},
+    )
+
+    assert result.returncode == EXIT_GATE_FAILURE, result.stdout + result.stderr
+    assert "UNDETERMINED / NOT COMPLETE" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_an_unknown_mode_is_a_usage_error(
+    repo_root: Path, shipped_config: Path, command: str
+) -> None:
+    result = _run(["m3", command, "--config", str(shipped_config), "--mode", "repair"], repo_root)
+
+    assert result.returncode == EXIT_USAGE
+
+
+@pytest.mark.parametrize("command", _PRE_E0_COMMANDS)
+def test_no_pre_e0_output_discloses_a_private_path_or_an_identity(
+    repo_root: Path, shipped_config: Path, evidence_root: Path, command: str
+) -> None:
+    """§7.1 and §12.3 item 11: the synthetic root's value never reaches rendered output.
+
+    Every mode is exercised, including the two refusal paths, because a refusal is where a
+    private value is most likely to be reached for as context.
+    """
+    for mode, env in (
+        ("execute", {}),
+        ("preflight", {"DISCLOSURE_DRIFT_EVIDENCE_ROOT": str(evidence_root)}),
+        ("verify", {"DISCLOSURE_DRIFT_EVIDENCE_ROOT": str(evidence_root)}),
+        ("preflight", {}),
+    ):
+        result = _run(
+            ["m3", command, "--config", str(shipped_config), "--mode", mode], repo_root, env=env
+        )
+        combined = result.stdout + result.stderr
+        assert str(evidence_root) not in combined
+        assert "private-evidence" not in combined
+        assert str(evidence_root.parent) not in combined
+        assert "@" not in combined

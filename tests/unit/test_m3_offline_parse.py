@@ -216,10 +216,19 @@ def test_only_parser_state_may_be_updated_on_the_plan_table(blank_catalog: Path)
             connection.execute("DELETE FROM census_plan_sources")
 
 
-def test_the_permitted_footprint_is_exactly_fifteen_tables() -> None:
-    assert len(op.E0_PERMITTED_TABLES) == 15
+def test_the_permitted_footprint_is_exactly_sixteen_tables() -> None:
+    """**R17** as narrowly amended by accepted Decision 094 §6.1.
+
+    Fifteen became sixteen by the addition of exactly one table -- the R58 canonical relation
+    whose writer migration ``0014``'s own comment assigns to E0. The count is asserted
+    alongside the *identity* of the addition, so the test cannot be satisfied by widening E0
+    with some other table: a general widening is precisely what §6.1 says this is not.
+    """
+    assert len(op.E0_PERMITTED_TABLES) == 16
+    assert "census_accession_registrants" in op.E0_PERMITTED_TABLES
     assert "census_qa_metrics" not in op.E0_PERMITTED_TABLES
     assert not {table for table in op.E0_PERMITTED_TABLES if table.startswith("census_index_")}
+    assert not op.E0_PERMITTED_TABLES & op.E0_PROHIBITED_TABLES
 
 
 def test_containment_is_removed_when_the_context_exits(blank_catalog: Path) -> None:
@@ -736,7 +745,21 @@ def test_full_index_materialization_writes_no_index_table(
 def test_full_index_evidence_never_overwrites_the_authoritative_accession(
     corpus: tuple[Path, DataTree], tmp_path: Path
 ) -> None:
-    """**R23** §5.5: Decision 012 gives full_index level 3, weaker than submissions."""
+    """**R23** §5.5: Decision 012 gives full_index level 3, weaker than submissions.
+
+    The authoritative submissions-derived fields are what "never overwritten" means, and they
+    are unchanged.
+
+    The scalar registrant is a different matter under accepted Decision 094 §6.2. This corpus
+    plans **no submissions source at all** -- only tickers, the full index, and the calendar --
+    so ``S_submissions`` is empty, §6.2 condition 1 is false, and the set is correctly
+    ``unestablished``. The two full-index members are still written as relation rows, because
+    §6.2 says known substantive observations may remain visible while completeness is
+    unestablished; what they may not do is be read as a complete set. So the accession keeps a
+    ``NULL`` scalar, carries its relation rows, and is fail-closed -- which is a sharper
+    statement of R23 §5.5 than the old assertion was: the weaker source did not overwrite the
+    stronger one, and it also did not get to *stand in* for it.
+    """
     database, tree = corpus
     with connect(database) as connection:
         before = connection.execute(
@@ -744,14 +767,36 @@ def test_full_index_evidence_never_overwrites_the_authoritative_accession(
             "WHERE accession_plain = ?",
             (_ACCESSION_PLAIN,),
         ).fetchone()
-        anchor_before = int(before["registrant_cik_numeric"])
+        assert int(before["registrant_cik_numeric"]) == _ANCHOR_CIK
+        form_before = str(before["form_type"])
+        filed_before = str(before["filing_date_sec"])
     _run(database, tree, tmp_path)
     with connect(database) as connection:
         after = connection.execute(
-            "SELECT registrant_cik_numeric FROM census_accessions WHERE accession_plain = ?",
+            "SELECT registrant_cik_numeric, form_type, filing_date_sec, "
+            "registrant_set_completeness FROM census_accessions WHERE accession_plain = ?",
             (_ACCESSION_PLAIN,),
         ).fetchone()
-    assert int(after["registrant_cik_numeric"]) == anchor_before == _ANCHOR_CIK
+        members = [
+            int(row["registrant_cik_numeric"])
+            for row in connection.execute(
+                "SELECT registrant_cik_numeric FROM census_accession_registrants "
+                "WHERE accession_plain = ? AND association_class = 'substantive' "
+                "ORDER BY registrant_cik_numeric",
+                (_ACCESSION_PLAIN,),
+            ).fetchall()
+        ]
+
+    # The stronger source's fields are untouched by the weaker one.
+    assert str(after["form_type"]) == form_before
+    assert str(after["filing_date_sec"]) == filed_before
+
+    # Both full-index members are visible in the canonical relation, the scalar is NULL --
+    # never the anchor and never the co-registrant -- and the set is fail-closed because no
+    # submissions evidence corroborates it.
+    assert members == sorted({_ANCHOR_CIK, _ASSOCIATED_CIK})
+    assert after["registrant_cik_numeric"] is None
+    assert str(after["registrant_set_completeness"]) == "unestablished"
 
 
 def test_index_object_order_does_not_change_the_result(tmp_path: Path) -> None:

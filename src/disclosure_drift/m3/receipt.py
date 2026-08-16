@@ -67,7 +67,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Final
+from typing import ClassVar, Final
 
 from disclosure_drift.errors import DisclosureDriftError
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
@@ -75,18 +75,26 @@ from disclosure_drift.reasons import REASON_CODES
 
 __all__ = [
     "COMPLETION_STATUSES",
+    "COMPLETION_STATUSES_V4",
     "INTERRUPTION_STATES",
+    "INTERRUPTION_STATES_V4",
     "INVOCATION_MODES",
+    "INVOCATION_MODES_V4",
     "OPERATOR_RECEIPT_FILENAME",
     "PHASES",
+    "PHASE_V4",
     "READABLE_RECEIPT_SCHEMA_VERSIONS",
     "RECEIPT_SCHEMA_VERSION",
     "RECEIPT_SCHEMA_VERSION_V2",
+    "RECEIPT_SCHEMA_VERSION_V4",
+    "REASON_CODES_V4",
     "RESPONSE_CLASSIFICATION_BUCKETS",
     "RUN_NAMESPACE_DIRNAME",
     "SCHEMA_DRIFT_OUTCOMES",
     "ZERO_NETWORK_MODES",
+    "ZERO_NETWORK_MODES_V4",
     "ExecutionReceipt",
+    "ExecutionReceiptV4",
     "ProhibitedReceiptContentError",
     "ReceiptChainResolutionError",
     "ReceiptError",
@@ -114,8 +122,23 @@ RECEIPT_SCHEMA_VERSION: Final = "m3-execution-receipt/3.0"
 #: dispatches on the version found in the document; it never upgrades one in place.
 RECEIPT_SCHEMA_VERSION_V2: Final = "m3-execution-receipt/2.0"
 
-#: Every schema version a reader accepts. The writer is :data:`RECEIPT_SCHEMA_VERSION` alone.
-READABLE_RECEIPT_SCHEMA_VERSIONS: Final = (RECEIPT_SCHEMA_VERSION_V2, RECEIPT_SCHEMA_VERSION)
+#: The Decision 094 §10.1 successor. It exists for exactly the two new PRE-E0 operator commands
+#: and **nothing else emits it**: `2.0` and `3.0` receipts stay byte-unchanged, their validators
+#: and writer behavior are untouched, and every existing command still emits `3.0`. The delta is
+#: deliberately one-directional -- v4 adds two zero-network invocation modes, a stage-specific
+#: interruption vocabulary, and a stage-specific closed reason vocabulary, all of them
+#: **version-scoped objects** that no v2/v3 validator can see. A `3.0` document naming a v4-only
+#: mode or interruption state is refused by the `3.0` table, which is what keeps the isolation a
+#: mechanical fact rather than a convention.
+RECEIPT_SCHEMA_VERSION_V4: Final = "m3-execution-receipt/4.0"
+
+#: Every schema version a reader accepts. The writer is :data:`RECEIPT_SCHEMA_VERSION` for every
+#: pre-existing command; only the two Decision 094 commands call the explicit v4 builder.
+READABLE_RECEIPT_SCHEMA_VERSIONS: Final = (
+    RECEIPT_SCHEMA_VERSION_V2,
+    RECEIPT_SCHEMA_VERSION,
+    RECEIPT_SCHEMA_VERSION_V4,
+)
 
 INVOCATION_MODES: Final = ("approval", "dry_run", "live", "offline_execution", "rehearsal")
 """The five invocation modes (spec §4)."""
@@ -165,6 +188,67 @@ RESPONSE_CLASSIFICATION_BUCKETS: Final = (
 )
 
 ACQUISITION_WINDOWS: Final = ("M3.2A", "M3.2B")
+
+# --------------------------------------------------------------------------- #
+# Decision 094 §10.1 -- the version-scoped `4.0` vocabulary
+#
+# Every object below is v4-only. None of it is added to the tuples above, none of it is
+# reachable from `_RULES` or `_RULES_V3`, and none of it enters `reasons.py`. That is the
+# whole point of the ruling: a v4 value in a v2/v3 document must fail closed.
+# --------------------------------------------------------------------------- #
+#: The two PRE-E0 invocation modes. Both are zero-network by construction: the commands
+#: that emit them import no client, transport, socket, or SEC route on any code path.
+INVOCATION_MODES_V4: Final = ("offline_catalog_transition", "offline_parse")
+
+#: Both v4 modes place nothing on the wire, so both counts are fixed at zero (§7.3).
+ZERO_NETWORK_MODES_V4: Final = INVOCATION_MODES_V4
+
+#: Decision 094 §10.1 item 1: the already-accepted real-execution phase, deliberately reused
+#: rather than inventing a new project phase for two commands inside an existing one.
+PHASE_V4: Final = "M3.3B"
+
+COMPLETION_STATUSES_V4: Final = ("complete", "failed", "interrupted")
+"""The only three terminal statuses either PRE-E0 state machine can reach.
+
+There is no ``stopped_at_ceiling`` -- the ceiling is zero and nothing is ever attempted -- and
+no ``stopped_by_gate``: a refused predicate is a ``failed`` run with its own reason code, not a
+fourth status that would let a refusal read as an orderly stop.
+"""
+
+#: Decision 094 §10.2's exact interruption vocabulary, in the order the ruling states it.
+INTERRUPTION_STATES_V4: Final = (
+    "before_backup",
+    "during_backup",
+    "after_backup_before_migration",
+    "after_migration_0014_before_0015",
+    "after_migration_0014_commit_before_event",
+    "after_migration_0015_commit_before_event",
+    "after_migration_0015_before_transition_freeze",
+    "during_e0_source_parse",
+    "after_e0_source_commit_before_event",
+    "during_e0_full_index_observation_materialization",
+    "after_e0_full_index_observations_before_resolution",
+    "during_e0_accession_resolution",
+    "after_e0_resolution_before_association_materialization",
+    "during_e0_association_materialization",
+    "after_e0_materialization_before_validation",
+    "after_e0_validation_before_freeze",
+)
+
+REASON_CODES_V4: Final = (
+    "PRE_E0_CATALOG_TRANSITION_FAILED",
+    "PRE_E0_CATALOG_TRANSITION_INTERRUPTED",
+    "M3_3_E0_OFFLINE_PARSE_FAILED",
+    "M3_3_E0_OFFLINE_PARSE_INTERRUPTED",
+)
+"""Decision 094 §10.1's closed v4 reason vocabulary.
+
+Stage-specific, release-blocking, and manual-review-required by the ruling's own words, and
+deliberately **not** added to :mod:`disclosure_drift.reasons`: the repository-wide registry is a
+prohibited path for this stage, and a four-code stage vocabulary does not need to become a
+repository-wide one to be closed. A v2/v3 receipt still validates its ``reason_code`` against
+the repository registry, exactly as before.
+"""
 
 _ALL_MODES: Final = frozenset(INVOCATION_MODES)
 _LIVE: Final = frozenset({"live"})
@@ -343,6 +427,57 @@ _RULES_V3: Final[tuple[_Rule, ...]] = tuple(
     for rule in _RULES
 ) + (_Rule("carry_in_authority_sha256", "sha256", _LIVE, condition="carry_in_root"),)
 
+_V4_MODES: Final = frozenset(INVOCATION_MODES_V4)
+_V4_PARSE: Final = frozenset({"offline_parse"})
+
+#: The ``4.0`` table (Decision 094 §10.1 items 3-4), written out in full rather than derived from
+#: ``_RULES_V3``. Derivation would be shorter and wrong: v4's permitted set is a *different,
+#: smaller* closed set, and every selection, quota, manifest, drift, route, classification, and
+#: transport field is absent from it entirely -- so a document carrying one is refused by the
+#: closed-field-set check outright, not merely found out of mode.
+#:
+#: ``offline_catalog_transition`` permits only the common identity, migration, timing,
+#: zero-network, completion, reason, interruption, and predecessor fields. ``offline_parse``
+#: additionally requires the parser versions and the cohort-definition digest, because it is the
+#: mode that actually parses.
+#:
+#: No terminal-record field appears here. §10.1 makes the relationship deliberately one-way --
+#: the receipt is written first and the terminal record binds its ``receipt_id`` -- which is what
+#: prevents a receipt/terminal identity cycle.
+_RULES_V4: Final[tuple[_Rule, ...]] = (
+    # §4.1 identity and provenance
+    _Rule("receipt_schema_version", "string", _V4_MODES),
+    _Rule("receipt_id", "sha256", _V4_MODES),
+    _Rule("command_name", "string", _V4_MODES),
+    _Rule("command_version", "string", _V4_MODES),
+    _Rule("phase", "enum", _V4_MODES, values=(PHASE_V4,)),
+    _Rule("invocation_mode", "enum", _V4_MODES, values=INVOCATION_MODES_V4),
+    _Rule("configuration_fingerprint", "sha256", _V4_MODES),
+    _Rule("migration_chain_head", "string", _V4_MODES),
+    # §4.2 policy and definition versions, narrowed to what the parsing mode needs
+    _Rule("parser_versions", "string_map", _V4_PARSE),
+    _Rule("cohort_definition_digest", "sha256", _V4_PARSE),
+    # §4.3 timing
+    _Rule("started_at_utc", "timestamp", _V4_MODES),
+    _Rule("completed_at_utc", "timestamp", _V4_MODES),
+    _Rule("elapsed_seconds", "number", _V4_MODES),
+    # §4.5 accounting: both fixed at zero by the schema's zero-network mode set
+    _Rule("actual_logical_request_count", "integer", _V4_MODES),
+    _Rule("actual_physical_attempt_count", "integer", _V4_MODES),
+    # §4.8 completion and recovery
+    _Rule("completion_status", "enum", _V4_MODES, values=COMPLETION_STATUSES_V4),
+    _Rule("reason_code", "string", _V4_MODES, condition="non_complete"),
+    _Rule("reason_detail", "reason_detail", _V4_MODES, condition="non_complete"),
+    _Rule(
+        "interruption_state",
+        "enum",
+        _V4_MODES,
+        condition="interrupted",
+        values=INTERRUPTION_STATES_V4,
+    ),
+    _Rule("recovery_predecessor_receipt_id", "sha256", _V4_MODES, condition="permitted"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _Schema:
@@ -356,6 +491,15 @@ class _Schema:
 
     version: str
     rules: tuple[_Rule, ...]
+    #: The modes this version fixes at zero requests and zero attempts. On the schema, not at
+    #: module level, because Decision 094 §10.1 requires every v4 vocabulary object to be
+    #: version-scoped -- a shared tuple consulted by a common checker would not be.
+    zero_network_modes: frozenset[str]
+    #: The closed reason vocabulary this version validates against, or ``None`` for "use the
+    #: repository-wide :mod:`disclosure_drift.reasons` registry" -- which is exactly what ``2.0``
+    #: and ``3.0`` did before and still do. Decision 094 §10.1 gives v4 a stage-specific closed
+    #: vocabulary precisely so the repository registry does not have to change.
+    reason_codes: frozenset[str] | None = None
 
     @property
     def by_name(self) -> Mapping[str, _Rule]:
@@ -371,12 +515,27 @@ class _Schema:
         )
 
 
-_SCHEMA_V2: Final = _Schema(version=RECEIPT_SCHEMA_VERSION_V2, rules=_RULES)
-_SCHEMA_V3: Final = _Schema(version=RECEIPT_SCHEMA_VERSION, rules=_RULES_V3)
+_SCHEMA_V2: Final = _Schema(
+    version=RECEIPT_SCHEMA_VERSION_V2,
+    rules=_RULES,
+    zero_network_modes=frozenset(ZERO_NETWORK_MODES),
+)
+_SCHEMA_V3: Final = _Schema(
+    version=RECEIPT_SCHEMA_VERSION,
+    rules=_RULES_V3,
+    zero_network_modes=frozenset(ZERO_NETWORK_MODES),
+)
+_SCHEMA_V4: Final = _Schema(
+    version=RECEIPT_SCHEMA_VERSION_V4,
+    rules=_RULES_V4,
+    zero_network_modes=frozenset(ZERO_NETWORK_MODES_V4),
+    reason_codes=frozenset(REASON_CODES_V4),
+)
 
 _SCHEMAS: Final[Mapping[str, _Schema]] = {
     _SCHEMA_V2.version: _SCHEMA_V2,
     _SCHEMA_V3.version: _SCHEMA_V3,
+    _SCHEMA_V4.version: _SCHEMA_V4,
 }
 
 _RULES_BY_NAME: Final[Mapping[str, _Rule]] = _SCHEMA_V3.by_name
@@ -798,8 +957,14 @@ def _check_class_conformance(
             raise ReceiptValidationError(message)
 
 
-def _check_accounting(document: Mapping[str, object]) -> None:
-    """§14 accounting, classification, timing, and zero-network consistency."""
+def _check_accounting(document: Mapping[str, object], schema: _Schema) -> None:
+    """§14 accounting, classification, timing, and zero-network consistency.
+
+    Every vocabulary this reads comes from ``schema`` rather than from a module-level tuple, so
+    the checker is shared but the vocabularies are not: Decision 094 §10.1 requires the v4
+    objects to be version-scoped, and a common checker consulting a common tuple would silently
+    have made them global.
+    """
     mode = document["invocation_mode"]
     started = str(document["started_at_utc"])
     completed = str(document["completed_at_utc"])
@@ -810,7 +975,7 @@ def _check_accounting(document: Mapping[str, object]) -> None:
     logical = _as_int(document["actual_logical_request_count"])
     physical = _as_int(document["actual_physical_attempt_count"])
 
-    if mode in ZERO_NETWORK_MODES and (logical or physical):
+    if mode in schema.zero_network_modes and (logical or physical):
         message = (
             f"actual_logical_request_count and actual_physical_attempt_count must both be 0 in a "
             f"{mode!r} receipt; scripted responses, injected retries, and simulated cooldowns are "
@@ -902,12 +1067,19 @@ def _check_accounting(document: Mapping[str, object]) -> None:
         raise ReceiptValidationError(message)
 
     reason_code = document.get("reason_code")
-    if reason_code is not None and reason_code not in REASON_CODES:
-        message = (
-            f"reason_code {reason_code!r} is not registered in disclosure_drift.reasons; an "
-            f"unregistered code is a defect, not a new code"
-        )
-        raise ReceiptValidationError(message)
+    if reason_code is not None:
+        registered = schema.reason_codes if schema.reason_codes is not None else set(REASON_CODES)
+        if reason_code not in registered:
+            registry = (
+                f"the closed {schema.version} vocabulary ({', '.join(sorted(schema.reason_codes))})"
+                if schema.reason_codes is not None
+                else "disclosure_drift.reasons"
+            )
+            message = (
+                f"reason_code {reason_code!r} is not registered in {registry}; an unregistered "
+                f"code is a defect, not a new code"
+            )
+            raise ReceiptValidationError(message)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -936,7 +1108,7 @@ def _validate(document: Mapping[str, object], *, with_identity: bool) -> None:
     for key, value in document.items():
         _check_kind(schema.by_name[key], value)
 
-    _check_accounting(document)
+    _check_accounting(document, schema)
 
     if with_identity:
         expected = compute_receipt_id(document)
@@ -1053,6 +1225,87 @@ class ExecutionReceipt:
 
     def canonical_bytes(self) -> bytes:
         """The bytes written to the evidence root (§6)."""
+        return canonical_bytes(self.as_document())
+
+
+#: The v4 caller field set, derived from the v4 table alone. Kept separate from
+#: :data:`_CALLER_FIELDS` so a v3 field can never be serialized into a v4 preimage.
+_CALLER_FIELDS_V4: Final = _SCHEMA_V4.caller_fields
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionReceiptV4:
+    """One validated ``m3-execution-receipt/4.0`` receipt (Decision 094 §10.1).
+
+    A **separate class**, not a mode of :class:`ExecutionReceipt`. That is the isolation the
+    ruling asks for made structural: this type cannot express a v3 field, :class:`ExecutionReceipt`
+    cannot express a v4 mode, and neither can be relabelled as the other because both write their
+    own ``receipt_schema_version``. Existing commands keep emitting ``3.0`` untouched; only the
+    two Decision 094 operator commands construct this.
+
+    Construction validates, exactly as v3 does, so an invalid v4 receipt cannot be built,
+    serialized, written, or quoted.
+    """
+
+    command_name: str
+    command_version: str
+    invocation_mode: str
+    configuration_fingerprint: str
+    migration_chain_head: str
+    started_at_utc: str
+    completed_at_utc: str
+    elapsed_seconds: float
+    completion_status: str
+
+    #: Fixed at zero by :data:`ZERO_NETWORK_MODES_V4`. Present as fields rather than as literals
+    #: so a receipt states its accounting rather than having it assumed, and so the zero-network
+    #: check has something real to refuse.
+    actual_logical_request_count: int = 0
+    actual_physical_attempt_count: int = 0
+
+    parser_versions: Mapping[str, str] | None = None
+    cohort_definition_digest: str | None = None
+
+    reason_code: str | None = None
+    reason_detail: str | None = None
+    interruption_state: str | None = None
+    recovery_predecessor_receipt_id: str | None = None
+
+    #: Decision 094 §10.1 item 1: the accepted real-execution phase, not a new project phase.
+    #: Fixed rather than supplied, so a caller cannot label a PRE-E0 receipt with another phase.
+    phase: ClassVar[str] = PHASE_V4
+
+    def __post_init__(self) -> None:
+        _validate(self.preimage_document(), with_identity=False)
+
+    def preimage_document(self) -> dict[str, object]:
+        """The §13 preimage: every field except ``receipt_id``, omissions omitted."""
+        document: dict[str, object] = {
+            "receipt_schema_version": RECEIPT_SCHEMA_VERSION_V4,
+            "phase": PHASE_V4,
+        }
+        for name in _CALLER_FIELDS_V4:
+            if name == "phase":
+                continue
+            value = getattr(self, name)
+            if value is None:
+                continue
+            document[name] = _jsonable(value)
+        return document
+
+    @property
+    def receipt_id(self) -> str:
+        """The single integrity identity (§13). Never random, never a timestamp."""
+        return hashlib.sha256(canonical_bytes(self.preimage_document())).hexdigest()
+
+    def as_document(self) -> dict[str, object]:
+        """The complete receipt document, ``receipt_id`` included."""
+        document = self.preimage_document()
+        document["receipt_id"] = self.receipt_id
+        return document
+
+    def canonical_bytes(self) -> bytes:
+        """The bytes written into the Decision 094 run namespace (§6)."""
         return canonical_bytes(self.as_document())
 
 

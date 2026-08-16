@@ -34,6 +34,7 @@ from disclosure_drift.m3.receipt import (
     READABLE_RECEIPT_SCHEMA_VERSIONS,
     RECEIPT_SCHEMA_VERSION,
     RECEIPT_SCHEMA_VERSION_V2,
+    RECEIPT_SCHEMA_VERSION_V4,
     RESPONSE_CLASSIFICATION_BUCKETS,
     RUN_NAMESPACE_DIRNAME,
     SCHEMA_DRIFT_OUTCOMES,
@@ -201,12 +202,20 @@ def test_the_writer_schema_version_is_the_one_decision_055_fixed() -> None:
     assert RECEIPT_SCHEMA_VERSION_V2 == "m3-execution-receipt/2.0"
 
 
-def test_both_schema_versions_remain_readable() -> None:
-    """`2.0` receipts stay readable; the reader dispatches on the version it finds (§7.1)."""
+def test_every_schema_version_remains_readable() -> None:
+    """`2.0` and `3.0` stay readable; the reader dispatches on the version it finds (§7.1).
+
+    Accepted Decision 094 §10.1 adds `4.0` as a **readable** successor for the two PRE-E0
+    commands. The writer constant asserted above is unchanged and still emits `3.0`, which is
+    the property that actually matters: adding a version a reader accepts does not change what
+    any existing command writes.
+    """
     assert READABLE_RECEIPT_SCHEMA_VERSIONS == (
         "m3-execution-receipt/2.0",
         "m3-execution-receipt/3.0",
+        "m3-execution-receipt/4.0",
     )
+    assert RECEIPT_SCHEMA_VERSION_V4 == "m3-execution-receipt/4.0"
 
 
 def test_the_enumerations_are_exactly_the_specified_value_sets() -> None:
@@ -1251,10 +1260,53 @@ def test_a_v2_receipt_may_not_carry_the_new_field() -> None:
 
 
 def test_an_unknown_schema_version_is_refused() -> None:
-    document = live().as_document()
-    document["receipt_schema_version"] = "m3-execution-receipt/4.0"
+    """A version no reader knows is refused rather than assumed to be the current one (§12).
 
+    ``4.0`` was the unknown version before accepted Decision 094 §10.1 introduced it; now that
+    a reader dispatches on it, the unknown case needs a version that is genuinely absent from
+    :data:`READABLE_RECEIPT_SCHEMA_VERSIONS`. That is the same property under test, and it
+    stays non-vacuous: the assertion below would fail the moment a ``5.0`` reader appeared
+    without this test being revisited.
+    """
+    document = live().as_document()
+    document["receipt_schema_version"] = "m3-execution-receipt/5.0"
+
+    assert "m3-execution-receipt/5.0" not in READABLE_RECEIPT_SCHEMA_VERSIONS
     with pytest.raises(ReceiptValidationError, match="receipt_schema_version"):
+        validate_receipt_document(document)
+
+
+def test_a_v3_document_carrying_v4_only_vocabulary_is_refused() -> None:
+    """Decision 094 §10.1: no v4 vocabulary may enter a v2/v3 validator.
+
+    The mutation proof §12.3 item 7 asks for. Each of the three v4-only vocabulary objects is
+    injected into an otherwise valid ``3.0`` document, and each must be refused by the ``3.0``
+    table -- not by a shared module-level tuple, which is exactly the coupling that would make
+    the isolation a convention rather than a fact.
+    """
+    for field, value in (
+        ("invocation_mode", "offline_catalog_transition"),
+        ("invocation_mode", "offline_parse"),
+        ("interruption_state", "after_migration_0014_before_0015"),
+    ):
+        document = dict(live().as_document())
+        document[field] = value
+        document["receipt_schema_version"] = RECEIPT_SCHEMA_VERSION
+        with pytest.raises(ReceiptValidationError):
+            validate_receipt_document(document)
+
+
+def test_a_v4_reason_code_is_refused_by_the_v3_registry() -> None:
+    """The v4 reason vocabulary is stage-scoped and never enters ``reasons.py`` (§10.1)."""
+    from disclosure_drift.m3.receipt import REASON_CODES_V4
+    from disclosure_drift.reasons import REASON_CODES
+
+    assert not set(REASON_CODES_V4) & set(REASON_CODES)
+    document = dict(live().as_document())
+    document["completion_status"] = "failed"
+    document["reason_code"] = REASON_CODES_V4[0]
+    document["reason_detail"] = "a stage-scoped v4 code in a v3 receipt"
+    with pytest.raises(ReceiptValidationError, match="disclosure_drift.reasons"):
         validate_receipt_document(document)
 
 

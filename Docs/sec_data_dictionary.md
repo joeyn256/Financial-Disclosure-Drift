@@ -668,21 +668,26 @@ requires of every Milestone 3 phase — none of which has begun or is authorized
 | `0011_m23_joint_selector_policy_reference` | joint selector policy row | **9** |
 | `0012_m23_selection_entity_reasons` | **1 pilot table + 4 triggers** | **9, 12** |
 | `0013_m23_manifest_lifecycle_guards` | **8 triggers** | **9, 13.2** |
-| `0014_m33_multi_registrant_relational_correction` | **1 census relation + 4 table rebuilds + 8 triggers** | **10, 11** (see note) |
+| `0014_m33_multi_registrant_relational_correction` | **1 census relation + 4 table rebuilds + 8 triggers** | **10, 11, 16** |
 | `0015_m33_verified_document_evidence` | **4 evidence relations + 1 table rebuild + 23 triggers** | **15** |
 
-**Coverage is complete for `0001`–`0013` and `0015`.**
+**Coverage is complete for `0001`–`0015`.**
 
 **Note on `0014`.** The R46 multi-registrant relational correction changed tables §§10–11 already
 describe — it made `census_accessions.registrant_cik_numeric` and both anchor columns nullable, added
 `census_accession_registrants` and the per-accession `registrant_set_completeness` fact, and replaced
 the snapshot-freeze anchor invariant. **Those §§10–11 rows were not revised when `0014` landed**, so
-they still read as the pre-correction schema, and `0014` has no dictionary section of its own. That
-gap is recorded here rather than repaired: revising it is Decision 083's implementation scope, not
-the verified-evidence stage's, and
-[Decision 083](Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md) §§3–7 plus the
-migration itself remain the authoritative description in the meantime. The migrations are ground
-truth for the persisted contract; this dictionary describes the schema and never defines it.
+they still read as the pre-correction schema. The relation and the completeness fact now have their
+own section — **§16** — added when accepted
+[Decision 094](Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) §6 supplied their
+writer. [Decision 083](Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md) §§3–7 and
+the migration itself remain authoritative for the §§10–11 columns `0014` made nullable. The
+migrations are ground truth for the persisted contract; this dictionary describes the schema and
+never defines it.
+
+**Neither `0014` nor `0015` is applied to the accepted operational catalog.** That catalog is at head
+`0013`, and carrying it to `0015` is the separately gated Decision 094 §5 transition. Nothing in this
+dictionary authorizes applying a migration.
 
 Milestone 3 phases M3.4–M3.5 have not begun and are not authorized; when they introduce schema, this
 dictionary must be extended in the same pass (Decision 024 §8).
@@ -854,3 +859,64 @@ document adjudication, **M3.3-E0**, **M3.3-E1**, **M3.3-E2**, and **M3.4** all r
 **UNAUTHORIZED**, and network, SEC, and HTTP authority is **NONE** at `REQUEST_CEILING = 0`. The
 schema itself is **NOT YET OWNER ACCEPTED**: it failed its first independent review, was corrected
 under Decision 088, and awaits a **fresh** independent acceptance rereview.
+
+## 16. Canonical multi-registrant association layer (migration `0014`)
+
+**Governing records:** accepted
+[Decision 083](Decisions/decision_083_m3_3_pre_e0_multi_registrant_correction.md) **R58**/**R59**,
+which created the relation, and accepted
+[Decision 094](Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) §§6.1–6.5, which
+supplies its writer and fixes the derivation, the transaction shape, and the consumer rule.
+
+**State class:** Operational-derived. **Written only at M3.3-E0**, by
+`src/disclosure_drift/m3/offline_parse.py`'s association projection, inside the **same** E0
+`CatalogWriter` invocation as the parse — not by a second catalog writer. **The table ships empty**:
+the accepted catalog is at head `0013`, so neither the relation nor its completeness column exists
+there yet, and E0 is not authorized.
+
+### 16.1 `census_accession_registrants`
+
+One row per `(accession_plain, registrant_cik_numeric)`.
+
+| Field | Meaning |
+|---|---|
+| `accession_plain` | the canonical accession the membership belongs to |
+| `registrant_cik_numeric` / `registrant_cik_padded` | the member's canonical CIK, in both renderings; the padded value must be `printf('%010d', …)` of the numeric one, and a mismatch is a totality failure |
+| `association_class` | `substantive` for a membership this projection writes. A submitter that is not a registrant never establishes the set (Decision 019 §6.2) and is never promoted here |
+| `evidence_level` | `provisional` for a valid, internally consistent accepted metadata witness. `conflicting`, `review_required`, and `unavailable` retain the existing fail-closed vocabulary and **never** establish completeness |
+| `source_observation_id` / `parsed_record_id` | the **singular** provenance of the strongest accepted membership witness, chosen by Decision 012's source-authority order, then `source_observation_id`, then the nullable `parsed_record_id` with a missing identity sorting **after** every present one |
+| `first_observed_at_utc` / `latest_observed_at_utc` | the minimum and maximum across **all** supporting membership observations |
+
+Where more than one persisted observation supports a membership, **all of them remain independently
+durable** in the accepted observation tables; none is deleted to make the projection singular.
+
+### 16.2 `census_accessions.registrant_set_completeness`
+
+Per accession, and written **last** — after the relation for that accession is total.
+
+| Value | Meaning |
+|---|---|
+| `established` | every Decision 094 §6.2 condition holds: both membership sets non-empty, submissions corroborated by the full index, every member already a persisted `census_registrants` row, every required provenance reference present, exact CIK normalization and accession binding, and both blocking Decision 012 resolutions clear |
+| `unestablished` | anything else. **This is a lawful, expected, fail-closed state**, not a defect — and it is never proof of a sole registrant |
+
+The scalar `census_accessions.registrant_cik_numeric` is **derived, not authoritative**: for an
+established singleton it **must** equal that sole member; for an established multi-member set it is
+`NULL`; for an unestablished set it is not authoritative at all.
+
+**A missing member is never invented.** A valid full-index-only member with no `census_registrants`
+row leaves the accession `unestablished`, its unbindable count recorded, and its candidacy blocked
+under existing reason `PILOT_ACCESSION_REGISTRANT_SET_UNESTABLISHED`. Relation rows for the members
+E0 *does* know may lawfully exist beside an `unestablished` accession, and **no consumer may read
+those rows as a complete set**.
+
+### 16.3 The consumer rule
+
+The candidate builder and every later Decision 093 linkage consumer read this relation **together
+with** the completeness column, and nothing else: no re-derivation from
+`census_accession_observations`, no scalar CIK, no anchor, no heuristic. An established joint filing's
+form is attributed to **every** substantive member in entity-domain history, while accession-domain
+counts still dedupe by canonical accession. An unestablished accession contributes **no** entity
+history.
+
+**Documenting this layer authorizes nothing.** Applying `0014` or `0015` to the accepted catalog,
+running E0, and enabling either activation constant each remain a separate owner act.

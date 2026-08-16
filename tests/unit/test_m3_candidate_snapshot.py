@@ -15,13 +15,17 @@ from pathlib import Path
 
 import pytest
 
+from disclosure_drift.m3 import candidate_snapshot
 from disclosure_drift.m3.candidate_snapshot import (
     UNESTABLISHED_REGISTRANT_SET_REASON,
     CandidateSnapshotError,
     CandidateSnapshotInputs,
     build_and_freeze_candidate_snapshot,
 )
-from disclosure_drift.m3.offline_parse import run_offline_metadata_parse
+from disclosure_drift.m3.offline_parse import (
+    materialize_census_associations,
+    run_offline_metadata_parse,
+)
 from disclosure_drift.paths import DataTree
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.accession_selection_store import load_frozen_joint_candidates
@@ -215,14 +219,22 @@ def _accession(
                 _AT,
             ),
         )
-    connection.execute(
-        "INSERT INTO census_accession_field_resolutions (accession_plain, field_name, "
-        "status, resolved_value, authority_class, policy_version, is_material, "
-        "blocks_dependents, resolution_sha256, resolved_at_utc) "
-        "VALUES (?, 'official_filing_date', 'resolved', ?, 'entity_submissions', "
-        "'accession-resolution/1.0', 1, 0, ?, ?)",
-        (plain, filing_date, "0" * 64, _AT),
-    )
+    # Decision 094 §6.2 item 5 names **both** blocking fields, so a realistic fixture carries
+    # both resolutions -- a real parse writes them together through the accepted resolver, and
+    # a fixture that supplied only one would leave every accession unestablished for a reason
+    # the evidence does not actually have.
+    for resolved_field, resolved_value, digest in (
+        ("official_filing_date", filing_date, "0" * 64),
+        ("form", form, "3" * 64),
+    ):
+        connection.execute(
+            "INSERT INTO census_accession_field_resolutions (accession_plain, field_name, "
+            "status, resolved_value, authority_class, policy_version, is_material, "
+            "blocks_dependents, resolution_sha256, resolved_at_utc) "
+            "VALUES (?, ?, 'resolved', ?, 'entity_submissions', "
+            "'accession-resolution/1.0', 1, 0, ?, ?)",
+            (plain, resolved_field, resolved_value, digest, _AT),
+        )
     if parent is not None:
         connection.execute(
             "INSERT INTO census_accession_field_resolutions (accession_plain, field_name, "
@@ -303,6 +315,23 @@ def _seed_census(connection: sqlite3.Connection) -> None:
                 "VALUES (?, 'pr-1', ?, ?, ?, ?, 1, 0, ?)",
                 (f"struct-{index}", _OBSERVATION, region, state, observed, _AT),
             )
+        # Decision 094 §6.2 joins membership through ``census_plan_sources.observation_id``
+        # exclusively (**R13**), so the two membership observations must be plan-bound or they
+        # contribute nothing. Binding them here is what lets the fixture derive its relation
+        # through the production projection instead of hand-writing relation rows.
+        for instance, source_id, observation in (
+            ("base|bulk-submissions|0", "sec_bulk_submissions", _OBSERVATION),
+            ("base|full-index|0", "sec_full_index_company", _INDEX_OBSERVATION),
+        ):
+            active.execute(
+                "INSERT INTO census_plan_sources (census_run_id, source_instance_id, "
+                "source_id, request_identity, required, source_scope, retrieval_state, "
+                "snapshot_state, parser_state, catalog_state, qa_state, "
+                "unresolved_blocking_reasons_json, observation_id, successful_terminal, "
+                "updated_at_utc) VALUES (?, ?, ?, ?, 1, 'base', 'retrieved', 'verified', "
+                "'completed', 'committed', 'passed', '[]', ?, 1, ?)",
+                (_RUN, instance, source_id, f"req/{source_id}/0", observation, _AT),
+            )
         _seed_sic_authority(active, "3571", "1311", "3826", "6726", "6770")
         _registrant(
             active,
@@ -339,12 +368,18 @@ def seed_unestablished_accession(connection: sqlite3.Connection) -> str:
         return _accession(active, UNESTABLISHED_CIK, 2019, 5, establish_registrant_set=False)
 
 
-def seed_catalog(tmp_path: Path, *, unestablished: bool = False) -> Path:
+def seed_catalog(tmp_path: Path, *, unestablished: bool = False, materialize: bool = True) -> Path:
     """A migrated catalog carrying only an accepted synthetic census layer.
 
     With ``unestablished`` the world additionally carries
     :data:`UNESTABLISHED_ACCESSION_PLAIN`; everything else is byte-identical, so any
     difference between the two builds is attributable to establishment and nothing else.
+
+    ``materialize=False`` leaves the canonical relation unwritten, for a test that goes on to
+    add further accepted evidence. Decision 094 §6.4 makes the relation create-once with no
+    replacement write, so the projection has to see the complete evidence set once rather than
+    be re-run over a growing one -- which is also exactly what production does, since E0 runs
+    once and ``execute`` refuses a catalog that already carries an E0 parser run.
     """
     database = tmp_path / "catalog.sqlite3"
     with connect(database, writer=True) as connection:
@@ -353,6 +388,15 @@ def seed_catalog(tmp_path: Path, *, unestablished: bool = False) -> Path:
         _seed_census(connection)
         if unestablished:
             seed_unestablished_accession(connection)
+        if not materialize:
+            return database
+        # Accepted Decision 094 §6.5 makes ``census_accession_registrants`` plus the persisted
+        # completeness state the **only** membership source for every candidate consumer, so
+        # the fixture has to carry a real relation. It is derived by running the **production**
+        # projection over the seeded evidence rather than by hand-writing relation rows: a
+        # hand-written relation would let a consumer test pass against a relation E0 could
+        # never have produced, which is precisely the class of defect §6.5 exists to close.
+        materialize_census_associations(connection)
     return database
 
 
@@ -761,6 +805,7 @@ def test_no_operational_value_reaches_the_snapshot_identity(catalog: Path, tmp_p
                 "'M2.2', ?, '')",
                 (_AT,),
             )
+        materialize_census_associations(connection)
     with CatalogWriter(other, tmp_path / "locks-2") as writer:
         second = build_and_freeze_candidate_snapshot(
             writer=writer,
@@ -801,7 +846,12 @@ def _company_index_bytes(rows: tuple[tuple[str, int], ...]) -> bytes:
 def _materialize_full_index(
     catalog: Path, tmp_path: Path, rows: tuple[tuple[str, int], ...]
 ) -> None:
-    """Run the real offline driver over a synthetic index object -- not a stub."""
+    """Run the real offline driver over a synthetic index object -- not a stub.
+
+    The catalog must not already carry a materialized relation: Decision 094 §6.4 writes the
+    relation create-once, so the projection sees the submissions and index evidence together,
+    in one run, exactly as a real E0 would.
+    """
     tree = DataTree.from_root(tmp_path / "data")
     relative = "raw/sec/indexes/company_2020_QTR1.idx"
     target = tree.data_root / relative
@@ -834,9 +884,10 @@ def _materialize_full_index(
 
 
 def test_a_full_index_co_registrant_reaches_the_candidate_registrant_rows(
-    catalog: Path, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     """Decision 072 §3: the corrected route, through production code end to end."""
+    catalog = seed_catalog(tmp_path, materialize=False)
     _materialize_full_index(
         catalog, tmp_path, (("ALPHA TECHNOLOGIES INC", 1), ("CO REGISTRANT LLC", 2))
     )
@@ -873,9 +924,10 @@ def test_a_full_index_co_registrant_reaches_the_candidate_registrant_rows(
 
 
 def test_the_accepted_decision_019_loader_accepts_the_associated_registrant(
-    catalog: Path, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     """The registrant set must survive the accepted S5.2 mapping, not just the write."""
+    catalog = seed_catalog(tmp_path, materialize=False)
     _materialize_full_index(
         catalog, tmp_path, (("ALPHA TECHNOLOGIES INC", 1), ("CO REGISTRANT LLC", 2))
     )
@@ -934,6 +986,142 @@ def test_the_multi_registrant_quota_is_not_deferred() -> None:
     """**R24**: the only accepted M2.3 quota deferral stays the difficult-package key."""
     assert QUOTA_KEY_MULTI_REGISTRANT_ACCESSIONS not in APPROVED_DEFERRED_QUOTA_KEYS
     assert set(APPROVED_DEFERRED_QUOTA_KEYS) == {DEFERRED_QUOTA_KEY}
+
+
+# ==========================================================================
+# Group D094 §6.5: the canonical consumer rule
+#
+# One membership source, read together with the persisted completeness state. No
+# observation fallback, no scalar union, no anchor, no heuristic — and an `unestablished`
+# accession contributes no entity history rather than contributing its scalar's.
+# ==========================================================================
+
+
+def test_entity_history_attributes_a_joint_filing_to_every_established_member(
+    tmp_path: Path,
+) -> None:
+    """§6.5 and §12.3 items 4-5: relational entity history, over a lawful ``NULL`` scalar.
+
+    A jointly filed annual report really is each co-registrant's annual report, so the
+    entity-domain projection attributes it to every substantive member of the **established**
+    relation. The same call is the ``int(NULL)`` proof: this accession's scalar is lawfully
+    ``NULL``, and the old ``census_accessions``-scalar query would have raised on it rather
+    than returning a set — the read that would crash is gone, not merely guarded.
+    """
+    catalog = seed_catalog(tmp_path, materialize=False)
+    _materialize_full_index(
+        catalog, tmp_path, (("ALPHA TECHNOLOGIES INC", 1), ("CO REGISTRANT LLC", 2))
+    )
+    with connect(catalog) as connection:
+        scalar = connection.execute(
+            "SELECT registrant_cik_numeric FROM census_accessions WHERE accession_plain = ?",
+            (_INDEX_ACCESSION_PLAIN,),
+        ).fetchone()[0]
+        forms = candidate_snapshot._submission_forms(connection)
+    assert scalar is None
+    assert "10-K" in forms[1]
+    assert "10-K" in forms[2]
+
+
+def test_an_unestablished_accession_contributes_no_entity_history(tmp_path: Path) -> None:
+    """§6.5: ``unestablished`` fails closed, and its scalar is not read as a substitute."""
+    database = seed_catalog(tmp_path, unestablished=True)
+    with connect(database) as connection:
+        completeness = connection.execute(
+            "SELECT registrant_set_completeness FROM census_accessions WHERE accession_plain = ?",
+            (UNESTABLISHED_ACCESSION_PLAIN,),
+        ).fetchone()[0]
+        forms_with = candidate_snapshot._submission_forms(connection)
+    with connect(seed_catalog(tmp_path / "control")) as connection:
+        forms_without = candidate_snapshot._submission_forms(connection)
+    assert completeness == "unestablished"
+    assert forms_with == forms_without
+
+
+def test_relation_rows_without_established_completeness_are_not_a_complete_set(
+    tmp_path: Path,
+) -> None:
+    """§6.2 and §6.5: E0 may write bindable rows while completeness stays ``unestablished``.
+
+    That state is not constructed here — it is what the **production projection** already
+    produces for this fixture, because the accession's membership is known but its evidence
+    does not satisfy §6.2's establishment conditions. §6.5 is explicit that no consumer may
+    read those rows as a complete set. The census scalar is populated too, so this also
+    proves the builder does not fall back to it when the relation is present but incomplete.
+    """
+    database = seed_catalog(tmp_path, unestablished=True)
+    with connect(database) as connection:
+        rows, completeness, scalar = (
+            connection.execute(
+                "SELECT COUNT(*) FROM census_accession_registrants WHERE accession_plain = ?",
+                (UNESTABLISHED_ACCESSION_PLAIN,),
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT registrant_set_completeness FROM census_accessions "
+                "WHERE accession_plain = ?",
+                (UNESTABLISHED_ACCESSION_PLAIN,),
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT registrant_cik_numeric FROM census_accessions WHERE accession_plain = ?",
+                (UNESTABLISHED_ACCESSION_PLAIN,),
+            ).fetchone()[0],
+        )
+    assert rows == 1
+    assert completeness == "unestablished"
+    assert scalar == UNESTABLISHED_CIK
+
+    frozen = build_snapshot(database, tmp_path)
+    assert frozen.excluded_unestablished_registrant_set == 1  # type: ignore[attr-defined]
+    with connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accessions WHERE accession_plain = ?",
+                (UNESTABLISHED_ACCESSION_PLAIN,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_the_builder_reads_no_observation_derived_membership(tmp_path: Path) -> None:
+    """§6.5: one membership source. Proved behaviourally, not only by reading the source.
+
+    The full-index membership observations are left in place and the canonical relation rows
+    for the joint accession are removed. Under the deleted observation fallback the accession
+    would still resolve to two registrants; under §6.5 it has no established set at all.
+    """
+    catalog = seed_catalog(tmp_path, materialize=False)
+    _materialize_full_index(
+        catalog, tmp_path, (("ALPHA TECHNOLOGIES INC", 1), ("CO REGISTRANT LLC", 2))
+    )
+    with connect(catalog, writer=True) as connection, transaction(connection) as active:
+        active.execute(
+            "UPDATE census_accessions SET registrant_set_completeness = 'unestablished' "
+            "WHERE accession_plain = ?",
+            (_INDEX_ACCESSION_PLAIN,),
+        )
+        active.execute(
+            "DELETE FROM census_accession_registrants WHERE accession_plain = ?",
+            (_INDEX_ACCESSION_PLAIN,),
+        )
+    with connect(catalog) as connection:
+        surviving = connection.execute(
+            "SELECT COUNT(*) FROM census_accession_observations AS o "
+            "JOIN census_source_observations AS s "
+            "ON s.observation_id = o.source_observation_id "
+            "WHERE o.field_name = 'cik_padded' AND s.source_id = 'sec_full_index_company' "
+            "AND o.accession_plain = ?",
+            (_INDEX_ACCESSION_PLAIN,),
+        ).fetchone()[0]
+    assert int(surviving) >= 2, "the observation evidence a fallback would read is still present"
+
+    frozen = _build(catalog, tmp_path)
+    with connect(catalog) as connection:
+        present = connection.execute(
+            "SELECT COUNT(*) FROM pilot_candidate_accessions "
+            "WHERE snapshot_id = ? AND accession_plain = ?",
+            (frozen.snapshot_id, _INDEX_ACCESSION_PLAIN),  # type: ignore[attr-defined]
+        ).fetchone()[0]
+    assert int(present) == 0
 
 
 # ==========================================================================
@@ -1035,22 +1223,24 @@ def test_r59_establishing_the_same_accession_makes_it_a_single_registrant_candid
     Without this, Group R59 would prove nothing -- an accession excluded for some other
     reason would satisfy every assertion above.
     """
-    database = seed_catalog(tmp_path, unestablished=True)
-    with connect(database, writer=True) as connection, transaction(connection) as active:
-        active.execute(
-            "INSERT INTO census_accession_observations (accession_observation_id, "
-            "accession_plain, source_observation_id, parsed_record_id, field_name, "
-            "raw_value_json, observed_at_utc, conflict_indicator) "
-            "VALUES (?, ?, ?, ?, 'cik_padded', ?, ?, 0)",
-            (
-                f"ao-{UNESTABLISHED_ACCESSION_PLAIN}-idx-{UNESTABLISHED_CIK}",
-                UNESTABLISHED_ACCESSION_PLAIN,
-                _INDEX_OBSERVATION,
-                f"parsed-acc-{UNESTABLISHED_ACCESSION_PLAIN}",
-                f'"{UNESTABLISHED_CIK:010d}"',
-                _AT,
-            ),
-        )
+    database = seed_catalog(tmp_path, unestablished=True, materialize=False)
+    with connect(database, writer=True) as connection:
+        with transaction(connection) as active:
+            active.execute(
+                "INSERT INTO census_accession_observations (accession_observation_id, "
+                "accession_plain, source_observation_id, parsed_record_id, field_name, "
+                "raw_value_json, observed_at_utc, conflict_indicator) "
+                "VALUES (?, ?, ?, ?, 'cik_padded', ?, ?, 0)",
+                (
+                    f"ao-{UNESTABLISHED_ACCESSION_PLAIN}-idx-{UNESTABLISHED_CIK}",
+                    UNESTABLISHED_ACCESSION_PLAIN,
+                    _INDEX_OBSERVATION,
+                    f"parsed-acc-{UNESTABLISHED_ACCESSION_PLAIN}",
+                    f'"{UNESTABLISHED_CIK:010d}"',
+                    _AT,
+                ),
+            )
+        materialize_census_associations(connection)
     frozen = build_snapshot(database, tmp_path)
 
     assert frozen.excluded_unestablished_registrant_set == 0  # type: ignore[attr-defined]

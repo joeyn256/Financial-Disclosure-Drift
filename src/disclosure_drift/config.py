@@ -47,6 +47,7 @@ __all__ = [
     "CONFIG_PATH_ENV",
     "ENV_OVERRIDES",
     "ENV_PREFIX",
+    "EVIDENCE_ROOT_ENV",
     "FROZEN_CONFIG_SECTIONS",
     "PLACEHOLDER_CONTACT_DOMAINS",
     "RECOGNIZED_ENV_VARS",
@@ -99,15 +100,35 @@ SEC_USER_AGENT_ENV: Final = "DISCLOSURE_DRIFT_SEC_USER_AGENT"
 
 BACKUP_ROOT_ENV: Final = "DISCLOSURE_DRIFT_BACKUP_ROOT"
 
+EVIDENCE_ROOT_ENV: Final = "DISCLOSURE_DRIFT_EVIDENCE_ROOT"
+"""The owner-controlled private evidence root the Decision 094 operator surface reads.
+
+Recognized here and **nowhere else in this module**: accepted Decision 095 R80 makes it a
+runtime root, not a configuration override. ``load_config`` therefore learns the name and
+stops -- it never reads, normalizes, validates, persists, or applies the value, and the
+value never reaches a Pydantic model, a configuration fingerprint, a repr, a receipt, a log
+record, or CLI output. Only the Decision 094 operator surface resolves it, once per process,
+through the accepted external-root boundary.
+
+Central recognition is the point. The alternative -- filtering or deleting the variable from
+the environment mapping at ``cli.py`` dispatch -- is prohibited by R80 item 7, because it
+would put the recognition contract in one command instead of in the one place every command
+already consults.
+"""
+
 SECRET_ENV_VARS: Final[frozenset[str]] = frozenset({SEC_USER_AGENT_ENV})
 """Recognized secret variables: resolved on demand, never stored or logged."""
 
-RUNTIME_ROOT_ENV_VARS: Final[frozenset[str]] = frozenset({BACKUP_ROOT_ENV})
+RUNTIME_ROOT_ENV_VARS: Final[frozenset[str]] = frozenset({BACKUP_ROOT_ENV, EVIDENCE_ROOT_ENV})
 """Runtime roots that may be absolute machine-local paths and are not config overrides.
 
 The backup root deliberately has no entry in tracked YAML (Decision 009 section 2):
 a fabricated relative destination would be worse than an unset one. It may remain
 unset during offline work; commands that back up or restore validate it.
+
+The evidence root is the same shape of fact for the same reason (Decision 095 R80): an
+absolute machine-local path that no tracked file may carry, recognized so the process is not
+refused before dispatch, and applied by nothing here.
 """
 
 ENV_OVERRIDES: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(

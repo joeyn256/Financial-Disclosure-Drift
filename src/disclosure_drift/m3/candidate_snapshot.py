@@ -335,64 +335,21 @@ def _read_accession_observations(
     return grouped
 
 
-def _read_full_index_registrants(
-    connection: sqlite3.Connection,
-) -> Mapping[str, tuple[int, ...]]:
-    """**R23** §5.2 -- the associated registrant set, from accepted ``company.idx`` rows.
-
-    ``company.idx`` emits one row per registrant per accession, so grouping its accepted
-    ``cik_padded`` observations by canonical accession is what establishes co-registrants
-    (Decision 072 §3). The submissions documents alone cannot: ``census_accessions``
-    carries one registrant CIK and one submitter CIK and no more (Decision 072 §1).
-
-    Identity is the canonical CIK and nothing else -- never a company name, never a row
-    count. A malformed stored CIK fails the snapshot closed rather than contributing a
-    guessed registrant.
-
-    **Decision 083 R58/R59.** The presence of accepted full-index evidence for an
-    accession is exactly what *establishes* its substantive association set; its absence
-    is the R22 category-B silence that **R59** forbids reading as proof of a sole
-    registrant. An accession absent from this mapping therefore has an ``unestablished``
-    set and is blocked from candidacy entirely, rather than being quietly treated as
-    single-registrant.
-    """
-    rows = connection.execute(
-        "SELECT o.accession_plain, o.raw_value_json FROM census_accession_observations AS o "
-        "JOIN census_source_observations AS s ON s.observation_id = o.source_observation_id "
-        "WHERE o.field_name = 'cik_padded' AND s.source_id = 'sec_full_index_company' "
-        "ORDER BY o.accession_plain, o.accession_observation_id"
-    ).fetchall()
-    grouped: dict[str, set[int]] = defaultdict(set)
-    for row in rows:
-        value = _json_scalar(row["raw_value_json"])
-        if value is None:
-            continue
-        try:
-            grouped[str(row["accession_plain"])].add(normalize_cik(value)[0])
-        except IdentifierError as exc:
-            message = (
-                f"accepted full-index registrant evidence for accession "
-                f"{row['accession_plain']!r} carries a non-canonical CIK: {exc}"
-            )
-            raise CandidateSnapshotError(message) from exc
-    return {accession: tuple(sorted(ciks)) for accession, ciks in grouped.items()}
-
-
 def _read_census_registrant_associations(
     connection: sqlite3.Connection,
 ) -> Mapping[str, tuple[int, ...]]:
     """**Decision 083 R58** -- the canonical census-layer substantive association set.
 
     ``census_accession_registrants`` (migration ``0014``) is the durable census-level
-    relation between an accession and **all** substantive registrants established for
-    it. When it carries rows for an accession, that relation is authoritative and is
-    preferred over re-deriving the set. It is written by the real durable offline parse
-    (**M3.3-E0**), which no accepted decision authorizes yet, so today it is empty and
-    the accepted **R23** §5.2 derivation above remains the operative establishment rule.
+    relation between an accession and **all** substantive registrants established for it.
+    Accepted **Decision 094 §6.5** makes it the *only* membership source for every
+    candidate and later linkage consumer: there is no fall back to re-deriving membership
+    from ``census_accession_observations``, no scalar CIK unioned in, no anchor, and no
+    heuristic. Its writer is the real durable offline parse (**M3.3-E0**).
 
-    There is one establishment rule, not two: both paths yield the complete set of
-    distinct canonical substantive registrant CIKs, and neither invents a member.
-    Submitter-only associations are excluded here exactly as Decision 019 §6.2 requires.
+    An accession absent from this mapping has **no** established membership. That is the
+    fail-closed reading **R59** requires, and it is never proof of a sole registrant.
+    Submitter-only associations are excluded exactly as Decision 019 §6.2 requires.
     """
     rows = connection.execute(
         "SELECT accession_plain, registrant_cik_numeric FROM census_accession_registrants "
@@ -403,6 +360,24 @@ def _read_census_registrant_associations(
     for row in rows:
         grouped[str(row["accession_plain"])].add(int(row["registrant_cik_numeric"]))
     return {accession: tuple(sorted(ciks)) for accession, ciks in grouped.items()}
+
+
+def _read_registrant_set_completeness(connection: sqlite3.Connection) -> frozenset[str]:
+    """**Decision 094 §6.5** -- the accessions whose substantive set is *established*.
+
+    The relation alone is not sufficient: §6.5 requires every consumer to read
+    ``census_accession_registrants`` **together with**
+    ``census_accessions.registrant_set_completeness``. Relation rows may lawfully exist
+    for an accession whose set is still ``unestablished`` -- E0 writes the bindable rows
+    it does know -- and **no consumer may read those rows as a complete set**.
+    """
+    return frozenset(
+        str(row["accession_plain"])
+        for row in connection.execute(
+            "SELECT accession_plain FROM census_accessions "
+            "WHERE registrant_set_completeness = 'established' ORDER BY accession_plain"
+        ).fetchall()
+    )
 
 
 def _read_cohort_resolutions(connection: sqlite3.Connection) -> Mapping[str, sqlite3.Row]:
@@ -1215,13 +1190,16 @@ def _registrant_rows(
     exists** -- the first-observed CIK, the smallest, the largest, the census scalar, and
     the submitter are all equally ineligible, because none of them is the registrant.
 
+    **Decision 094 §6.5**: ``associated`` is the complete canonical relation, and the
+    census scalar is **never added as another member**. Unioning it in would be a second
+    establishment rule reaching past the relation E0 materialized -- and for a lawful
+    multi-registrant accession the scalar is ``NULL`` anyway, so the union could only ever
+    corrupt a set it cannot complete.
+
     The output is keyed and emitted in canonical CIK order, so it is invariant to
     observation, parser, archive, full-index row, and insertion order.
     """
-    scalar = row["registrant_cik_numeric"]
     substantive: set[int] = {int(numeric) for numeric in associated}
-    if scalar is not None:
-        substantive.add(int(scalar))
 
     # Decision 072 R23 §5.3 restated anchor-free at identical extension: an anchor
     # exists exactly when the established set holds one distinct substantive CIK.
@@ -1352,11 +1330,29 @@ def _submission_forms(connection: sqlite3.Connection) -> Mapping[int, frozenset[
     coverage window: the asset-backed and foreign-private-issuer predicates read the
     whole accepted stored history, and a ``10-D`` or a ``20-F`` is never an eligible
     annual report.
+
+    **Decision 094 §6.5** makes this an *entity-domain* projection over the canonical
+    relation. One accession's form is attributed to **every** substantive member of its
+    **established** relation, because a jointly filed annual report really is each
+    co-registrant's annual report. Two consequences are deliberate:
+
+    * an accession whose set is ``unestablished`` contributes **no** entity history at
+      all, rather than contributing its scalar's history and hiding the gap; and
+    * the nullable scalar is never read here, so a lawful multi-registrant ``NULL`` can
+      never be converted with ``int()`` -- the crash that conversion would cause is not
+      merely avoided, the read that would cause it is gone.
+
+    This is entity-domain aggregation and never counts accessions, so attributing one
+    filing to two registrants double-counts nothing: accession-domain totals dedupe by
+    canonical accession in the selector, over the accession set itself.
     """
     forms: dict[int, set[str]] = defaultdict(set)
     for row in connection.execute(
-        "SELECT registrant_cik_numeric, form_type FROM census_accessions "
-        "ORDER BY registrant_cik_numeric, form_type"
+        "SELECT r.registrant_cik_numeric, a.form_type FROM census_accessions AS a "
+        "JOIN census_accession_registrants AS r ON r.accession_plain = a.accession_plain "
+        "WHERE a.registrant_set_completeness = 'established' "
+        "AND r.association_class = 'substantive' "
+        "ORDER BY r.registrant_cik_numeric, a.form_type"
     ).fetchall():
         forms[int(row["registrant_cik_numeric"])].add(str(row["form_type"]))
     return {cik: frozenset(values) for cik, values in forms.items()}
@@ -1381,8 +1377,8 @@ def derive_candidate_snapshot(
     cohort_resolutions = _read_cohort_resolutions(connection)
     field_resolutions = _read_field_resolutions(connection)
     lineage = _read_lineage_edge_kinds(connection)
-    full_index_registrants = _read_full_index_registrants(connection)
     census_registrants = _read_census_registrant_associations(connection)
+    established_sets = _read_registrant_set_completeness(connection)
     observations = _read_observations(connection)
     submission_forms = _submission_forms(connection)
     sic_authority = _sic_authority(connection)
@@ -1401,19 +1397,15 @@ def derive_candidate_snapshot(
             accession_rows.append(row)
         else:
             excluded_forms[form] += 1
-    # **Decision 083 R62**: conflict attribution follows the complete substantive
-    # association set, on the same establishment rule the candidate rows use below.
-    registrants_by_accession: dict[str, tuple[int, ...]] = {}
-    for row in accession_rows:
-        plain = str(row["accession_plain"])
-        associations = census_registrants.get(plain, full_index_registrants.get(plain))
-        if associations is None:
-            continue
-        scalar = row["registrant_cik_numeric"]
-        members = set(associations)
-        if scalar is not None:
-            members.add(int(scalar))
-        registrants_by_accession[plain] = tuple(sorted(members))
+    # **Decision 083 R62**, as narrowed by **Decision 094 §6.5**: conflict attribution
+    # uses that same complete canonical relation. The scalar census CIK is **not** unioned
+    # into an already-materialized relation, and an unestablished accession attributes no
+    # conflict at all, because its membership is not known.
+    registrants_by_accession: dict[str, tuple[int, ...]] = {
+        plain: census_registrants[plain]
+        for plain in (str(row["accession_plain"]) for row in accession_rows)
+        if plain in established_sets and plain in census_registrants
+    }
     conflicted = _material_conflict_ciks(connection, registrants_by_accession)
 
     originals: dict[str, bool] = {
@@ -1424,20 +1416,18 @@ def derive_candidate_snapshot(
     unestablished_registrant_sets = 0
     for row in accession_rows:
         plain = str(row["accession_plain"])
-        # **Decision 083 R58**: the canonical census-layer relation is authoritative
-        # where it carries rows. It is written by the real durable offline parse, which
-        # is not authorized, so today it is empty everywhere and the accepted R23 §5.2
-        # derivation below establishes the set. One rule, two storage locations.
-        census_associations = census_registrants.get(plain)
-        derived_associations = full_index_registrants.get(plain)
-        associations = (
-            census_associations if census_associations is not None else derived_associations
-        )
-        # **Decision 083 R59**: absent accepted evidence, the substantive association set
-        # is UNESTABLISHED. That silence is never proof of a sole registrant, and it
-        # BLOCKS CANDIDACY ENTIRELY -- not merely the scalar anchor -- so the accession
-        # never enters a candidate snapshot and never becomes a later identity problem.
-        if associations is None:
+        # **Decision 094 §6.5**: the canonical relation read together with the persisted
+        # completeness state is the ONLY membership source. There is one storage location
+        # and one rule -- no observation-derived re-derivation, no scalar, no anchor.
+        associations = census_registrants.get(plain)
+        # **Decision 083 R59**, as sharpened by **Decision 094 §6.2**: an accession whose
+        # persisted completeness is not `established` has an UNESTABLISHED substantive
+        # set, whether that is because no relation row exists or because E0 recorded an
+        # unbindable member, a missing corroboration, or a blocking resolution. That state
+        # is never proof of a sole registrant, `unestablished` FAILS CLOSED, and it BLOCKS
+        # CANDIDACY ENTIRELY -- so the accession never enters a candidate snapshot,
+        # contributes no entity history, and never becomes a later identity problem.
+        if associations is None or plain not in established_sets:
             unestablished_registrant_sets += 1
             continue  # reason code UNESTABLISHED_REGISTRANT_SET_REASON
         draft = _derive_accession(

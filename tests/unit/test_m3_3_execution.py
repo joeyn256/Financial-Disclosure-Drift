@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -79,7 +80,204 @@ def test_the_world_is_derived_by_the_offline_parse_without_a_request(
     assert record["requests_made"] == 0
     assert record["transports_constructed"] == 0
     assert record["required_parse"] > 0
-    assert world.census_registrant_count == 24
+    # Accepted Decision 095 R79: 24 filing registrants plus the two support-only
+    # co-registrants whose accepted-shaped submissions objects the production parser turns
+    # into `census_registrants` rows. The R79 group below reconciles the whole base case.
+    assert world.census_registrant_count == 26
+    assert world.census_accession_count == 65
+
+
+# ==========================================================================
+# Group A': accepted Decision 095 R79 -- the corrected support-only base case
+#
+# R79 corrected the *fixture*, never the production rule: the two joint filings name
+# co-registrants in `company.idx` that no submissions document described, so Decision 094
+# §6.2 condition 3 correctly refused to bind them. The tests below hold both halves of that
+# ruling at once -- the corrected base case reconciles exactly, and removing either
+# support-only object puts the production path straight back into its fail-closed state.
+# ==========================================================================
+
+
+#: Decision 095 R79's exact mechanical reconciliation of the corrected base case.
+_R79_RECONCILIATION: Final[Mapping[str, int]] = {
+    "census_accession_count": 65,
+    "census_registrants": 26,
+    "established_accession_count": 65,
+    "unestablished_accession_count": 0,
+    "established_singleton_count": 63,
+    "established_multi_count": 2,
+    "substantive_relation_count": 67,
+    "unbindable_registrant_member_count": 0,
+    "candidate_multi_registrant_accessions": 2,
+    "candidate_associated_rows": 4,
+}
+
+
+def _support_only_ciks(design: rw.WorldDesign) -> tuple[int, ...]:
+    """The design's support-only registrants: declared, and with no filing of their own."""
+    return tuple(sorted(entity.cik for entity in design.entities if not entity.accessions))
+
+
+def _joint_accession_for(design: rw.WorldDesign, cik: int) -> str:
+    """The one accession ``company.idx`` associates with ``cik`` as a co-registrant."""
+    matches = [
+        accession.plain
+        for entity in design.entities
+        for accession in entity.accessions
+        if cik in accession.co_registrants
+    ]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def test_the_r79_base_case_reconciles_exactly(
+    world: rw.RehearsalWorld, paired: rsnap.PairedSnapshots
+) -> None:
+    """**Accepted Decision 095 R79** -- every count in the ruling's table, measured.
+
+    Asserted as one dictionary comparison rather than as ten separate assertions so a
+    partial drift cannot pass by matching the counts that happen to be checked first: the
+    whole reconciliation either holds or the diff shows exactly which cell moved.
+    """
+    totality = world.parse_report.association_totality.as_record()
+    with connect(paired.track_a_database, writer=False) as connection:
+        candidate_multi = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accessions "
+                "WHERE snapshot_id = ? AND multi_registrant = 1",
+                (paired.track_a.snapshot_id,),
+            ).fetchone()[0]
+        )
+        candidate_associated = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM pilot_candidate_accession_registrants "
+                "WHERE snapshot_id = ? AND role = 'associated'",
+                (paired.track_a.snapshot_id,),
+            ).fetchone()[0]
+        )
+    measured = {
+        "census_accession_count": totality["census_accession_count"],
+        "census_registrants": world.census_registrant_count,
+        "established_accession_count": totality["established_accession_count"],
+        "unestablished_accession_count": totality["unestablished_accession_count"],
+        "established_singleton_count": totality["established_singleton_count"],
+        "established_multi_count": totality["established_multi_count"],
+        "substantive_relation_count": totality["substantive_relation_count"],
+        "unbindable_registrant_member_count": totality["unbindable_registrant_member_count"],
+        "candidate_multi_registrant_accessions": candidate_multi,
+        "candidate_associated_rows": candidate_associated,
+    }
+    assert measured == dict(_R79_RECONCILIATION)
+
+
+def test_the_hard_multi_registrant_quota_is_feasible_on_the_r79_base_case(
+    executed: tuple[Path, ox.SelectionOutcome],
+) -> None:
+    """**R79**'s last row: the hard **R24** quota is feasible, not deferred and not relaxed."""
+    _, outcome = executed
+    assert outcome.feasible
+    assert "multi_registrant_accessions" not in APPROVED_DEFERRED_QUOTA_KEYS
+
+
+def test_a_support_only_registrant_takes_no_independent_credit(
+    world: rw.RehearsalWorld, paired: rsnap.PairedSnapshots
+) -> None:
+    """**R79** item 2: zero filings of its own, and therefore zero independent credit.
+
+    A support-only registrant exists to be *bindable*. It is a substantive member of the
+    joint accession ``company.idx`` names it on -- so it is legitimately a candidate entity
+    of that accession -- and it is nothing else: no accession, no quota witness, no event,
+    and no selection credit, because it has no filing to contribute one with.
+    """
+    support = _support_only_ciks(world.design)
+    assert support, "the corrected base case declares support-only co-registrants"
+    placeholders = ", ".join("?" for _ in support)
+    with connect(world.database, writer=False) as connection:
+        assert (
+            int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM census_accessions "  # noqa: S608
+                    f"WHERE registrant_cik_numeric IN ({placeholders})",
+                    support,
+                ).fetchone()[0]
+            )
+            == 0
+        )
+        # Each is present as a real parsed registrant, created by the production parser
+        # from its accepted-shaped submissions object -- never by a hand-written INSERT.
+        assert int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM census_registrants "  # noqa: S608
+                f"WHERE cik_numeric IN ({placeholders})",
+                support,
+            ).fetchone()[0]
+        ) == len(support)
+    with connect(paired.track_b_database, writer=False) as connection:
+        selected = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM pilot_candidate_accessions AS a "  # noqa: S608
+                f"JOIN pilot_candidate_accession_registrants AS r "
+                f"ON r.snapshot_id = a.snapshot_id AND r.accession_plain = a.accession_plain "
+                f"WHERE a.snapshot_id = ? AND r.registrant_cik_numeric IN ({placeholders}) "
+                f"AND r.role = 'anchor'",
+                (paired.track_b.snapshot_id, *support),
+            ).fetchone()[0]
+        )
+    assert selected == 0
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_removing_a_support_only_object_fails_its_joint_accession_closed(
+    tmp_path: Path, index: int
+) -> None:
+    """**R79**'s required negative control, one support object at a time.
+
+    This is the proof that R79 corrected a fixture rather than a production rule. With the
+    support-only submissions object withdrawn, the accepted evidence still *names* the
+    co-registrant in ``company.idx`` -- and Decision 094 §6.2 condition 3 still refuses to
+    bind it, still invents no ``census_registrants`` entity, still counts the unbindable
+    member, and still fails exactly that accession closed while every other accession
+    remains established.
+    """
+    design = rw.base_case_design()
+    withdrawn = _support_only_ciks(design)[index]
+    joint = _joint_accession_for(design, withdrawn)
+    reduced = rw.WorldDesign(
+        entities=tuple(entity for entity in design.entities if entity.cik != withdrawn)
+    )
+    root = tmp_path / f"withdrawn-{withdrawn}"
+    world = rw.build_rehearsal_world(
+        tree=DataTree.from_root(root / "data"),
+        database=root / "source.sqlite3",
+        lock_root=root / "locks",
+        design=reduced,
+    )
+    totality = world.parse_report.association_totality.as_record()
+
+    # The member is named by accepted evidence, is unbindable, and is not invented.
+    assert totality["unbindable_registrant_member_count"] == 1
+    assert totality["unestablished_accession_count"] == 1
+    assert totality["established_multi_count"] == 1
+    assert totality["census_accession_count"] == _R79_RECONCILIATION["census_accession_count"]
+
+    with connect(world.database, writer=False) as connection:
+        assert (
+            int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM census_registrants WHERE cik_numeric = ?",
+                    (withdrawn,),
+                ).fetchone()[0]
+            )
+            == 0
+        )
+        unestablished = [
+            str(row["accession_plain"])
+            for row in connection.execute(
+                "SELECT accession_plain FROM census_accessions "
+                "WHERE registrant_set_completeness <> 'established'"
+            ).fetchall()
+        ]
+    assert unestablished == [joint]
 
 
 def test_every_planned_source_receives_exactly_one_r18_disposition(
@@ -214,23 +412,26 @@ def test_the_bridge_covers_every_candidate_family(paired: rsnap.PairedSnapshots)
 
 
 @pytest.mark.parametrize(
-    ("statement", "field"),
+    ("statement", "field", "absent"),
     [
         (
             "UPDATE census_registrant_observations SET value_text = 'Accelerated filer' "
             "WHERE observation_kind = 'filing_status' AND cik_numeric = 1",
             "size_stratum",
+            None,
         ),
         (
             "UPDATE census_accessions SET inline_xbrl_flag = 1 - inline_xbrl_flag "
             "WHERE accession_plain = (SELECT MIN(accession_plain) FROM census_accessions)",
             "has_inline_xbrl",
+            None,
         ),
         (
             "UPDATE census_accession_observations SET raw_value_json = '\"9999999999\"' "
             "WHERE field_name = 'cik_padded' AND accession_plain = "
             "(SELECT MIN(accession_plain) FROM census_accession_observations "
             "WHERE field_name = 'cik_padded')",
+            "candidate_accession_evidence_sha256",
             "multi_registrant",
         ),
     ],
@@ -241,6 +442,7 @@ def test_the_bridge_fails_on_any_unrelated_difference(
     tmp_path: Path,
     statement: str,
     field: str,
+    absent: str | None,
 ) -> None:
     """**R28** is an explicit allowlist: an unrelated difference must fail the bridge.
 
@@ -248,6 +450,16 @@ def test_the_bridge_fails_on_any_unrelated_difference(
     rebuilt from it, because a frozen snapshot refuses mutation outright. That is the
     adversarial case the bridge exists to catch: a Track B quietly built over a different
     candidate universe.
+
+    **Accepted Decision 096 R84** fixes the third case's attribution. The mutation edits a
+    source observation *after* the canonical association relation has been materialized, and
+    accepted Decision 094 §6.5 makes ``multi_registrant`` a projection of that
+    already-materialized relation -- so it correctly does **not** move. What does move is the
+    candidate evidence identity, because the altered observation is part of that accession's
+    evidence preimage, so the bridge fails on ``candidate_accession_evidence_sha256``.
+    Row-presence violations may accompany the digest, but the digest is the required
+    attribution and the stale one must be absent: asserting only "some violation exists"
+    would let the relation silently start following a mutated observation again.
     """
     source = tmp_path / "diverged.sqlite3"
     er._copy(world.database, source)
@@ -265,10 +477,11 @@ def test_the_bridge_fails_on_any_unrelated_difference(
         snapshot_a=paired.track_a.snapshot_id,
         snapshot_b=frozen.snapshot_id,
     )
+    observed = [item.field for item in report.violations]
     assert not report.passed
-    assert any(item.field == field for item in report.violations), [
-        item.field for item in report.violations
-    ]
+    assert field in observed, observed
+    if absent is not None:
+        assert absent not in observed, observed
 
 
 def test_the_production_builder_cannot_reach_the_overlay() -> None:
@@ -751,7 +964,6 @@ def test_a_full_index_disagreement_is_a_diagnostic_not_an_overwrite(
         (er._corrupt_dashed_form, "disagrees with the canonical dashed form"),
         (er._corrupt_registrant_cik, "not the canonical rendering"),
         (er._remove_company_name, "filing_time_name"),
-        (er._corrupt_full_index_cik, "non-canonical CIK"),
         (er._orphan_accession_anchor, "none of which has an accepted registrant row"),
     ],
 )
@@ -761,7 +973,16 @@ def test_each_freeze_obligation_fails_for_its_own_reason(
     mutate: object,
     expected: str,
 ) -> None:
-    """Obligation B: one violated obligation per fixture, each non-vacuous."""
+    """Obligation B: one violated obligation per fixture, each non-vacuous.
+
+    **Accepted Decision 096 R83.** The malformed full-index CIK case is deliberately absent
+    from this parametrization. Accepted Decision 094 §6.5 gave the candidate layer exactly
+    one membership source -- the canonical relation read with its completeness state -- so
+    it no longer rereads the observation this mutation would corrupt. Enforcing the
+    invariant here would require restoring the observation fallback §6.5 removed. It is
+    instead proved one layer earlier, before the relation exists, by
+    ``tests/unit/test_m3_e0.py::test_a_malformed_full_index_cik_fails_the_projection_closed``.
+    """
     target = tmp_path / "freeze.sqlite3"
     er._copy(world.database, target)
     with connect(target, writer=True) as connection:
@@ -805,10 +1026,18 @@ def test_a_building_snapshot_at_entry_blocks(world: rw.RehearsalWorld, tmp_path:
 
 
 def test_the_loader_accepts_every_frozen_track_b_row(paired: rsnap.PairedSnapshots) -> None:
-    """The accepted Decision-019 loader validates the frozen snapshot end to end."""
+    """The accepted Decision-019 loader validates the frozen snapshot end to end.
+
+    Twenty-six candidate entities under accepted Decision 095 R79: the 24 filing registrants
+    plus the two support-only co-registrants, which are substantive members of the two joint
+    accessions and therefore candidate entities of them. They are **not** selected -- see
+    ``test_the_rehearsal_snapshot_reaches_a_feasible_selection``, which still selects 24 --
+    because neither has an accession of its own, which is exactly R79's "no independent
+    accession, quota witness, event, or selection credit".
+    """
     with connect(paired.track_b_database, writer=False) as connection:
         loaded = load_frozen_joint_candidates(connection, paired.track_b.snapshot_id)
-    assert loaded.entity_count == 24
+    assert loaded.entity_count == 26
     assert len(loaded.accessions) == loaded.accession_count
 
 

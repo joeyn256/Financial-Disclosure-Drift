@@ -137,6 +137,31 @@ def test_unknown_environment_variable_exits_one(repo_root: Path) -> None:
     assert "unrecognized environment variable" in result.stderr
 
 
+def test_the_evidence_root_is_recognized_and_changes_no_rendered_value(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """Accepted **Decision 095 R80**, at the boundary the finding was measured at.
+
+    The central loader rejects every unrecognized ``DISCLOSURE_DRIFT_*`` name **before a
+    command dispatches**, which is why the two Decision 094 PRE-E0 commands returned
+    configuration exit ``1`` before R80: their required runtime root was not recognized.
+    Recognition is proved here by an ordinary command succeeding with the variable set, and
+    it is bounded by the control above — an unrelated unknown name still exits ``1``. The
+    value reaches no rendered output on either path.
+    """
+    synthetic = tmp_path / "synthetic-runtime-root"
+    synthetic.mkdir()
+    with_root = _run(
+        ["validate-config"], repo_root, env={"DISCLOSURE_DRIFT_EVIDENCE_ROOT": str(synthetic)}
+    )
+    without_root = _run(["validate-config"], repo_root)
+
+    assert with_root.returncode == 0, with_root.stderr
+    assert with_root.stdout == without_root.stdout
+    assert str(synthetic) not in with_root.stdout + with_root.stderr
+    assert "synthetic-runtime-root" not in with_root.stdout + with_root.stderr
+
+
 @pytest.mark.parametrize("command", ["validate-config", "show-cohorts"])
 def test_commands_run_from_a_subdirectory(repo_root: Path, command: str) -> None:
     result = _run([command], repo_root / "src" / "disclosure_drift")

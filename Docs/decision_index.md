@@ -1230,8 +1230,31 @@ production semantic.
 | What validation and commit are authorized | **Decision 097 §5, R89.** One fresh actual-`claude-opus-5` Maximum exceptional correction; red/green plus isolated non-vacuity; one post-correction `make check-fast`; one local implementation commit over the 22 exact-hash D096 paths plus the audit test only on full success; no push |
 | What remains held | **Decision 097 §§7–8.** Both execute constants `None`; no private-root access, accepted-catalog migration, transition, E0, linkage diagnostic, persistence bridge, `0016`, later stage, network, SEC, HTTP, push, or tag |
 
-*(Current state: **the Decision-097 one-file audit correction is the next authorized action.** E0
-is operationally **HELD**, `REQUEST_CEILING = 0`, and no broader correction is authorized.)*
+*(Position after D097 acceptance: the one-file correction was next. It has since produced candidate
+`1e200218…` and passed its one full gate, but the required independent review failed with two
+MAJOR findings. Accepted Decision 098 below now controls. E0 remains operationally **HELD**.)*
+
+## Decision 098 — ACCEPTED (D094 implementation review rejection and PRE-E0 hold)
+
+[Decision 098](Decisions/decision_098_m3_3_d094_implementation_review_rejection_and_hold.md)
+(`ACCEPTED — OWNER REVIEW ADJUDICATION AND HOLD 2026-08-16`) is the **twenty-ninth M3.3 record**.
+It accepts the independent-review evidence, rejects but preserves the current candidate, and grants
+no further correction or execution authority.
+
+| Question | Controlling record |
+|---|---|
+| What candidate was reviewed | **Decision 098 §1.** Clean local unpushed HEAD `1e200218…`, tree `7d5f3aa9…`, exact 23-path D097 set; one `make check-fast` passed at 4351 passed / 1 skipped / 0 failed |
+| Where is the review evidence | **Decision 098 §2, R90.** [`m3_3_d094_pre_e0_implementation_independent_review_1e20021.md`](m3/reviews/m3_3_d094_pre_e0_implementation_independent_review_1e20021.md), SHA-256 `07feb1608f85ae30b61ff3ec4cdc1fb67ad6b17da03fa6cebd97295174cf1beb`; fresh actual `claude-opus-5`; verdict B0/M2/MIN4/OPT1/OBS4 |
+| What is MAJOR-1 | **Decision 098 §3, R91.** Event-conditioned fields can be assigned before their durable event, causing failure disclosure to write a create-once terminal its own validator refuses while suppressing the validation error |
+| What is MAJOR-2 | **Decision 098 §4, R92.** Mandatory Decision-094 §5.2 predicate 3, the accepted M3.2 completion-receipt/catalog binding, is missing from both transition preflight and under-lease recheck and is not superseded |
+| What happened to the other findings | **Decision 098 §5, R93.** Four MINORs and four observations are confirmed; one harmless redundant-condition optimization is deferred. None authorizes cleanup |
+| Is the candidate accepted | **Decision 098 §6, R94.** No. Candidate `1e200218…` is preserved unchanged, clean, unpushed, and unaccepted. Both execute constants remain `None` |
+| What may happen next | **Decision 098 §7.** A new Joey ruling is required before one exceptional bounded correction and corrected-target review boundary. No executor may start automatically |
+| What remains held | **Decision 098 §§6–9.** Accepted-catalog migration, private-root access, transition, E0, linkage, bridge, `0016`, later stages, activation, network, SEC, HTTP, push, and tag; request ceiling 0 |
+
+*(Current state: **PRE-E0 implementation acceptance is rejected pending a new Joey correction
+ruling.** E0 is operationally **HELD**, and read-only analysis/governance recording is the only
+authorized work.)*
 
 ## Deviation register — where deviations are recorded
 

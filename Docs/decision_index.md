@@ -1256,6 +1256,25 @@ no further correction or execution authority.
 ruling.** E0 is operationally **HELD**, and read-only analysis/governance recording is the only
 authorized work.)*
 
+## Decision 099 — ACCEPTED (post-D098 bounded correction and final PRE-E0 acceptance boundary)
+
+[Decision 099](Decisions/decision_099_m3_3_post_d098_bounded_correction.md)
+records Joey's explicit one-post-D098 correction authorization and Sol/GPT's exact technical
+disposition.
+
+| Question | Controlling answer |
+|---|---|
+| What may be corrected | **Decision 099 §§1–5, R95–R98.** Durable-event-derived failure terminal fields; the exact accepted T7→T6 completion-receipt/catalog binding in transition preflight and under lease; catalog-aware verify; structural lease-check omission; and the existing/operator-owned namespace parent |
+| What is the exact receipt binding | **Decision 099 §3, R97.** Fixed accepted T7 and T6 paths, file digests, receipt ids, run ids, plan identities, exact two-receipt chain, 77 cumulative attempts, truthful catalog run rows/attempt ledgers, and exact T7 observation attribution, through the existing receipt loader and predecessor resolver only |
+| What may the executor edit | **Decision 099 §5.** `m3/e0.py`, `test_m3_e0.py`, the E0 execution-record spec, operator runbook, and change-impact map; nothing else |
+| What proof and commit are allowed | **Decision 099 §§7–8.** Targeted mutation/non-vacuity proof, one final `make check-fast`, and one local commit only on full success with subject `fix: close Decision 098 PRE-E0 review findings` |
+| What model/review boundary applies | **Decision 099 §§6, 9.** One fresh actual-`claude-opus-5` Maximum executor, no delegation; then Sol direct corrected-target review, with no additional opinion or optimization pass |
+| What happens on success | **Decision 099 §9.** Sol may owner-accept PRE-E0 if no BLOCKER/MAJOR or failed frozen proof remains, stop optimizing, and proceed to the separately governed transition/E0 sequence |
+| What remains prohibited during correction | **Decision 099 §11.** Private-root access, accepted-catalog migration/transition, E0, activation, linkage, bridge, `0016`, later stages, network/SEC/HTTP, push, and tag; request ceiling 0 |
+
+*(Current state: **the one final post-D098 PRE-E0 correction is authorized and not yet
+accepted.** E0 remains operationally **HELD during correction**.)*
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

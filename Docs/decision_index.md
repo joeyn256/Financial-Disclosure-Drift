@@ -1167,9 +1167,29 @@ stage runs; both execute activation constants remain `None`.
 | What the architecture challenge found | **Decision 094 §13.** Proposal digest `b01bd2736…`; `ACCEPT_WITH_BOUNDED_CORRECTIONS`, B2/M6/MIN10/OPT5; every finding owner-dispositioned, no Joey-reserved choice and no second architecture reviewer |
 | What is authorized now | **Decision 094 §12.** One fresh attested Opus 5 maximum implementation on the exact executor paths, disposable fixtures, one local commit, no push. Real transition and E0 remain unauthorized/HELD |
 
-*(Current state: **D094 implementation is the next authorized action.** E0 is operationally
-**HELD**; accepted-catalog `0014`/`0015`, linkage diagnostic, persistence bridge, `0016`, E1, E2,
-M3.4, network, SEC, and HTTP remain unauthorized at `REQUEST_CEILING = 0`.)*
+*(Position at D094 acceptance: bounded implementation was next. Accepted Decision 095 below now
+controls the correction/remediation boundary. E0 remains operationally **HELD**.)*
+
+## Decision 095 — ACCEPTED (D094 bounded correction and one remediation)
+
+[Decision 095](Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md)
+(`ACCEPTED — OWNER BOUNDED CORRECTION AND SINGLE REMEDIATION AUTHORITY 2026-08-15`) is the
+**twenty-sixth M3.3 record**. It accepts no implementation bytes. It preserves Decision 094's
+production architecture and corrects only the implementation boundary exposed by the first blocked
+epoch.
+
+| Question | Controlling record |
+|---|---|
+| Does missing registrant membership still fail closed | **Decision 095 §§2–3, R79. Yes.** D094 §6.2 condition 3 and §13 M6 stand; production E0 never invents an entity |
+| What changes in the synthetic fixture | **Decision 095 §3, R79.** Support-only CIKs 917/918 receive accepted-shaped submissions objects with zero own filings so the production parser creates their registrant rows; `company.idx` remains the joint-filing membership source |
+| How is the private-root variable admitted | **Decision 095 §4, R80.** `DISCLOSURE_DRIFT_EVIDENCE_ROOT` is centrally recognized as a runtime root, never a config override or persisted/logged value; a `cli.py` filtering bypass is prohibited |
+| How does `e0.py` avoid an acquisition import | **Decision 095 §5, R81.** Restate exactly `catalogs/m3_2a_operational.sqlite3` and require an equality/drift test against the accepted acquisition constant |
+| What happened to the first implementation run | **Decision 095 §1.** Blocked, no commit; two source files preserved as unreviewed WIP, never an accepted candidate |
+| What is authorized now | **Decision 095 §§6–8, R82.** One fresh attested Opus 5 Maximum normal bounded remediation on D094 §12.1 plus the exact D095 additions; all D094 proofs plus D095 controls; one local implementation commit only after a passing final gate; no push |
+| What remains held | **Decision 095 §§9–10.** Both execute constants `None`; no accepted-catalog migration, transition, E0, linkage, bridge, `0016`, later stage, network, SEC, HTTP, push, or tag |
+
+*(Current state: **the Decision-095 remediation is the next authorized action.** E0 is
+operationally **HELD** and `REQUEST_CEILING = 0`.)*
 
 ## Deviation register — where deviations are recorded
 

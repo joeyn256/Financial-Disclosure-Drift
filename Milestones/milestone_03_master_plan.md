@@ -1,6 +1,6 @@
 # Milestone 3 — Master Plan and Operational Readiness Roadmap
 
-> **CURRENT STATE, 2026-08-15 — DECISION 094 PRE-E0 REDESIGN IS OWNER-ACCEPTED; BOUNDED IMPLEMENTATION IS NEXT; E0 IS HELD.** [Decision 094](../Docs/Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) freezes the exact transition, canonical relation writer, operator/durability contracts, and authorizes only implementation on disposable fixtures. Applying `0014`/`0015`, E0, linkage diagnostic, bridge, `0016`, E1/E2/M3.4, and network remain unauthorized.
+> **CURRENT STATE, 2026-08-15 — DECISION 095 BOUNDED PRE-E0 CORRECTION IS OWNER-ACCEPTED; ONE REMEDIATION IS NEXT; E0 IS HELD.** [Decision 095](../Docs/Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) preserves Decision 094's transition, relation, operator, durability, recovery, and freeze contracts while authorizing only the exact fixture/runtime-root/import-boundary correction and one fresh Opus 5 Maximum remediation. Applying `0014`/`0015`, E0, linkage, bridge, `0016`, later stages, and network remain unauthorized.
 
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS

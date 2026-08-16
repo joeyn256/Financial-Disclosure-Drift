@@ -1,6 +1,6 @@
 # Milestones/contracts/ — purpose and structure
 
-> **CURRENT STATE, 2026-08-15 — DECISION 094 PRE-E0 REDESIGN IS OWNER-ACCEPTED; BOUNDED IMPLEMENTATION IS NEXT; E0 IS HELD.** [Decision 094](../../Docs/Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) narrowly amends the active M3.3 contract and authorizes only its exact disposable-fixture implementation with both execute constants `None`. Real migration/E0 and every later or networked act remain unauthorized.
+> **CURRENT STATE, 2026-08-15 — DECISION 095 BOUNDED PRE-E0 CORRECTION IS OWNER-ACCEPTED; ONE REMEDIATION IS NEXT; E0 IS HELD.** [Decision 095](../../Docs/Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) preserves Decision 094's production rules and authorizes only its exact fixture/runtime-root/import-boundary correction plus one fresh Opus 5 Maximum remediation with both execute constants `None`. Real migration/E0 and every later or networked act remain unauthorized.
 
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS

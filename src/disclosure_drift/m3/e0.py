@@ -172,7 +172,7 @@ receipt, or namespace can substitute for it. Transition activation also cannot e
 that is a separate constant, below, and a separate owner act.
 """
 
-M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None
+M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = "M3_3_D101_E0_EXECUTION_AUTHORIZED"
 """The governed token authorizing one real M3.3-E0 offline parse.
 
 ``None`` means the E0 ``execute`` mode is **not enabled** and returns exit ``3``. Held

@@ -12,9 +12,9 @@ Two conventions carry most of the weight, and both are deliberate.
 and :data:`~disclosure_drift.m3.e0.M3_3_E0_EXECUTION_AUTHORITY` gate the two ``execute`` state
 machines, and each carries exactly the value its governing record gives it — which is what
 ``test_the_shipped_activation_constants_match_the_governing_record`` asserts against the *file*,
-not against a runtime value. Accepted Decision 101 §7 activated the transition constant to its
-governed token; the E0 constant is a separate owner act and remains ``None`` until its own
-instrument lands. Decision 094 §12.3 items 1-2 and 8-10 require both machines to be proved
+not against a runtime value. Accepted Decision 101 §7 activated the transition constant and §8
+activated the E0 constant, each by its own separate owner act against its own distinct governed
+token. Decision 094 §12.3 items 1-2 and 8-10 require both machines to be proved
 non-vacuously whatever the shipped values are, so a test that needs a machine reachable
 overrides the attribute for the duration of one test, and a test about the gate itself disables
 it the same way. That is a harness override of an in-memory constant against a disposable
@@ -512,16 +512,18 @@ def test_the_shipped_activation_constants_match_the_governing_record() -> None:
     one: a runtime check alone would pass against a module some other test had already
     overridden, and this is the one property no test may leave ambiguous.
 
-    Decision 101 §7 activated the transition constant to its governed token. The E0 constant
-    is a separate owner act under §8 and remains ``None`` here, which is exactly the
-    independence §7.2 requires: transition activation cannot enable E0.
+    Decision 101 §7 activated the transition constant and §8 activated the E0 constant, each
+    by its own separate owner act against its own governed token — which is the independence
+    §7.2 requires. The two values are distinct, and neither is the other's authority.
     """
     governed_transition_value = "M3_3_D101_PRE_E0_CATALOG_TRANSITION_AUTHORIZED"
+    governed_e0_value = "M3_3_D101_E0_EXECUTION_AUTHORIZED"
     assert governed_transition_value == e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY
-    assert e0.M3_3_E0_EXECUTION_AUTHORITY is None
+    assert governed_e0_value == e0.M3_3_E0_EXECUTION_AUTHORITY
+    assert governed_transition_value != governed_e0_value
     source = Path(e0.__file__).read_text(encoding="utf-8")
     assert f'"{governed_transition_value}"' in source
-    assert "M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None" in source
+    assert f'"{governed_e0_value}"' in source
 
 
 @pytest.mark.parametrize(
@@ -586,13 +588,19 @@ def test_a_passing_preflight_does_not_enable_execute(
     assert result.exit_code == e0.EXIT_STAGE_NOT_ENABLED
 
 
-def test_the_activation_check_precedes_root_resolution(config: _Config, tmp_path: Path) -> None:
+def test_the_activation_check_precedes_root_resolution(
+    monkeypatch: pytest.MonkeyPatch, config: _Config, tmp_path: Path
+) -> None:
     """Exit ``3`` is unconditional: an unset root cannot mask "this stage is not enabled".
 
     If the root were resolved first, an operator with no variable set would be told to fix
     their environment for a command that would refuse regardless — and a *set* variable would
     have become a precondition for learning the stage was disabled.
+
+    The constant is disabled explicitly because the claim is about *ordering* — activation is
+    consulted before the root — which only has content while the stage is disabled.
     """
+    monkeypatch.setattr(e0, "M3_3_E0_EXECUTION_AUTHORITY", None)
     result = e0.run_offline_parse_command(
         mode="execute", config=_Config(), repository_root=tmp_path, environ={}
     )
@@ -1622,12 +1630,17 @@ def transitioned(evidence_root: Path, config: _Config, monkeypatch: pytest.Monke
 def test_e0_preflight_requires_a_complete_transition_terminal(
     evidence_root: Path, config: _Config
 ) -> None:
-    """§9.1: an absent transition terminal is UNDETERMINED, never permission."""
+    """§9.1: an absent transition terminal is UNDETERMINED, never permission.
+
+    The refusal is the assertion. ``e0_execute_enabled`` is reported alongside it and is now
+    ``True`` under accepted Decision 101 §8, which is exactly the point being made: an
+    activated constant does not make an absent transition terminal into permission.
+    """
     build_catalog(evidence_root, head=15)
     report = e0.e0_preflight(evidence_root=evidence_root, config=config)
     assert not report.passed
     assert any("transition terminal record is absent" in item for item in report.refusals)
-    assert report.facts["e0_execute_enabled"] is False
+    assert report.facts["e0_execute_enabled"] is True
 
 
 def test_e0_preflight_passes_after_a_complete_transition(

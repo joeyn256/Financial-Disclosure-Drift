@@ -1,5 +1,7 @@
 # Architecture Map — Disclosure Drift
 
+> **CURRENT STATE, 2026-08-15 — DECISION 094 PRE-E0 REDESIGN IS OWNER-ACCEPTED; BOUNDED IMPLEMENTATION IS NEXT; E0 IS HELD.** [Decision 094](Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) preserves Decisions 091–093 and authorizes only its exact disposable-fixture implementation with both execute constants `None`. The accepted catalog remains at `0013`; applying `0014`/`0015`, E0, the linkage diagnostic, persistence bridge, `0016`, E1, E2, M3.4, and all network/SEC/HTTP remain unauthorized.
+
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS
 > THE DECISION-078 PRE-E0 READ-ONLY REAL-FEASIBILITY SOURCE AUDIT. NO REAL EXECUTION IS

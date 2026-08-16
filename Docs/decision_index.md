@@ -1144,6 +1144,33 @@ in a new session but is not started**; E1, E2, M3.4, and migration `0016` remain
 deferred level-1 `filing_level_metadata` native-header class is **not** activated; network/SEC/HTTP
 authority is NONE at `REQUEST_CEILING = 0`.)*
 
+## Decision 094 — ACCEPTED (PRE-E0 executability redesign)
+
+[Decision 094](Decisions/decision_094_m3_3_pre_e0_executability_redesign.md)
+(`ACCEPTED — OWNER PRE-E0 REDESIGN AUTHORITY 2026-08-15`) is the **twenty-fifth M3.3 record**. It
+accepts the PRE-E0 redesign after one fresh Opus 5 maximum read-only architecture challenge and
+authorizes only its bounded implementation.
+
+**It executes nothing.** No accepted-catalog migration, E0, linkage diagnostic, network, or later
+stage runs; both execute activation constants remain `None`.
+
+| Question | Controlling record |
+|---|---|
+| What is preserved | **Decision 094 §§2, 4.** D091 evidence/digests, D092 acceptance/purpose closure, D093 durability and exact linkage predicate, the open linkage gate, and the read-only owner-adjudicated diagnostic. The 96-outcome claim remains inference |
+| What happens to the accepted catalog | **Decision 094 §5.** Future exact `0013 -> 0014 -> 0015` only, under a later activation instrument; preflight, continuous lease, `0600` backup, partial-head disclosure, no auto-resume/restore. `0016` excluded |
+| What E0 may write | **Decision 094 §6.1.** The former fifteen plus only `census_accession_registrants`, with the existing category-A plan-state transition; exact contract amendment, no general widening |
+| How canonical membership is derived | **Decision 094 §§6.2–6.4.** Set union of plan-bound submissions and full-index membership, submissions corroborated by full index, no scalar/anchor/heuristic, no invented registrant, R59 fail closed, completeness last |
+| What consumers do | **Decision 094 §6.5.** Candidate and later linkage layers read the relation plus completeness, never observation/scalar fallback; history attributes an established joint filing to every substantive member |
+| What the commands are | **Decision 094 §7.** `m3 prepare-e0-catalog` and `m3 offline-parse`, each with `preflight/execute/verify`; fixed namespaces and private-root environment boundary; source constants independently gate execute |
+| What durable evidence exists | **Decision 094 §§8–10.** Two fixed private run directories; backup, hash-chained ledger, v4 receipt, terminal; exact conditional fields, identities, totality, and reconstruction |
+| What freeze means | **Decision 094 §11.** Compute, validate, commit, independently recompute/verify under the same flock, write receipt/event/terminal, reproduce token, then release; no self-referential identity; post-freeze defect preserved and returned to owner |
+| What the architecture challenge found | **Decision 094 §13.** Proposal digest `b01bd2736…`; `ACCEPT_WITH_BOUNDED_CORRECTIONS`, B2/M6/MIN10/OPT5; every finding owner-dispositioned, no Joey-reserved choice and no second architecture reviewer |
+| What is authorized now | **Decision 094 §12.** One fresh attested Opus 5 maximum implementation on the exact executor paths, disposable fixtures, one local commit, no push. Real transition and E0 remain unauthorized/HELD |
+
+*(Current state: **D094 implementation is the next authorized action.** E0 is operationally
+**HELD**; accepted-catalog `0014`/`0015`, linkage diagnostic, persistence bridge, `0016`, E1, E2,
+M3.4, network, SEC, and HTTP remain unauthorized at `REQUEST_CEILING = 0`.)*
+
 ## Deviation register — where deviations are recorded
 
 **[`Docs/preregistration.md`](preregistration.md) §25 is the canonical preregistration deviation

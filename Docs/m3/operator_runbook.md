@@ -1,5 +1,7 @@
 # Milestone 3 — Mac Operator Runbook
 
+> **CURRENT OPERATOR STATE, 2026-08-15 — DO NOT RUN E0 OR THE CATALOG TRANSITION.** [Decision 094](../Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) is accepted for bounded implementation only. The future `prepare-e0-catalog` and `offline-parse` execute modes must land disabled (`None`); no operator command in this runbook presently authorizes real migration, E0, linkage, later stages, or network.
+
 
 > **CURRENT STATE, 2026-08-14 — M3.3-I/R IS COMPLETE AND OWNER-ACCEPTED, AND THE NEXT ACT IS
 > THE DECISION-078 PRE-E0 READ-ONLY REAL-FEASIBILITY SOURCE AUDIT. NO REAL EXECUTION IS

@@ -1209,8 +1209,29 @@ production semantic.
 | What is authorized now | **Decision 096 §§6–7.** One final fresh bounded remediation; every remaining D094/D095 deliverable and proof; one successful `make check-fast`; one conditional local implementation commit; no push. No further autonomous remediation follows |
 | What remains held | **Decision 096 §§8–9.** Both execute constants `None`; no private-root access, accepted-catalog migration, transition, E0, linkage diagnostic, persistence bridge, `0016`, later stage, network, SEC, HTTP, push, or tag |
 
-*(Current state: **the Decision-096 final remediation is the next authorized action.** E0 is
-operationally **HELD**, `REQUEST_CEILING = 0`, and no later remediation is implicitly authorized.)*
+*(Position after D096 acceptance: its final remediation was next. That run has since completed all
+direct implementation/proof work but stopped at one inherited M19 audit-anchor failure with no
+commit; accepted Decision 097 below now controls the exceptional one-file correction. E0 remains
+operationally **HELD**.)*
+
+## Decision 097 — ACCEPTED (M19 live-anchor supersession and exact audit correction)
+
+[Decision 097](Decisions/decision_097_m3_3_m19_live_anchor_supersession_correction.md)
+(`ACCEPTED — OWNER EXCEPTIONAL POST-D096 BLOCKER CORRECTION AUTHORITY 2026-08-16`) is the
+**twenty-eighth M3.3 record**. It accepts no implementation bytes and changes no D094-D096
+production semantic.
+
+| Question | Controlling record |
+|---|---|
+| What happened to the D096 remediation | **Decision 097 §1.** Fresh actual `claude-opus-5`; D094-D096 implementation and direct proofs complete; sole `make check-fast` returned 4350 passed / 1 failed / 1 skipped on missing live anchor M19; no commit |
+| What is M19's status | **Decision 097 §3, R87.** Its immutable historical definition and KILLED evidence stand; only live-target applicability is superseded by D094 §6.5 and D096 R83. Exact partition: 38 historical definitions, 37 live anchors, superseded `[M19]`, unexpected missing 0 |
+| What replaces M19's live proof | **Decision 097 §3, R87.** D096 R83's positive/adversarial pre-association E0 proof: `invalid_cik_rendering_count`, rollback, no established projection, no invented entity, no candidate/scalar/observation fallback |
+| What may change | **Decision 097 §4, R88.** Only `tests/unit/test_audit_tooling.py`; the runner, historical artifact, production source, and all D096 WIP bytes remain unchanged |
+| What validation and commit are authorized | **Decision 097 §5, R89.** One fresh actual-`claude-opus-5` Maximum exceptional correction; red/green plus isolated non-vacuity; one post-correction `make check-fast`; one local implementation commit over the 22 exact-hash D096 paths plus the audit test only on full success; no push |
+| What remains held | **Decision 097 §§7–8.** Both execute constants `None`; no private-root access, accepted-catalog migration, transition, E0, linkage diagnostic, persistence bridge, `0016`, later stage, network, SEC, HTTP, push, or tag |
+
+*(Current state: **the Decision-097 one-file audit correction is the next authorized action.** E0
+is operationally **HELD**, `REQUEST_CEILING = 0`, and no broader correction is authorized.)*
 
 ## Deviation register — where deviations are recorded
 

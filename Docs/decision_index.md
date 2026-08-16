@@ -1313,9 +1313,15 @@ reserved for a later exact owner act.
 | Is M3.3-E0 authorized | **Decision 101 §8.** Yes, **conditionally** — one invocation, if and only if the transition completes and verifies, enabled by its own constant-only activation of `M3_3_E0_EXECUTION_AUTHORITY`. Every Decision 091–100 evidence, relation, no-fallback, projection, provenance, and identity rule is preserved |
 | What is published, and when | **Decision 101 §§5–6.** One ordinary push of `main` to `origin/main` **before** the private catalog is touched; private-root access only afterwards, resolved through the accepted mechanism and never disclosed. No force push, rebase, amend, or tag |
 | Where does the sequence stop | **Decision 101 §9.** After verified E0. No migration `0016`, persistence bridge, E1, E2, or M3.4. The read-only R52 linkage diagnostic may run only under unambiguous existing authority, and its results never become a new owner ruling |
+| **Which E0 run namespace is current** | **Decision 103 §3 (R105) — `m3_3_e0_offline_parse_v2`.** It supersedes the E0 literal in Decision 094 §7.1 and **only** that literal. The generation advances by reviewed source change alone: there is no `--run-namespace`, environment override, or configuration field, and the transition namespace is unchanged |
+| **What the interrupted `…_v1` E0 run is now** | **Decision 103 §4 (R106) — immutable interrupted evidence, classification `UNDETERMINED / NOT COMPLETE`.** Never repaired, resumed, overwritten, deleted, renamed, or read as a v2 prefix. The successor **validates** it — present, terminal-free, receipt-free, chain-valid, no closing event — rather than skipping it, and an absent v1 stops the successor instead of reading as a clean start |
+| **How a stale catalog writer lease is reconciled** | **Decision 103 §§5–9 (R107–R111).** `m3 reconcile-writer-lease --config … --mode {preflight,execute}`, never automatic, gated by its own `STALE_WRITER_LEASE_RECOVERY_AUTHORITY` constant. Eligibility is the conjunctive fail-closed `L1`–`L12` ladder: no elapsed time, dead PID, or free advisory lock authorizes takeover on its own. The lease transitions `held -> released` **without** `released_at_utc` and **with** `reconciliation_reason`, so voluntary release cannot be inferred; one write-once record binds both lease digests and the catalog's before/after identity. The ordinary E0 surfaces keep refusing a held lease |
 
-*(Current state: **the PRE-E0 chain is closed and execution is authorized.** Network, SEC, and HTTP
-authority remain **NONE** at request ceiling **0** throughout.)*
+*(Current state: **the PRE-E0 chain is closed and execution is authorized.** The Decision 101 E0
+invocation was **interrupted**; Decision 103 implements the successor generation and the governed
+stale-lease recovery, and authorizes **implementation only** — reconciling the real lease and
+running E0 v2 each still require a separate owner instrument. Network, SEC, and HTTP authority
+remain **NONE** at request ceiling **0** throughout.)*
 
 ## Deviation register — where deviations are recorded
 

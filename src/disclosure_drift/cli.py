@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from logging import Logger
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from disclosure_drift import __version__
 from disclosure_drift.cohorts import (
@@ -108,6 +108,9 @@ from disclosure_drift.storage.catalog import (
     read_only_connection,
     strictly_read_only_connection,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; `m3/e0.py` stays a call-time import
+    from disclosure_drift.m3.e0 import OperatorResult
 
 __all__ = ["build_parser", "main", "run"]
 
@@ -338,6 +341,37 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
                 "write mode and is not enabled; verify validates a durable namespace read-only."
             ),
         )
+
+    # Decision 103 R6. Same shape and the same absent options as the two surfaces above: no
+    # --force, --pid, --lease-id, --host, --catalog, --lease-file, --evidence-root,
+    # --ignore-lock, --skip-check, --run-namespace, or --network. Every eligibility predicate is
+    # measured from the world, so there is nothing left for an operator to assert.
+    recover_lease = m3_subparsers.add_parser(
+        _M3_3_RECOVERY_COMMAND,
+        help="Reconcile one stale catalog writer lease left by an interrupted run (D103 R3).",
+        description=(
+            "Reconciles a persisted writer lease that still records 'held' for a process that "
+            "no longer exists. It is never automatic and never a step another command performs: "
+            "the ordinary PRE-E0 surfaces continue to refuse a held lease. Eligibility is "
+            "conjunctive and fail-closed — same host, dead writer, no other active writer, a "
+            "free exclusive advisory lock, an expired lease, a clean catalog whose identity "
+            "matches the accepted recovery baseline, network disabled, and no prior "
+            "reconciliation. preflight is strictly read-only; execute reconciles exactly once "
+            "and writes a durable recovery record. No catalog page, WAL frame, migration, "
+            "observation, parser state, or E0 evidence is written on any path, and no transport "
+            "is constructed."
+        ),
+    )
+    _add_config_argument(recover_lease)
+    recover_lease.add_argument(
+        "--mode",
+        required=True,
+        choices=_M3_3_RECOVERY_MODES,
+        help=(
+            "preflight evaluates every eligibility predicate and writes nothing; execute "
+            "repeats them, reasserts under the exclusive lock, and reconciles exactly once."
+        ),
+    )
 
     for name, gate, summary in _M3_3_GATED_COMMANDS:
         gated = m3_subparsers.add_parser(
@@ -1383,6 +1417,13 @@ _M3_3_PRE_E0_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
     ),
 )
 
+#: Accepted Decision 103 R6's recovery surface. It sits beside the two PRE-E0 commands rather
+#: than among them because it is not a stage: it reconciles one stale writer lease left by an
+#: interrupted run, and it has no `verify` mode because its entire result is one lease document
+#: and one create-once record, both of which `preflight` already reads.
+_M3_3_RECOVERY_COMMAND: Final = "reconcile-writer-lease"
+_M3_3_RECOVERY_MODES: Final[tuple[str, ...]] = ("preflight", "execute")
+
 #: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
 #: the command set is complete and each **refuses**: the owner gate it names has not been
 #: issued, and no acceptance, rehearsal, suite, commit, or tag issues one.
@@ -1540,6 +1581,8 @@ def _m3_command(
     # module -- which is why nothing here can print, log, or persist it.
     if command in {name for name, _, _ in _M3_3_PRE_E0_COMMANDS}:
         return _m3_pre_e0_command(command, args, config, logger)
+    if command == _M3_3_RECOVERY_COMMAND:
+        return _m3_reconcile_writer_lease_command(args, config, logger)
 
     try:
         evidence_root = require_external_evidence_root(args.evidence_root, _repository_root())
@@ -1615,6 +1658,40 @@ def _m3_pre_e0_command(
         else run_offline_parse_command
     )
     result = runner(mode=mode, config=config, repository_root=_repository_root())
+    return _report_pre_e0_result(result, command=command, mode=mode, logger=logger)
+
+
+def _m3_reconcile_writer_lease_command(
+    args: argparse.Namespace,
+    config: ProjectConfig,
+    logger: Logger,
+) -> int:
+    """Dispatch the Decision 103 R6 stale-writer-lease recovery surface.
+
+    Routing and rendering only, exactly like :func:`_m3_pre_e0_command`. Every eligibility
+    predicate, the lock, the mutation, and the durable record live in
+    :mod:`disclosure_drift.m3.e0`, so this layer cannot become a second place where a lease is
+    judged reconcilable. It never sees the private root's value either — the module returns
+    counts, digests, enum tokens, and fixed root-relative names.
+    """
+    from disclosure_drift.m3.e0 import run_reconcile_writer_lease_command
+
+    mode = str(args.mode)
+    result = run_reconcile_writer_lease_command(
+        mode=mode, config=config, repository_root=_repository_root()
+    )
+    return _report_pre_e0_result(result, command=_M3_3_RECOVERY_COMMAND, mode=mode, logger=logger)
+
+
+def _report_pre_e0_result(
+    result: OperatorResult, *, command: str, mode: str, logger: Logger
+) -> int:
+    """Render one operator result to the right stream and log the right severity.
+
+    Shared by every Decision 094 §7 / Decision 103 R6 surface so the exit-code-to-stream and
+    exit-code-to-log-line mapping is stated once. Exit ``3`` is a governance fact and is logged
+    as such; every other nonzero exit is a gate that ran and did not pass.
+    """
     stream = sys.stdout if result.exit_code == EXIT_OK else sys.stderr
     for line in result.lines:
         print(line, file=stream)

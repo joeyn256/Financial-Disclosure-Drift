@@ -28,6 +28,7 @@ invented entity — it measures the absence directly rather than trusting a retu
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -1133,11 +1134,73 @@ def test_an_unlawful_namespace_is_refused(namespace: str) -> None:
 
 
 def test_the_production_namespaces_are_fixed_constants_of_the_accepted_shape() -> None:
-    """§7.1 and adopted optimization O2: not CLI options, and lawfully shaped."""
+    """§7.1 and adopted optimization O2: not CLI options, and lawfully shaped.
+
+    **Accepted-test conflict, resolved by Decision 103 §13.** This assertion previously pinned
+    ``m3_3_e0_offline_parse_v1`` as the current E0 namespace. Decision 103 R1 supersedes that:
+    the interrupted v1 run makes v1 unreachable for a successor, and the fixed-namespace design
+    is preserved by advancing the *constant* in reviewed source rather than by adding an
+    operator option. The assertion is updated, not deleted or skipped, and v1's separate
+    identity as the immutable predecessor is asserted immediately below.
+    """
     assert e0.TRANSITION_RUN_NAMESPACE == "m3_3_pre_e0_catalog_transition_0013_0015_v1"
-    assert e0.E0_RUN_NAMESPACE == "m3_3_e0_offline_parse_v1"
-    for namespace in (e0.TRANSITION_RUN_NAMESPACE, e0.E0_RUN_NAMESPACE):
+    assert e0.E0_RUN_NAMESPACE == "m3_3_e0_offline_parse_v2"
+    for namespace in (
+        e0.TRANSITION_RUN_NAMESPACE,
+        e0.E0_RUN_NAMESPACE,
+        e0.E0_PREDECESSOR_RUN_NAMESPACE,
+        e0.LEASE_RECOVERY_RUN_NAMESPACE,
+    ):
         assert e0.validate_namespace(namespace) == namespace
+
+
+def test_the_predecessor_namespace_is_v1_and_is_distinct_from_the_current_generation() -> None:
+    """D103 R1/R2 (N3, N4): v1 is named, kept separate, and is not a prefix collision.
+
+    ``E0_RUN_NAMESPACE`` and ``E0_PREDECESSOR_RUN_NAMESPACE`` are distinct directory names, so
+    a v1 that already exists does not make v2's create-once check fire, and nothing about v2
+    reaches into v1's directory by prefix.
+    """
+    assert e0.E0_PREDECESSOR_RUN_NAMESPACE == "m3_3_e0_offline_parse_v1"
+    assert e0.E0_RUN_NAMESPACE != e0.E0_PREDECESSOR_RUN_NAMESPACE
+    assert not e0.E0_RUN_NAMESPACE.startswith(e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    assert not e0.E0_PREDECESSOR_RUN_NAMESPACE.startswith(e0.E0_RUN_NAMESPACE)
+
+
+def _every_cli_option_string() -> set[str]:
+    """Every option string the shipped parser exposes, at any nesting depth."""
+    from disclosure_drift import cli
+
+    found: set[str] = set()
+
+    def walk(parser: argparse.ArgumentParser) -> None:
+        for action in parser._actions:  # noqa: SLF001 - argparse exposes no public walk
+            found.update(action.option_strings)
+            choices = getattr(action, "choices", None)
+            if not isinstance(choices, Mapping):
+                continue
+            for candidate in choices.values():
+                if isinstance(candidate, argparse.ArgumentParser):
+                    walk(candidate)
+
+    walk(cli.build_parser())
+    return found
+
+
+def test_no_runtime_option_or_environment_value_can_choose_a_run_namespace() -> None:
+    """D103 R1 (N2): the generation advances by reviewed source and by nothing else.
+
+    Walked over the *built* parser rather than grepped from source, because the source
+    deliberately names ``--run-namespace`` in prose to say it does not exist — a text scan
+    would fail on the very comments that document the rule. The recognized environment
+    variables are checked the same way: no allowlisted name can carry a namespace either.
+    """
+    options = _every_cli_option_string()
+    for prohibited in ("--run-namespace", "--namespace", "--generation", "--lease-file"):
+        assert prohibited not in options
+    assert not any("namespace" in option for option in options)
+    for variable in RECOGNIZED_ENV_VARS:
+        assert "NAMESPACE" not in variable.upper()
 
 
 def test_the_run_namespace_is_create_once_at_mode_0700(evidence_root: Path) -> None:
@@ -1611,12 +1674,69 @@ def test_a_failure_after_the_namespace_exists_is_disclosed_and_preserved(
 # ==========================================================================
 
 
+def install_interrupted_predecessor(evidence_root: Path, *, events: int = 2) -> Path:
+    """Build a disposable v1 namespace in exactly the accepted interrupted shape.
+
+    Accepted Decision 103 R8 makes the successor's predecessor gate load-bearing, so every E0
+    test needs a predecessor to run against. The shape reproduced here is the accepted one: a
+    chain-valid ledger that reached ``PREFLIGHT_PASSED`` and ``BACKUP_VERIFIED``, no terminal
+    record, no execution receipt, and therefore ``UNDETERMINED / NOT COMPLETE``.
+
+    The ledger is written by the **real** :class:`~disclosure_drift.m3.e0.EventLedger`, so the
+    chain the gate verifies is a chain production actually produces. Every value is invented
+    for a temporary directory; nothing here reads, names, copies, or approximates the accepted
+    private root or the real v1 run.
+    """
+    directory = e0.create_run_namespace(evidence_root, e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    ledger = e0.EventLedger(
+        directory / e0.E0_EVENTS_FILENAME, e0.E0_PREDECESSOR_RUN_NAMESPACE, kind="E0"
+    )
+    if events >= 1:
+        ledger.append(
+            "PREFLIGHT_PASSED",
+            {
+                "migration_head": "0015",
+                "planned_source_count": e0.PLANNED_SOURCE_COUNT,
+                "input_observation_set_sha256": "d" * 64,
+                "pre_e0_catalog_logical_sha256": "e" * 64,
+            },
+            observed_at_utc=_AT,
+        )
+    if events >= 2:  # noqa: PLR2004 - the accepted predecessor stopped at the second boundary
+        ledger.append(
+            "BACKUP_VERIFIED",
+            {
+                "relative_path": (
+                    f"runs/{e0.E0_PREDECESSOR_RUN_NAMESPACE}/{e0.E0_BACKUP_FILENAME}"
+                ),
+                "byte_length": 4096,
+                "file_sha256": "f" * 64,
+                "catalog_logical_sha256": "e" * 64,
+            },
+            observed_at_utc=_AT,
+        )
+    return directory
+
+
 @pytest.fixture
-def transitioned(evidence_root: Path, config: _Config, monkeypatch: pytest.MonkeyPatch) -> Path:
+def predecessor(evidence_root: Path) -> Path:
+    """The interrupted v1 predecessor every successor-generation E0 run requires."""
+    return install_interrupted_predecessor(evidence_root)
+
+
+@pytest.fixture
+def transitioned(
+    evidence_root: Path,
+    config: _Config,
+    predecessor: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
     """A disposable catalog carried to head ``0015`` by the real transition machine.
 
     The E0 machine requires a COMPLETE transition terminal, so the two are chained here
     exactly as the accepted sequence chains them, rather than the terminal being fabricated.
+    It also requires the interrupted predecessor (Decision 103 R8), which ``predecessor``
+    installs beside it.
     """
     catalog = build_catalog(evidence_root, head=13, sources=True)
     install_m3_2_binding(evidence_root, catalog, monkeypatch)
@@ -1628,7 +1748,7 @@ def transitioned(evidence_root: Path, config: _Config, monkeypatch: pytest.Monke
 
 
 def test_e0_preflight_requires_a_complete_transition_terminal(
-    evidence_root: Path, config: _Config
+    evidence_root: Path, predecessor: Path, config: _Config
 ) -> None:
     """§9.1: an absent transition terminal is UNDETERMINED, never permission.
 
@@ -4027,3 +4147,264 @@ def test_restoring_the_pre_d100_behavior_makes_the_targeted_proof_fail(
     expected = r"failure carries key\(s\) \('interruption_state',\) outside its closed set"
     with pytest.raises(e0.TerminalValidationError, match=expected):
         _reopen_terminal(evidence_root, "E0")
+
+
+# ==========================================================================
+# Family 10: the Decision 103 R8 successor generation
+#
+# Every test below drives the shipped v2 constant over a disposable catalog beneath a
+# synthetic root, beside a synthetic v1 predecessor built by the real event ledger. Nothing
+# here resolves, opens, names, or infers the accepted private root, and nothing touches the
+# real interrupted v1 run.
+# ==========================================================================
+
+
+def _lease_document(evidence_root: Path, **overrides: object) -> Path:
+    """Write a `held` writer lease beside the disposable catalog and return its path."""
+    from disclosure_drift.storage.catalog import lease_path
+
+    catalog = _catalog_path(evidence_root)
+    path = lease_path(catalog.parent)
+    payload: dict[str, object] = {
+        "lease_id": "0" * 32,
+        "writer_pid": 999_999,
+        "host_fingerprint": "synthetic-host",
+        "acquired_at_utc": _AT,
+        "expires_at_utc": _AT,
+        "state": "held",
+    }
+    payload.update(overrides)
+    path.write_bytes(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    path.chmod(0o600)
+    return path
+
+
+def test_e0_preflight_refuses_while_the_writer_lease_records_held(
+    evidence_root: Path, transitioned: Path, config: _Config
+) -> None:
+    """E-T1 and D103 R3: the ordinary E0 surface still refuses a held lease, unchanged.
+
+    The recovery command exists precisely so this refusal never has to be softened. E0 does
+    not consult it, does not clear a lease, and does not gain a "the writer looks dead" path.
+    """
+    _lease_document(evidence_root)
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+
+    assert not report.passed
+    assert report.facts["writer_lease"] == "held"
+    assert any("lease state is 'held'" in item for item in report.refusals)
+
+
+def test_e0_preflight_passes_its_lease_predicate_once_the_lease_reads_released(
+    evidence_root: Path, transitioned: Path, config: _Config
+) -> None:
+    """E-T1's other half: `released` is the state that clears the predicate, and only that."""
+    _lease_document(evidence_root, state="released", released_at_utc=_AT)
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+
+    assert report.passed, report.refusals
+    assert report.facts["writer_lease"] == "released"
+
+
+def test_e0_requires_the_interrupted_predecessor_to_be_present(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """E-T3 and D103 R2: a deleted or renamed v1 stops the successor rather than freeing it.
+
+    The predecessor is moved aside rather than emptied, which is the exact shape of the thing
+    R2 forbids: v1 gone, everything else intact, and a successor that would otherwise proceed.
+    """
+    directory = e0.namespace_directory(evidence_root, e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    directory.rename(directory.with_name("moved-aside"))
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+    assert not report.passed
+    assert report.facts["predecessor_state"] == "absent"
+    assert any("is absent or is not a real directory" in item for item in report.refusals)
+
+    with pytest.raises(e0.PreflightRefusalError, match="under-lease recheck diverged"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+    assert not e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE).exists()
+
+
+@pytest.mark.parametrize("filename_attribute", ["E0_TERMINAL_FILENAME"])
+def test_a_predecessor_carrying_a_manufactured_terminal_stops_the_successor(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    filename_attribute: str,
+) -> None:
+    """E-T4 and D103 R2: v1 may never become current-success evidence.
+
+    A terminal record dropped into v1 is the cheapest way to fake a completed predecessor, so
+    that is exactly what is attempted here. The successor refuses at preflight and again under
+    the lease, and creates no v2 namespace.
+    """
+    directory = e0.namespace_directory(evidence_root, e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    (directory / getattr(e0, filename_attribute)).write_text('{"status": "complete"}\n', "utf-8")
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+    assert not report.passed
+    assert any("may never be mutated into a successful run" in item for item in report.refusals)
+
+    with pytest.raises(e0.PreflightRefusalError, match="under-lease recheck diverged"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+    assert not e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE).exists()
+
+
+def test_a_predecessor_carrying_an_execution_receipt_stops_the_successor(
+    evidence_root: Path, transitioned: Path, config: _Config
+) -> None:
+    """E-T4: a receipt is the other way a run claims it finished, and it is refused too."""
+    directory = e0.namespace_directory(evidence_root, e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    (directory / OPERATOR_RECEIPT_FILENAME).write_text("{}\n", "utf-8")
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+    assert not report.passed
+    assert any("may never be mutated into a successful run" in item for item in report.refusals)
+
+
+@pytest.mark.parametrize("closing", ["EXECUTION_RECEIPT_WRITTEN", "FAILED", "INTERRUPTED"])
+def test_a_predecessor_whose_ledger_closed_stops_the_successor(
+    evidence_root: Path, config: _Config, closing: str
+) -> None:
+    """E-T4: the accepted predecessor reached no closing boundary, and that is checked.
+
+    Appended through the real ledger so the chain stays valid — the refusal has to come from
+    the event *vocabulary*, not from a broken hash chain that would refuse anything.
+    """
+    build_catalog(evidence_root, head=15)
+    install_interrupted_predecessor(evidence_root)
+    directory = e0.namespace_directory(evidence_root, e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    events = e0.read_event_ledger(directory / e0.E0_EVENTS_FILENAME, kind="E0")
+    ledger = e0.EventLedger(
+        directory / e0.E0_EVENTS_FILENAME, e0.E0_PREDECESSOR_RUN_NAMESPACE, kind="E0"
+    )
+    ledger._sequence = len(events)  # noqa: SLF001 - continue the real chain, not a new one
+    ledger._previous = str(events[-1]["event_sha256"])  # noqa: SLF001
+    details: dict[str, object] = {"reason_code": "R-QA-006", "reason_detail": "synthetic"}
+    if closing == "EXECUTION_RECEIPT_WRITTEN":
+        details = {"execution_receipt_id": "a" * 64}
+    elif closing == "INTERRUPTED":
+        details["interruption_state"] = "before_backup"
+    ledger.append(closing, details, observed_at_utc=_AT)
+
+    refusals, facts = e0._predecessor_refusals(evidence_root)  # noqa: SLF001
+    assert facts["predecessor_state"] == "closed"
+    assert facts["predecessor_event_chain"] == "valid"
+    assert any("records closing event(s)" in item for item in refusals)
+
+
+def test_a_predecessor_with_a_broken_event_chain_stops_the_successor(
+    evidence_root: Path, config: _Config
+) -> None:
+    """E-T3 and D103 R2: v1's immutability is verified, not assumed."""
+    build_catalog(evidence_root, head=15)
+    directory = install_interrupted_predecessor(evidence_root)
+    ledger_path = directory / e0.E0_EVENTS_FILENAME
+    # Edit the first event's payload without recomputing its digest: the chain no longer
+    # verifies, which is what an edited immutable ledger looks like. Truncating the file
+    # instead would leave a shorter but internally consistent chain, which this ledger cannot
+    # detect on its own and which the terminal record is what catches.
+    lines = ledger_path.read_text("utf-8").splitlines(keepends=True)
+    lines[0] = lines[0].replace('"planned_source_count":76', '"planned_source_count":75')
+    ledger_path.write_text("".join(lines), "utf-8")
+
+    refusals, facts = e0._predecessor_refusals(evidence_root)  # noqa: SLF001
+    assert facts["predecessor_event_chain"] == "invalid"
+    assert any("event ledger did not verify" in item for item in refusals)
+
+
+def test_the_accepted_predecessor_shape_is_undetermined_not_complete(
+    evidence_root: Path, predecessor: Path
+) -> None:
+    """E-T3 and D103 R2: absence of a terminal is reported as UNDETERMINED, never success."""
+    refusals, facts = e0._predecessor_refusals(evidence_root)  # noqa: SLF001
+
+    assert refusals == []
+    assert facts["predecessor_state"] == "UNDETERMINED / NOT COMPLETE"
+    assert facts["predecessor_terminal_record"] == "absent"
+    assert facts["predecessor_execution_receipt"] == "absent"
+    assert facts["predecessor_event_count"] == 2
+
+
+def test_an_existing_v2_namespace_refuses_the_create_once_execution(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """N5: create-once is create-once for the successor generation too."""
+    e0.create_run_namespace(evidence_root, e0.E0_RUN_NAMESPACE)
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+    assert not report.passed
+    assert any("already exists; it is create-once" in item for item in report.refusals)
+
+    with pytest.raises(e0.PreflightRefusalError, match="under-lease recheck diverged"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+
+def test_the_successor_writes_its_own_namespace_backup_and_event_sequence(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """N4, N6, E-T5, E-T6: v2 is a run, not a continuation of v1.
+
+    Four separable claims, proved together because they are one property: the successor starts
+    from nothing. Its namespace is its own, its backup is its own file, its ledger starts at
+    sequence 1, and v1's ledger is byte-identical afterwards.
+    """
+    predecessor_directory = e0.namespace_directory(evidence_root, e0.E0_PREDECESSOR_RUN_NAMESPACE)
+    before = (predecessor_directory / e0.E0_EVENTS_FILENAME).read_bytes()
+
+    outcome = e0.e0_execute(evidence_root=evidence_root, config=config)
+    assert outcome.status == "complete"
+    assert outcome.run_namespace == e0.E0_RUN_NAMESPACE == "m3_3_e0_offline_parse_v2"
+
+    successor = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    assert successor.is_dir()
+    assert successor != predecessor_directory
+
+    # E-T5: a distinct backup file, in the successor's own namespace.
+    assert (successor / e0.E0_BACKUP_FILENAME).is_file()
+    assert not (predecessor_directory / e0.E0_BACKUP_FILENAME).exists()
+
+    # N6: the successor's ledger is its own chain, from sequence 1, with no inherited head.
+    events = e0.read_event_ledger(successor / e0.E0_EVENTS_FILENAME, kind="E0")
+    assert [event["sequence"] for event in events[:2]] == [1, 2]
+    assert all(event["run_namespace"] == e0.E0_RUN_NAMESPACE for event in events)
+    assert "previous_event_sha256" not in events[0]
+
+    # E-T6: v1's ledger is untouched, byte for byte.
+    assert (predecessor_directory / e0.E0_EVENTS_FILENAME).read_bytes() == before
+    assert not (predecessor_directory / e0.E0_TERMINAL_FILENAME).exists()
+    assert not (predecessor_directory / OPERATOR_RECEIPT_FILENAME).exists()
+
+
+def test_the_successor_run_records_zero_network_activity(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """E-T7: the zero-network construction the successor generation inherits, restated."""
+    e0.e0_execute(evidence_root=evidence_root, config=config)
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    document = json.loads((directory / e0.E0_TERMINAL_FILENAME).read_text("utf-8"))
+
+    assert document["actual_logical_request_count"] == 0
+    assert document["actual_physical_attempt_count"] == 0
+    receipt = inspect_receipt(directory / OPERATOR_RECEIPT_FILENAME)
+    assert receipt["actual_logical_request_count"] == 0
+    assert receipt["actual_physical_attempt_count"] == 0
+
+
+def test_the_successor_leaves_the_migration_chain_at_0015_and_creates_no_0016(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """E-T8: E0 applies no migration, and no sixteenth migration is packaged."""
+    assert all(migration.version <= 15 for migration in available_migrations())  # noqa: PLR2004
+
+    e0.e0_execute(evidence_root=evidence_root, config=config)
+    with strictly_read_only_connection(transitioned) as connection:
+        assert applied_versions(connection) == tuple(range(1, 16))
+
+    directory = e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE)
+    document = json.loads((directory / e0.E0_TERMINAL_FILENAME).read_text("utf-8"))
+    assert document["post_migration_chain"] == list(range(1, 16))
+    assert "applied_migrations" not in document

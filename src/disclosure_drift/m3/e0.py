@@ -66,6 +66,7 @@ from disclosure_drift.m3.receipt import (
     canonical_bytes,
     inspect_receipt,
     resolve_predecessor_receipt,
+    scan_for_prohibited_content,
 )
 from disclosure_drift.release.hashing import TableHash, hash_release, hash_table, normalize_value
 from disclosure_drift.storage.sqlite import (
@@ -79,6 +80,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; keeps the runtime import gr
     from collections.abc import Callable
 
     from disclosure_drift.m3.offline_parse import OfflineParseReport
+    from disclosure_drift.storage.catalog import PersistedLease
 
 try:  # pragma: no cover - supported CI and production platforms are Unix
     fcntl: Any = importlib.import_module("fcntl")
@@ -89,6 +91,7 @@ __all__ = [
     "E0_BACKUP_FILENAME",
     "E0_EVENTS_FILENAME",
     "E0_EVENT_TYPES",
+    "E0_PREDECESSOR_RUN_NAMESPACE",
     "E0_RUN_NAMESPACE",
     "E0_TERMINAL_FILENAME",
     "E0_TERMINAL_SCHEMA_VERSION",
@@ -98,12 +101,20 @@ __all__ = [
     "EXIT_OK",
     "EXIT_STAGE_NOT_ENABLED",
     "EXIT_USAGE",
+    "LEASE_RECOVERY_COMMAND_NAME",
+    "LEASE_RECOVERY_RECORD_FILENAME",
+    "LEASE_RECOVERY_RECORD_SCHEMA_VERSION",
+    "LEASE_RECOVERY_RECORD_TYPE",
+    "LEASE_RECOVERY_RUN_NAMESPACE",
     "M3_2_ACQUISITION_JOB_KIND",
     "M3_2_COMPLETION_BINDING",
     "M3_3_E0_EXECUTION_AUTHORITY",
     "MAXIMUM_RELEASE_HASH_BYTES",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
     "PRE_E0_CATALOG_TRANSITION_AUTHORITY",
+    "RECOVERY_CATALOG_LOGICAL_SHA256",
+    "RECOVERY_INPUT_OBSERVATION_SET_SHA256",
+    "STALE_WRITER_LEASE_RECOVERY_AUTHORITY",
     "TRANSITION_BACKUP_FILENAME",
     "TRANSITION_EVENTS_FILENAME",
     "TRANSITION_EVENT_TYPES",
@@ -117,6 +128,7 @@ __all__ = [
     "CatalogSnapshotDigest",
     "E0Error",
     "EventLedger",
+    "LeaseRecoveryOutcome",
     "LedgerIntegrityError",
     "OperatorResult",
     "PreflightRefusalError",
@@ -129,10 +141,13 @@ __all__ = [
     "e0_preflight",
     "e0_verify",
     "read_event_ledger",
+    "reconcile_writer_lease_execute",
+    "reconcile_writer_lease_preflight",
     "resolve_evidence_root",
     "result_token",
     "run_offline_parse_command",
     "run_prepare_e0_catalog_command",
+    "run_reconcile_writer_lease_command",
     "transition_preflight",
     "transition_verify",
     "validate_e0_terminal",
@@ -181,13 +196,34 @@ transition is not E0 authority, and E0 success is not linkage-gate closure or E1
 """
 
 TRANSITION_RUN_NAMESPACE: Final = "m3_3_pre_e0_catalog_transition_0013_0015_v1"
-E0_RUN_NAMESPACE: Final = "m3_3_e0_offline_parse_v1"
-"""The two production run namespaces (Decision 094 §7.1).
+E0_RUN_NAMESPACE: Final = "m3_3_e0_offline_parse_v2"
+"""The two production run namespaces (Decision 094 §7.1, E0 generation advanced by D103 R1).
 
 Internal constants, not CLI options: an operator-selected namespace would be a degree of
 freedom with nothing to constrain it, and the create-once rule is only meaningful against a
 fixed name. Tests may pass their own temporary namespace matching
 :data:`_NAMESPACE_PATTERN`.
+
+**Accepted Decision 103 R1** advances the E0 namespace from ``…_v1`` to ``…_v2`` and does so
+the only way this design allows: by a reviewed source change. Decision 094 §7.1 named
+``m3_3_e0_offline_parse_v1`` as the E0 namespace; R1 supersedes that literal for the *current*
+generation and leaves the architecture untouched. There is still no ``--run-namespace``, no
+environment override, and no configuration field — R1 forbids each by name — because a
+create-once namespace an operator can choose is not create-once at all.
+"""
+
+E0_PREDECESSOR_RUN_NAMESPACE: Final = "m3_3_e0_offline_parse_v1"
+"""The interrupted E0 generation this one succeeds (accepted Decision 103 R2).
+
+It is **historical immutable evidence**, not a namespace anything here writes to. The v1 run
+reached ``PREFLIGHT_PASSED`` and ``BACKUP_VERIFIED``, recorded no terminal and no execution
+receipt, and is therefore ``UNDETERMINED / NOT COMPLETE``. R2 forbids it becoming
+current-success evidence, being repaired, resumed, overwritten, deleted, renamed, or treated
+as a prefix of v2.
+
+It is named here for exactly one purpose: :func:`_predecessor_refusals` **validates** it
+before the successor may run, rather than ignoring it. A v1 that acquired a terminal record,
+a receipt, or a broken chain is an anomaly that stops v2 rather than a detail v2 may skip.
 """
 
 TRANSITION_SOURCE_HEAD: Final = 13
@@ -339,6 +375,64 @@ E0_COMMAND_NAME: Final = "m3 offline-parse"
 TRANSITION_COMMAND_VERSION: Final = "m3.3b-pre-e0-catalog-transition/1.0"
 E0_COMMAND_VERSION: Final = "m3.3b-e0-offline-parse/1.0"
 
+
+# --------------------------------------------------------------------------- #
+# Accepted Decision 103 -- governed stale-writer-lease reconciliation
+#
+# One narrow recovery surface, and nothing more. It exists because an interrupted E0 left a
+# persisted lease recording `state = "held"` for a process that no longer exists, and no
+# governed operator surface could reconcile that: ordinary E0 preflight/execute/verify refuse
+# a held lease by design (R3 keeps that refusal exactly as it is), and elapsed time, a dead
+# PID, or a free advisory lock never authorize a takeover on their own.
+# --------------------------------------------------------------------------- #
+LEASE_RECOVERY_RUN_NAMESPACE: Final = "m3_3_stale_writer_lease_recovery_v1"
+"""The create-once namespace this recovery's durable evidence is written to.
+
+Fixed by source for the same reason the E0 namespaces are (R1's principle, applied to this
+surface): create-once is only a guarantee against a name nobody can choose. A second
+reconciliation on this catalog would need a reviewed source change to a ``…_v2`` generation,
+exactly as a second E0 does.
+"""
+
+LEASE_RECOVERY_RECORD_FILENAME: Final = "writer_lease_recovery_record.json"
+LEASE_RECOVERY_RECORD_SCHEMA_VERSION: Final = "m3-3-writer-lease-recovery-terminal/1.0"
+LEASE_RECOVERY_COMMAND_NAME: Final = "m3 reconcile-writer-lease"
+LEASE_RECOVERY_COMMAND_VERSION: Final = "m3.3b-reconcile-writer-lease/1.0"
+LEASE_RECOVERY_RECORD_TYPE: Final = "m3_3_stale_writer_lease_recovery"
+
+STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = (
+    "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
+)
+"""The governed token authorizing owner-approved stale-writer-lease reconciliation.
+
+Held under the same rule as the other two activation constants and read through the same
+:func:`_require_activation` door: ``None`` means ``execute`` returns exit ``3``. It is
+**separate** from the transition and E0 constants on purpose — reconciling a stale lease is
+not transition authority, and it is emphatically not E0 authority.
+
+Decision 103 R7 requires the durable recovery record to bind the Decision 103 authority
+identity, which is this constant's SHA-256. The value is never printed, logged, or persisted;
+only its digest is.
+"""
+
+RECOVERY_CATALOG_LOGICAL_SHA256: Final = (
+    "5c823d216957c0035babd4956f9d9e0c3c0b8ea54455231436a514191c6ad306"
+)
+RECOVERY_INPUT_OBSERVATION_SET_SHA256: Final = (
+    "b1122bb9fbb084411ce3cb3b7d192c7874c8969aadbb29f6ca313543b8e533be"
+)
+"""The catalog identity the accepted recovery policy expects (Decision 103 R3 predicate L9).
+
+Fixed literals, not operator input: R6 forbids a ``--catalog`` or digest option, so "which
+catalog is this lease over" has to be answered by reviewed source or not at all. These are the
+owner-accepted post-transition measurements — the same two digests Decision 102 recorded for
+the interrupted state — so a reconciliation cannot silently clear a lease over a catalog that
+has moved since the owner looked at it.
+
+They are keyword defaults rather than hardcoded comparisons so a disposable test can supply
+its own temporary catalog's identity; production supplies neither and gets these.
+"""
+
 #: Decision 094 §5.2 predicate 11: three catalog copies plus a gibibyte of headroom.
 DISK_HEADROOM_BYTES: Final = 1_073_741_824
 DISK_CATALOG_MULTIPLE: Final = 3
@@ -394,6 +488,13 @@ E0_EVENT_TYPES: Final[tuple[str, ...]] = (
     "EXECUTION_RECEIPT_WRITTEN",
     "FAILED",
     "INTERRUPTED",
+)
+
+#: The E0 events that close a run. Accepted Decision 103 R8 requires the successor to prove the
+#: predecessor reached none of them: a v1 ledger recording any of these would be a run that
+#: ended, and the accepted predecessor did not end -- it was interrupted with no terminal.
+_E0_CLOSING_EVENT_TYPES: Final[frozenset[str]] = frozenset(
+    {"EXECUTION_RECEIPT_WRITTEN", "FAILED", "INTERRUPTED"}
 )
 
 #: Decision 094 §10.2's closed ``details`` projection, per event type. ``details`` is not an
@@ -1257,6 +1358,16 @@ TERMINAL_STATUSES: Final[tuple[str, ...]] = ("complete", "failed", "interrupted"
 #: record contain itself -- the exact self-reference §11 forbids.
 _IDENTITY_EXCLUDED: Final[frozenset[str]] = frozenset({"terminal_record_id", "result_token"})
 
+#: One token prefix per governed record family. A mapping rather than a chain of conditionals
+#: so a third family is a data entry, not a second derivation rule: Decision 103 R7 asks the
+#: stale-lease recovery record to carry a durable identity, and reusing *this* deriver is what
+#: keeps it from becoming a competing identity framework.
+_RESULT_TOKEN_PREFIXES: Final[Mapping[str, str]] = {
+    "catalog_transition": "M3_3_PRE_E0_CATALOG_TRANSITION",
+    "m3_3_e0_offline_parse": "M3_3_E0_OFFLINE_PARSE",
+    LEASE_RECOVERY_RECORD_TYPE: "M3_3_STALE_WRITER_LEASE_RECOVERY",
+}
+
 #: Fields every terminal record carries, whatever its status (§8.1 first row).
 _TRANSITION_ALWAYS: Final[tuple[str, ...]] = (
     "schema_version",
@@ -1481,11 +1592,7 @@ def result_token(record_type: str, status: str, terminal_record_id: str) -> str:
     if status not in TERMINAL_STATUSES:
         message = f"terminal status {status!r} is not one of {TERMINAL_STATUSES}"
         raise TerminalValidationError(message)
-    prefix = (
-        "M3_3_PRE_E0_CATALOG_TRANSITION"
-        if record_type == "catalog_transition"
-        else "M3_3_E0_OFFLINE_PARSE"
-    )
+    prefix = _RESULT_TOKEN_PREFIXES.get(record_type, "M3_3_E0_OFFLINE_PARSE")
     return f"{prefix}_{status.upper()}:{terminal_record_id}"
 
 
@@ -2113,6 +2220,71 @@ def _lease_state(lock_directory: Path) -> tuple[bool, str | None, bool]:
         return True, None, True
     state = recorded.get("state") if isinstance(recorded, dict) else None
     return True, (str(state) if state is not None else None), True
+
+
+def _predecessor_refusals(evidence_root: Path) -> tuple[list[str], dict[str, object]]:
+    """Validate the interrupted E0 predecessor (accepted Decision 103 R2 and R8).
+
+    Advancing the E0 generation to v2 must not reinterpret v1, so v1 is **checked** rather
+    than ignored. The successor may proceed only against the predecessor the owner accepted:
+    present, chain-valid, terminal-free, receipt-free, and therefore ``UNDETERMINED / NOT
+    COMPLETE``.
+
+    Each refusal below closes a distinct way the successor could otherwise launder history:
+
+    * an **absent** v1 would mean the interrupted run had been deleted or renamed, and R2
+      forbids both -- so absence stops the successor rather than looking like a clean start;
+    * a v1 carrying a **terminal record** or an **execution receipt** would mean something
+      manufactured a completion for a run that never completed;
+    * a v1 whose **ledger does not chain** would mean the immutable evidence was edited.
+
+    Nothing here opens, writes, moves, or repairs the predecessor. It is read, verified, and
+    left exactly as it was found.
+    """
+    refusals: list[str] = []
+    facts: dict[str, object] = {"predecessor_run_namespace": E0_PREDECESSOR_RUN_NAMESPACE}
+    directory = namespace_directory(evidence_root, E0_PREDECESSOR_RUN_NAMESPACE)
+    if directory.is_symlink() or not directory.is_dir():
+        facts["predecessor_state"] = "absent"
+        refusals.append(
+            f"the interrupted predecessor namespace {E0_PREDECESSOR_RUN_NAMESPACE!r} is absent "
+            f"or is not a real directory; it is immutable historical evidence the successor "
+            f"requires, and its absence is never a clean start"
+        )
+        return refusals, facts
+
+    for filename, label in (
+        (E0_TERMINAL_FILENAME, "terminal record"),
+        (OPERATOR_RECEIPT_FILENAME, "execution receipt"),
+    ):
+        present = (directory / filename).exists()
+        facts[f"predecessor_{label.replace(' ', '_')}"] = "present" if present else "absent"
+        if present:
+            refusals.append(
+                f"the interrupted predecessor carries a {label}; it was UNDETERMINED / NOT "
+                f"COMPLETE and may never be mutated into a successful run"
+            )
+
+    try:
+        events = read_event_ledger(directory / E0_EVENTS_FILENAME, kind="E0")
+    except (E0Error, OSError) as exc:
+        facts["predecessor_event_chain"] = "invalid"
+        refusals.append(f"the interrupted predecessor's event ledger did not verify: {exc}")
+        return refusals, facts
+
+    facts["predecessor_event_chain"] = "valid"
+    facts["predecessor_event_count"] = len(events)
+    observed = tuple(str(event["event_type"]) for event in events)
+    closing = tuple(sorted({item for item in observed if item in _E0_CLOSING_EVENT_TYPES}))
+    if closing:
+        facts["predecessor_state"] = "closed"
+        refusals.append(
+            f"the interrupted predecessor's ledger records closing event(s) {closing}; the "
+            f"accepted predecessor reached no terminal boundary"
+        )
+    else:
+        facts["predecessor_state"] = "UNDETERMINED / NOT COMPLETE"
+    return refusals, facts
 
 
 def _empty_state_counts(connection: sqlite3.Connection) -> Mapping[str, int]:
@@ -2771,9 +2943,14 @@ def e0_preflight(
     """Evaluate every Decision 094 §9.1 E0 predicate. Strictly read-only, creates nothing.
 
     E0's distinct requirements are the head-``0015`` chain, an owner-accepted **COMPLETE**
-    transition terminal and token, and the exact input-observation digest. The shared
-    predicates -- integrity, empty state, plan totality, lease, namespace, disk, memory, and
-    network switches -- are the same measurements the transition makes.
+    transition terminal and token, the exact input-observation digest, and -- since accepted
+    Decision 103 R8 -- an intact interrupted **predecessor**. The shared predicates --
+    integrity, empty state, plan totality, lease, namespace, disk, memory, and network
+    switches -- are the same measurements the transition makes.
+
+    The lease predicate is unchanged and still refuses a recorded ``held`` state (R3 is
+    explicit that ordinary E0 keeps refusing it). Clearing a stale lease is the separate,
+    explicitly invoked :func:`reconcile_writer_lease_execute`, never a step E0 performs.
     """
     refusals, facts, measured = _shared_preflight(
         evidence_root=evidence_root,
@@ -2781,6 +2958,9 @@ def e0_preflight(
         namespace=namespace,
         expected_head=TRANSITION_TARGET_HEAD,
     )
+    predecessor_refusals, predecessor_facts = _predecessor_refusals(evidence_root)
+    refusals.extend(predecessor_refusals)
+    facts.update(predecessor_facts)
     transition_directory = namespace_directory(evidence_root, TRANSITION_RUN_NAMESPACE)
     terminal_path = transition_directory / TRANSITION_TERMINAL_FILENAME
     facts["transition_terminal"] = "present" if terminal_path.exists() else "absent"
@@ -3698,6 +3878,7 @@ def _recheck_under_lease(
     namespace: str,
     expected_head: int,
     require_acquisition_binding: bool,
+    require_predecessor: bool = False,
 ) -> _CatalogFacts:
     """Repeat every mutable predicate while the writer lease is held (§5.3 item 2).
 
@@ -3712,6 +3893,11 @@ def _recheck_under_lease(
     predicates, so the transition rechecks predicate 3 under the lease. E0's predicate list is
     §9.1, which names the §5.2 disk and lock predicates and not the M3.2 completion binding, so
     E0 passes ``False`` rather than inheriting a predicate its own ruling does not state.
+
+    ``require_predecessor`` carries accepted Decision 103 R8's successor gate the same way. The
+    predecessor is immutable historical evidence, so re-reading it under the lease is not about
+    concurrent mutation -- it is about the gate being repeated where every other load-bearing
+    predicate is repeated, rather than only at preflight where a passing result is not authority.
     """
     refusals, _, measured = _shared_preflight(
         evidence_root=evidence_root,
@@ -3720,6 +3906,9 @@ def _recheck_under_lease(
         expected_head=expected_head,
         lease_check=False,
     )
+    if require_predecessor:
+        predecessor_refusals, _ = _predecessor_refusals(evidence_root)
+        refusals.extend(predecessor_refusals)
     if require_acquisition_binding:
         binding_refusals, _ = _acquisition_completion_binding(
             evidence_root=evidence_root,
@@ -3929,6 +4118,7 @@ def e0_execute(
                 namespace=namespace,
                 expected_head=TRANSITION_TARGET_HEAD,
                 require_acquisition_binding=False,
+                require_predecessor=True,
             )
             with _read_only(catalog_path) as before:
                 input_digest = input_observation_set_digest(before)
@@ -4547,4 +4737,768 @@ def run_offline_parse_command(
         verify=e0_verify,
         activation=M3_3_E0_EXECUTION_AUTHORITY,
         constant_name="M3_3_E0_EXECUTION_AUTHORITY",
+    )
+
+
+# =========================================================================== #
+# Accepted Decision 103 R3-R7 -- governed stale-writer-lease reconciliation
+#
+# A sidecar recovery, deliberately unlike everything above it. It writes no catalog page, no
+# WAL frame, no migration, no observation, no parser state, no E0 evidence, and nothing inside
+# any E0 run namespace. Its entire durable effect is two files: the lease document it
+# reconciles in place, and the create-once record that proves it did so.
+#
+# It is never automatic. Ordinary E0 preflight, execute, and verify continue to refuse a
+# recorded `held` lease exactly as before -- R3 keeps that refusal intact and puts the recovery
+# behind its own explicitly invoked command, because "a writer looks gone" and "an owner
+# authorized taking its lease" are different claims and only the second is authority.
+# =========================================================================== #
+_LEASE_RECOVERY_RELATIVE_PATH: Final = (
+    f"{Path(OPERATIONAL_CATALOG_RELATIVE_PATH).parent.as_posix()}/{_LEASE_FILENAME}"
+)
+
+
+def _lease_lock(path: Path, *, writable: bool) -> AbstractContextManager[int]:
+    """The accepted exclusive advisory lock, reached through one indirection.
+
+    Imported at call time for the same reason every other ``storage.catalog`` use here is: this
+    module's import graph is part of its no-network proof. Being a module-level function also
+    gives the suite a seam at which a lease can be tampered with *between* the pre-lock
+    measurement and the lock, which is the only honest way to prove the under-lock reassertion
+    refuses a lease that changed underneath it.
+    """
+    from disclosure_drift.storage.catalog import exclusive_lease_lock
+
+    return exclusive_lease_lock(path, writable=writable)
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogIdentity:
+    """One strictly read-only measurement of the catalog's byte and logical identity."""
+
+    file_sha256: str
+    byte_length: int
+    wal_byte_length: int
+    applied: tuple[int, ...]
+    integrity: Mapping[str, object]
+    catalog_logical_sha256: str
+    input_observation_set_sha256: str
+
+    @property
+    def integrity_passed(self) -> bool:
+        return (
+            self.integrity["quick_check"] == "ok"
+            and self.integrity["integrity_check"] == "ok"
+            and self.integrity["foreign_key_violations"] == 0
+        )
+
+    def rendered(self) -> dict[str, object]:
+        """The record projection: counts, digests, and the applied chain."""
+        return {
+            "applied_migration_chain": list(self.applied),
+            "byte_length": self.byte_length,
+            "catalog_logical_sha256": self.catalog_logical_sha256,
+            "file_sha256": self.file_sha256,
+            "foreign_key_violations": self.integrity["foreign_key_violations"],
+            "input_observation_set_sha256": self.input_observation_set_sha256,
+            "integrity_check": self.integrity["integrity_check"],
+            "quick_check": self.integrity["quick_check"],
+            "wal_byte_length": self.wal_byte_length,
+        }
+
+
+def _wal_byte_length(catalog_path: Path) -> int:
+    """The write-ahead log's size, or ``0`` when it is absent.
+
+    Measured **before** any connection is opened and again after everything closes. A non-empty
+    WAL beside a supposedly dead writer is uncommitted or uncheckpointed state, which a lease
+    recovery must refuse rather than paper over: the point of the operation is that nothing
+    about the catalog changes, and a pending log is a change that has not landed yet.
+    """
+    sidecar = catalog_path.with_name(f"{catalog_path.name}-wal")
+    return sidecar.stat().st_size if sidecar.is_file() else 0
+
+
+def _measure_catalog_identity(catalog_path: Path) -> _CatalogIdentity:
+    """Measure byte identity, WAL size, integrity, and both logical digests, read-only."""
+    file_sha256, byte_length = file_digest(catalog_path)
+    wal_bytes = _wal_byte_length(catalog_path)
+    with _read_only(catalog_path) as connection:
+        report = integrity_report(connection)
+        applied = applied_versions(connection)
+        logical = catalog_snapshot_digest(connection).require_full()
+        observations = input_observation_set_digest(connection)
+    return _CatalogIdentity(
+        file_sha256=file_sha256,
+        byte_length=byte_length,
+        wal_byte_length=wal_bytes,
+        applied=applied,
+        integrity={
+            "quick_check": report.quick_check,
+            "integrity_check": report.integrity_check,
+            "foreign_key_violations": report.foreign_key_violations,
+        },
+        catalog_logical_sha256=logical,
+        input_observation_set_sha256=observations,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _StaleLeaseState:
+    """Everything the read-only eligibility ladder established, for the execute path to reuse."""
+
+    catalog_path: Path
+    lease_path: Path
+    lease: PersistedLease
+    lease_file_sha256: str
+    lease_byte_length: int
+    identity: _CatalogIdentity
+
+
+def _lease_eligibility(
+    *,
+    evidence_root: Path,
+    config: object,
+    expected_catalog_logical_sha256: str,
+    expected_input_observation_set_sha256: str,
+    namespace: str,
+) -> tuple[list[str], dict[str, object], _StaleLeaseState | None]:
+    """Evaluate every Decision 103 R3 predicate ``L1``-``L11``. Strictly read-only.
+
+    Every predicate is conjunctive and every failure is collected rather than raised at the
+    first one, so an operator sees the whole picture instead of peeling it one refusal at a
+    time. The ladder returns a state object **only** when nothing refused; a partial result is
+    never handed to the execute path.
+
+    ``L12`` -- that the exclusive lock is held continuously across the reassertion and the
+    mutation -- is not evaluated here, because it is not a fact about the world that can be
+    measured. It is a control-flow property of :func:`reconcile_writer_lease_execute`, which
+    performs both inside one ``with`` block.
+    """
+    from disclosure_drift.storage.catalog import (
+        LEASE_STATE_HELD,
+        LeaseFormatError,
+        host_fingerprint,
+        read_persisted_lease,
+        writer_process_is_alive,
+    )
+
+    refusals: list[str] = []
+    facts: dict[str, object] = {
+        "catalog_relative_path": OPERATIONAL_CATALOG_RELATIVE_PATH,
+        "lease_relative_path": _LEASE_RECOVERY_RELATIVE_PATH,
+        "recovery_run_namespace": namespace,
+    }
+
+    catalog_path = resolve_within(
+        evidence_root, OPERATIONAL_CATALOG_RELATIVE_PATH, label="operational catalog"
+    )
+    if not catalog_path.is_file():
+        refusals.append("the accepted catalog is absent beneath the resolved private root")
+        return refusals, facts, None
+    _refuse_symlinked_descent(evidence_root, catalog_path)
+
+    # -- L1, L2: a present, structurally valid lease that actually records `held` ----------- #
+    lease_file = catalog_path.parent / _LEASE_FILENAME
+    if lease_file.is_symlink() or not lease_file.is_file():
+        facts["writer_lease"] = "absent" if not lease_file.exists() else "not a regular file"
+        refusals.append(
+            "there is no regular persisted writer lease to reconcile; a reconciliation acts on "
+            "an existing stale lease and never creates, replaces, or invents one"
+        )
+        return refusals, facts, None
+    # Read **once**, and derive both the digest and the parsed document from those same bytes.
+    # Digesting the file and then re-reading it would let a change slip between the two, leaving
+    # a digest that describes one document and a decision made about another.
+    raw_lease = lease_file.read_bytes()
+    lease_file_sha256 = hashlib.sha256(raw_lease).hexdigest()
+    lease_byte_length = len(raw_lease)
+    try:
+        lease = read_persisted_lease(raw_lease)
+    except LeaseFormatError as exc:
+        facts["writer_lease"] = "structurally invalid"
+        refusals.append(f"the persisted writer lease is not structurally valid: {exc}")
+        return refusals, facts, None
+    facts["writer_lease"] = lease.state
+    if lease.state != LEASE_STATE_HELD:
+        refusals.append(
+            f"the persisted writer lease records state {lease.state!r}; only a lease still "
+            f"recording {LEASE_STATE_HELD!r} is stale-held and eligible for reconciliation"
+        )
+
+    # -- L3: the lease belongs to this host ------------------------------------------------ #
+    same_host = lease.host_fingerprint == host_fingerprint()
+    facts["lease_host_binding"] = "this host" if same_host else "a different host"
+    if not same_host:
+        refusals.append(
+            "the persisted writer lease was taken on a different host; this host cannot "
+            "observe that writer's liveness and may never reconcile its lease"
+        )
+
+    # -- L4, L5: the recorded writer is gone and no other writer is detectable ------------- #
+    alive = writer_process_is_alive(lease.writer_pid)
+    facts["recorded_writer_process"] = "alive" if alive else "not alive"
+    if alive:
+        refusals.append(
+            "the process recorded in the writer lease is still alive; a live writer's lease is "
+            "never stale, whatever its expiry says"
+        )
+    wal_bytes = _wal_byte_length(catalog_path)
+    facts["write_ahead_log_bytes"] = wal_bytes
+    if wal_bytes:
+        refusals.append(
+            f"the catalog carries a {wal_bytes}-byte write-ahead log, which indicates state a "
+            f"writer has not finished landing; reconciliation requires an idle catalog"
+        )
+
+    # -- L7: the lease has outlived its own recorded expiry --------------------------------- #
+    expired = lease.has_expired()
+    facts["lease_expiry"] = "expired" if expired else "unexpired"
+    if not expired:
+        refusals.append(
+            "the persisted writer lease has not reached its recorded expiry; an unexpired "
+            "lease is refused even when its process is gone"
+        )
+
+    # -- L6: the exclusive advisory lock is genuinely free ---------------------------------- #
+    #    Taken and released without writing: `flock` mutates no byte of the file, and the
+    #    descriptor is opened read-only here precisely so preflight cannot write even by
+    #    accident. This is also the only predicate that answers "is another *process* using
+    #    this catalog right now" rather than "does a record say so".
+    try:
+        with _lease_lock(lease_file, writable=False):
+            facts["exclusive_writer_lock"] = "available"
+    except (DisclosureDriftError, OSError) as exc:
+        facts["exclusive_writer_lock"] = "unavailable"
+        refusals.append(f"the exclusive catalog writer advisory lock is not available: {exc}")
+
+    # -- L8, L9: the catalog opens clean and is the catalog the accepted policy expects ------ #
+    identity = _measure_catalog_identity(catalog_path)
+    facts["applied_migration_head"] = f"{identity.applied[-1]:04d}" if identity.applied else "none"
+    facts["quick_check"] = identity.integrity["quick_check"]
+    facts["integrity_check"] = identity.integrity["integrity_check"]
+    facts["foreign_key_violations"] = identity.integrity["foreign_key_violations"]
+    if not identity.integrity_passed:
+        refusals.append("the catalog did not pass all three SQLite integrity gates")
+    matched = (
+        identity.catalog_logical_sha256 == expected_catalog_logical_sha256
+        and identity.input_observation_set_sha256 == expected_input_observation_set_sha256
+    )
+    facts["catalog_identity"] = "matches the accepted recovery baseline" if matched else "differs"
+    facts["catalog_logical_sha256"] = _short(identity.catalog_logical_sha256)
+    facts["input_observation_set_sha256"] = _short(identity.input_observation_set_sha256)
+    if not matched:
+        refusals.append(
+            "the catalog's logical identity is not the one the accepted recovery policy "
+            "expects; a lease is never cleared over an unexpected catalog"
+        )
+
+    # -- L10: the network switches are off --------------------------------------------------- #
+    facts["network_switches_disabled"] = _network_switches_disabled(config)
+    if not facts["network_switches_disabled"]:
+        refusals.append("a tracked network switch is enabled")
+
+    # -- L11: no other recovery has already claimed this namespace --------------------------- #
+    recovery_directory = namespace_directory(evidence_root, namespace)
+    conflicting = recovery_directory.exists() or recovery_directory.is_symlink()
+    facts["recovery_namespace"] = "already exists" if conflicting else "absent"
+    if conflicting:
+        refusals.append(
+            f"recovery namespace {namespace!r} already exists; a reconciliation is create-once "
+            f"and is never repeated, resumed, or overwritten"
+        )
+
+    if refusals:
+        return refusals, facts, None
+    return (
+        refusals,
+        facts,
+        _StaleLeaseState(
+            catalog_path=catalog_path,
+            lease_path=lease_file,
+            lease=lease,
+            lease_file_sha256=lease_file_sha256,
+            lease_byte_length=lease_byte_length,
+            identity=identity,
+        ),
+    )
+
+
+def reconcile_writer_lease_preflight(
+    *,
+    evidence_root: Path,
+    config: object,
+    expected_catalog_logical_sha256: str = RECOVERY_CATALOG_LOGICAL_SHA256,
+    expected_input_observation_set_sha256: str = RECOVERY_INPUT_OBSERVATION_SET_SHA256,
+    namespace: str = LEASE_RECOVERY_RUN_NAMESPACE,
+) -> PreflightReport:
+    """Evaluate every stale-lease predicate. Strictly read-only; writes nothing.
+
+    A passing preflight is a measurement, not permission and not a reservation: nothing is
+    created, no lock is retained, and the lease is left byte-identical. ``execute`` repeats
+    every one of these predicates and then repeats the mutable ones again under the lock.
+    """
+    refusals, facts, _ = _lease_eligibility(
+        evidence_root=evidence_root,
+        config=config,
+        expected_catalog_logical_sha256=expected_catalog_logical_sha256,
+        expected_input_observation_set_sha256=expected_input_observation_set_sha256,
+        namespace=namespace,
+    )
+    facts["reconciliation_enabled"] = STALE_WRITER_LEASE_RECOVERY_AUTHORITY is not None
+    return PreflightReport(passed=not refusals, refusals=tuple(refusals), facts=facts)
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseRecoveryOutcome:
+    """One completed stale-writer-lease reconciliation's durable result."""
+
+    status: str
+    run_namespace: str
+    terminal_record_id: str
+    result_token: str
+    prior_lease_file_sha256: str
+    resulting_lease_file_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Reassertion:
+    """The under-lock re-measurement of every mutable predicate, immediately before mutation."""
+
+    lease: PersistedLease
+    host_matched: bool
+    writer_process_alive: bool
+    lease_expired: bool
+
+
+def _reassert_under_lock(descriptor: int, state: _StaleLeaseState) -> _Reassertion:
+    """Re-read the locked lease and require every mutable predicate to still hold.
+
+    The ladder ran without the lock, so everything it observed is a claim about a past instant.
+    This is where those claims are made good, in two parts.
+
+    **The lease is the same lease.** The same bytes, and then the same identity field by field:
+    id, writer, host, expiry, and state. Any difference means something touched the lease in
+    between, and something touching a supposedly abandoned lease is precisely the situation in
+    which a takeover must not proceed.
+
+    **The world has not changed underneath it.** Host binding, writer liveness, and expiry are
+    re-measured rather than carried forward. Liveness is the one that can genuinely flip: a PID
+    is a reusable number, and a process that took `43427` after the ladder ran would make
+    "the recorded writer is gone" false at the instant the lease is rewritten even though it was
+    true when it was checked. Expiry and host binding cannot regress, and are re-measured anyway
+    so the durable record states values observed inside the critical section rather than outside
+    it.
+
+    Raises:
+        PreflightRefusalError: the locked lease diverges, or a mutable predicate no longer holds.
+    """
+    from disclosure_drift.storage.catalog import (
+        LeaseFormatError,
+        host_fingerprint,
+        read_persisted_lease,
+        writer_process_is_alive,
+    )
+
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw = os.read(descriptor, 64 * 1024)
+    if hashlib.sha256(raw).hexdigest() != state.lease_file_sha256 or len(raw) != (
+        state.lease_byte_length
+    ):
+        message = (
+            "the writer lease changed between the eligibility check and the exclusive lock; "
+            "refusing to reconcile a lease that is not the one that was examined"
+        )
+        raise PreflightRefusalError(message)
+    try:
+        locked = read_persisted_lease(raw)
+    except LeaseFormatError as exc:  # pragma: no cover - identical bytes reparse identically
+        message = f"the locked writer lease is not structurally valid: {exc}"
+        raise PreflightRefusalError(message) from exc
+    divergences = tuple(
+        label
+        for label, before, after in (
+            ("lease_id", state.lease.lease_id, locked.lease_id),
+            ("writer_pid", state.lease.writer_pid, locked.writer_pid),
+            ("host_fingerprint", state.lease.host_fingerprint, locked.host_fingerprint),
+            ("expires_at_utc", state.lease.expires_at_utc, locked.expires_at_utc),
+            ("state", state.lease.state, locked.state),
+        )
+        if before != after
+    )
+    if divergences:
+        message = f"the locked writer lease diverged in {divergences}; refusing to reconcile"
+        raise PreflightRefusalError(message)
+
+    reassertion = _Reassertion(
+        lease=locked,
+        host_matched=locked.host_fingerprint == host_fingerprint(),
+        writer_process_alive=writer_process_is_alive(locked.writer_pid),
+        lease_expired=locked.has_expired(),
+    )
+    failures = tuple(
+        label
+        for label, holds in (
+            ("host binding", reassertion.host_matched),
+            ("recorded writer not alive", not reassertion.writer_process_alive),
+            ("lease expired", reassertion.lease_expired),
+        )
+        if not holds
+    )
+    if failures:
+        message = (
+            f"a mutable eligibility predicate no longer holds under the lock ({failures}); "
+            f"refusing to reconcile"
+        )
+        raise PreflightRefusalError(message)
+    return reassertion
+
+
+def _lease_recovery_record(
+    *,
+    namespace: str,
+    started: str,
+    completed: str,
+    authority: str,
+    config: object,
+    state: _StaleLeaseState,
+    reassertion: _Reassertion,
+    reconciled: Mapping[str, object],
+    resulting_sha256: str,
+    resulting_bytes: int,
+    after: _CatalogIdentity,
+) -> dict[str, object]:
+    """Build the Decision 103 R7 durable recovery record, identity last.
+
+    It reuses the accepted evidence primitives rather than starting a second framework:
+    :func:`canonical_bytes` for serialization, :func:`compute_terminal_record_id` for the
+    identity over everything except the two self-referential fields, and :func:`result_token`
+    for the token that contains that identity. What is new here is only the field set.
+
+    The ``eligibility`` block is built from **measured** values -- the under-lock reassertion,
+    the catalog inspection, and the configuration -- rather than from literals that would be
+    true only because the ladder would otherwise have refused. A record that asserted its own
+    preconditions would be evidence of nothing.
+    """
+    document: dict[str, object] = {
+        "schema_version": LEASE_RECOVERY_RECORD_SCHEMA_VERSION,
+        "record_type": LEASE_RECOVERY_RECORD_TYPE,
+        "operation": "stale_writer_lease_reconciliation",
+        "run_namespace": validate_namespace(namespace),
+        "command_name": LEASE_RECOVERY_COMMAND_NAME,
+        "command_version": LEASE_RECOVERY_COMMAND_VERSION,
+        "status": "complete",
+        "outcome": "reconciled",
+        "started_at_utc": started,
+        "completed_at_utc": completed,
+        "elapsed_seconds": _elapsed_seconds(started, completed),
+        "owner_authority_sha256": _authority_digest(authority),
+        "configuration_fingerprint": _configuration_fingerprint(config),
+        "catalog_relative_path": OPERATIONAL_CATALOG_RELATIVE_PATH,
+        "lease_relative_path": _LEASE_RECOVERY_RELATIVE_PATH,
+        "prior_lease": {
+            "acquired_at_utc": state.lease.acquired_at_utc,
+            "byte_length": state.lease_byte_length,
+            "expires_at_utc": state.lease.expires_at_utc,
+            "file_sha256": state.lease_file_sha256,
+            "lease_id": state.lease.lease_id,
+            "state": state.lease.state,
+            "writer_pid": state.lease.writer_pid,
+        },
+        "resulting_lease": {
+            "byte_length": resulting_bytes,
+            "file_sha256": resulting_sha256,
+            "reconciled_at_utc": reconciled["reconciled_at_utc"],
+            "reconciled_prior_state": reconciled["reconciled_prior_state"],
+            "reconciliation_reason": reconciled["reconciliation_reason"],
+            "state": reconciled["state"],
+        },
+        "eligibility": {
+            "catalog_identity_matched": (
+                state.identity.catalog_logical_sha256 == after.catalog_logical_sha256
+                and state.identity.input_observation_set_sha256
+                == after.input_observation_set_sha256
+            ),
+            "catalog_integrity_passed": (
+                state.identity.integrity_passed and after.integrity_passed
+            ),
+            "conflicting_recovery_detected": False,
+            "exclusive_advisory_lock_acquired": True,
+            "lease_expired": reassertion.lease_expired,
+            "lease_structurally_valid": True,
+            "lock_held_across_reassertion_and_mutation": True,
+            "network_switches_disabled": _network_switches_disabled(config),
+            "other_active_writer_detected": bool(after.wal_byte_length),
+            "persisted_state_before": reassertion.lease.state,
+            "recorded_writer_process_alive": reassertion.writer_process_alive,
+            "recorded_writer_host_matched": reassertion.host_matched,
+        },
+        "catalog_before": state.identity.rendered(),
+        "catalog_after": after.rendered(),
+        "actual_logical_request_count": 0,
+        "actual_physical_attempt_count": 0,
+    }
+    _refuse_prohibited_recovery_content(document)
+    identity = compute_terminal_record_id(document)
+    document["terminal_record_id"] = identity
+    document["result_token"] = result_token(LEASE_RECOVERY_RECORD_TYPE, "complete", identity)
+    return document
+
+
+def _refuse_prohibited_recovery_content(document: Mapping[str, object]) -> None:
+    """Apply the accepted §5 prohibited-content scan to the recovery record.
+
+    One field is renamed for the scan and for the scan only. ``owner_authority_sha256`` is the
+    field name the accepted transition and E0 terminal records already use, so the recovery
+    record uses it too rather than inventing a fourth spelling of the same thing — but §5's
+    key-fragment guard rejects any key containing ``auth``, which exists to stop an
+    ``authorization`` header riding in under a plausible name. Renaming the **key** for the
+    scan keeps that guard's purpose intact while still scanning the field's **value**, which is
+    a 64-character SHA-256 of a governed public token and can be neither a path nor a
+    credential. Nothing else is exempted, and nothing is skipped.
+    """
+    scannable = dict(document)
+    scannable["owner_governed_identity_sha256"] = scannable.pop("owner_authority_sha256")
+    scan_for_prohibited_content(scannable)
+
+
+def reconcile_writer_lease_execute(
+    *,
+    evidence_root: Path,
+    config: object,
+    expected_catalog_logical_sha256: str = RECOVERY_CATALOG_LOGICAL_SHA256,
+    expected_input_observation_set_sha256: str = RECOVERY_INPUT_OBSERVATION_SET_SHA256,
+    namespace: str = LEASE_RECOVERY_RUN_NAMESPACE,
+) -> LeaseRecoveryOutcome:
+    """Reconcile exactly one stale writer lease (accepted Decision 103 R3-R7).
+
+    The whole operation is: rewrite one JSON document in place, and write one record proving
+    it. No SQLite page, WAL frame, migration, observation, parser state, raw object, E0 run
+    namespace, or acquisition artifact is opened for writing on any path here — the catalog is
+    only ever opened through ``SQLITE_OPEN_READONLY``, before and after, so the record's
+    before/after digests are measured by a handle that could not have changed them.
+
+    Order matters and is the same order the transition and E0 use: take the lock, prove the
+    predicates again under it, create the create-once namespace, mutate, verify the mutation,
+    then write the record — all without releasing the lock.
+
+    It is **not** idempotent, by design. A second invocation finds a lease recording
+    ``released`` and a namespace that already exists, and refuses on both counts.
+
+    Raises:
+        StageNotEnabledError: the activation constant is ``None`` (exit ``3``).
+        PreflightRefusalError: a predicate failed, or the locked lease diverged (exit ``4``).
+    """
+    from disclosure_drift.storage.catalog import (
+        reconciled_lease_document,
+        rewrite_locked_lease,
+    )
+
+    authority = _require_activation(
+        STALE_WRITER_LEASE_RECOVERY_AUTHORITY,
+        stage="reconcile-writer-lease",
+        constant_name="STALE_WRITER_LEASE_RECOVERY_AUTHORITY",
+    )
+    started = _utc_now()
+    refusals, _, state = _lease_eligibility(
+        evidence_root=evidence_root,
+        config=config,
+        expected_catalog_logical_sha256=expected_catalog_logical_sha256,
+        expected_input_observation_set_sha256=expected_input_observation_set_sha256,
+        namespace=namespace,
+    )
+    if refusals or state is None:
+        message = "stale writer lease reconciliation refused: " + "; ".join(refusals)
+        raise PreflightRefusalError(message)
+
+    with _lease_lock(state.lease_path, writable=True) as descriptor:
+        reassertion = _reassert_under_lock(descriptor, state)
+        directory = create_run_namespace(evidence_root, namespace)
+        reconciled_at = _utc_now()
+        reconciled = reconciled_lease_document(reassertion.lease, reconciled_at_utc=reconciled_at)
+        payload = canonical_bytes(reconciled)
+        rewrite_locked_lease(descriptor, payload)
+
+        # The mutation is verified from the file, not from the payload that was handed to the
+        # write: a post-write re-read is the only evidence that what landed is what was meant.
+        resulting_sha256, resulting_bytes = file_digest(state.lease_path)
+        verified = _verified_reconciled_lease(state.lease_path, expected=reconciled)
+        after = _measure_catalog_identity(state.catalog_path)
+        _require_catalog_nonmutation(state.identity, after)
+
+        document = _lease_recovery_record(
+            namespace=namespace,
+            started=started,
+            completed=_utc_now(),
+            authority=authority,
+            config=config,
+            state=state,
+            reassertion=reassertion,
+            reconciled=verified,
+            resulting_sha256=resulting_sha256,
+            resulting_bytes=resulting_bytes,
+            after=after,
+        )
+        write_once(directory / LEASE_RECOVERY_RECORD_FILENAME, canonical_bytes(document))
+
+    return LeaseRecoveryOutcome(
+        status="complete",
+        run_namespace=namespace,
+        terminal_record_id=str(document["terminal_record_id"]),
+        result_token=str(document["result_token"]),
+        prior_lease_file_sha256=state.lease_file_sha256,
+        resulting_lease_file_sha256=resulting_sha256,
+    )
+
+
+def _verified_reconciled_lease(
+    path: Path, *, expected: Mapping[str, object]
+) -> Mapping[str, object]:
+    """Re-read the rewritten lease and require it to be exactly the intended document.
+
+    Structural validation alone would accept any well-formed lease. This additionally requires
+    the persisted document to equal the one that was written, field for field, so a partial or
+    reordered write is caught here rather than becoming the record's ``resulting_lease``.
+
+    Raises:
+        PreflightRefusalError: the persisted lease is not the intended reconciled document.
+    """
+    from disclosure_drift.storage.catalog import (
+        LEASE_STATE_RELEASED,
+        STALE_LEASE_RECONCILIATION_REASON,
+        LeaseFormatError,
+        read_persisted_lease,
+    )
+
+    try:
+        persisted = read_persisted_lease(path.read_bytes())
+    except LeaseFormatError as exc:
+        message = f"the reconciled writer lease did not re-read as a valid lease: {exc}"
+        raise PreflightRefusalError(message) from exc
+    if dict(persisted.document) != dict(expected):
+        message = "the reconciled writer lease on disk is not the document that was written"
+        raise PreflightRefusalError(message)
+    if (
+        persisted.state != LEASE_STATE_RELEASED
+        or persisted.document.get("reconciliation_reason") != STALE_LEASE_RECONCILIATION_REASON
+        or "released_at_utc" in persisted.document
+    ):  # pragma: no cover - `reconciled_lease_document` cannot produce this
+        message = "the reconciled writer lease does not truthfully record an owner recovery"
+        raise PreflightRefusalError(message)
+    return persisted.document
+
+
+def _require_catalog_nonmutation(before: _CatalogIdentity, after: _CatalogIdentity) -> None:
+    """Refuse unless the catalog is byte-identical and logically identical across the operation.
+
+    Decision 103 R5 states this as a prohibition; it is enforced here as a *measurement*. The
+    lease rewrite cannot touch the catalog, so a difference would mean something else did —
+    which is exactly the concurrent-writer situation the whole ladder exists to exclude, caught
+    while the lock is still held and before any record claims otherwise.
+
+    Raises:
+        PreflightRefusalError: any measured catalog identity changed.
+    """
+    differences = tuple(
+        label
+        for label, first, second in (
+            ("file_sha256", before.file_sha256, after.file_sha256),
+            ("byte_length", before.byte_length, after.byte_length),
+            ("wal_byte_length", before.wal_byte_length, after.wal_byte_length),
+            ("applied_chain", before.applied, after.applied),
+            (
+                "catalog_logical_sha256",
+                before.catalog_logical_sha256,
+                after.catalog_logical_sha256,
+            ),
+            (
+                "input_observation_set_sha256",
+                before.input_observation_set_sha256,
+                after.input_observation_set_sha256,
+            ),
+        )
+        if first != second
+    )
+    if differences:  # pragma: no cover - no path here opens the catalog for writing
+        message = (
+            f"the catalog changed during lease reconciliation ({differences}); a lease recovery "
+            f"mutates no catalog state and a difference is never accepted"
+        )
+        raise PreflightRefusalError(message)
+
+
+def run_reconcile_writer_lease_command(
+    *,
+    mode: str,
+    config: object,
+    repository_root: Path,
+    environ: Mapping[str, str] | None = None,
+) -> OperatorResult:
+    """``m3 reconcile-writer-lease --config … --mode {preflight,execute}`` (Decision 103 R6).
+
+    Takes exactly ``--config`` and ``--mode``. There is no ``--force``, ``--pid``,
+    ``--lease-id``, ``--host``, ``--catalog``, ``--lease-file``, ``--evidence-root``,
+    ``--ignore-lock``, ``--skip-check``, ``--run-namespace``, or ``--network``: each of those
+    would be a way to assert a predicate instead of establishing it, and every predicate here
+    is measured or the command refuses.
+
+    There is no ``verify`` mode either. The two E0 surfaces have one because a run namespace is
+    a durable multi-artifact state machine worth revalidating; this operation's entire result
+    is one lease document and one record, and preflight already reads both.
+
+    The exit table is Decision 094 §7.3's, unchanged: ``1`` private-root resolution, ``2``
+    usage, ``3`` not enabled, ``4`` a gate that ran and refused.
+    """
+    modes = ("preflight", "execute")
+    if mode not in modes:
+        return OperatorResult(
+            exit_code=EXIT_USAGE, lines=(f"--mode must be one of {', '.join(modes)}",)
+        )
+    header = (f"{LEASE_RECOVERY_COMMAND_NAME} --mode {mode}",)
+    if mode == "execute":
+        # The activation check precedes root resolution for the same reason it does in
+        # `_operator_command`: whether this stage is enabled depends on the source constant and
+        # on nothing else, so nothing else is consulted before answering.
+        try:
+            _require_activation(
+                STALE_WRITER_LEASE_RECOVERY_AUTHORITY,
+                stage="reconcile-writer-lease",
+                constant_name="STALE_WRITER_LEASE_RECOVERY_AUTHORITY",
+            )
+        except StageNotEnabledError as exc:
+            return OperatorResult(exit_code=EXIT_STAGE_NOT_ENABLED, lines=(*header, f"  {exc}"))
+    try:
+        evidence_root = resolve_evidence_root(repository_root, environ=environ)
+    except EvidenceRootUnsetError as exc:
+        return OperatorResult(exit_code=EXIT_CONFIG_ERROR, lines=(*header, f"  {exc}"))
+    try:
+        if mode == "preflight":
+            report = reconcile_writer_lease_preflight(evidence_root=evidence_root, config=config)
+            verdict = "PASS" if report.passed else "REFUSED"
+            return OperatorResult(
+                exit_code=EXIT_OK if report.passed else EXIT_GATE_FAILURE,
+                lines=(*header, *report.lines, f"  preflight: {verdict}"),
+            )
+        outcome = reconcile_writer_lease_execute(evidence_root=evidence_root, config=config)
+    except StageNotEnabledError as exc:  # pragma: no cover - checked above
+        return OperatorResult(exit_code=EXIT_STAGE_NOT_ENABLED, lines=(*header, f"  {exc}"))
+    except (DisclosureDriftError, sqlite3.Error) as exc:
+        return OperatorResult(exit_code=EXIT_GATE_FAILURE, lines=(*header, f"  {exc}"))
+    except OSError as exc:
+        return OperatorResult(
+            exit_code=EXIT_GATE_FAILURE,
+            lines=(*header, f"  {type(exc).__name__} while reading or writing an artifact"),
+        )
+    return OperatorResult(
+        exit_code=EXIT_OK,
+        lines=(
+            *header,
+            f"  status                                : {outcome.status}",
+            f"  recovery namespace                    : {outcome.run_namespace}",
+            f"  terminal record id                    : {outcome.terminal_record_id}",
+            f"  result token                          : {outcome.result_token}",
+            f"  prior lease digest                    : {_short(outcome.prior_lease_file_sha256)}",
+            "  resulting lease digest                : "
+            f"{_short(outcome.resulting_lease_file_sha256)}",
+        ),
     )

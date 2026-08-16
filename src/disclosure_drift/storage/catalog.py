@@ -11,7 +11,9 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import sqlite3
+import stat
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -41,14 +43,54 @@ except ImportError:  # pragma: no cover - supported CI and production platforms 
 __all__ = [
     "DEFAULT_LEASE_SECONDS",
     "ELIGIBLE_FORM_TYPES",
+    "LEASE_FILENAME",
+    "LEASE_STATE_HELD",
+    "LEASE_STATE_RELEASED",
+    "STALE_LEASE_RECONCILIATION_REASON",
     "CatalogWriter",
+    "LeaseFormatError",
+    "PersistedLease",
     "WriterLease",
+    "exclusive_lease_lock",
+    "host_fingerprint",
+    "lease_path",
     "read_only_connection",
+    "read_persisted_lease",
+    "reconciled_lease_document",
+    "rewrite_locked_lease",
     "strictly_read_only_connection",
+    "writer_process_is_alive",
 ]
 
 DEFAULT_LEASE_SECONDS: Final = 900
-_LEASE_FILENAME: Final = "catalog_writer.lease"
+
+#: The one lease filename. Public because the Decision 103 R3 stale-writer reconciliation must
+#: name the same file this class writes, and a second literal would be a second contract.
+LEASE_FILENAME: Final = "catalog_writer.lease"
+_LEASE_FILENAME: Final = LEASE_FILENAME
+
+#: The two lifecycle states this module has ever written. There is no third: accepted
+#: Decision 103 R4 reconciles a stale lease **into** ``released`` and distinguishes it by
+#: provenance fields, rather than by inventing a state vocabulary no existing reader knows.
+LEASE_STATE_HELD: Final = "held"
+LEASE_STATE_RELEASED: Final = "released"
+
+#: The Decision 103 R4 provenance marker. Its presence is what separates an owner-authorized
+#: stale-writer reconciliation from an ordinary holder release, which records
+#: ``released_at_utc`` instead and never carries this field.
+STALE_LEASE_RECONCILIATION_REASON: Final = "owner_authorized_stale_writer_recovery"
+
+#: Required keys of a structurally valid lease document, and the optional lifecycle keys the
+#: two release paths may add. Anything else is refused: a lease carrying an unknown key has
+#: been written by something that is not this module, and a recovery must not act on it.
+_LEASE_REQUIRED_KEYS: Final[frozenset[str]] = frozenset(
+    {"lease_id", "writer_pid", "host_fingerprint", "acquired_at_utc", "expires_at_utc", "state"}
+)
+_LEASE_OPTIONAL_KEYS: Final[frozenset[str]] = frozenset(
+    {"released_at_utc", "reconciliation_reason", "reconciled_at_utc", "reconciled_prior_state"}
+)
+
+_LEASE_TIMESTAMP_PATTERN: Final = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 
 ELIGIBLE_FORM_TYPES: Final[tuple[tuple[str, bool, bool, str], ...]] = (
     ("10-K", False, True, "Original annual report."),
@@ -70,6 +112,51 @@ def _host_fingerprint() -> str:
     return uname().nodename if uname is not None else "unknown-host"
 
 
+def host_fingerprint() -> str:
+    """The current host's coarse identifier, as a lease records it.
+
+    Public so a stale-lease reconciliation can compare a persisted lease's recorded host
+    against *this* host using the same function that wrote it. A recovery that compared
+    against a separately derived identifier could pass while the two definitions drifted.
+    """
+    return _host_fingerprint()
+
+
+def lease_path(lock_directory: Path) -> Path:
+    """The lease file :class:`CatalogWriter` uses for ``lock_directory``."""
+    return lock_directory / LEASE_FILENAME
+
+
+def writer_process_is_alive(pid: int) -> bool:
+    """Whether ``pid`` names a live process on this host.
+
+    ``os.kill(pid, 0)`` sends no signal; it asks the kernel whether the process exists and
+    whether this user could signal it. ``PermissionError`` therefore means **alive and owned
+    by someone else**, which is a live writer, not an absent one. Anything the platform will
+    not answer is reported as alive, so an unanswerable question never authorizes a takeover.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:  # pragma: no cover - defensive; no supported platform reaches this
+        return True
+    return True
+
+
+class LeaseFormatError(CatalogWriteError):
+    """A persisted lease document is absent, unreadable, or not structurally valid.
+
+    Its own class because the Decision 103 R3 recovery must distinguish "this lease is not
+    something I may act on" from "this lease is valid and ineligible". Both refuse; only the
+    second is a finding about the writer.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class WriterLease:
     """A held writer lease."""
@@ -79,6 +166,217 @@ class WriterLease:
     writer_pid: int
     acquired_at_utc: str
     expires_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedLease:
+    """One structurally valid persisted lease document, as read from disk.
+
+    ``document`` is the exact parsed mapping, kept so a reconciliation rewrites the lease it
+    actually read rather than a reconstruction of it: a field this dataclass does not model
+    survives the rewrite instead of being silently dropped.
+    """
+
+    lease_id: str
+    writer_pid: int
+    host_fingerprint: str
+    acquired_at_utc: str
+    expires_at_utc: str
+    state: str
+    document: Mapping[str, Any]
+
+    @property
+    def expires_at(self) -> datetime:
+        """The recorded expiry as an aware UTC instant."""
+        return datetime.fromisoformat(self.expires_at_utc.replace("Z", "+00:00"))
+
+    def has_expired(self, *, now: datetime | None = None) -> bool:
+        """Whether the recorded expiry is in the past."""
+        return (datetime.now(UTC) if now is None else now) > self.expires_at
+
+
+def _require_lease_text(label: str, value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        message = f"the persisted lease field {label!r} must be a non-empty string"
+        raise LeaseFormatError(message)
+    return value
+
+
+def _require_lease_timestamp(label: str, value: object) -> str:
+    text = _require_lease_text(label, value)
+    if not _LEASE_TIMESTAMP_PATTERN.fullmatch(text):
+        message = f"the persisted lease field {label!r} is not an accepted UTC timestamp"
+        raise LeaseFormatError(message)
+    return text
+
+
+def read_persisted_lease(raw: bytes) -> PersistedLease:
+    """Parse and structurally validate one persisted lease document.
+
+    Fail-closed in both directions: a missing required field is refused, and so is an
+    **unknown** field. A lease carrying a key this module never writes was written by
+    something else, and a governed recovery must not reconcile a document whose meaning it
+    cannot account for.
+
+    Raises:
+        LeaseFormatError: the bytes are not a structurally valid lease document.
+    """
+    try:
+        loaded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"the persisted lease is not readable UTF-8 JSON: {exc}"
+        raise LeaseFormatError(message) from exc
+    if not isinstance(loaded, dict):
+        message = "the persisted lease is not a JSON object"
+        raise LeaseFormatError(message)
+    missing = tuple(sorted(_LEASE_REQUIRED_KEYS - set(loaded)))
+    if missing:
+        message = f"the persisted lease is missing required field(s) {missing}"
+        raise LeaseFormatError(message)
+    unknown = tuple(sorted(set(loaded) - _LEASE_REQUIRED_KEYS - _LEASE_OPTIONAL_KEYS))
+    if unknown:
+        message = f"the persisted lease carries unrecognized field(s) {unknown}"
+        raise LeaseFormatError(message)
+    pid = loaded["writer_pid"]
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        message = "the persisted lease field 'writer_pid' must be a positive integer"
+        raise LeaseFormatError(message)
+    return PersistedLease(
+        lease_id=_require_lease_text("lease_id", loaded["lease_id"]),
+        writer_pid=pid,
+        host_fingerprint=_require_lease_text("host_fingerprint", loaded["host_fingerprint"]),
+        acquired_at_utc=_require_lease_timestamp("acquired_at_utc", loaded["acquired_at_utc"]),
+        expires_at_utc=_require_lease_timestamp("expires_at_utc", loaded["expires_at_utc"]),
+        state=_require_lease_text("state", loaded["state"]),
+        document=dict(loaded),
+    )
+
+
+def reconciled_lease_document(lease: PersistedLease, *, reconciled_at_utc: str) -> dict[str, Any]:
+    """The Decision 103 R4 reconciled form of a stale ``held`` lease.
+
+    The transition is ``held -> released`` — the state the ordinary holder-release path
+    already writes, so every existing reader (``CatalogWriter._acquire_lease``, the E0
+    preflight lease predicate) understands it without a vocabulary change.
+
+    What makes it **truthful** is what is added and what is not:
+
+    * ``released_at_utc`` is **not** written. That field means "the holder released this",
+      and the holder did not; it died.
+    * ``reconciliation_reason`` and ``reconciled_at_utc`` record that this release was an
+      owner-authorized stale-writer recovery, performed by a different process at a later
+      instant. Their presence is unambiguous — no ordinary release writes them.
+    * ``reconciled_prior_state`` names the state that was displaced.
+    * ``lease_id``, ``writer_pid``, ``host_fingerprint``, ``acquired_at_utc``, and
+      ``expires_at_utc`` are carried through **unchanged**. They are already the prior
+      holder's values, so separate ``prior_*`` copies would be exact duplicates rather than
+      new provenance; the dead writer stays named in the record it left behind.
+
+    Raises:
+        LeaseFormatError: ``lease`` is not in the ``held`` state.
+    """
+    if lease.state != LEASE_STATE_HELD:
+        message = (
+            f"only a lease in state {LEASE_STATE_HELD!r} can be reconciled; this one records "
+            f"{lease.state!r}"
+        )
+        raise LeaseFormatError(message)
+    document = dict(lease.document)
+    document["state"] = LEASE_STATE_RELEASED
+    document["reconciliation_reason"] = STALE_LEASE_RECONCILIATION_REASON
+    document["reconciled_at_utc"] = reconciled_at_utc
+    document["reconciled_prior_state"] = LEASE_STATE_HELD
+    return document
+
+
+@contextmanager
+def exclusive_lease_lock(path: Path, *, writable: bool) -> Iterator[int]:
+    """Hold the accepted exclusive advisory lock on an **existing** lease file.
+
+    This is the same mechanism :meth:`CatalogWriter._acquire_lease` uses — a non-blocking
+    ``flock(LOCK_EX)`` on the lease file's own descriptor — and deliberately not a second
+    locking scheme. Two differences from the writer path, both required by Decision 103 R3:
+
+    * The file is never created. ``O_CREAT`` is absent, so asking whether the lock is free
+      cannot bring a lease into existence.
+    * A symbolic link or non-regular file is refused before the descriptor is used, so the
+      lock and any subsequent write land on the lease itself and not on an aliased target.
+
+    Args:
+        path: The lease file, which must already exist.
+        writable: Open read-write. Required only by the reconciliation, which rewrites the
+            same descriptor it locked; a read-only inspection passes ``False``.
+
+    Raises:
+        LeaseFormatError: the path is absent, a symlink, or not a regular file.
+        SingleWriterViolationError: another process holds the advisory lock.
+        CatalogWriteError: advisory locking is unavailable on this platform.
+    """
+    if fcntl is None:  # pragma: no cover - supported CI and production platforms are Unix
+        message = (
+            "stale-lease reconciliation requires operating-system advisory locking, but "
+            "fcntl.flock is unavailable on this platform; refusing to proceed without it"
+        )
+        raise CatalogWriteError(message)
+    if path.is_symlink():
+        message = "the catalog writer lease is a symbolic link and is refused"
+        raise LeaseFormatError(message)
+    if not path.is_file():
+        message = "the catalog writer lease is absent or is not a regular file"
+        raise LeaseFormatError(message)
+    flags = (os.O_RDWR if writable else os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):  # pragma: no cover - defensive
+            message = "the opened catalog writer lease is not a regular file"
+            raise LeaseFormatError(message)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            message = (
+                "another process holds the catalog writer advisory lock; a lease held by a "
+                "live writer is never stale and is never reconciled"
+            )
+            raise SingleWriterViolationError(message) from None
+        try:
+            yield descriptor
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def rewrite_locked_lease(descriptor: int, payload: bytes) -> None:
+    """Rewrite the locked lease **in place**, preserving its inode, mode, and lock.
+
+    Decision 103 R5 asks for the repository's safest existing atomic/private-file pattern.
+    That pattern, for this file, is the in-place locked rewrite
+    :meth:`CatalogWriter._release_lease` already performs — not a temporary file replaced by
+    ``rename``. A rename would swap the inode, and ``flock`` is held on the *inode*: the
+    exclusive lock would survive on an orphaned file while the new one sat unlocked and open
+    to any writer. R5 also requires the lock to remain continuously held across the
+    check-and-reconcile section, and those two requirements cannot both hold. Lock continuity
+    wins, and the crash window is bounded instead:
+
+    * the new payload is required to be no shorter than the old, so the file is never
+      truncated first and no window exists in which it is legitimately empty;
+    * the write is fsynced before the caller re-reads and revalidates it; and
+    * a torn write leaves a document that fails structural validation, which every reader of
+      this file refuses rather than interpreting.
+
+    Raises:
+        CatalogWriteError: the replacement payload is shorter than the document on disk.
+    """
+    existing = os.fstat(descriptor).st_size
+    if len(payload) < existing:
+        message = (
+            "a reconciled lease may only add provenance to the document it replaces; refusing "
+            "a replacement shorter than the persisted one"
+        )
+        raise CatalogWriteError(message)
+    os.pwrite(descriptor, payload, 0)
+    os.ftruncate(descriptor, len(payload))
+    os.fsync(descriptor)
 
 
 def read_only_connection(database_path: Path) -> AbstractContextManager[sqlite3.Connection]:
@@ -181,7 +479,7 @@ class CatalogWriter:
             "host_fingerprint": _host_fingerprint(),
             "acquired_at_utc": acquired_at_utc,
             "expires_at_utc": expires_at_utc,
-            "state": "held",
+            "state": LEASE_STATE_HELD,
         }
         try:
             descriptor = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -246,7 +544,7 @@ class CatalogWriter:
         try:
             persisted = self._read_locked_metadata(descriptor)
             if persisted.get("lease_id") == lease.lease_id:
-                persisted["state"] = "released"
+                persisted["state"] = LEASE_STATE_RELEASED
                 persisted["released_at_utc"] = utc_now()
                 encoded = json.dumps(persisted, sort_keys=True).encode("utf-8")
                 os.ftruncate(descriptor, 0)

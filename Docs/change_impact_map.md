@@ -868,13 +868,16 @@ rather than adding a row. The eight components Decision 088 §11 names — inclu
 `candidate_tables_sha256` and `selection_result_sha256` — are **byte-identical**, and no frozen
 identity tuple is widened.
 
-## Decisions 094–096 — the PRE-E0 executability implementation (real impact)
+## Decisions 094–099 — the PRE-E0 executability implementation (real impact)
 
 [Decision 094](Decisions/decision_094_m3_3_pre_e0_executability_redesign.md)
 (`ACCEPTED — OWNER PRE-E0 REDESIGN AUTHORITY 2026-08-15`), as corrected by
-[Decision 095](Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) **R79–R81**
-and [Decision 096](Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md)
-**R83–R84**, restores a genuinely executable M3.3-E0 path. It implements two operator state
+[Decision 095](Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md) **R79–R81**,
+[Decision 096](Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md)
+**R83–R84**,
+[Decision 097](Decisions/decision_097_m3_3_m19_live_anchor_supersession_correction.md) **R87–R89**,
+and [Decision 099](Decisions/decision_099_m3_3_post_d098_bounded_correction.md) **R96–R98**,
+restores a genuinely executable M3.3-E0 path. It implements two operator state
 machines, **both of whose `execute` modes are disabled**, and it runs neither.
 
 **What it does not touch.** No research definition, cohort, quota, seed, or selector. No migration —
@@ -885,7 +888,7 @@ opened, and both tracked network switches stay `false` at `REQUEST_CEILING = 0`.
 
 | Surface touched | Change | Nearest tests |
 |---|---|---|
-| `src/disclosure_drift/m3/e0.py` | **new** — the two bounded state machines: preflight predicates, the `0013 -> 0014 -> 0015` transition, the E0 driver, the hash-chained ledger, both closed terminal schemas, identity/freeze, and `verify`. Both activation constants ship as `None` | `tests/unit/test_m3_e0.py`; `tests/integration/test_m3_cli.py` |
+| `src/disclosure_drift/m3/e0.py` | **new** — the two bounded state machines: preflight predicates, the `0013 -> 0014 -> 0015` transition, the E0 driver, the hash-chained ledger, both closed terminal schemas, identity/freeze, and `verify`. Both activation constants ship as `None`. **D099 R96–R98** add: failure terminals projected from the durable event ledger, §5.2 predicate 3's source-local M3.2 completion/catalog binding (`M3_2_COMPLETION_BINDING`), catalog-aware `verify`, the explicit `lease_check` policy, and predicate 10's full parent existence/ownership check | `tests/unit/test_m3_e0.py`; `tests/integration/test_m3_cli.py` |
 | `src/disclosure_drift/m3/offline_parse.py` | the Decision 094 §§6.2–6.4 canonical association projection, the §9.5 totality object, the sixteen-table footprint, and the named `materialize_source_layer()` pre-projection boundary | `tests/unit/test_m3_offline_parse.py`, `tests/unit/test_m3_e0.py` |
 | `src/disclosure_drift/m3/candidate_snapshot.py` | §6.5 consumer rule: the canonical relation plus persisted completeness is the **only** membership source. The observation-derived derivation, the scalar union, and the scalar-keyed entity history are removed | `tests/unit/test_m3_candidate_snapshot.py`, `tests/unit/test_m3_3_multi_registrant_correction.py` |
 | `src/disclosure_drift/m3/receipt.py` | the isolated `m3-execution-receipt/4.0` reader/builder. `2.0`/`3.0` bytes, validators, vocabularies, and emitters are unchanged | `tests/unit/test_m3_receipt.py`, `tests/unit/test_m3_e0.py` |
@@ -893,15 +896,20 @@ opened, and both tracked network switches stay `false` at `REQUEST_CEILING = 0`.
 | `src/disclosure_drift/m3/rehearsal_world.py` | **R79 only** — the two support-only co-registrants get accepted-shaped submissions objects with zero filings of their own | `tests/unit/test_m3_3_execution.py` |
 | `src/disclosure_drift/config.py` | **R80 only** — `EVIDENCE_ROOT_ENV` is a recognized **runtime root**, never an override, secret, or tracked value | `tests/unit/test_env_overrides.py`, `tests/unit/test_config.py` |
 | `src/disclosure_drift/cli.py` | the two `--config … --mode {preflight,execute,verify}` subcommands, routed before the shared evidence-root resolution because neither takes a path option | `tests/integration/test_m3_cli.py` |
-| `Docs/m3/e0_execution_record_spec.md` | **new** — the executable record specification | Markdown link and decision-reference gates |
-| `Docs/m3/execution_receipt_spec.md`, `Docs/m3/operator_runbook.md`, `Docs/sec_data_dictionary.md` | §12.2 `4.0`; step 28a's implemented-and-disabled state; §16 for the canonical relation | Markdown link and decision-reference gates |
+| `scripts/dev/mutation_campaign.py` and `Docs/m3/reviews/m3_3_i_r_mutation_campaign_06bb47a.md` | **D097 R87–R89 only** — neither is edited; the M19 live anchor is recorded superseded and the audit proof asserts 38 recovered / 37 resolved / `['M19']` superseded against the shipped tree | `tests/unit/test_audit_tooling.py` |
+| `Docs/m3/e0_execution_record_spec.md` | **new** — the executable record specification; **D099** adds §5a (predicate 3), the durable-event failure projection table, the predicate-10 parent rule, and what `verify` reads from the catalog | Markdown link and decision-reference gates |
+| `Docs/m3/execution_receipt_spec.md`, `Docs/m3/operator_runbook.md`, `Docs/sec_data_dictionary.md` | §12.2 `4.0`; step 28a's implemented-and-disabled state, plus the **D099** operator-visible refusals; §16 for the canonical relation | Markdown link and decision-reference gates |
 
 **Which tests to run for it.** Direct: `tests/unit/test_m3_e0.py`,
 `tests/unit/test_m3_offline_parse.py`, `tests/unit/test_m3_candidate_snapshot.py`,
 `tests/unit/test_m3_receipt.py`, `tests/unit/test_m3_3_execution.py`. Identity and schema
 neighbours, because the association projection and the sixteen-table footprint move what a snapshot
 is built from: `tests/unit/test_m3_3_multi_registrant_correction.py`,
-`tests/unit/test_migration_provenance.py`. Operator surface:
+`tests/unit/test_migration_provenance.py`. Campaign-audit truthfulness, because D097 R88's live
+anchor partition is asserted against the shipped tree: `tests/unit/test_audit_tooling.py`. Receipt
+mechanics, because D099 R97's predicate-3 binding reuses `inspect_receipt` and the Decision-063
+predecessor resolver: `tests/unit/test_m3_receipt.py`, `tests/unit/test_m3_recovery.py`,
+`tests/unit/test_m3_recover.py`. Operator surface:
 `tests/integration/test_m3_cli.py`, `tests/integration/test_cli.py`. Central configuration:
 `tests/unit/test_env_overrides.py`, `tests/unit/test_config.py`.
 

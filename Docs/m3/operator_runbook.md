@@ -1081,10 +1081,10 @@ rule 12).
 
 **`IMPLEMENTED AND DISABLED (Decision 094)`** · **`SEPARATE OWNER GATE`**
 
-> **Current state, accepted Decision 094 §7 as corrected by Decisions 095–096.** The two operator
-> surfaces below **exist and are wired**. `preflight` and `verify` are strictly read-only and do real
-> work. **`execute` returns exit `3`** on both, because each is gated by its own source constant and
-> both ship as `None`:
+> **Current state, accepted Decision 094 §7 as corrected by Decisions 095–096 and 099.** The two
+> operator surfaces below **exist and are wired**. `preflight` and `verify` are strictly read-only
+> and do real work. **`execute` returns exit `3`** on both, because each is gated by its own source
+> constant and both ship as `None`:
 >
 > ```python
 > PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = None
@@ -1119,6 +1119,25 @@ rule 12).
 > **What a passing preflight means:** the predicates it measured were true when it measured them. It
 > creates nothing, it authorizes nothing, and it must be repeated under the writer lease by any later
 > authorized `execute`.
+>
+> **What `prepare-e0-catalog --mode preflight` refuses on, that an operator may not expect**
+> (accepted Decision 099 **R97–R98**):
+>
+> - **The accepted M3.2 completion binding (§5.2 predicate 3).** The two accepted M3.2 receipts —
+>   `runs/m3_2_decision_062_sic_continuation/execution_receipt.json` and
+>   `runs/m3_2a_clean_carry_in/execution_receipt.json` — must be present, unaltered, and bound to the
+>   fixed catalog's own run rows, attempt ledger, and accepted head observation, with cumulative
+>   accounting of exactly **77** physical attempts. A moved, edited, copied, or re-hashed receipt
+>   refuses; so does a catalog whose run rows disagree with them. Nothing is repaired, and no receipt
+>   is copied, renamed, or synthesized to make the chain resolve. The refusal names only fixed public
+>   relative names, counts, and digest prefixes.
+> - **The `runs/` parent (§5.2 predicate 10).** It must **already** exist, be a real non-symlink
+>   directory, and be owned by the operator running the command. Preflight will not create it.
+>
+> **What `--mode verify` now also reads.** Both `verify` modes open the fixed catalog read-only and
+> compare its current chain, integrity, and — for E0 — its §9.4 governed-state identities against
+> what the terminal record froze, and re-hash the run's verified backup. A catalog that has drifted
+> since the freeze makes `verify` REFUSE. It still repairs, restores, and resumes nothing.
 
 **The census parse layer is empty.** M3.2 acquired and stored the objects; it parsed none of them,
 and `parser_state` is `not_started` for all 76 plan sources. **M3.3 Owner Ruling R13** (accepted

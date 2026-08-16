@@ -2,9 +2,11 @@
 
 **Governing record:** accepted
 [Decision 094](../Decisions/decision_094_m3_3_pre_e0_executability_redesign.md), as corrected by
-accepted [Decision 095](../Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md)
+accepted [Decision 095](../Decisions/decision_095_m3_3_d094_bounded_correction_and_remediation.md),
+accepted
+[Decision 096](../Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md),
 and accepted
-[Decision 096](../Decisions/decision_096_m3_3_final_pre_e0_rehearsal_correction_and_remediation.md).
+[Decision 099](../Decisions/decision_099_m3_3_post_d098_bounded_correction.md) **R96–R98**.
 
 **Implementing module:** `src/disclosure_drift/m3/e0.py`.
 **Executable companion of:** [`execution_receipt_spec.md`](execution_receipt_spec.md), which governs
@@ -111,6 +113,51 @@ governed artifacts. **No artifact is written in Git.**
 which is not convention: a read-write handle to a WAL-mode database checkpoints on close and would
 rewrite durable bytes with no statement having written anything. Preflight inspects the writer lease
 without creating or acquiring it — an absent lease passes the predicate outright.
+
+**Neither creates the `runs/` parent either.** Accepted Decision 099 **R98** implements Decision 094
+§5.2 predicate 10 in full: the parent must **already** exist, be a real non-symlink directory, and be
+owned by the effective operator before preflight passes. A platform that will not report the
+effective identity refuses rather than silently passing.
+
+## 5a. Predicate 3 — the accepted M3.2 completion binding
+
+Decision 094 §5.2 is headed "Preflight — all predicates required", and its predicate 3 is *the
+accepted M3.2 acquisition completion receipt and catalog binding validate*. Accepted Decision 099
+**R97** implements it as a strictly read-only, **source-local** validation in `m3/e0.py`, reusing only
+`inspect_receipt` and the Decision-063 `resolve_predecessor_receipt` from `m3/receipt.py`. It imports
+no recovery module, acquisition orchestrator, request-plan builder, source registry, client,
+transport, socket, HTTP library, or SEC route.
+
+Nothing about the binding is discovered. The two receipt paths, their file digests and identities,
+their run identities, the acquisition window, the head's completion facts, the accepted head
+observation, and the cumulative attempt total are all fixed literals of
+`M3_2_COMPLETION_BINDING` (accepted Decision 099 §3, restating accepted Decisions 061–063). It
+requires, and refuses otherwise:
+
+- both receipts to be regular, non-symlinked, contained files whose stored bytes hash to the exact
+  accepted digests, whose closed schema, canonical form, and self-derived identity the accepted
+  loader accepts, and whose derived identities are the accepted ones;
+- the head to record `complete`, the window, its exact plan digest, one logical request, one physical
+  attempt, and the accepted predecessor identity;
+- the root to record `failed`, the window, its exact plan digest, and **no predecessor** — which is
+  what makes the chain exactly two receipts to root and a cycle unconstructible;
+- the accepted predecessor identity to resolve, through the Decision-063 resolver, to exactly that
+  root receipt at its fixed name;
+- cumulative accounting of exactly **77** physical attempts — the chain's own attempts plus the
+  single no-predecessor root's carried-forward baseline, added exactly once;
+- exactly one `ops_ingestion_jobs` row per fixed run identity, with `job_kind = 'm3_2_acquisition'`,
+  the receipt's window as its stage, the truthful terminal job state for the receipt's completion
+  status, and boundary instants exactly equal to the receipt's;
+- a durable `ops_retrieval_attempts` count equal to that receipt's own
+  `actual_physical_attempt_count`; and
+- the accepted head observation to exist exactly once and to be attributed, through
+  `census_plan_sources`, to the accepted head run and to no other.
+
+The same binding runs in transition preflight **and** in the under-lease recheck, because Decision
+094 §5.3 item 2 repeats §5.2's predicates before a namespace or backup exists. It is **not** an E0
+predicate: Decision 094 §9.1 states E0's own list and names the §5.2 disk and lock predicates only.
+The binding reports non-secret enums, counts, digest prefixes, and fixed public relative names; no
+private absolute path is rendered.
 
 ## 6. The E0 database write set — sixteen tables
 
@@ -242,6 +289,32 @@ absent value is represented by `null`, `0`, `"N/A"`, `"-"`, or any other placeho
 inapplicable field is omitted, because the conditional-presence table can prove an absence lawful and
 can prove a placeholder nothing at all.
 
+**A failed or interrupted record's permitted fields are read from the durable ledger, never from
+assignment order** (accepted Decision 099 **R96**). The execute paths necessarily assign an
+event-conditioned value *before* appending the event that permits it, because the event's own
+`details` carry that value. Before a failure terminal is written, the ledger is therefore read back
+and fully verified from disk, and each conditioned group is kept only when its event is durably
+present:
+
+| Kind | Field or group | Permitted on failure only when durable |
+|---|---|---|
+| transition | `backup` | `BACKUP_VERIFIED` |
+| transition | `post_preexisting_content_sha256` | `POSTCHECK_PASSED` |
+| E0 | `backup` | `BACKUP_VERIFIED` |
+| E0 | `association_totality` | `ASSOCIATIONS_MATERIALIZED` |
+| E0 | `table_hashes`, `plan_parser_state_hash`, `e0_catalog_state_sha256`, `post_integrity` | `VALIDATION_PASSED` |
+
+`applied_migrations`, `post_migration_chain`, and the transition's `post_integrity` stay governed by
+`failure.catalog_state_observed` exactly as before — `applied_migrations` deliberately so, since §8.1
+lets it lead the ledger by one migration inside the disclosed commit-before-event window. Each
+execute path records its catalog-observed fields at the moment that flag becomes true, so a refusal
+*after* a commit discloses the state it observed instead of leaving a record its own validator
+refuses.
+
+**If the ledger itself cannot be verified, no terminal is manufactured over it.** A truncated,
+malformed, reordered, or unchained ledger means the durable event set is unknown; the surviving
+artifacts stay `UNDETERMINED / NOT COMPLETE` and the original exception still propagates.
+
 The E0 terminal additionally carries `source_results` — one closed record per accepted
 `(census_run_id, source_instance_id)` pair, ordered by that pair, **76/76 on a complete run** — the
 closed `source_result_counts` object, the §9.5 `association_totality`, one `table_hashes` record per
@@ -305,6 +378,15 @@ identity. There is no automatic repair and no re-freeze.
 - A hard kill may leave a ledger and no terminal. That is exactly `UNDETERMINED / NOT COMPLETE`, and
   it is never read as success. `verify` still validates the surviving ledger so the operator learns
   how far the run got.
+
+`verify` also **reads the fixed catalog** (accepted Decision 099 **R98**, implementing Decision 094
+§7.2's "catalog state" row). Strictly read-only, it compares the catalog's current applied chain and
+integrity report with what the terminal froze wherever the terminal asserts them, re-hashes the run's
+verified backup against the byte length, file digest, and logical catalog digest the terminal
+recorded, and — for E0, whenever `VALIDATION_PASSED` made them lawful — independently reproduces the
+§9.4 governed-state identities from the catalog itself. A post-freeze catalog-state or identity
+mutation therefore makes `verify` refuse instead of passing on a recorded claim. It still repairs
+nothing.
 
 The interruption vocabulary is closed and is listed in
 [`execution_receipt_spec.md`](execution_receipt_spec.md) §12.2 alongside the `4.0` schema that

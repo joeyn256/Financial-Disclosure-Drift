@@ -27,6 +27,10 @@ Three boundaries are structural rather than promised:
   under accepted Decision 095 R81 rather than imported from ``m3/acquisition.py``. It is a
   deliberate source-boundary duplication of one frozen literal, pinned by a direct equality
   test, and it is not a second operator choice, configuration field, or path-discovery rule.
+  The Decision 094 §5.2 predicate 3 acquisition-completion binding is likewise **source-local**
+  (accepted Decision 099 R97): it reuses only ``inspect_receipt`` and the Decision-063
+  ``resolve_predecessor_receipt`` from ``m3/receipt.py``, and imports no recovery module,
+  acquisition orchestrator, request-plan builder, or source registry.
 * **No private-path disclosure.** The evidence root is read once from the fixed unlogged
   environment variable, resolved through the accepted external-root boundary, and cached.
   Its value never reaches a message, a log record, a receipt, a ledger event, a terminal
@@ -60,6 +64,8 @@ from disclosure_drift.m3.receipt import (
     RUN_NAMESPACE_DIRNAME,
     ExecutionReceiptV4,
     canonical_bytes,
+    inspect_receipt,
+    resolve_predecessor_receipt,
 )
 from disclosure_drift.release.hashing import TableHash, hash_release, hash_table, normalize_value
 from disclosure_drift.storage.sqlite import (
@@ -92,6 +98,8 @@ __all__ = [
     "EXIT_OK",
     "EXIT_STAGE_NOT_ENABLED",
     "EXIT_USAGE",
+    "M3_2_ACQUISITION_JOB_KIND",
+    "M3_2_COMPLETION_BINDING",
     "M3_3_E0_EXECUTION_AUTHORITY",
     "MAXIMUM_RELEASE_HASH_BYTES",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
@@ -104,6 +112,8 @@ __all__ = [
     "TRANSITION_TARGET_HEAD",
     "TRANSITION_TERMINAL_FILENAME",
     "TRANSITION_TERMINAL_SCHEMA_VERSION",
+    "AcquisitionCompletionBinding",
+    "AcquisitionReceiptPin",
     "CatalogSnapshotDigest",
     "E0Error",
     "EventLedger",
@@ -223,6 +233,92 @@ EMPTY_STATE_TABLES: Final[tuple[str, ...]] = tuple(
 
 #: The accepted plan size E0 preflight requires (Decision 094 §1.2, §9.1).
 PLANNED_SOURCE_COUNT: Final = 76
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionReceiptPin:
+    """One pinned accepted M3.2 completion receipt, by public name and exact identity.
+
+    Every field is a fixed public value already published in accepted Decisions 061-063 and
+    restated by Decision 099 §3. ``relative_path`` is private-root-relative, so nothing here
+    is or discloses an absolute path.
+    """
+
+    label: str
+    relative_path: str
+    file_sha256: str
+    receipt_id: str
+    run_id: str
+    completion_status: str
+    request_plan_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionCompletionBinding:
+    """The exact accepted M3.2 completion chain Decision 094 §5.2 predicate 3 validates.
+
+    A single frozen object rather than a scatter of module constants, because predicate 3 is
+    one binding: the T7 head receipt, its T6 predecessor, the window they share, the head's
+    exact completion facts, the accepted head observation, and the cumulative attempt total.
+    Splitting them would let a later edit move one pin without moving the rest.
+    """
+
+    head: AcquisitionReceiptPin
+    predecessor: AcquisitionReceiptPin
+    acquisition_window: str
+    head_logical_request_count: int
+    head_physical_attempt_count: int
+    head_observation_id: str
+    cumulative_physical_attempt_count: int
+
+
+M3_2_COMPLETION_BINDING: Final = AcquisitionCompletionBinding(
+    head=AcquisitionReceiptPin(
+        label="T7",
+        relative_path="runs/m3_2_decision_062_sic_continuation/execution_receipt.json",
+        file_sha256="ae8ace5dc62155c9dca395af238290b0bb5b99dc4e3f1741e3d8ff1c9ab9c3dd",
+        receipt_id="7d72a5501f66d36af9024b80a64060668da315b8880fb5add028917d36ad12e1",
+        run_id="m3-2-acquisition-b6f8bc7f48b94e6080038db575b204e5",
+        completion_status="complete",
+        request_plan_sha256="f77e003ccc0ed8f9c0e55065b3c211aa5e33c7abf86cc71cbe66d427611d890a",
+    ),
+    predecessor=AcquisitionReceiptPin(
+        label="T6",
+        relative_path="runs/m3_2a_clean_carry_in/execution_receipt.json",
+        file_sha256="0278c857d7816a79907068513fe09d5b78fc3973ba415149fbc9d73605b5359c",
+        receipt_id="37dd811497d4a57e8b911917ed6c0426a22f443c3ddd5aeba8d4da3e076f6a7c",
+        run_id="m3-2-acquisition-6db97de60ac64b30bc36371d7b209b44",
+        completion_status="failed",
+        request_plan_sha256="19be7bdc9071d0dcdcaaa1972e6b4844fa8076c9b1761735f903fa500623af68",
+    ),
+    acquisition_window="M3.2A",
+    head_logical_request_count=1,
+    head_physical_attempt_count=1,
+    head_observation_id="6e9d92c859bc48faa6c1c5e47c36fd8e",
+    cumulative_physical_attempt_count=77,
+)
+"""The accepted M3.2 completion evidence (accepted Decision 099 §3, from Decisions 061-063).
+
+**Fixed, not discovered.** Predicate 3 is a provenance binding, so nothing about it is an
+operator choice, a search, a "most recent receipt" rule, or a value read from the catalog it is
+meant to bind. A disposable test may substitute a synthetic binding in memory to build an
+accepted-shaped chain; the shipped literals above are the accepted ones and are pinned by a
+source-text assertion.
+"""
+
+#: The ``ops_ingestion_jobs.job_kind`` every M3.2 acquisition run is registered under. Restated
+#: here rather than imported: Decision 094 §7.3 forbids importing the acquisition orchestrator.
+M3_2_ACQUISITION_JOB_KIND: Final = "m3_2_acquisition"
+
+#: The truthful ``ops_ingestion_jobs.job_state`` for each terminal receipt completion status.
+#: A ``complete`` receipt beside a ``failed`` run row establishes nothing, and disagreement is
+#: never reconciled by preferring one surface over the other.
+_ACQUISITION_TERMINAL_JOB_STATES: Final[Mapping[str, str]] = {
+    "complete": "completed",
+    "failed": "failed",
+    "stopped_at_ceiling": "failed",
+    "stopped_by_gate": "failed",
+}
 
 TRANSITION_BACKUP_FILENAME: Final = "catalog_backup_0013.sqlite3"
 TRANSITION_EVENTS_FILENAME: Final = "catalog_transition_events.jsonl"
@@ -1235,6 +1331,37 @@ _E0_CONDITIONAL: Final[tuple[str, ...]] = (
     "failure",
 )
 
+#: Accepted Decision 099 R96, from the Decision 094 §8.1 and §9.2 conditional-presence tables:
+#: which terminal fields a **failed or interrupted** record may carry, keyed by the durable
+#: event that permits them. In-memory assignment is not evidence that an event became durable,
+#: so a disclosed failure derives its permitted field set from the ledger rather than from the
+#: order in which the execute path happened to assign things.
+_TRANSITION_EVENT_CONDITIONED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
+    "BACKUP_VERIFIED": ("backup",),
+    "POSTCHECK_PASSED": ("post_preexisting_content_sha256",),
+}
+
+_E0_EVENT_CONDITIONED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
+    "BACKUP_VERIFIED": ("backup",),
+    "ASSOCIATIONS_MATERIALIZED": ("association_totality",),
+    "VALIDATION_PASSED": (
+        "table_hashes",
+        "plan_parser_state_hash",
+        "e0_catalog_state_sha256",
+        "post_integrity",
+    ),
+}
+
+#: The fields §8.1 and §9.2 condition on ``failure.catalog_state_observed`` instead of on a
+#: durable event. ``applied_migrations`` is deliberately here and not above: §8.1 lets it lead
+#: the ledger by exactly one migration inside the disclosed commit-before-event window, so
+#: pruning it against ``MIGRATION_*_COMMITTED`` would delete the very disclosure that window
+#: exists to make.
+_CATALOG_OBSERVED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
+    "catalog_transition": ("post_migration_chain", "post_integrity", "applied_migrations"),
+    "m3_3_e0_offline_parse": ("post_migration_chain",),
+}
+
 _INTEGRITY_KEYS: Final[tuple[str, ...]] = (
     "quick_check",
     "integrity_check",
@@ -2061,17 +2188,363 @@ def _inspect_catalog(catalog_path: Path) -> _CatalogFacts:
     )
 
 
+def _effective_uid() -> int | None:
+    """The effective operator's numeric identity, or ``None`` when the platform will not say.
+
+    A platform that cannot answer must not silently pass the ownership half of §5.2 predicate
+    10, so the caller treats ``None`` as "ownership could not be established" and refuses --
+    the same rule :func:`_physical_memory_bytes` follows for the memory bound.
+    """
+    getter = getattr(os, "geteuid", None)
+    if getter is None:  # pragma: no cover - supported CI and production platforms are Unix
+        return None
+    return int(getter())
+
+
+def _short(value: object) -> str:
+    """The first twelve characters of a digest or identity, for a printed report.
+
+    Preflight output is read by an operator and reaches logs, so identities are rendered as
+    prefixes: enough to tell two apart, never a full secret-shaped value.
+    """
+    return f"{str(value)[:12]}…"
+
+
+def _pinned_receipt(
+    evidence_root: Path, pin: AcquisitionReceiptPin
+) -> tuple[Path, Mapping[str, object] | None, list[str]]:
+    """Load one pinned M3.2 receipt from its fixed public relative name, or refuse.
+
+    Four independent facts are required before the document is trusted at all: the artifact is a
+    **regular, non-symlinked, contained** file beneath the private root; its stored bytes hash to
+    the exact accepted digest; the accepted loader accepts its closed schema, canonical bytes,
+    and self-derived identity; and the identity it derives is the accepted one. Each catches
+    something the others do not -- a digest match cannot prove the schema, and a schema match
+    cannot prove the bytes were not reserialized.
+
+    No message quotes an :class:`OSError`, which ordinarily carries the offending filename and
+    would be exactly the private absolute path this boundary exists to keep out of output.
+    """
+    refusals: list[str] = []
+    path = resolve_within(
+        evidence_root, pin.relative_path, label=f"{pin.label} M3.2 completion receipt"
+    )
+    if path.is_symlink() or not path.is_file():
+        refusals.append(
+            f"the accepted M3.2 {pin.label} completion receipt is not a regular file at the "
+            f"fixed name {pin.relative_path}"
+        )
+        return path, None, refusals
+    try:
+        _refuse_symlinked_descent(evidence_root, path)
+        digest, _length = file_digest(path)
+    except E0Error as exc:
+        refusals.append(f"the accepted M3.2 {pin.label} completion receipt is not contained: {exc}")
+        return path, None, refusals
+    except OSError as exc:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} completion receipt could not be read "
+            f"({type(exc).__name__})"
+        )
+        return path, None, refusals
+    if digest != pin.file_sha256:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} completion receipt hashes to {_short(digest)}, not "
+            f"the accepted {_short(pin.file_sha256)}"
+        )
+        return path, None, refusals
+    try:
+        document = inspect_receipt(path)
+    except DisclosureDriftError as exc:
+        refusals.append(f"the accepted M3.2 {pin.label} completion receipt did not validate: {exc}")
+        return path, None, refusals
+    except OSError as exc:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} completion receipt could not be read "
+            f"({type(exc).__name__})"
+        )
+        return path, None, refusals
+    if str(document.get("receipt_id")) != pin.receipt_id:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} completion receipt derives identity "
+            f"{_short(document.get('receipt_id'))}, not the accepted {_short(pin.receipt_id)}"
+        )
+        return path, None, refusals
+    return path, document, refusals
+
+
+def _receipt_count(document: Mapping[str, object], key: str) -> int:
+    """One integer receipt field, narrowed from a parsed JSON document.
+
+    An absent optional count is ``0``, which is its arithmetic meaning. A present value of any
+    other type is ``-1``: the receipt loader has already refused a non-integer where the closed
+    schema types a count, so this cannot arise from a valid receipt -- and if it somehow did, a
+    negative contribution makes the cumulative comparison refuse rather than silently pass.
+    """
+    if key not in document:
+        return 0
+    value = document[key]
+    return value if isinstance(value, int) and not isinstance(value, bool) else -1
+
+
+def _receipt_fact_refusals(
+    pin: AcquisitionReceiptPin,
+    document: Mapping[str, object],
+    binding: AcquisitionCompletionBinding,
+    *,
+    is_head: bool,
+) -> list[str]:
+    """Refuse a validated receipt whose recorded facts are not the accepted ones."""
+    refusals: list[str] = []
+    if document.get("completion_status") != pin.completion_status:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} receipt records completion status "
+            f"{document.get('completion_status')!r}, not {pin.completion_status!r}"
+        )
+    if document.get("acquisition_window") != binding.acquisition_window:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} receipt records window "
+            f"{document.get('acquisition_window')!r}, not {binding.acquisition_window!r}"
+        )
+    if document.get("request_plan_sha256") != pin.request_plan_sha256:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} receipt executed plan "
+            f"{_short(document.get('request_plan_sha256'))}, not the accepted "
+            f"{_short(pin.request_plan_sha256)}"
+        )
+    if is_head:
+        if document.get("actual_logical_request_count") != binding.head_logical_request_count:
+            refusals.append(
+                f"the accepted M3.2 {pin.label} receipt records "
+                f"{document.get('actual_logical_request_count')!r} logical request(s), not "
+                f"{binding.head_logical_request_count}"
+            )
+        if document.get("actual_physical_attempt_count") != binding.head_physical_attempt_count:
+            refusals.append(
+                f"the accepted M3.2 {pin.label} receipt records "
+                f"{document.get('actual_physical_attempt_count')!r} physical attempt(s), not "
+                f"{binding.head_physical_attempt_count}"
+            )
+        if document.get("recovery_predecessor_receipt_id") != binding.predecessor.receipt_id:
+            refusals.append(
+                f"the accepted M3.2 {pin.label} receipt names predecessor "
+                f"{_short(document.get('recovery_predecessor_receipt_id'))}, not the accepted "
+                f"{_short(binding.predecessor.receipt_id)}"
+            )
+    elif "recovery_predecessor_receipt_id" in document:
+        refusals.append(
+            f"the accepted M3.2 {pin.label} receipt names a predecessor; it is the chain root "
+            f"and the accepted chain is exactly two receipts to root"
+        )
+    return refusals
+
+
+def _acquisition_run_refusals(
+    connection: sqlite3.Connection,
+    pin: AcquisitionReceiptPin,
+    document: Mapping[str, object],
+) -> list[str]:
+    """Refuse unless the fixed catalog carries exactly the accepted run row for this receipt.
+
+    Zero rows, more than one, a non-acquisition job kind, another window, an untruthful terminal
+    job state, a boundary instant that is not the receipt's, or an attempt ledger that disagrees
+    with the receipt's own accounting each refuse. Nothing is repaired, preferred, or averaged:
+    two durable surfaces that disagree establish nothing.
+    """
+    refusals: list[str] = []
+    rows = connection.execute(
+        "SELECT job_kind, stage, job_state, started_at_utc, finished_at_utc "
+        "FROM ops_ingestion_jobs WHERE job_id = ?",
+        (pin.run_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        refusals.append(
+            f"the fixed catalog carries {len(rows)} run row(s) for the accepted M3.2 "
+            f"{pin.label} run; exactly one is required"
+        )
+        return refusals
+    row = rows[0]
+    expected_state = _ACQUISITION_TERMINAL_JOB_STATES.get(str(document.get("completion_status")))
+    checks: tuple[tuple[str, object, object], ...] = (
+        ("job kind", row["job_kind"], M3_2_ACQUISITION_JOB_KIND),
+        ("stage", row["stage"], document.get("acquisition_window")),
+        ("job state", row["job_state"], expected_state),
+        ("start instant", row["started_at_utc"], document.get("started_at_utc")),
+        ("finish instant", row["finished_at_utc"], document.get("completed_at_utc")),
+    )
+    for name, found, expected in checks:
+        if expected is None or found != expected:
+            refusals.append(
+                f"the accepted M3.2 {pin.label} run row's {name} does not equal the receipt's"
+            )
+    attempts = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM ops_retrieval_attempts WHERE job_id = ?", (pin.run_id,)
+        ).fetchone()[0]
+    )
+    if attempts != document.get("actual_physical_attempt_count"):
+        refusals.append(
+            f"the accepted M3.2 {pin.label} run holds {attempts} durable attempt row(s) but its "
+            f"receipt records {document.get('actual_physical_attempt_count')!r}"
+        )
+    return refusals
+
+
+def _head_observation_refusals(
+    connection: sqlite3.Connection, binding: AcquisitionCompletionBinding
+) -> list[str]:
+    """Refuse unless the accepted head observation exists and is attributed to the head run.
+
+    ``census_plan_sources`` is the accepted run-to-observation attribution relation: it carries
+    ``census_run_id`` as an ``ops_ingestion_jobs.job_id`` and ``observation_id`` as a
+    ``census_source_observations`` reference, which is exactly the pair predicate 3 binds. One
+    observation may lawfully be planned under more than one instance of the same run, so the
+    rule is that **every** attributing run is the accepted one, and at least one exists.
+    """
+    refusals: list[str] = []
+    observations = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM census_source_observations WHERE observation_id = ?",
+            (binding.head_observation_id,),
+        ).fetchone()[0]
+    )
+    if observations != 1:
+        refusals.append(
+            f"the fixed catalog carries {observations} row(s) for the accepted M3.2 head "
+            f"observation; exactly one is required"
+        )
+    attributing = tuple(
+        str(row["census_run_id"])
+        for row in connection.execute(
+            "SELECT DISTINCT census_run_id FROM census_plan_sources WHERE observation_id = ?",
+            (binding.head_observation_id,),
+        ).fetchall()
+    )
+    if attributing != (binding.head.run_id,):
+        refusals.append(
+            f"the accepted M3.2 head observation's durable run attribution is not exactly the "
+            f"accepted T7 run; {len(attributing)} attributing run(s) were found"
+        )
+    return refusals
+
+
+def _acquisition_completion_binding(
+    *,
+    evidence_root: Path,
+    catalog_path: Path | None,
+    binding: AcquisitionCompletionBinding,
+) -> tuple[list[str], dict[str, object]]:
+    """Decision 094 §5.2 predicate 3: the accepted M3.2 completion receipt and catalog binding.
+
+    Strictly read-only and source-local (accepted Decision 099 R97). It reuses exactly two
+    accepted mechanics -- :func:`~disclosure_drift.m3.receipt.inspect_receipt` for a receipt's
+    schema, canonical bytes, and self-derived identity, and the Decision-063
+    :func:`~disclosure_drift.m3.receipt.resolve_predecessor_receipt` for cross-namespace chain
+    resolution -- and imports no recovery module, acquisition orchestrator, request-plan builder,
+    source registry, client, transport, socket, HTTP library, or SEC route.
+
+    Nothing here is discovered. The chain, its two identities, the window, the head's completion
+    facts, the accepted observation, and the cumulative attempt total are all fixed by
+    :data:`M3_2_COMPLETION_BINDING`: a predicate that searched for "the most recent receipt"
+    would validate whatever it found, which is the opposite of a provenance binding.
+
+    Returns:
+        The collected refusals and the non-secret facts the report prints.
+    """
+    refusals: list[str] = []
+    facts: dict[str, object] = {
+        "m3_2_completion_receipt_head": _short(binding.head.receipt_id),
+        "m3_2_completion_receipt_root": _short(binding.predecessor.receipt_id),
+    }
+
+    head_path, head, head_refusals = _pinned_receipt(evidence_root, binding.head)
+    root_path, root, root_refusals = _pinned_receipt(evidence_root, binding.predecessor)
+    refusals.extend(head_refusals)
+    refusals.extend(root_refusals)
+    if head is None or root is None:
+        facts["m3_2_completion_binding"] = "REFUSED"
+        return refusals, facts
+
+    refusals.extend(_receipt_fact_refusals(binding.head, head, binding, is_head=True))
+    refusals.extend(_receipt_fact_refusals(binding.predecessor, root, binding, is_head=False))
+
+    # The chain is resolved by the accepted resolver rather than assumed from the two pins: that
+    # is what refuses a missing, ambiguous, or substituted predecessor, and it is the surface
+    # Decision 063 corrected for exactly this two-namespace chain.
+    try:
+        resolved_path, resolved = resolve_predecessor_receipt(
+            binding.predecessor.receipt_id,
+            head_directory=head_path.parent,
+            evidence_root=evidence_root,
+        )
+    except DisclosureDriftError as exc:
+        refusals.append(f"the accepted M3.2 completion chain did not resolve: {exc}")
+    except OSError as exc:
+        refusals.append(
+            f"the accepted M3.2 completion chain could not be read ({type(exc).__name__})"
+        )
+    else:
+        if resolved_path != root_path or canonical_bytes(resolved) != canonical_bytes(root):
+            refusals.append(
+                "the accepted M3.2 predecessor identity resolves to a receipt other than the "
+                "accepted T6 receipt at its fixed name"
+            )
+
+    # Decision 055 §7.5's cumulative rule, restated rather than imported: the chain's own
+    # attempts plus the carried-forward baseline of the single no-predecessor root, added
+    # exactly once. The head's baseline is deliberately not added -- a resumed head inherits
+    # from its predecessor, whose attempts are already in the sum.
+    cumulative = (
+        _receipt_count(head, "actual_physical_attempt_count")
+        + _receipt_count(root, "actual_physical_attempt_count")
+        + _receipt_count(root, "consumed_request_count_carried_forward")
+    )
+    facts["m3_2_cumulative_physical_attempts"] = cumulative
+    if cumulative != binding.cumulative_physical_attempt_count:
+        refusals.append(
+            f"the accepted M3.2 chain accounts for {cumulative} cumulative physical attempt(s), "
+            f"not the accepted {binding.cumulative_physical_attempt_count}"
+        )
+
+    if catalog_path is None:
+        refusals.append(
+            "the accepted M3.2 completion receipts could not be bound to the fixed catalog "
+            "because the catalog was not measurable"
+        )
+    else:
+        try:
+            with _read_only(catalog_path) as connection:
+                refusals.extend(_acquisition_run_refusals(connection, binding.head, head))
+                refusals.extend(_acquisition_run_refusals(connection, binding.predecessor, root))
+                refusals.extend(_head_observation_refusals(connection, binding))
+        except (DisclosureDriftError, sqlite3.Error) as exc:
+            refusals.append(f"the accepted M3.2 catalog binding could not be read: {exc}")
+        except OSError as exc:
+            refusals.append(
+                f"the accepted M3.2 catalog binding could not be read ({type(exc).__name__})"
+            )
+
+    facts["m3_2_completion_binding"] = "REFUSED" if refusals else "validated"
+    return refusals, facts
+
+
 def _shared_preflight(
     *,
     evidence_root: Path,
     namespace: str,
     config: object,
     expected_head: int,
+    lease_check: bool = True,
 ) -> tuple[list[str], dict[str, object], _CatalogFacts | None]:
     """The predicates both machines share, measured once.
 
     Every refusal is collected rather than raised at the first failure: an operator fixing one
     predicate should not have to rerun to discover the next three.
+
+    ``lease_check`` is the accepted Decision 099 R98 replacement for filtering refusal text: the
+    under-lease recheck passes ``False`` because **this process** now holds the lease predicate 9
+    would otherwise be testing, and that is a control-flow fact the caller knows rather than
+    something to be recovered from an English message. No other predicate is ever omitted.
     """
     refusals: list[str] = []
     facts: dict[str, object] = {}
@@ -2134,23 +2607,47 @@ def _shared_preflight(
             f"exceeds the ceiling {measured.estimate.memory_ceiling}"
         )
 
-    lock_directory = catalog_path.parent
-    present, recorded_state, shareable = _lease_state(lock_directory)
-    facts["writer_lease"] = "absent" if not present else (recorded_state or "unreadable")
-    if present and not shareable:
-        refusals.append(
-            "another writer holds the catalog lease; elapsed time never permits takeover"
-        )
-    if present and recorded_state == "held":
-        refusals.append("the recorded catalog writer lease state is 'held'")
+    if lease_check:
+        lock_directory = catalog_path.parent
+        present, recorded_state, shareable = _lease_state(lock_directory)
+        facts["writer_lease"] = "absent" if not present else (recorded_state or "unreadable")
+        if present and not shareable:
+            refusals.append(
+                "another writer holds the catalog lease; elapsed time never permits takeover"
+            )
+        if present and recorded_state == "held":
+            refusals.append("the recorded catalog writer lease state is 'held'")
+    else:
+        facts["writer_lease"] = "held by this run"
 
     run_directory = namespace_directory(evidence_root, namespace)
     facts["run_namespace"] = namespace
     if run_directory.exists() or run_directory.is_symlink():
         refusals.append(f"run namespace {namespace!r} already exists; it is create-once")
+    # §5.2 predicate 10's second half, in full: the parent must **already** be a real directory
+    # owned by the effective operator. Creating it here, or accepting an unowned one, would each
+    # be a permissive reading of a predicate whose whole point is that the governed artifacts
+    # land somewhere the operator already controls.
     parent = runs_directory(evidence_root)
-    if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
-        refusals.append("the private root's runs path is not a plain existing directory")
+    if parent.is_symlink() or not parent.is_dir():
+        facts["runs_parent"] = "unsound"
+        refusals.append(
+            "the private root's runs directory must already exist as a real, non-symlinked "
+            "directory before a run namespace may be created"
+        )
+    else:
+        operator = _effective_uid()
+        owner = parent.stat().st_uid
+        facts["runs_parent"] = "owned by the operator" if operator == owner else "unsound"
+        if operator is None:
+            refusals.append(
+                "the effective operator identity could not be established, so the private "
+                "root's runs directory cannot be proved to be owned by the operator"
+            )
+        elif operator != owner:
+            refusals.append(
+                "the private root's runs directory is not owned by the effective operator"
+            )
 
     ok, available, required = _disk_predicate(catalog_path, measured.catalog_bytes)
     facts["free_disk_bytes"] = available
@@ -2171,7 +2668,12 @@ def transition_preflight(
     config: object,
     namespace: str = TRANSITION_RUN_NAMESPACE,
 ) -> PreflightReport:
-    """Evaluate every Decision 094 §5.2 predicate. Strictly read-only.
+    """Evaluate every Decision 094 §5.2 predicate, all thirteen. Strictly read-only.
+
+    Predicate 3 -- the accepted M3.2 acquisition completion receipt and catalog binding -- is
+    :func:`_acquisition_completion_binding`, added by accepted Decision 099 R97. The claim in
+    this docstring's first line is therefore exact rather than aspirational; before that
+    correction it was twelve of thirteen, which is the Decision 098 MAJOR-2 finding.
 
     Creates **nothing**: no directory, lock, backup, receipt, ledger, temporary file, schema
     row, or catalog page. That is not a convention here -- the catalog is opened through
@@ -2184,6 +2686,13 @@ def transition_preflight(
         namespace=namespace,
         expected_head=TRANSITION_SOURCE_HEAD,
     )
+    binding_refusals, binding_facts = _acquisition_completion_binding(
+        evidence_root=evidence_root,
+        catalog_path=None if measured is None else measured.catalog_path,
+        binding=M3_2_COMPLETION_BINDING,
+    )
+    facts.update(binding_facts)
+    refusals.extend(binding_refusals)
     facts["target_migration_head"] = f"{TRANSITION_TARGET_HEAD:04d}"
     try:
         targets = _packaged_target_migrations()
@@ -2461,6 +2970,55 @@ def _freeze(
     )
 
 
+def _durable_event_types(path: Path, *, kind: str) -> frozenset[str] | None:
+    """The event types the ledger **durably** holds, or ``None`` if it cannot be verified.
+
+    An absent ledger file is not an unverifiable one: it is the verified fact that no event
+    became durable, and the projection below then permits no event-conditioned field at all. A
+    ledger that exists but is truncated, malformed, reordered, or unchained is a different
+    answer entirely -- nothing can be concluded about which events are durable, so the caller
+    must not manufacture a terminal record over it (accepted Decision 099 R96).
+    """
+    if not path.exists():
+        return frozenset()
+    try:
+        events = read_event_ledger(path, kind=kind)
+    except (E0Error, OSError):
+        return None
+    return frozenset(str(event["event_type"]) for event in events)
+
+
+def _project_failure_terminal(
+    terminal: dict[str, object],
+    *,
+    record_type: str,
+    event_types: frozenset[str],
+    catalog_observed: bool,
+) -> None:
+    """Remove every conditional field whose durable condition is absent (Decision 099 R96).
+
+    The execute paths assign an event-conditioned value **before** appending the event that
+    permits it -- necessarily so, since the event's own ``details`` carry that value. A failure
+    inside that window would otherwise leave a create-once terminal record carrying a field its
+    own closed validator refuses, which is Decision 098 MAJOR-1. Deriving the permitted set from
+    the ledger closes the whole class rather than the two windows that were reproduced: assignment
+    order stops being evidence of durability, because durability is read from the ledger.
+    """
+    conditioned = (
+        _TRANSITION_EVENT_CONDITIONED_FIELDS
+        if record_type == "catalog_transition"
+        else _E0_EVENT_CONDITIONED_FIELDS
+    )
+    for event_type, fields in conditioned.items():
+        if event_type in event_types:
+            continue
+        for field_name in fields:
+            terminal.pop(field_name, None)
+    if not catalog_observed:
+        for field_name in _CATALOG_OBSERVED_FIELDS[record_type]:
+            terminal.pop(field_name, None)
+
+
 def _disclose_failure(
     *,
     directory: Path,
@@ -2510,9 +3068,6 @@ def _disclose_failure(
     terminal["status"] = status
     terminal["completed_at_utc"] = completed
     terminal["failure"] = failure
-    if not catalog_observed:
-        for key in ("post_migration_chain", "post_integrity", "applied_migrations"):
-            terminal.pop(key, None)
 
     with suppress(E0Error, OSError):
         ledger.append(
@@ -2520,6 +3075,24 @@ def _disclose_failure(
             dict(failure) if interrupted else {"reason_code": reason_code, "reason_detail": detail},
             observed_at_utc=completed,
         )
+
+    # Accepted Decision 099 R96. The ledger is read back and fully verified from disk before a
+    # terminal is written over it, and the record's event-conditioned fields are derived from
+    # the events that are actually durable there.
+    kind = "TRANSITION" if is_transition else "E0"
+    durable = _durable_event_types(ledger.path, kind=kind)
+    if durable is None:
+        # The ledger cannot be verified, so which events are durable is unknown and no lawful
+        # terminal can be projected. The surviving artifacts stay UNDETERMINED / NOT COMPLETE,
+        # which is what §5.4 already requires, and the original exception still propagates.
+        return
+    _project_failure_terminal(
+        terminal,
+        record_type=record_type,
+        event_types=durable,
+        catalog_observed=catalog_observed,
+    )
+
     receipt = ExecutionReceiptV4(
         command_name=TRANSITION_COMMAND_NAME if is_transition else E0_COMMAND_NAME,
         command_version=TRANSITION_COMMAND_VERSION if is_transition else E0_COMMAND_VERSION,
@@ -2620,6 +3193,7 @@ def transition_execute(
                 config=config,
                 namespace=namespace,
                 expected_head=TRANSITION_SOURCE_HEAD,
+                require_acquisition_binding=True,
             )
             terminal["pre_migration_chain"] = list(measured.applied)
             terminal["precondition_counts"] = dict(measured.empty_state)
@@ -2674,10 +3248,22 @@ def transition_execute(
                 apply_migrations(writer.connection, prefix)
                 catalog_observed = True
                 chain = applied_versions(writer.connection)
+                report = integrity_report(writer.connection)
+                # `catalog_state_observed` is now true, and §8.1 conditions these three fields on
+                # exactly that. They are recorded **before** the two refusals below, so a refusal
+                # that fires after a commit discloses the state it actually observed instead of
+                # leaving a create-once record its own validator refuses. The success path
+                # recomputes and overwrites all three from the post-loop measurement.
+                terminal["applied_migrations"] = list(applied_records)
+                terminal["post_migration_chain"] = list(chain)
+                terminal["post_integrity"] = {
+                    "quick_check": report.quick_check,
+                    "integrity_check": report.integrity_check,
+                    "foreign_key_violations": report.foreign_key_violations,
+                }
                 if chain[-1] != migration.version:
                     message = f"applying {migration.version:04d} did not move the chain head"
                     raise PreflightRefusalError(message)
-                report = integrity_report(writer.connection)
                 if not report.passed:
                     message = f"integrity failed after migration {migration.version:04d}"
                     raise PreflightRefusalError(message)
@@ -2794,24 +3380,38 @@ def _recheck_under_lease(
     config: object,
     namespace: str,
     expected_head: int,
+    require_acquisition_binding: bool,
 ) -> _CatalogFacts:
     """Repeat every mutable predicate while the writer lease is held (§5.3 item 2).
 
-    Predicate 9 -- the lease itself -- is deliberately dropped: this process now holds the
-    lease it would otherwise be testing, so leaving the check in would refuse every real run.
-    Any other divergence refuses **before** a namespace, a backup, or a catalog page exists.
+    Predicate 9 -- the lease itself -- is the **only** predicate omitted, and it is omitted
+    structurally: ``lease_check=False`` says "this process holds the lease", which is a fact the
+    caller knows for certain. Accepted Decision 099 R98 replaced the previous English-substring
+    filter over refusal text, whose correctness depended on message wording and whose
+    sufficiency depended on an unasserted platform property. Any other divergence refuses
+    **before** a namespace, a backup, or a catalog page exists.
+
+    ``require_acquisition_binding`` carries §5.3 item 2's own scope: it repeats §5.2's
+    predicates, so the transition rechecks predicate 3 under the lease. E0's predicate list is
+    §9.1, which names the §5.2 disk and lock predicates and not the M3.2 completion binding, so
+    E0 passes ``False`` rather than inheriting a predicate its own ruling does not state.
     """
     refusals, _, measured = _shared_preflight(
         evidence_root=evidence_root,
         config=config,
         namespace=namespace,
         expected_head=expected_head,
+        lease_check=False,
     )
-    remaining = tuple(
-        refusal for refusal in refusals if "writer holds the catalog lease" not in refusal
-    )
-    if remaining:
-        message = "under-lease recheck diverged: " + "; ".join(remaining)
+    if require_acquisition_binding:
+        binding_refusals, _ = _acquisition_completion_binding(
+            evidence_root=evidence_root,
+            catalog_path=None if measured is None else measured.catalog_path,
+            binding=M3_2_COMPLETION_BINDING,
+        )
+        refusals.extend(binding_refusals)
+    if refusals:
+        message = "under-lease recheck diverged: " + "; ".join(refusals)
         raise PreflightRefusalError(message)
     if measured is None:  # pragma: no cover - the recheck above already refused
         message = "the accepted catalog could not be measured under the lease"
@@ -3008,6 +3608,7 @@ def e0_execute(
                 config=config,
                 namespace=namespace,
                 expected_head=TRANSITION_TARGET_HEAD,
+                require_acquisition_binding=False,
             )
             with _read_only(catalog_path) as before:
                 input_digest = input_observation_set_digest(before)
@@ -3053,6 +3654,12 @@ def e0_execute(
 
             interruption = "during_e0_source_parse"
             catalog_observed = True
+            # §9.2 conditions `post_migration_chain` on `failure.catalog_state_observed`, which
+            # is now true for the whole remaining run. E0 applies no migration, so the chain the
+            # run observed under its own lease is the chain to disclose; recording it here is
+            # what makes every failure from this point on representable rather than a record its
+            # own validator refuses. The success path re-measures and overwrites it.
+            terminal["post_migration_chain"] = list(measured.applied)
             tree = DataTree(evidence_root if data_root is None else data_root)
             report = run_offline_metadata_parse(writer=writer, tree=tree)
 
@@ -3221,6 +3828,138 @@ class VerifyReport:
         return tuple(rendered)
 
 
+def _backup_refusals(directory: Path, document: Mapping[str, object], *, kind: str) -> list[str]:
+    """Reproduce the run's persisted content identity from the backup it actually wrote.
+
+    The backup is the transition's (and E0's) durable content identity: the terminal records its
+    byte length, file digest, and full logical catalog digest, and the execute path proved that
+    digest equal to the source snapshot's before any migration ran. Recomputing all three here
+    is what makes ``backup`` a checked claim rather than a recorded one.
+
+    Only the artifact's fixed **name** is taken from the recorded relative path; the directory
+    is the namespace already resolved, so no path in the record can redirect this read.
+    """
+    recorded = document.get("backup")
+    if not isinstance(recorded, Mapping):
+        return []
+    backup_path = directory / str(recorded["relative_path"]).rsplit("/", 1)[-1]
+    if backup_path.is_symlink() or not backup_path.is_file():
+        return ["the run's verified backup is absent or is not a regular file"]
+    digest, length = file_digest(backup_path)
+    if digest != recorded["file_sha256"] or length != recorded["byte_length"]:
+        return ["the run's verified backup no longer hashes to the identity the terminal froze"]
+    with _read_only(backup_path) as backup:
+        logical = catalog_snapshot_digest(backup).require_full()
+    refusals: list[str] = []
+    if logical != recorded["catalog_logical_sha256"]:
+        refusals.append(
+            "the run's verified backup no longer reproduces the logical catalog digest the "
+            "terminal froze"
+        )
+    recorded_pre = document.get(
+        "pre_catalog_logical_sha256" if kind == "TRANSITION" else "pre_e0_catalog_logical_sha256"
+    )
+    if recorded_pre is not None and logical != recorded_pre:
+        refusals.append(
+            "the run's verified backup no longer reproduces the pre-run catalog logical digest "
+            "the terminal froze"
+        )
+    return refusals
+
+
+def _e0_identity_refusals(
+    connection: sqlite3.Connection, document: Mapping[str, object]
+) -> list[str]:
+    """Independently reproduce the §9.4 governed-state identities from the fixed catalog.
+
+    Only when the terminal carries them: they are permitted exactly when ``VALIDATION_PASSED``
+    is durable, so a disclosed failure before that boundary has nothing to reproduce and is not
+    made to look as though it does.
+    """
+    if "e0_catalog_state_sha256" not in document:
+        return []
+    table_hashes, plan_hash, state_hash = _governed_state_identity(connection)
+    refusals: list[str] = []
+    if state_hash != document["e0_catalog_state_sha256"]:
+        refusals.append(
+            "the fixed catalog no longer reproduces the E0 governed catalog-state identity"
+        )
+    if plan_hash != document.get("plan_parser_state_hash"):
+        refusals.append("the fixed catalog no longer reproduces the E0 plan parser-state identity")
+    if list(table_hashes) != document.get("table_hashes"):
+        refusals.append("the fixed catalog no longer reproduces the E0 table hash records")
+    return refusals
+
+
+def _catalog_state_refusals(
+    *, evidence_root: Path, directory: Path, document: Mapping[str, object], kind: str
+) -> tuple[list[str], dict[str, object]]:
+    """Compare the fixed catalog's current state with what this terminal record froze (§7.2).
+
+    Accepted Decision 099 R98, correcting Decision 098 MINOR-2: §7.2's verify row lists "catalog
+    state" among what verify validates, and the previous implementation never opened the catalog
+    at all -- so a complete terminal verified PASS even after the accepted catalog had drifted
+    from the chain and integrity report it recorded.
+
+    Strictly read-only, through ``SQLITE_OPEN_READONLY``, exactly as preflight is. Each
+    comparison is made only where the terminal actually asserts the fact, because a failed run
+    that never observed catalog state asserts nothing about it and must not be measured as if
+    it had.
+    """
+    refusals: list[str] = []
+    facts: dict[str, object] = {}
+    # Counted rather than assumed: a disclosed failure that never observed catalog state asserts
+    # nothing to compare, and reporting "matches" for zero comparisons would be an overclaim of
+    # exactly the kind this correction exists to remove.
+    compared = 0
+    try:
+        catalog_path = resolve_within(
+            evidence_root, OPERATIONAL_CATALOG_RELATIVE_PATH, label="operational catalog"
+        )
+        if not catalog_path.exists():
+            refusals.append("the fixed catalog is absent beneath the resolved private root")
+        else:
+            _refuse_symlinked_descent(evidence_root, catalog_path)
+            with _read_only(catalog_path) as connection:
+                chain = list(applied_versions(connection))
+                report = integrity_report(connection)
+                facts["catalog_migration_head"] = f"{chain[-1]:04d}" if chain else "none"
+                facts["catalog_integrity_check"] = report.integrity_check
+                if "post_migration_chain" in document:
+                    compared += 1
+                    if document["post_migration_chain"] != chain:
+                        refusals.append(
+                            "the fixed catalog's applied migration chain is no longer the chain "
+                            "this terminal record froze"
+                        )
+                recorded_integrity = document.get("post_integrity")
+                if isinstance(recorded_integrity, Mapping):
+                    compared += 1
+                    if dict(recorded_integrity) != {
+                        "quick_check": report.quick_check,
+                        "integrity_check": report.integrity_check,
+                        "foreign_key_violations": report.foreign_key_violations,
+                    }:
+                        refusals.append(
+                            "the fixed catalog's integrity report is no longer the report this "
+                            "terminal record froze"
+                        )
+                if kind == "E0" and "e0_catalog_state_sha256" in document:
+                    compared += 3
+                    refusals.extend(_e0_identity_refusals(connection, document))
+            if isinstance(document.get("backup"), Mapping):
+                compared += 1
+                refusals.extend(_backup_refusals(directory, document, kind=kind))
+    except (DisclosureDriftError, sqlite3.Error) as exc:
+        refusals.append(f"the fixed catalog state could not be verified: {exc}")
+    except OSError as exc:
+        # An OSError ordinarily names the offending file, which here would be a private path.
+        refusals.append(f"the fixed catalog state could not be verified ({type(exc).__name__})")
+    facts["catalog_state_comparisons"] = compared
+    facts["catalog_state_compared"] = "REFUSED" if refusals else "consistent"
+    return refusals, facts
+
+
 def _verify(
     *,
     evidence_root: Path,
@@ -3229,7 +3968,7 @@ def _verify(
     terminal_filename: str,
     events_filename: str,
 ) -> VerifyReport:
-    """Validate one durable namespace without changing a byte of it."""
+    """Validate one durable namespace, and the catalog state it recorded, changing no byte."""
     facts: dict[str, object] = {"run_namespace": namespace}
     directory = namespace_directory(evidence_root, namespace)
     if not directory.is_dir():
@@ -3267,8 +4006,6 @@ def _verify(
     if not receipt_path.exists():
         refusals.append("the run's execution receipt is absent")
     else:
-        from disclosure_drift.m3.receipt import inspect_receipt
-
         try:
             receipt = inspect_receipt(receipt_path)
         except (DisclosureDriftError, OSError) as exc:
@@ -3281,6 +4018,11 @@ def _verify(
             refusals.append(f"{artifact.name} is not mode 0600")
     if (directory.stat().st_mode & 0o777) != _DIRECTORY_MODE:
         refusals.append("the run directory is not mode 0700")
+    catalog_refusals, catalog_facts = _catalog_state_refusals(
+        evidence_root=evidence_root, directory=directory, document=document, kind=kind
+    )
+    facts.update(catalog_facts)
+    refusals.extend(catalog_refusals)
     return VerifyReport(
         determined=True,
         passed=not refusals and document["status"] == "complete",
@@ -3292,10 +4034,12 @@ def _verify(
 def transition_verify(
     *, evidence_root: Path, namespace: str = TRANSITION_RUN_NAMESPACE
 ) -> VerifyReport:
-    """Validate the transition namespace, receipt, ledger, terminal, and identities.
+    """Validate the transition namespace, receipt, ledger, terminal, catalog state, identities.
 
     Strictly read-only. It repairs nothing, resumes nothing, and restores nothing: a defect
-    found here is preserved and returned to the owner (§11).
+    found here is preserved and returned to the owner (§11). The fixed catalog is opened
+    read-only and its current chain and integrity are compared with what the terminal froze, and
+    the run's verified backup is re-hashed against the content identity the terminal recorded.
     """
     return _verify(
         evidence_root=evidence_root,
@@ -3307,7 +4051,13 @@ def transition_verify(
 
 
 def e0_verify(*, evidence_root: Path, namespace: str = E0_RUN_NAMESPACE) -> VerifyReport:
-    """Validate the E0 namespace, receipt, ledger, terminal, and identities. Read-only."""
+    """Validate the E0 namespace, receipt, ledger, terminal, catalog state, and identities.
+
+    Strictly read-only. In addition to the shared checks, the §9.4 governed-state identities are
+    **independently reproduced** from the fixed catalog whenever the terminal carries them, so a
+    post-freeze mutation of any of the sixteen tables or of the plan projection is detected here
+    rather than assumed away.
+    """
     return _verify(
         evidence_root=evidence_root,
         namespace=namespace,

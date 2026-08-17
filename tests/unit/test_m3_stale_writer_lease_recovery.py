@@ -6,7 +6,15 @@ the accepted private evidence root; nothing opens the accepted operational catal
 reads, writes, or approximates the real stale lease this capability was built for. The fixtures
 build their own catalog from the packaged migrations and delete it with the temporary directory.
 
-Two conventions carry most of the weight.
+Three conventions carry most of the weight.
+
+**Test-scoped activation.** :data:`~disclosure_drift.m3.e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY`
+ships ``None`` under accepted Decision 104, so ``execute`` is not reachable as the repository
+stands. Every test that drives the execute machine therefore injects its own disposable token —
+through the ``activated`` fixture, or by ``monkeypatch`` where the token's identity is itself the
+subject — and never through the shipped constant. Two tests deliberately do the opposite and read
+the shipped value rather than setting it: ``test_the_shipped_activation_constant_is_disabled`` and
+``test_execute_is_unreachable_under_the_shipped_activation_constant``.
 
 **A real dead process, not an invented number.** The "recorded writer is gone" predicate is
 proved against the PID of a subprocess this module started and reaped, so ``os.kill(pid, 0)``
@@ -956,7 +964,15 @@ def test_the_record_binds_the_governed_authority_and_states_zero_network_activit
     config: _Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R-T5: the authority identity is bound as a digest, and never as its value."""
+    """R-T5: the authority identity is bound as a digest, and never as its value.
+
+    Decision 104 adds the negative half. The record must bind the authority that was
+    **actually active for this execution** — the value ``_require_activation`` returned —
+    rather than a literal the record builder carries. Asserting only that some 64-character
+    digest is present would pass equally well against a hardcoded one, so the test pins the
+    digest to the injected token *and* requires it to differ from the Decision 103 literal,
+    which is the exact value a hardcoding would most plausibly have used.
+    """
     import hashlib
 
     authority = "TEST-ONLY-DISPOSABLE-AUTHORITY"
@@ -966,6 +982,8 @@ def test_the_record_binds_the_governed_authority_and_states_zero_network_activit
 
     assert document["owner_authority_sha256"] == hashlib.sha256(authority.encode()).hexdigest()
     assert authority not in json.dumps(document)
+    d103_literal = "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
+    assert document["owner_authority_sha256"] != hashlib.sha256(d103_literal.encode()).hexdigest()
     assert document["actual_logical_request_count"] == 0
     assert document["actual_physical_attempt_count"] == 0
     assert document["record_type"] == e0.LEASE_RECOVERY_RECORD_TYPE
@@ -1073,43 +1091,144 @@ def test_the_e0_lease_predicate_clears_once_the_stale_lease_is_reconciled(
     assert not any("lease state is 'held'" in item for item in after.refusals)
 
 
-def test_execute_is_not_reachable_while_its_activation_constant_is_none(
+def test_execute_is_unreachable_under_the_shipped_activation_constant(
     evidence_root: Path,
     catalog: Path,
     stale_lease: Path,
     config: _Config,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """R6: the recovery is gated by its own source-bound constant, like every write mode.
+    """R6 and Decision 104: the shipped constant refuses ``execute``, and touches nothing.
 
-    The refusal precedes the private root, the lease, and the catalog: whether the stage is
-    enabled depends on the constant and on nothing else.
+    Deliberately **not** monkeypatched. Every other execute test in this file injects a
+    disposable token, which is the only honest way to exercise the machine; this one is the
+    complement, and its whole value is that it runs the door the repository actually ships.
+    A `monkeypatch.setattr(..., None)` here would prove the gate works when told to be
+    ``None`` — the shipped value is the thing in question, so it is read rather than set.
+
+    Two invocation shapes, because the refusal has to be unconditional in both. With the
+    private root unset, exit ``3`` must win over the configuration error the unset root would
+    otherwise produce. With it set, exit ``3`` must still win, and the fully populated
+    evidence root must come through byte-identical: a refusal that read the lease, took the
+    lock, or created the recovery namespace before answering would leave a trace here.
     """
-    monkeypatch.setattr(e0, "STALE_WRITER_LEASE_RECOVERY_AUTHORITY", None)
-    before = stale_lease.read_bytes()
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
+    before = _inventory(evidence_root)
+    checkout = tmp_path / "checkout"
 
     with pytest.raises(e0.StageNotEnabledError, match="is None"):
         _execute(evidence_root, catalog, config)
 
-    result = e0.run_reconcile_writer_lease_command(
+    unset_root = e0.run_reconcile_writer_lease_command(
         mode="execute",
         config=config,
-        repository_root=tmp_path / "checkout",
+        repository_root=checkout,
         environ={},
     )
-    assert result.exit_code == e0.EXIT_STAGE_NOT_ENABLED
-    assert any("not enabled" in line for line in result.lines)
-    assert stale_lease.read_bytes() == before
+    assert unset_root.exit_code == e0.EXIT_STAGE_NOT_ENABLED
+    assert any("not enabled" in line for line in unset_root.lines)
+    assert not any(EVIDENCE_ROOT_ENV in line for line in unset_root.lines)
 
-
-def test_the_shipped_activation_constant_matches_the_governing_record() -> None:
-    """R6/R7: asserted against the source file, so a runtime override cannot satisfy it."""
-    source = Path(e0.__file__).read_text(encoding="utf-8")
-    assert 'STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = (\n    "M3_3_D103_' in source
-    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY == (
-        "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
+    resolvable_root = e0.run_reconcile_writer_lease_command(
+        mode="execute",
+        config=config,
+        repository_root=checkout,
+        environ={EVIDENCE_ROOT_ENV: str(evidence_root)},
     )
+    assert resolvable_root.exit_code == e0.EXIT_STAGE_NOT_ENABLED
+    assert any("not enabled" in line for line in resolvable_root.lines)
+
+    assert stale_lease.read_bytes() == before[str(stale_lease.relative_to(evidence_root))]
+    assert _inventory(evidence_root) == before
+    assert not e0.namespace_directory(evidence_root, e0.LEASE_RECOVERY_RUN_NAMESPACE).exists()
+
+
+def test_a_passing_preflight_neither_activates_nor_implies_mutation_authority(
+    evidence_root: Path,
+    catalog: Path,
+    stale_lease: Path,
+    config: _Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decision 104: preflight stays read-only, and a PASS confers nothing.
+
+    This is the shape most likely to be misread by an operator: every predicate holds, the
+    ladder reports ``PASS``, and the obvious next inference is that the reconciliation is
+    therefore available. It is not, and the report says so on its own face —
+    ``reconciliation_enabled`` is rendered as a measured fact, so a PASS that an operator can
+    read is never a PASS they can act on while the constant is ``None``.
+
+    Running preflight first and execute immediately after, in one test against one root, is
+    the point: a passing preflight is not a reservation, not a handshake, and not a state the
+    following execute can consume.
+    """
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
+    before = _inventory(evidence_root)
+
+    report = _preflight(evidence_root, catalog, config)
+    assert report.passed, report.refusals
+    assert report.facts["reconciliation_enabled"] is False
+    assert any("reconciliation_enabled" in line and "False" in line for line in report.lines)
+
+    # The command runner takes no catalog or digest option by design (R6), so the accepted
+    # identity policy reaches it as a keyword default, substituted here for the disposable
+    # catalog's own digests exactly as the operator-surface test does.
+    logical, observations = _identity(catalog)
+    for function in (e0.reconcile_writer_lease_preflight, e0.reconcile_writer_lease_execute):
+        defaults = function.__kwdefaults__
+        monkeypatch.setitem(defaults, "expected_catalog_logical_sha256", logical)
+        monkeypatch.setitem(defaults, "expected_input_observation_set_sha256", observations)
+    environ = {EVIDENCE_ROOT_ENV: str(evidence_root)}
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    passed = e0.run_reconcile_writer_lease_command(
+        mode="preflight", config=config, repository_root=checkout, environ=environ
+    )
+    assert passed.exit_code == e0.EXIT_OK
+    assert any("preflight: PASS" in line for line in passed.lines)
+    assert any("reconciliation_enabled" in line and "False" in line for line in passed.lines)
+
+    refused = e0.run_reconcile_writer_lease_command(
+        mode="execute", config=config, repository_root=checkout, environ=environ
+    )
+    assert refused.exit_code == e0.EXIT_STAGE_NOT_ENABLED
+
+    assert _inventory(evidence_root) == before
+    assert not e0.namespace_directory(evidence_root, e0.LEASE_RECOVERY_RUN_NAMESPACE).exists()
+
+
+def test_the_shipped_activation_constant_is_disabled() -> None:
+    """Accepted Decision 104: the recovery ships **disabled**, and no token ships with it.
+
+    Decision 103 authorizes this surface's implementation and expressly withholds authority
+    to reconcile the real lease. Shipping the literal its §8 illustrates would have granted
+    in source exactly what the record withheld, which is the defect Decision 104 corrects. A
+    later exact owner instrument replaces this literal to authorize one real reconciliation.
+
+    Three assertions, none of them redundant. The source assertion is the load-bearing one: a
+    runtime check alone would pass against a module some other test had already overridden.
+    The runtime check catches a reassignment made elsewhere in the module rather than at the
+    definition. And the token's *absence* from the whole file is what stops the value being
+    reintroduced under another name, in a default argument, or in a comment a later reader
+    could mistake for the shipped state.
+
+    The disabled state is asserted here as a property of the shipped source, and separately
+    exercised as behaviour by
+    :func:`test_execute_is_unreachable_under_the_shipped_activation_constant`.
+    """
+    source = Path(e0.__file__).read_text(encoding="utf-8")
+    assert "STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = None\n" in source
+    assert "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
+
+    # Decision 104 corrects one constant and nothing around it. The other two activation
+    # constants are governed by Decision 101 and are asserted in full by
+    # `test_m3_e0.py::test_the_shipped_activation_constants_match_the_governing_record`;
+    # what matters here is only that this correction did not reach them.
+    assert e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY is not None
+    assert e0.M3_3_E0_EXECUTION_AUTHORITY is not None
 
 
 def _subparser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:

@@ -400,19 +400,33 @@ LEASE_RECOVERY_COMMAND_NAME: Final = "m3 reconcile-writer-lease"
 LEASE_RECOVERY_COMMAND_VERSION: Final = "m3.3b-reconcile-writer-lease/1.0"
 LEASE_RECOVERY_RECORD_TYPE: Final = "m3_3_stale_writer_lease_recovery"
 
-STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = (
-    "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
-)
+STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = None
 """The governed token authorizing owner-approved stale-writer-lease reconciliation.
 
 Held under the same rule as the other two activation constants and read through the same
-:func:`_require_activation` door: ``None`` means ``execute`` returns exit ``3``. It is
-**separate** from the transition and E0 constants on purpose — reconciling a stale lease is
-not transition authority, and it is emphatically not E0 authority.
+:func:`_require_activation` door: ``None`` means ``execute`` returns exit ``3``, before a
+private root is resolved, a lease is opened, or a catalog page is read. It is **separate**
+from the transition and E0 constants on purpose — reconciling a stale lease is not
+transition authority, and it is emphatically not E0 authority.
 
-Decision 103 R7 requires the durable recovery record to bind the Decision 103 authority
-identity, which is this constant's SHA-256. The value is never printed, logged, or persisted;
-only its digest is.
+**Accepted Decision 104 — this constant ships ``None``, and that is the correction.**
+Decision 103 authorizes this surface's *implementation* and expressly withholds authority to
+reconcile the real lease (``REAL_LEASE_RECONCILIATION_EXECUTION: NOT AUTHORIZED BY THIS
+RECORD``). Shipping the literal its §8 illustrates would have granted in source precisely
+what the governing record withheld, and an activation constant that arrives pre-activated
+alongside its own implementation is not a gate. A later exact owner instrument replaces
+**only** this literal, authorizing exactly one real reconciliation; no flag, environment
+value, preflight result, catalog state, lease state, or namespace substitutes for it, and a
+passing ``preflight`` is a measurement rather than permission. Decision 104 changes nothing
+else: the recovery architecture, its ``L1``–``L12`` ladder, and the transition and E0
+constants are all untouched.
+
+Decision 103 R7 requires the durable recovery record to bind the authority identity, as a
+SHA-256 in ``owner_authority_sha256``. That digest is taken from whichever token is *actually
+active* at execution time — the value :func:`_require_activation` returns and
+:func:`_lease_recovery_record` receives — never from a literal written into the record
+builder, so the record cannot claim an authority the run did not hold. The value itself is
+never printed, logged, or persisted; only its digest is.
 """
 
 RECOVERY_CATALOG_LOGICAL_SHA256: Final = (

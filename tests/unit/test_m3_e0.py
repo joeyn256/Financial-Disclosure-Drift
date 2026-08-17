@@ -4627,18 +4627,17 @@ def test_decision_105_grants_no_recovery_authority() -> None:
     Asserted against the shipped **source** as well as the attribute, because a runtime check
     alone would pass against a module an earlier test had already overridden.
 
-    The recovery surface is now activated, by accepted **Decision 107 §3 (R116)** and by
-    nothing else. That is why this test reads the shipped value rather than asserting ``None``:
-    the D105 claim is that its own reader correction produced no reconciliation authority, so
-    what it has to establish is that the authority in force traces to D107's instrument — and
-    that neither D103's illustrative literal nor any other token is what the module carries.
+    The recovery surface shipped ``None`` when D105 landed; **Decision 107 §3 (R116)** briefly
+    activated it for exactly one real reconciliation, and **§5 (R118)** withdrew it again once
+    that reconciliation was executed and verified. So the shipped state is ``None`` once more,
+    and the D105 claim is unchanged either way: its reader correction produced no reconciliation
+    authority, and no token of any generation — D103's illustrative literal or D107's spent
+    instrument — is what the module carries.
     """
-    assert (
-        e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY
-        == "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
-    )
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
     source = Path(e0.__file__).read_text(encoding="utf-8")
     assert "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
+    assert "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
 
 
 def test_e0_execute_refuses_through_the_ordinary_activation_gate_as_shipped(

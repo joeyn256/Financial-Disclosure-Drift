@@ -9,15 +9,20 @@ build their own catalog from the packaged migrations and delete it with the temp
 Three conventions carry most of the weight.
 
 **Test-scoped activation.** :data:`~disclosure_drift.m3.e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY`
-now carries the accepted Decision 107 §3 token, which authorizes exactly **one** real
-reconciliation of the real stale lease. That value is spent by its one use and returns to ``None``
-under Decision 107 §5, so no test may depend on it either way. Every test that drives the execute
-machine therefore injects its own disposable token — through the ``activated`` fixture, or by
-``monkeypatch`` where the token's identity is itself the subject — and never relies on the shipped
-constant to reach the machine. Three tests deliberately do the opposite and read the shipped value
-rather than setting it: ``test_the_shipped_activation_constant_carries_the_d107_token``,
-``test_the_shipped_activation_constant_is_necessary_but_never_sufficient``, and
-``test_the_record_binds_the_shipped_authority_actually_in_force``.
+is ``None``. It briefly carried the accepted Decision 107 §3 token, which authorized exactly
+**one** real reconciliation of the real stale lease; that value was spent by its one use and was
+withdrawn under Decision 107 §5, and no test may depend on it in either direction. Every test that
+drives the execute machine therefore injects its own disposable token — through the ``activated``
+fixture, or by ``monkeypatch`` where the token's identity is itself the subject — and never relies
+on the shipped constant to reach the machine. Two tests deliberately do the opposite and read the
+shipped value rather than setting it:
+``test_the_spent_activation_constant_is_withdrawn_and_leaves_no_token_behind`` and
+``test_the_withdrawn_activation_constant_refuses_the_shipped_execute_door``. Decision 104 §3
+(R114) — that the record binds the authority *actually active* rather than a literal in the
+record builder — stays proved by
+``test_the_record_binds_the_governed_authority_and_states_zero_network_activity``, which pins the
+digest to an injected token; with the constant withdrawn there is no shipped value left for a
+complementary test to bind.
 
 **A real dead process, not an invented number.** The "recorded writer is gone" predicate is
 proved against the PID of a subprocess this module started and reaped, so ``os.kill(pid, 0)``
@@ -1094,96 +1099,50 @@ def test_the_e0_lease_predicate_clears_once_the_stale_lease_is_reconciled(
     assert not any("lease state is 'held'" in item for item in after.refusals)
 
 
-def test_the_shipped_activation_constant_is_necessary_but_never_sufficient(
+def test_the_withdrawn_activation_constant_refuses_the_shipped_execute_door(
     evidence_root: Path,
     catalog: Path,
     stale_lease: Path,
     config: _Config,
     tmp_path: Path,
 ) -> None:
-    """R6 and Decision 107 §3: activation opens the door, and the ladder still refuses.
+    """R6 and Decision 107 §5 (R118): the one grant is spent, and the door is shut again.
 
     Deliberately **not** monkeypatched. Every other execute test in this file injects a
     disposable token, which is the only honest way to exercise the machine; this one is the
     complement, and its whole value is that it runs the door the repository actually ships.
 
-    It is also what stops the Decision 107 activation from silently becoming a skeleton key.
-    The shipped keyword defaults carry the **accepted real** catalog identity, and this
-    catalog is a disposable one, so ``L9`` fails: the refusal is exit ``4`` from a gate that
-    ran, not exit ``3`` from a gate that did not. Every other predicate here holds — a
-    stale-held expired lease, this host, a dead writer, a free lock, an absent namespace — and
-    a single mismatched digest is still enough to refuse, which is what conjunctive means.
+    While Decision 107 §3 held, this test's ancestor asserted the opposite shape — activation
+    open, and the conjunctive ladder refusing a disposable catalog at exit ``4``. That grant
+    authorized exactly one real reconciliation, which has been executed and verified, so the
+    shape under test is now the withdrawal: exit ``3`` from a gate that did not run, ahead of
+    root resolution. Exit ``3`` must win even with a perfectly good evidence root **and** with
+    no variable set at all, because "this stage is not enabled" may never depend on the
+    environment being configured.
 
     The whole evidence root must come through byte-identical: a refusal that rewrote the
     lease, or created the recovery namespace before answering, would leave a trace here.
     """
-    assert (
-        e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY
-        == "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
-    )
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
     before = _inventory(evidence_root)
     checkout = tmp_path / "checkout"
 
-    with pytest.raises(e0.PreflightRefusalError, match="never cleared over an unexpected catalog"):
+    with pytest.raises(e0.StageNotEnabledError, match="is None"):
         e0.reconcile_writer_lease_execute(evidence_root=evidence_root, config=config)
 
-    refused = e0.run_reconcile_writer_lease_command(
-        mode="execute",
-        config=config,
-        repository_root=checkout,
-        environ={EVIDENCE_ROOT_ENV: str(evidence_root)},
-    )
-    assert refused.exit_code == e0.EXIT_GATE_FAILURE
-    assert not any("not enabled" in line for line in refused.lines)
-
-    # Activation still never substitutes for the private root: an unset variable is exit `1`,
-    # and the variable's value is never echoed back on that path.
-    unset_root = e0.run_reconcile_writer_lease_command(
-        mode="execute",
-        config=config,
-        repository_root=checkout,
-        environ={},
-    )
-    assert unset_root.exit_code == e0.EXIT_CONFIG_ERROR
+    for environ in ({EVIDENCE_ROOT_ENV: str(evidence_root)}, {}, {EVIDENCE_ROOT_ENV: ""}):
+        refused = e0.run_reconcile_writer_lease_command(
+            mode="execute",
+            config=config,
+            repository_root=checkout,
+            environ=environ,
+        )
+        assert refused.exit_code == e0.EXIT_STAGE_NOT_ENABLED
+        assert any("is None" in line for line in refused.lines)
 
     assert stale_lease.read_bytes() == before[str(stale_lease.relative_to(evidence_root))]
     assert _inventory(evidence_root) == before
     assert not e0.namespace_directory(evidence_root, e0.LEASE_RECOVERY_RUN_NAMESPACE).exists()
-
-
-def test_the_record_binds_the_shipped_authority_actually_in_force(
-    evidence_root: Path,
-    catalog: Path,
-    stale_lease: Path,
-    config: _Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Decision 104 §3 (R114) against the Decision 107 token, over a disposable root.
-
-    Its neighbour above pins the record's authority digest to an *injected* token, which
-    proves the value is not hardcoded. This is the other half, and it is the one that matters
-    for the real reconciliation: run the machine with the shipped constant untouched, and the
-    digest the record binds must be the SHA-256 of the exact Decision 107 §3 token.
-
-    Only the catalog-identity keyword defaults are substituted — the accepted real digests
-    cannot match a disposable catalog — and the authority is left exactly as shipped, because
-    the authority is the thing under test. The token's *value* must still not appear anywhere
-    in the record; only its digest may.
-    """
-    import hashlib
-
-    logical, observations = _identity(catalog)
-    defaults = e0.reconcile_writer_lease_execute.__kwdefaults__
-    monkeypatch.setitem(defaults, "expected_catalog_logical_sha256", logical)
-    monkeypatch.setitem(defaults, "expected_input_observation_set_sha256", observations)
-
-    e0.reconcile_writer_lease_execute(evidence_root=evidence_root, config=config)
-    document = _record(evidence_root)
-
-    d107_literal = "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
-    assert d107_literal == e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY
-    assert document["owner_authority_sha256"] == hashlib.sha256(d107_literal.encode()).hexdigest()
-    assert d107_literal not in json.dumps(document)
 
 
 def test_a_passing_preflight_neither_activates_nor_implies_mutation_authority(
@@ -1206,10 +1165,11 @@ def test_a_passing_preflight_neither_activates_nor_implies_mutation_authority(
     the point: a passing preflight is not a reservation, not a handshake, and not a state the
     following execute can consume.
 
-    The constant is disabled here rather than assumed, because Decision 107 §3 has since
-    activated it for exactly one real reconciliation. The claim under test is architectural and
-    outlives that activation: a passing preflight never substitutes for the gate, whatever the
-    gate currently says, and Decision 107 §5 returns it to ``None`` once the one use is spent.
+    The constant is disabled here explicitly rather than assumed, and stays that way now that
+    Decision 107 §5 has withdrawn the §3 activation. The claim under test is architectural and
+    outlived that activation in both directions: a passing preflight never substitutes for the
+    gate, whatever the gate currently says. Setting it locally is what keeps the test honest if
+    a later owner instrument reactivates the constant.
     """
     monkeypatch.setattr(e0, "STALE_WRITER_LEASE_RECOVERY_AUTHORITY", None)
     before = _inventory(evidence_root)
@@ -1247,34 +1207,35 @@ def test_a_passing_preflight_neither_activates_nor_implies_mutation_authority(
     assert not e0.namespace_directory(evidence_root, e0.LEASE_RECOVERY_RUN_NAMESPACE).exists()
 
 
-def test_the_shipped_activation_constant_carries_the_d107_token() -> None:
-    """Accepted Decision 107 §3 (R116): the recovery ships **enabled**, by that exact token.
+def test_the_spent_activation_constant_is_withdrawn_and_leaves_no_token_behind() -> None:
+    """Accepted Decision 107 §5 (R118): the recovery ships **disabled** once more.
 
     Decision 103 authorized this surface's implementation while expressly withholding authority
     to reconcile the real lease, and Decision 104 corrected the constant to ``None`` because
     shipping the literal D103 §8 illustrates would have granted in source exactly what the
-    record withheld. Decision 106 then owner-accepted the implementation and authorized one
-    read-only real-state preflight, which measured ``L1``–``L11`` as PASS. Decision 107 is the
-    separate owner instrument all three reserved, and it replaces only this literal.
+    record withheld. Decision 106 owner-accepted the implementation and authorized one read-only
+    real-state preflight, which measured ``L1``–``L11`` as PASS. Decision 107 §3 was the separate
+    owner instrument all three reserved — one real reconciliation, no more — and §5 withdraws it
+    now that the reconciliation is executed and verified.
 
-    Three assertions, none of them redundant. The source assertion is the load-bearing one: a
+    Four assertions, none of them redundant. The source assertion is the load-bearing one: a
     runtime check alone would pass against a module some other test had already overridden.
     The runtime check catches a reassignment made elsewhere in the module rather than at the
-    definition. And the D103 literal's continued *absence* from the whole file is what stops
-    the illustrative value being reintroduced under another name, in a default argument, or in
-    a comment a later reader could mistake for the shipped state — the authority in force has
-    to be D107's, not a lookalike.
+    definition. And **both** governed literals' absence from the whole file is what stops either
+    being reintroduced under another name, in a default argument, or in a comment a later reader
+    could mistake for the shipped state — a spent token left in source is exactly the lookalike
+    Decision 104 removed the first time. The recovery record binds D107's authority by SHA-256,
+    which is where a consumed grant belongs.
 
-    The activated state is asserted here as a property of the shipped source, and separately
+    The withdrawn state is asserted here as a property of the shipped source, and separately
     exercised as behaviour by
-    :func:`test_the_shipped_activation_constant_is_necessary_but_never_sufficient` and
-    :func:`test_the_record_binds_the_shipped_authority_actually_in_force`.
+    :func:`test_the_withdrawn_activation_constant_refuses_the_shipped_execute_door`.
     """
-    d107_literal = "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
     source = Path(e0.__file__).read_text(encoding="utf-8")
-    assert f'"{d107_literal}"\n' in source
+    assert "STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = None\n" in source
     assert "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
-    assert d107_literal == e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY
+    assert "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
 
     # Decision 107 §4 (R117) is the capability separation that precedes the reconciliation: E0
     # execution is disabled *before* the lease is touched, so clearing the lease cannot

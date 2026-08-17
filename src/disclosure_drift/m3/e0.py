@@ -411,9 +411,7 @@ LEASE_RECOVERY_COMMAND_NAME: Final = "m3 reconcile-writer-lease"
 LEASE_RECOVERY_COMMAND_VERSION: Final = "m3.3b-reconcile-writer-lease/1.0"
 LEASE_RECOVERY_RECORD_TYPE: Final = "m3_3_stale_writer_lease_recovery"
 
-STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = (
-    "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
-)
+STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = None
 """The governed token authorizing owner-approved stale-writer-lease reconciliation.
 
 Held under the same rule as the other two activation constants and read through the same
@@ -422,25 +420,34 @@ private root is resolved, a lease is opened, or a catalog page is read. It is **
 from the transition and E0 constants on purpose — reconciling a stale lease is not
 transition authority, and it is emphatically not E0 authority.
 
-**Accepted Decision 107 §3 (R116) — this is the separate owner instrument Decision 104
-reserved, and it authorizes exactly one real reconciliation.** Decision 104 shipped this
-constant ``None`` because Decision 103 authorized the surface's *implementation* while
-expressly withholding authority to reconcile the real lease. Decision 106 then owner-accepted
-that implementation and authorized one read-only real-state preflight, which measured every
-``L1``–``L11`` predicate as PASS against the real private state. Decision 107 replaces
-**only** this literal on that evidence. The value is spent by its one use: Decision 107 §5
-(R118) requires it back to ``None`` once the reconciliation is verified, so a second real
-reconciliation needs both a new owner instrument and a reviewed source change to a ``…_v2``
-recovery generation.
+**Accepted Decision 107 §5 (R118) — the one authorized reconciliation has been executed and
+verified, and this constant is therefore back to ``None``.** Decision 107 §3 (R116) briefly
+set it to that record's token: the separate owner instrument Decision 104 reserved, granted on
+Decision 106's owner-accepted read-only preflight, which measured every ``L1``–``L11``
+predicate as PASS against the real private state. That grant authorized **exactly one** real
+reconciliation, and it was spent by its one use. The real stale lease now records ``released``,
+and the create-once recovery namespace exists, so the ladder itself would refuse a second
+reconciliation of this catalog even were the constant reactivated — but the constant is the
+first gate, and it is shut. A second real reconciliation needs both a new owner instrument and
+a reviewed source change to a ``…_v2`` recovery generation, exactly as Decision 103 §3 (R105)
+requires of a second E0.
+
+The spent token's literal is deliberately **not** retained anywhere in this module, for the
+same reason Decision 104 removed Decision 103's illustrative one: a governed token left lying
+in source is a value a later reader can mistake for the shipped state. Its SHA-256 is bound in
+the durable recovery record, which is where the authority for that one execution is now
+recorded, permanently and by digest alone.
 
 **Activation is necessary and never sufficient.** The conjunctive fail-closed ``L1``–``L12``
 ladder still runs in full; no flag, environment value, preflight result, catalog state, lease
 state, or namespace substitutes for any predicate, and a passing ``preflight`` remains a
-measurement rather than permission. Decision 107 changes nothing else about this surface: the
+measurement rather than permission. Decision 107 changed nothing else about this surface: the
 recovery architecture and the whole ladder are untouched, and
-:data:`PRE_E0_CATALOG_TRANSITION_AUTHORITY` is untouched. It does deliberately reach one
-neighbour — :data:`M3_3_E0_EXECUTION_AUTHORITY` is set to ``None`` by §4 (R117) *before* this
-one is activated, so that clearing the lease cannot re-enable E0-v2 as a side effect.
+:data:`PRE_E0_CATALOG_TRANSITION_AUTHORITY` is untouched. It did deliberately reach one
+neighbour — :data:`M3_3_E0_EXECUTION_AUTHORITY` was set to ``None`` by §4 (R117) *before* the
+lease was touched, so that clearing the lease could not re-enable E0-v2 as a side effect, and
+it **remains** ``None`` now. Verified completion of this reconciliation is not an E0-v2
+instrument, does not imply one, and does not create one.
 
 Decision 103 R7 requires the durable recovery record to bind the authority identity, as a
 SHA-256 in ``owner_authority_sha256``. That digest is taken from whichever token is *actually

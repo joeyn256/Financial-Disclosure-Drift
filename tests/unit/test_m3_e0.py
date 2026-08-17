@@ -507,24 +507,32 @@ def _environ(root: Path) -> Mapping[str, str]:
 
 
 def test_the_shipped_activation_constants_match_the_governing_record() -> None:
-    """§7.2, Decision 096 §6.2, and accepted Decision 101 §7: the shipped literals.
+    """§7.2, Decision 096 §6.2, and accepted Decision 107 §4: the shipped literals.
 
     The runtime attribute is asserted too, but the **source** assertion is the load-bearing
     one: a runtime check alone would pass against a module some other test had already
     overridden, and this is the one property no test may leave ambiguous.
 
     Decision 101 §7 activated the transition constant and §8 activated the E0 constant, each
-    by its own separate owner act against its own governed token — which is the independence
-    §7.2 requires. The two values are distinct, and neither is the other's authority.
+    by its own separate owner act — which is the independence §7.2 requires. **Decision 107 §4
+    (R117) then set the E0 constant back to ``None``**, before the stale writer lease was
+    reconciled, precisely so that clearing the lease could not re-enable E0-v2 as a side
+    effect of an unrelated operation's success. The transition constant is untouched by that
+    correction, and this test asserts both halves so neither can drift into the other.
+
+    The Decision 101 E0 token's **absence** from the whole file is asserted for the same reason
+    Decision 104's disabled-constant test asserts its own: a value reintroduced under another
+    name, in a default argument, or in a comment a later reader could mistake for the shipped
+    state would otherwise go unnoticed.
     """
     governed_transition_value = "M3_3_D101_PRE_E0_CATALOG_TRANSITION_AUTHORIZED"
-    governed_e0_value = "M3_3_D101_E0_EXECUTION_AUTHORIZED"
+    withdrawn_e0_value = "M3_3_D101_E0_EXECUTION_AUTHORIZED"
     assert governed_transition_value == e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY
-    assert governed_e0_value == e0.M3_3_E0_EXECUTION_AUTHORITY
-    assert governed_transition_value != governed_e0_value
+    assert e0.M3_3_E0_EXECUTION_AUTHORITY is None
     source = Path(e0.__file__).read_text(encoding="utf-8")
     assert f'"{governed_transition_value}"' in source
-    assert f'"{governed_e0_value}"' in source
+    assert "M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None\n" in source
+    assert withdrawn_e0_value not in source
 
 
 @pytest.mark.parametrize(
@@ -1752,15 +1760,16 @@ def test_e0_preflight_requires_a_complete_transition_terminal(
 ) -> None:
     """§9.1: an absent transition terminal is UNDETERMINED, never permission.
 
-    The refusal is the assertion. ``e0_execute_enabled`` is reported alongside it and is now
-    ``True`` under accepted Decision 101 §8, which is exactly the point being made: an
-    activated constant does not make an absent transition terminal into permission.
+    The refusal is the assertion. ``e0_execute_enabled`` is reported alongside it and is
+    ``False`` under accepted Decision 107 §4, which does not weaken the point: the refusal is
+    the absent transition terminal, and it would stand at either activation state. The fact is
+    rendered so an operator reading a refusal can tell the two apart.
     """
     build_catalog(evidence_root, head=15)
     report = e0.e0_preflight(evidence_root=evidence_root, config=config)
     assert not report.passed
     assert any("transition terminal record is absent" in item for item in report.refusals)
-    assert report.facts["e0_execute_enabled"] is True
+    assert report.facts["e0_execute_enabled"] is False
 
 
 def test_e0_preflight_passes_after_a_complete_transition(
@@ -4617,10 +4626,76 @@ def test_decision_105_grants_no_recovery_authority() -> None:
 
     Asserted against the shipped **source** as well as the attribute, because a runtime check
     alone would pass against a module an earlier test had already overridden.
+
+    The recovery surface is now activated, by accepted **Decision 107 §3 (R116)** and by
+    nothing else. That is why this test reads the shipped value rather than asserting ``None``:
+    the D105 claim is that its own reader correction produced no reconciliation authority, so
+    what it has to establish is that the authority in force traces to D107's instrument — and
+    that neither D103's illustrative literal nor any other token is what the module carries.
     """
-    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
+    assert (
+        e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY
+        == "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED"
+    )
     source = Path(e0.__file__).read_text(encoding="utf-8")
-    assert "STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = None\n" in source
+    assert "M3_3_D103_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
+
+
+def test_e0_execute_refuses_through_the_ordinary_activation_gate_as_shipped(
+    evidence_root: Path, transitioned: Path, config: _Config, tmp_path: Path
+) -> None:
+    """Decision 107 §4 (R117): E0 ``execute`` is disabled, and the door proves it.
+
+    Deliberately **not** monkeypatched. Every other execute test here injects a disposable
+    token, which is the only honest way to exercise the machine; this one is the complement,
+    and its whole value is that it runs the door the repository actually ships.
+
+    The evidence root is the fully transitioned one on purpose — a COMPLETE transition terminal
+    is exactly the state an operator would most reasonably expect to carry E0 forward, and it
+    does not. Exit ``3`` must also win over root resolution with no variable set, because
+    "this stage is not enabled" may never depend on the environment being configured.
+    """
+    with pytest.raises(e0.StageNotEnabledError, match="is None"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    for environ in (_environ(evidence_root), {}, {EVIDENCE_ROOT_ENV: ""}):
+        result = e0.run_offline_parse_command(
+            mode="execute", config=config, repository_root=tmp_path, environ=environ
+        )
+        assert result.exit_code == e0.EXIT_STAGE_NOT_ENABLED
+        assert any("is None" in line for line in result.lines)
+
+    assert not e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE).exists()
+
+
+def test_no_second_door_runs_e0_while_its_constant_is_disabled() -> None:
+    """Decision 107 §4 (R117): one gate, read from one constant, on every E0 execute path.
+
+    The risk this closes is not that ``_require_activation`` stops working — it is that some
+    *other* entry point reaches the E0 machine without passing through it. Every module-level
+    callable is walked, not just the exported ones (``e0_execute`` is itself not in ``__all__``,
+    so an ``__all__`` walk would have missed the primary door), and the module is required to
+    carry exactly three ``execute`` callables — **one per governed surface**. ``e0_execute`` is
+    E0's only one, and ``run_offline_parse_command`` is the CLI wrapper the test above already
+    drives to exit ``3``.
+
+    ``transition_execute`` and ``reconcile_writer_lease_execute`` are the other two surfaces'
+    execute paths, each gated by its own separate constant. Naming them here is the point of the
+    capability separation: reconciling a lease runs no parse, and a completed transition is not
+    E0 authority.
+    """
+    callables = {
+        name
+        for name in dir(e0)
+        if not name.startswith("__") and callable(getattr(e0, name)) and "execute" in name
+    }
+    assert callables == {"e0_execute", "transition_execute", "reconcile_writer_lease_execute"}
+
+    source = Path(e0.__file__).read_text(encoding="utf-8")
+    # The constant is read in exactly the places that gate on it or report it as a fact, and a
+    # third reader appearing here would be a second door regardless of what it did.
+    assert source.count("M3_3_E0_EXECUTION_AUTHORITY,") == 2
+    assert source.count("M3_3_E0_EXECUTION_AUTHORITY is not None") == 1
 
 
 def test_the_successor_still_executes_to_completion_over_a_released_lease(

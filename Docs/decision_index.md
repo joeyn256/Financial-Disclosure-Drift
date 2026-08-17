@@ -1317,14 +1317,17 @@ reserved for a later exact owner act.
 | **What the interrupted `…_v1` E0 run is now** | **Decision 103 §4 (R106) — immutable interrupted evidence, classification `UNDETERMINED / NOT COMPLETE`.** Never repaired, resumed, overwritten, deleted, renamed, or read as a v2 prefix. The successor **validates** it — present, terminal-free, receipt-free, chain-valid, no closing event — rather than skipping it, and an absent v1 stops the successor instead of reading as a clean start |
 | **How a stale catalog writer lease is reconciled** | **Decision 103 §§5–9 (R107–R111).** `m3 reconcile-writer-lease --config … --mode {preflight,execute}`, never automatic, gated by its own `STALE_WRITER_LEASE_RECOVERY_AUTHORITY` constant. Eligibility is the conjunctive fail-closed `L1`–`L12` ladder: no elapsed time, dead PID, or free advisory lock authorizes takeover on its own. The lease transitions `held -> released` **without** `released_at_utc` and **with** `reconciliation_reason`, so voluntary release cannot be inferred; one write-once record binds both lease digests and the catalog's before/after identity. The ordinary E0 surfaces keep refusing a held lease |
 | **Whether that reconciliation can actually be run** | **No — [Decision 104](Decisions/decision_104_m3_3_d103_recovery_activation_correction.md) §2 (R113).** `STALE_WRITER_LEASE_RECOVERY_AUTHORITY` ships `None`, so `execute` returns exit `3` ahead of private-root resolution and touches no private state on that refusal. Decision 104 corrects the shipped **value** only; Decision 103 §8's gating ruling and the whole R105–R112 architecture stand. A passing read-only `preflight` is a measurement, never permission — it renders `reconciliation_enabled` as a fact and confers nothing. Activating the constant for **exactly one** real reconciliation needs a separate owner instrument that does not yet exist. §3 (R114): the recovery record binds the authority **actually active** for the execution, never a literal in the record builder |
+| **What an existing but unreadable writer lease means to the ordinary gates** | **[Decision 105](Decisions/decision_105_m3_3_unreadable_writer_lease_fail_closed.md) §2 (R115) — it refuses.** Because Decision 103 §7 rewrites the lease **in place**, a crash-torn rewrite can leave a document that is not structurally readable, and such a document is **never** a released lease. An **existing** lease clears Decision 094 §5.2 predicate 9 only by being structurally valid — read through the same production reader the `L1`–`L12` ladder uses — and recording exactly `released`. A `held` lease keeps its own unchanged refusal; an **absent** lease keeps its accepted Decision 094 finding-m1 semantics, passes, and is still never created. No new lease-state vocabulary, no weakening of `read_persisted_lease`, and no reopening of Decision 103 or Decision 104 |
 
 *(Current state: **the PRE-E0 chain is closed and execution is authorized.** The Decision 101 E0
 invocation was **interrupted**; Decision 103 implements the successor generation and the governed
 stale-lease recovery, and authorizes **implementation only** — reconciling the real lease and
 running E0 v2 each still require a separate owner instrument. Decision 104 makes that boundary
 executable: the recovery activation constant ships `None`, so the surface it implements is
-**disabled as shipped**. Network, SEC, and HTTP authority remain **NONE** at request ceiling **0**
-throughout.)*
+**disabled as shipped**. Decision 105 closes the last acceptance issue on that implementation — an
+existing lease the reader cannot account for now refuses at both ordinary gates instead of reading
+as permission — and grants no authority of its own. Network, SEC, and HTTP authority remain **NONE**
+at request ceiling **0** throughout.)*
 
 ## Deviation register — where deviations are recorded
 

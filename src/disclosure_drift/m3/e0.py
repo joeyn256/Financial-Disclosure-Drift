@@ -2210,7 +2210,18 @@ def _lease_state(lock_directory: Path) -> tuple[bool, str | None, bool]:
     predicate outright: Decision 094 finding m1 is explicit that a read-only preflight must
     not create the lock file to find out whether it could be taken, and a shared non-blocking
     ``flock`` on an existing file is non-mutating.
+
+    ``recorded_state`` is derived through :func:`read_persisted_lease` -- the same production
+    reader the Decision 103 R3 recovery uses -- rather than through a lenient ``json`` probe,
+    so it is a state this repository actually wrote or it is ``None``. Accepted Decision 105:
+    the R4 reconciliation rewrites the lease **in place**, so an interrupted rewrite can leave
+    a torn document, and a reader that reported such a document's state as ``None`` would hand
+    the caller a value that is not ``'held'`` and therefore reads as permission to proceed.
+    ``None`` here means only "no valid state could be established" -- never "not held" -- and
+    :func:`_shared_preflight` refuses on it.
     """
+    from disclosure_drift.storage.catalog import LeaseFormatError, read_persisted_lease
+
     path = lock_directory / _LEASE_FILENAME
     if not path.exists():
         return False, None, True
@@ -2229,11 +2240,10 @@ def _lease_state(lock_directory: Path) -> tuple[bool, str | None, bool]:
     finally:
         os.close(descriptor)
     try:
-        recorded = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        recorded = read_persisted_lease(raw)
+    except LeaseFormatError:
         return True, None, True
-    state = recorded.get("state") if isinstance(recorded, dict) else None
-    return True, (str(state) if state is not None else None), True
+    return True, recorded.state, True
 
 
 def _predecessor_refusals(evidence_root: Path) -> tuple[list[str], dict[str, object]]:
@@ -2843,6 +2853,10 @@ def _shared_preflight(
         )
 
     if lease_check:
+        # The two lifecycle states are imported rather than re-spelled: `storage.catalog` is
+        # the module that writes them, and a second literal here would be a second contract.
+        from disclosure_drift.storage.catalog import LEASE_STATE_HELD, LEASE_STATE_RELEASED
+
         lock_directory = catalog_path.parent
         present, recorded_state, shareable = _lease_state(lock_directory)
         facts["writer_lease"] = "absent" if not present else (recorded_state or "unreadable")
@@ -2850,8 +2864,22 @@ def _shared_preflight(
             refusals.append(
                 "another writer holds the catalog lease; elapsed time never permits takeover"
             )
-        if present and recorded_state == "held":
+        if present and recorded_state == LEASE_STATE_HELD:
             refusals.append("the recorded catalog writer lease state is 'held'")
+        elif present and shareable and recorded_state != LEASE_STATE_RELEASED:
+            # Accepted Decision 105. An **existing** lease clears this predicate in exactly one
+            # way: it is a structurally valid document recording `released`. Anything else the
+            # file can contain -- torn by an interrupted Decision 103 R4 in-place rewrite,
+            # unreadable, missing or mistyped fields, carrying a key this repository never
+            # writes, or naming a state that is neither lifecycle state -- is a lease whose
+            # meaning cannot be accounted for, and an unaccountable lease is not a released
+            # one. Absence is untouched (`present` is false there) and a held lease keeps its
+            # own refusal above, so this closes only the gap between them.
+            refusals.append(
+                f"an existing catalog writer lease is not a structurally valid lease recording "
+                f"{LEASE_STATE_RELEASED!r} (read as: {recorded_state or 'unreadable'}); an "
+                f"unreadable lease is never a released lease"
+            )
     else:
         facts["writer_lease"] = "held by this run"
 

@@ -4408,3 +4408,232 @@ def test_the_successor_leaves_the_migration_chain_at_0015_and_creates_no_0016(
     document = json.loads((directory / e0.E0_TERMINAL_FILENAME).read_text("utf-8"))
     assert document["post_migration_chain"] == list(range(1, 16))
     assert "applied_migrations" not in document
+
+
+# ==========================================================================
+# Family 11: the Decision 105 unreadable-lease fail-closed correction
+#
+# Decision 103 R4 rewrites the lease **in place**, so an interrupted rewrite can leave a lease
+# file that is not a readable document. Decision 105 fixes what the ordinary transition/E0
+# lease predicate must then do: an *existing* lease clears predicate 9 only by being a
+# structurally valid document that records exactly `released`. An unreadable lease is not a
+# released lease, and it never becomes one by being unreadable.
+#
+# Everything here drives the shipped predicate over a disposable catalog beneath a synthetic
+# root. No test reads, resolves, or names the accepted private root or its real lease.
+# ==========================================================================
+
+
+def _lease_bytes(**overrides: object) -> bytes:
+    """Canonical bytes of an otherwise-valid ``held`` lease, with ``overrides`` applied."""
+    payload: dict[str, object] = {
+        "lease_id": "0" * 32,
+        "writer_pid": 999_999,
+        "host_fingerprint": "synthetic-host",
+        "acquired_at_utc": _AT,
+        "expires_at_utc": _AT,
+        "state": "held",
+    }
+    payload.update(overrides)
+    return json.dumps(payload, sort_keys=True).encode("utf-8")
+
+
+def _lease_bytes_without(field: str) -> bytes:
+    payload = json.loads(_lease_bytes().decode("utf-8"))
+    del payload[field]
+    return json.dumps(payload, sort_keys=True).encode("utf-8")
+
+
+def _write_lease_bytes(evidence_root: Path, raw: bytes) -> Path:
+    """Put exactly ``raw`` at the lease path beside the disposable catalog."""
+    from disclosure_drift.storage.catalog import lease_path
+
+    path = lease_path(_catalog_path(evidence_root).parent)
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    return path
+
+
+#: Every shape an **existing** lease file can take that is not a structurally valid document
+#: recording a state this module has ever written. The first three are the Decision 103 crash
+#: window itself: the in-place rewrite truncates and then writes, so an interruption leaves an
+#: empty file or a prefix of the intended document, and a shorter overwrite that lost its
+#: truncation would leave the new document followed by a tail of the old one. The rest are the
+#: ways a lease can be well-formed JSON and still not be a lease this repository wrote.
+_UNREADABLE_LEASE_DOCUMENTS = (
+    pytest.param(b"", id="truncated-to-zero"),
+    pytest.param(_lease_bytes()[:41], id="torn-prefix"),
+    pytest.param(_lease_bytes(writer_pid=1) + b'd": 999999}', id="trailing-tail-of-the-old"),
+    pytest.param(b"not json at all", id="not-json"),
+    pytest.param(b"[]", id="json-array"),
+    pytest.param(b"\xff\xfe", id="not-utf8"),
+    pytest.param(_lease_bytes_without("state"), id="missing-state"),
+    pytest.param(_lease_bytes(state="reconciling"), id="unknown-state-token"),
+    pytest.param(_lease_bytes(state=17), id="state-not-a-string"),
+    pytest.param(_lease_bytes(injected_field="anything"), id="unknown-field"),
+    pytest.param(_lease_bytes(writer_pid=0), id="non-positive-writer-pid"),
+    pytest.param(_lease_bytes(expires_at_utc="2026-08-16 22:00:35"), id="malformed-timestamp"),
+)
+
+#: The one refusal Decision 105 adds. Asserted by substring so the test binds to the claim the
+#: operator reads, not to the whole sentence.
+_D105_REFUSAL = "is not a structurally valid lease recording 'released'"
+
+
+@pytest.mark.parametrize("raw", _UNREADABLE_LEASE_DOCUMENTS)
+def test_an_existing_unusable_writer_lease_refuses_the_ordinary_e0_preflight(
+    evidence_root: Path, transitioned: Path, config: _Config, raw: bytes
+) -> None:
+    """D105 case C, and T3/T4/T5: an existing lease that is not readable stops E0.
+
+    The refusal is required to come from the lease predicate specifically, so the assertion
+    names the D105 sentence rather than settling for ``not report.passed`` — which a bad fix
+    could satisfy by refusing for some unrelated reason. The bytes are re-read afterwards
+    because a read-only preflight must never repair the document it refuses.
+    """
+    path = _write_lease_bytes(evidence_root, raw)
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+
+    assert not report.passed
+    assert any(_D105_REFUSAL in item for item in report.refusals)
+    assert report.facts["writer_lease"] != "absent"
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("raw", _UNREADABLE_LEASE_DOCUMENTS)
+def test_an_existing_unusable_writer_lease_refuses_the_pre_e0_transition_preflight(
+    evidence_root: Path, catalog: Path, bound: M32World, config: _Config, raw: bytes
+) -> None:
+    """D105 case C at the other ordinary gate: the PRE-E0 transition refuses identically.
+
+    Both machines read predicate 9 through one shared implementation, and this is what makes
+    that shared-ness a checked claim rather than a reading of the source.
+    """
+    _write_lease_bytes(evidence_root, raw)
+
+    report = e0.transition_preflight(evidence_root=evidence_root, config=config)
+
+    assert not report.passed
+    assert any(_D105_REFUSAL in item for item in report.refusals)
+
+
+@pytest.mark.parametrize("raw", _UNREADABLE_LEASE_DOCUMENTS)
+def test_no_unusable_lease_is_ever_reported_as_a_released_lease(
+    evidence_root: Path, catalog: Path, raw: bytes
+) -> None:
+    """T6: the reader cannot mint ``released`` out of a document it could not validate.
+
+    This is the exact laundering path Decision 105 closes, asserted at the reader rather than
+    at the refusal: an unreadable document used to reach the consumer as ``state = None``,
+    which is not ``'held'`` and so used to look like permission to proceed. The lock is
+    confirmed shareable so the refusal cannot be coming from a live ``flock`` instead.
+    """
+    _write_lease_bytes(evidence_root, raw)
+
+    present, recorded_state, shareable = e0._lease_state(catalog.parent)  # noqa: SLF001
+
+    assert present is True
+    assert shareable is True
+    assert recorded_state != "released"
+
+
+def test_a_valid_held_lease_still_refuses_with_its_unchanged_refusal(
+    evidence_root: Path, transitioned: Path, config: _Config
+) -> None:
+    """T1 and D105 case A: the accepted ``held`` refusal is preserved word for word.
+
+    D105 must not merge the two refusals: "a writer holds this" and "this is not a lease I can
+    read" are different facts about the world, and an operator acts differently on each.
+    """
+    _write_lease_bytes(evidence_root, _lease_bytes())
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+
+    assert not report.passed
+    assert report.facts["writer_lease"] == "held"
+    assert any("lease state is 'held'" in item for item in report.refusals)
+    assert not any(_D105_REFUSAL in item for item in report.refusals)
+
+
+def test_the_decision_103_reconciled_release_still_clears_the_lease_predicate(
+    evidence_root: Path, transitioned: Path, config: _Config
+) -> None:
+    """T2 and D105 case B: the recovery's own output is a lease the ordinary gate accepts.
+
+    Built by the production ``reconciled_lease_document`` rather than by hand, because the
+    thing that must keep working is the real R4 document — the whole point of reconciling a
+    stale lease is that E0 may then proceed, and a fail-closed reader that refused the
+    recovery's result would have closed the door it was opening.
+    """
+    from disclosure_drift.storage.catalog import read_persisted_lease, reconciled_lease_document
+
+    held = read_persisted_lease(_lease_bytes())
+    document = reconciled_lease_document(held, reconciled_at_utc=_AT)
+    _write_lease_bytes(evidence_root, canonical_bytes(document))
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+
+    assert report.passed, report.refusals
+    assert report.facts["writer_lease"] == "released"
+
+
+def test_an_ordinary_released_lease_still_clears_the_lease_predicate(
+    evidence_root: Path, transitioned: Path, config: _Config
+) -> None:
+    """T2's other half: an ordinary holder release, which carries ``released_at_utc``."""
+    _write_lease_bytes(evidence_root, _lease_bytes(state="released", released_at_utc=_AT))
+
+    report = e0.e0_preflight(evidence_root=evidence_root, config=config)
+
+    assert report.passed, report.refusals
+    assert report.facts["writer_lease"] == "released"
+
+
+def test_an_absent_lease_keeps_its_pre_d105_semantics_exactly(
+    evidence_root: Path, catalog: Path, bound: M32World, config: _Config
+) -> None:
+    """T7 and D105 case D: absence is untouched — it passes, and is still never created.
+
+    Decision 094 finding m1 is the reason: a read-only preflight must not create the lock file
+    to discover whether it could take it. D105 fixes what an *existing* lease means, and is
+    required to leave "there is no lease" exactly as it found it.
+    """
+    lease = catalog.parent / "catalog_writer.lease"
+    assert not lease.exists()
+
+    present, recorded_state, shareable = e0._lease_state(catalog.parent)  # noqa: SLF001
+    report = e0.transition_preflight(evidence_root=evidence_root, config=config)
+
+    assert (present, recorded_state, shareable) == (False, None, True)
+    assert report.passed, report.refusals
+    assert report.facts["writer_lease"] == "absent"
+    assert not any(_D105_REFUSAL in item for item in report.refusals)
+    assert not lease.exists()
+
+
+def test_decision_105_grants_no_recovery_authority() -> None:
+    """T9: D105 is a reader correction, and corrects nothing about who may reconcile.
+
+    Asserted against the shipped **source** as well as the attribute, because a runtime check
+    alone would pass against a module an earlier test had already overridden.
+    """
+    assert e0.STALE_WRITER_LEASE_RECOVERY_AUTHORITY is None
+    source = Path(e0.__file__).read_text(encoding="utf-8")
+    assert "STALE_WRITER_LEASE_RECOVERY_AUTHORITY: Final[str | None] = None\n" in source
+
+
+def test_the_successor_still_executes_to_completion_over_a_released_lease(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """T10: activation and execution semantics are otherwise unchanged.
+
+    The stricter reader sits on the refusal path only, so the machine that a valid released
+    lease clears must still run all the way to a complete terminal.
+    """
+    _write_lease_bytes(evidence_root, _lease_bytes(state="released", released_at_utc=_AT))
+
+    outcome = e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    assert outcome.status == "complete"
+    assert outcome.run_namespace == e0.E0_RUN_NAMESPACE

@@ -1392,9 +1392,10 @@ _M3_3A_SUMMARY_LABEL_WIDTH: Final = 39
 
 #: Decision 094 §7's two PRE-E0 operator surfaces. Unlike the gated commands below, these are
 #: **implemented**: `preflight` and `verify` do real read-only work and can pass, while
-#: `execute` is present and unreachable because its source-bound activation constant is `None`.
-#: That distinction is the point of the redesign -- the old unconditional refusal made the
-#: transition and E0 unexecutable even after an owner authorized them.
+#: `execute` is reachable exactly while its own source-bound activation constant holds a
+#: governed token, and returns exit 3 whenever that constant is `None`. That distinction is the
+#: point of the redesign -- the old unconditional refusal made the transition and E0
+#: unexecutable even after an owner authorized them.
 _M3_3_PRE_E0_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "prepare-e0-catalog",
@@ -1410,10 +1411,10 @@ _M3_3_PRE_E0_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
         "Derive the census parse layer from accepted stored objects, offline (M3.3-E0).",
         "Validates, and when separately authorized performs, the real M3.3-E0 offline "
         "metadata parse into the Decision 094 §6.1 sixteen-table footprint plus the "
-        "category-A parser_state transition. execute returns exit 3 until a later exact "
-        "owner instrument replaces M3_3_E0_EXECUTION_AUTHORITY. A passing preflight is not "
-        "authorization, and a complete run is not M3.3-E1 authority. No transport is "
-        "constructed on any path.",
+        "category-A parser_state transition. execute is enabled only while an exact owner "
+        "instrument holds M3_3_E0_EXECUTION_AUTHORITY, and returns exit 3 otherwise. A "
+        "passing preflight is not authorization, and a complete run is not M3.3-E1 "
+        "authority. No transport is constructed on any path.",
     ),
 )
 

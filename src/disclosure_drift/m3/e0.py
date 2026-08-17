@@ -172,9 +172,7 @@ field, and no path-discovery rule; the catalog is always exactly this path benea
 resolved private root. It is also not permission to edit the acquisition constant.
 """
 
-PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = (
-    "M3_3_D101_PRE_E0_CATALOG_TRANSITION_AUTHORIZED"
-)
+PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = None
 """The governed token authorizing one real ``0013 -> 0014 -> 0015`` transition.
 
 ``None`` means the transition ``execute`` mode is **not enabled** and returns exit ``3``
@@ -185,25 +183,42 @@ SHA-256 of that token is then recorded as ``owner_authority_sha256`` in the term
 No operator flag, environment value, preflight result, verify result, catalog state,
 receipt, or namespace can substitute for it. Transition activation also cannot enable E0:
 that is a separate constant, below, and a separate owner act.
+
+**Accepted Decision 108 §3 (R119) — this constant is back to ``None``, because the grant it
+carried is spent.** Decision 101 §7 activated it for exactly one ``0013 -> 0014 -> 0015``
+transition; that transition ran to a COMPLETE and verified terminal, so the authorization was
+consumed by its one use and the literal it carried is a value a later reader could mistake for
+a live grant. E0 reads that completed transition terminal as an input predicate — it is not
+re-derived from this constant, and no verification path recomputes an authority digest from it
+— so withdrawing the grant leaves the E0 successor untouched. A second real transition of this
+catalog would need both a new owner instrument and a reviewed source change.
 """
 
-M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None
+M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"
 """The governed token authorizing one real M3.3-E0 offline parse.
 
 ``None`` means the E0 ``execute`` mode is **not enabled** and returns exit ``3``. Held
 independently of :data:`PRE_E0_CATALOG_TRANSITION_AUTHORITY` on purpose: a successful
 transition is not E0 authority, and E0 success is not linkage-gate closure or E1 authority.
 
-**Accepted Decision 107 §4 (R117) — this constant is back to ``None``, and that is capability
-separation.** Decision 101 §8 activated it for the ``…_v1`` generation, and that invocation was
-interrupted. The only thing standing between E0-v2 and the accepted private evidence root since
-then has been the stale writer lease — so activating the recovery surface below to clear that
-lease would, on success, have silently re-enabled a second and separately governed operation.
-An activation constant whose gate can be opened by an unrelated operation's success is not a
-gate, so this one is closed before the lease is touched and stays closed after.
+**Accepted Decision 108 §2 (R120) — this is the separate owner instrument Decision 107 §5
+reserved, and it authorizes exactly one real E0-v2 execution.** Decision 101 §8 activated the
+``…_v1`` generation and that invocation was interrupted; Decision 107 §4 (R117) then set this
+constant to ``None`` *before* the stale writer lease was reconciled, precisely so that clearing
+the lease could not re-enable E0 as a side effect of an unrelated operation's success. That
+reconciliation is complete, verified, owner-accepted, and closed, and the read-only successor
+preflight measured every frozen predicate as PASS — so the instrument is issued here, on that
+evidence, by reviewed source change and by nothing else.
 
-E0-v2 execution is not authorized by Decision 107, before, during, or after the reconciliation.
-A later separate owner instrument is required, and a verified recovery is not that instrument.
+**Activation is necessary and never sufficient.** Every frozen Decision 094 §5 and Decision 103
+§10 successor predicate still runs, still conjunctively, still fail-closed; ``preflight`` stays
+strictly read-only and a passing one remains a measurement rather than permission. The value is
+spent by its one use: Decision 108 §5 (R122) requires this constant back to ``None`` once the
+single invocation has returned, whatever its outcome, so a second E0 would need both a new owner
+instrument and a reviewed source change to a ``…_v3`` generation.
+
+E0-v2 success is not linkage-gate closure, migration ``0016`` authority, persistence-bridge
+authority, or E1/E2 authority; each remains a separate owner act.
 """
 
 TRANSITION_RUN_NAMESPACE: Final = "m3_3_pre_e0_catalog_transition_0013_0015_v1"
@@ -443,11 +458,14 @@ ladder still runs in full; no flag, environment value, preflight result, catalog
 state, or namespace substitutes for any predicate, and a passing ``preflight`` remains a
 measurement rather than permission. Decision 107 changed nothing else about this surface: the
 recovery architecture and the whole ladder are untouched, and
-:data:`PRE_E0_CATALOG_TRANSITION_AUTHORITY` is untouched. It did deliberately reach one
+:data:`PRE_E0_CATALOG_TRANSITION_AUTHORITY` was untouched by it. It did deliberately reach one
 neighbour — :data:`M3_3_E0_EXECUTION_AUTHORITY` was set to ``None`` by §4 (R117) *before* the
 lease was touched, so that clearing the lease could not re-enable E0-v2 as a side effect, and
-it **remains** ``None`` now. Verified completion of this reconciliation is not an E0-v2
-instrument, does not imply one, and does not create one.
+it stayed ``None`` across the whole D107 sequence. That E0 constant is now activated again, but
+by accepted **Decision 108 §2 (R120)** and by nothing else: a later separate owner instrument,
+issued on the verified recovery rather than granted by it. Verified completion of this
+reconciliation was not an E0-v2 instrument, did not imply one, and did not create one — and
+this surface stays shut regardless of what its neighbour currently holds.
 
 Decision 103 R7 requires the durable recovery record to bind the authority identity, as a
 SHA-256 in ``owner_authority_sha256``. That digest is taken from whichever token is *actually
@@ -4120,9 +4138,12 @@ def e0_execute(
 ) -> ExecuteOutcome:
     """Run the real M3.3-E0 offline metadata parse (Decision 094 §9.1).
 
-    **Not reachable.** :data:`M3_3_E0_EXECUTION_AUTHORITY` is ``None``, so the first statement
-    refuses with exit ``3``. The machine below it is complete so that the later activation
-    change is genuinely constant-only.
+    **Reachable, for exactly one invocation.** Accepted Decision 108 §2 (R120) sets
+    :data:`M3_3_E0_EXECUTION_AUTHORITY` to its governed token, so the first statement now
+    returns that authority instead of refusing with exit ``3``. Nothing else about this
+    function moved for that: the activation change was constant-only, exactly as the machine
+    below was built to allow. The grant is spent by its one use (§5, R122), and the frozen
+    successor predicates below still run in full — activation is necessary, never sufficient.
 
     The write set is the §6.1 sixteen tables plus the category-A
     ``census_plan_sources.parser_state`` transition, enforced by the accepted SQLite

@@ -11,6 +11,13 @@ from dataclasses import field as dataclass_field
 from datetime import date
 from typing import Any, Final, Literal
 
+from disclosure_drift.m3.compact_evidence import (
+    FULL_EVIDENCE,
+    CompactEvidencePolicy,
+    compact_parsed_payload,
+    materialized_fields,
+    reconstructed_observations,
+)
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.sec.accession_resolution import (
     RESOLUTION_POLICY_VERSION,
@@ -378,6 +385,7 @@ class CensusCatalog:
         writer: CatalogWriter,
         *,
         approved_2024_transitions: Mapping[str, bool] | None = None,
+        compact_evidence: CompactEvidencePolicy = FULL_EVIDENCE,
     ) -> None:
         """Create the catalog writer.
 
@@ -386,9 +394,19 @@ class CensusCatalog:
             approved_2024_transitions: Accessions whose entry into or exit from the 2024
                 primary-test cohort has been explicitly approved. Absent approval the
                 transition is recorded and blocked (Decision 012 section 6).
+            compact_evidence: The accepted Decision 112 compact evidence contract, or the
+                full-observation contract. **Full by default**, so no historical M2
+                acquisition path and no operational-catalog write changes behaviour; D112 §3
+                limits the ruling to E0 successor execution and this argument is that limit.
         """
         self._writer = writer
         self._approved_2024_transitions = dict(approved_2024_transitions or {})
+        self._compact = compact_evidence
+
+    @property
+    def compact_evidence(self) -> CompactEvidencePolicy:
+        """Which evidence contract this catalog writes and reads under."""
+        return self._compact
 
     def persist(
         self,
@@ -442,8 +460,14 @@ class CensusCatalog:
                     started,
                 ),
             )
+            # Hoisted out of the record loop: the merged outcome's duplicate list is a
+            # property of the whole source, so deriving it per record was quadratic in the
+            # source (accepted Decision 111 §3's defect class, in a path it did not reach).
+            duplicates = frozenset(identity for identity, _ in outcome.duplicate_identities)
             for record in outcome.records:
-                parsed_id = self._insert_record(connection, parser_run_id, record, outcome)
+                parsed_id = self._insert_record(
+                    connection, parser_run_id, record, outcome, duplicates
+                )
                 normalized = self._normalize_record(connection, parsed_id, record, started)
                 registrants += normalized[0]
                 accessions += normalized[1]
@@ -587,9 +611,14 @@ class CensusCatalog:
                 (parser_run_id, observation_id, parser_id, authoritative, started, started),
             )
             for outcome, references in outcomes:
+                part_duplicates = frozenset(
+                    identity for identity, _ in outcome.duplicate_identities
+                )
                 for record in outcome.records:
                     self._require_streamed_location(record.location.observation_id, observation_id)
-                    parsed_id = self._insert_record(connection, parser_run_id, record, outcome)
+                    parsed_id = self._insert_record(
+                        connection, parser_run_id, record, outcome, part_duplicates
+                    )
                     normalized = self._normalize_record(connection, parsed_id, record, started)
                     registrants += normalized[0]
                     accessions += normalized[1]
@@ -865,13 +894,25 @@ class CensusCatalog:
             raise ValueError(message)
         return observation_id
 
-    @staticmethod
     def _insert_record(
+        self,
         connection: sqlite3.Connection,
         parser_run_id: str,
         record: ParsedRecord,
         outcome: ParseOutcome,
+        duplicate_identities: frozenset[str] | None = None,
     ) -> str:
+        """Write one parsed source record.
+
+        ``duplicate_identities`` is the run's duplicate set, hoisted by the caller. It used to
+        be recomputed here as a linear scan of ``outcome.duplicate_identities`` **per record**,
+        which is the same per-record-over-run-level-state shape accepted Decision 111 §3
+        removed from two other derivations and did not reach here. It is only visible on the
+        merged path, where the outcome is the whole source: on one real median ``company.idx``
+        quarter that is 252,622 records against 62,266 duplicate identities, or **15.7 billion
+        string comparisons for one of seventy quarters**. Membership in a set answers exactly
+        the same question, so no row's value moves.
+        """
         location = record.location
         parsed_id = _stable_id(
             "parsed",
@@ -884,9 +925,11 @@ class CensusCatalog:
             location.record_path or "",
             str(location.record_index),
         )
-        duplicate = record.duplicate_indicator or any(
-            identity == record.native_identity for identity, _ in outcome.duplicate_identities
-        )
+        if duplicate_identities is None:
+            duplicate_identities = frozenset(
+                identity for identity, _ in outcome.duplicate_identities
+            )
+        duplicate = record.duplicate_indicator or record.native_identity in duplicate_identities
         connection.execute(
             "INSERT INTO census_parsed_records "
             "(parsed_record_id, parser_run_id, source_observation_id, native_identity, "
@@ -903,7 +946,7 @@ class CensusCatalog:
                 location.member_name,
                 location.record_path,
                 location.record_index,
-                _json(record.payload),
+                _json(self._persisted_payload(record)),
                 _json(record.unknown_fields),
                 _json(record.normalization_warnings),
                 _json(record.reason_codes),
@@ -913,6 +956,18 @@ class CensusCatalog:
             ),
         )
         return parsed_id
+
+    def _persisted_payload(self, record: ParsedRecord) -> Mapping[str, object]:
+        """The payload this contract stores for one parsed record.
+
+        Identical to the parsed payload except for an accession-class record under the compact
+        contract, whose full payload is read by nothing and is reduced to the governed
+        projection (accepted Decision 112 §7). ``record_sha256`` is untouched and still digests
+        the complete raw record, so the row's identity does not move.
+        """
+        if not self._compact or not record.native_identity.startswith("accession:"):
+            return record.payload
+        return compact_parsed_payload(record.payload)
 
     @staticmethod
     def _insert_quarantine(
@@ -1124,30 +1179,117 @@ class CensusCatalog:
             "latest_observed_at_utc = excluded.latest_observed_at_utc",
             values,
         )
-        for field, value in sorted(record.payload.items()):
-            connection.execute(
-                "INSERT OR IGNORE INTO census_accession_observations "
-                "(accession_observation_id, accession_plain, source_observation_id, "
-                "parsed_record_id, field_name, raw_value_json, observed_at_utc, "
-                "conflict_indicator) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    _stable_id(
-                        "accession-observation",
-                        accession.plain,
-                        record.location.observation_id,
-                        parsed_id,
-                        field,
-                    ),
-                    accession.plain,
-                    record.location.observation_id,
-                    parsed_id,
-                    field,
-                    _json(value),
-                    observed,
-                    0,
-                ),
+        if not self._compact:
+            fields = sorted(record.payload)
+        else:
+            # The canonical row is the observation for every governed field that round-trips
+            # through it, so only what it cannot carry is written (D112 §§4.B, 6). A later
+            # witness carries provenance the canonical row does not, and the incumbent's rows
+            # are back-filled first so a disagreement is represented by every row that
+            # disagrees rather than by the newcomer alone.
+            first_witness = self._is_first_witness(connection, accession.plain, parsed_id)
+            if not first_witness:
+                self._backfill_incumbent_observations(connection, accession.plain)
+            fields = list(materialized_fields(record.payload, first_witness=first_witness))
+        for field in fields:
+            self._insert_accession_observation(
+                connection,
+                accession_plain=accession.plain,
+                observation_id=record.location.observation_id,
+                parsed_id=parsed_id,
+                field=field,
+                value=record.payload[field],
+                observed=observed,
             )
         return 1
+
+    @staticmethod
+    def _insert_accession_observation(
+        connection: sqlite3.Connection,
+        *,
+        accession_plain: str,
+        observation_id: str,
+        parsed_id: str,
+        field: str,
+        value: object,
+        observed: str,
+    ) -> None:
+        """Write one field observation, with the identifier both contracts agree on."""
+        connection.execute(
+            "INSERT OR IGNORE INTO census_accession_observations "
+            "(accession_observation_id, accession_plain, source_observation_id, "
+            "parsed_record_id, field_name, raw_value_json, observed_at_utc, "
+            "conflict_indicator) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _stable_id(
+                    "accession-observation",
+                    accession_plain,
+                    observation_id,
+                    parsed_id,
+                    field,
+                ),
+                accession_plain,
+                observation_id,
+                parsed_id,
+                field,
+                _json(value),
+                observed,
+                0,
+            ),
+        )
+
+    @staticmethod
+    def _is_first_witness(
+        connection: sqlite3.Connection,
+        accession_plain: str,
+        parsed_id: str,
+    ) -> bool:
+        """Whether the canonical row for this accession is the one this record just created.
+
+        Read after the ``ON CONFLICT`` upsert rather than before it: the upsert keeps the
+        original ``parsed_record_id``, so the row naming this record is proof the insert took
+        the create branch, and the check needs no second query on the common path.
+        """
+        row = connection.execute(
+            "SELECT parsed_record_id FROM census_accessions WHERE accession_plain = ?",
+            (accession_plain,),
+        ).fetchone()
+        return row is not None and str(row["parsed_record_id"]) == parsed_id
+
+    @staticmethod
+    def _backfill_incumbent_observations(
+        connection: sqlite3.Connection,
+        accession_plain: str,
+    ) -> None:
+        """Materialize the canonical row's own omitted observations, once, before a rival.
+
+        A conflict is evidence about a *set* of rows, and the accepted conflict pass marks a
+        row only when it can see a sibling that differs. Writing the newcomer alone would
+        leave a disagreement with one side missing, so the incumbent is restored to rows
+        first. It is idempotent: the identifiers are the same ones the omitted rows would have
+        carried, so a second rival back-fills nothing.
+        """
+        row = connection.execute(
+            "SELECT accession_plain, source_observation_id, parsed_record_id, "
+            "first_observed_at_utc, form_type, filing_date_sec, report_date, "
+            "acceptance_datetime_sec_raw, primary_document_name, "
+            "CASE WHEN registrant_cik_numeric IS NULL THEN NULL "
+            "ELSE printf('%010d', registrant_cik_numeric) END AS registrant_cik_padded "
+            "FROM census_accessions WHERE accession_plain = ?",
+            (accession_plain,),
+        ).fetchone()
+        if row is None:
+            return
+        for field, value in reconstructed_observations(dict(row)):
+            CensusCatalog._insert_accession_observation(
+                connection,
+                accession_plain=accession_plain,
+                observation_id=str(row["source_observation_id"]),
+                parsed_id=str(row["parsed_record_id"]),
+                field=field,
+                value=value,
+                observed=str(row["first_observed_at_utc"]),
+            )
 
     # -- Decision 012 resolution pass --------------------------------------- #
     def resolve_persisted_accessions(
@@ -1257,15 +1399,26 @@ class CensusCatalog:
                 bounded.unit()
                 yield accession_plain, resolution
 
-    @staticmethod
-    def _iter_observed_accessions(connection: sqlite3.Connection) -> Iterator[str]:
-        """Every accession carrying at least one observation, ascending, in bounded pages."""
+    def _iter_observed_accessions(self, connection: sqlite3.Connection) -> Iterator[str]:
+        """Every accession carrying at least one observation, ascending, in bounded pages.
+
+        Under the compact contract the scan is over ``census_accessions`` instead. The two
+        enumerate the same accessions: an observation's ``accession_plain`` is a foreign key
+        into ``census_accessions``, and every canonical row is created by the same call that
+        would have written its observations, so neither table can hold an accession the other
+        does not. What changes is only which one is asked.
+        """
+        table, column = (
+            ("census_accessions", "accession_plain")
+            if self._compact
+            else ("census_accession_observations", "DISTINCT accession_plain")
+        )
         after = ""
         while True:
             page = [
                 str(row["accession_plain"])
                 for row in connection.execute(
-                    "SELECT DISTINCT accession_plain FROM census_accession_observations "
+                    f"SELECT {column} FROM {table} "  # noqa: S608 - both literals, never input
                     "WHERE accession_plain > ? ORDER BY accession_plain LIMIT ?",
                     (after, _ACCESSION_PAGE_SIZE),
                 ).fetchall()
@@ -1275,8 +1428,8 @@ class CensusCatalog:
             yield from page
             after = page[-1]
 
-    @staticmethod
     def _field_observations(
+        self,
         connection: sqlite3.Connection,
         accession_plain: str,
     ) -> list[AccessionFieldObservation]:
@@ -1284,10 +1437,15 @@ class CensusCatalog:
 
         Ordering here is only for reproducibility of the *input list*; the resolver's
         ranking never consults it, so the canonical result is unchanged by it.
+
+        Under the compact contract the persisted rows are joined by the ones the canonical
+        ``census_accessions`` row implies (:func:`reconstructed_observations`). Each carries
+        the same value, the same provenance, and the same deterministic identifier the omitted
+        row would have carried, so the resolver receives the identical input either way.
         """
-        rows = connection.execute(
-            "SELECT o.accession_observation_id, o.source_observation_id, o.field_name, "
-            "o.raw_value_json, o.observed_at_utc, s.source_id, s.logical_sha256 "
+        stored = connection.execute(
+            "SELECT o.accession_observation_id, o.source_observation_id, o.parsed_record_id, "
+            "o.field_name, o.raw_value_json, o.observed_at_utc, s.source_id, s.logical_sha256 "
             "FROM census_accession_observations AS o "
             "JOIN census_source_observations AS s "
             "  ON s.observation_id = o.source_observation_id "
@@ -1295,6 +1453,15 @@ class CensusCatalog:
             "ORDER BY o.accession_observation_id",
             (accession_plain,),
         ).fetchall()
+        rows: list[Mapping[str, Any]] = list(stored)
+        if self._compact:
+            rows += _reconstructed_rows(connection, accession_plain, stored)
+        # The full-observation path reads one ``ORDER BY accession_observation_id`` result. A
+        # compact read is two streams, so it is re-sorted on the same key rather than left in
+        # concatenation order -- the resolver's ranking ignores order, but the winning and
+        # competing identifier lists it records do not.
+        if self._compact:
+            rows.sort(key=lambda item: str(item["accession_observation_id"]))
         observations: list[AccessionFieldObservation] = []
         for row in rows:
             canonical = CANONICAL_FIELD_BY_SOURCE_FIELD.get(str(row["field_name"]))
@@ -2034,6 +2201,67 @@ def _count_metric(
         detail=f"deterministic count from {table}",
         dimension={},
     )
+
+
+def _reconstructed_rows(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+    stored: Sequence[sqlite3.Row],
+) -> list[Mapping[str, Any]]:
+    """Yield the observation rows one canonical accession row implies, shaped as read rows.
+
+    The compact contract's reader half. Each row carries exactly what the omitted
+    ``census_accession_observations`` row would have carried -- the same deterministic
+    identifier, the same ``raw_value_json`` rendering, the same provenance and observation
+    time -- so a consumer cannot tell a reconstructed row from a stored one, which is the
+    point: the canonical row *is* the observation.
+
+    A materialized row for the same field is not suppressed here. It cannot collide: an
+    observation is materialized precisely when the canonical column could not reproduce it, and
+    the incumbent's own governed fields are back-filled before any rival is written, so the
+    identifier a reconstruction emits is never also present as a stored row for the same
+    ``(accession, source, parsed record, field)``.
+    """
+    row = connection.execute(
+        "SELECT a.accession_plain, a.source_observation_id, a.parsed_record_id, "
+        "a.first_observed_at_utc, a.form_type, a.filing_date_sec, a.report_date, "
+        "a.acceptance_datetime_sec_raw, a.primary_document_name, "
+        "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
+        "ELSE printf('%010d', a.registrant_cik_numeric) END AS registrant_cik_padded, "
+        "s.source_id, s.logical_sha256 "
+        "FROM census_accessions AS a "
+        "JOIN census_source_observations AS s ON s.observation_id = a.source_observation_id "
+        "WHERE a.accession_plain = ?",
+        (accession_plain,),
+    ).fetchone()
+    if row is None:
+        return []
+    observation_id = str(row["source_observation_id"])
+    parsed_id = str(row["parsed_record_id"])
+    # The already-read rows answer this; the back-filled incumbent of a disagreement is stored
+    # under the canonical row's own provenance and must not be reconstructed on top of itself.
+    written = {
+        str(item["field_name"])
+        for item in stored
+        if str(item["source_observation_id"]) == observation_id
+        and str(item["parsed_record_id"]) == parsed_id
+    }
+    return [
+        {
+            "accession_observation_id": _stable_id(
+                "accession-observation", accession_plain, observation_id, parsed_id, field
+            ),
+            "source_observation_id": observation_id,
+            "parsed_record_id": parsed_id,
+            "field_name": field,
+            "raw_value_json": _json(value),
+            "observed_at_utc": str(row["first_observed_at_utc"]),
+            "source_id": str(row["source_id"]),
+            "logical_sha256": row["logical_sha256"],
+        }
+        for field, value in reconstructed_observations(dict(row))
+        if field not in written
+    ]
 
 
 def _stable_id(*parts: str) -> str:

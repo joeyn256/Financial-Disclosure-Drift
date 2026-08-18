@@ -35,15 +35,25 @@ token, no successful run — is an authorization.
 
 from __future__ import annotations
 
+import hashlib
+import heapq
 import json
 import sqlite3
 from collections import defaultdict
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import ClassVar, Final, Literal
+from dataclasses import field as dataclass_field
+from typing import Any, ClassVar, Final, Literal
 
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.m3.compact_evidence import (
+    CompactEvidenceSidecar,
+    MemberManifestEntry,
+    ProjectionDigest,
+    canonical_projection,
+    materialized_fields,
+)
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.accession_resolution import AUTHORITY_LEVEL, authority_for_source
 from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
@@ -52,6 +62,7 @@ from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
 # than reimplemented so exactly one derivation of an accession-observation identity
 # exists in the repository (M3.3 contract §20: no second persistence implementation).
 from disclosure_drift.sec.census import CensusCatalog, _stable_id
+from disclosure_drift.sec.census import _json as _stable_json
 from disclosure_drift.sec.identifiers import IdentifierError, normalize_cik, parse_accession
 from disclosure_drift.sec.observation_catalog import load_observations
 from disclosure_drift.sec.parsers.base import ParseOutcome, RecordLocation, merge_outcomes
@@ -620,8 +631,116 @@ def _historical_registrant_cik(
 _BULK_PARSER_ID: Final = "submissions-json"
 
 
+@dataclass
+class CompactSourceEvidence:
+    """One source's D112 §§4.A and 4.E evidence, accumulated during the single traversal.
+
+    The member manifest and the completeness digest are both properties of the frozen artifact
+    and of the pure parse of it, so both are built here rather than derived later from durable
+    rows -- rows the compact contract deliberately does not write. Nothing proportional to the
+    source is retained: each member's manifest entry is written and dropped, and the digest is
+    one running hash.
+
+    An auditor reparsing the frozen artifact reaches the same manifest and the same digest,
+    which is what keeps the omitted ordinary field values cryptographically represented
+    (D112 §5, §14).
+    """
+
+    source_observation_id: str
+    source_id: str
+    artifact_sha256: str
+    artifact_byte_length: int
+    sidecar: CompactEvidenceSidecar | None = None
+    digest: ProjectionDigest = dataclass_field(init=False)
+    members: int = 0
+    records: int = 0
+    omitted: int = 0
+    materialized: int = 0
+
+    def __post_init__(self) -> None:
+        self.digest = ProjectionDigest(self.source_id)
+        self._seen: set[str] = set()
+
+    def absorb(self, member_name: str, payload: bytes, outcome: ParseOutcome) -> None:
+        """Record one member's manifest entry and fold its records into the digest."""
+        ordinal = self.members
+        self.members += 1
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
+        self.digest.begin_member(ordinal, member_name, payload_sha256)
+        registrants = accessions = other = omitted = materialized = 0
+        for index, record in enumerate(outcome.records):
+            record_class = record.native_identity.split(":", 1)[0]
+            projection = canonical_projection(record.payload)
+            relation: list[str] = []
+            if record_class == "accession":
+                accessions += 1
+                first_witness = record.native_identity not in self._seen
+                self._seen.add(record.native_identity)
+                kept = materialized_fields(record.payload, first_witness=first_witness)
+                materialized += len(kept)
+                omitted += len(record.payload) - len(kept)
+                if projection.registrant_cik_padded is not None:
+                    relation.append(projection.registrant_cik_padded)
+            elif record_class == "registrant":
+                registrants += 1
+            else:
+                other += 1
+            self.digest.record(
+                ordinal=index,
+                record_class=record_class,
+                native_identity=record.native_identity,
+                record_sha256=record.record_sha256,
+                governed=dict(projection.as_digest_mapping()),
+                relation=relation,
+                exception=[*record.reason_codes, *record.unknown_fields],
+            )
+        self.records += len(outcome.records)
+        self.omitted += omitted
+        self.materialized += materialized
+        member_digest = self.digest.end_member()
+        if self.sidecar is not None:
+            self.sidecar.record_member(
+                self.source_observation_id,
+                MemberManifestEntry(
+                    member_ordinal=ordinal,
+                    member_name=member_name,
+                    payload_byte_length=len(payload),
+                    payload_sha256=payload_sha256,
+                    parsed_registrants=registrants,
+                    parsed_accessions=accessions,
+                    parsed_other=other,
+                    quarantined=len(outcome.quarantined),
+                    structural_failures=len(outcome.structural_failures),
+                    omitted_field_observations=omitted,
+                    materialized_field_observations=materialized,
+                    projection_digest=member_digest,
+                    disposition="parsed",
+                ),
+            )
+
+    def finish(self) -> str:
+        """Persist the source-level evidence row and return the completeness digest."""
+        completeness = self.digest.hexdigest()
+        if self.sidecar is not None:
+            self.sidecar.record_source(
+                source_observation_id=self.source_observation_id,
+                source_id=self.source_id,
+                artifact_sha256=self.artifact_sha256,
+                artifact_byte_length=self.artifact_byte_length,
+                members=self.members,
+                records=self.records,
+                omitted_field_observations=self.omitted,
+                materialized_field_observations=self.materialized,
+                completeness_digest=completeness,
+            )
+        return completeness
+
+
 def _stream_bulk_submissions(
-    store: SnapshotStore, observation: SourceObservation
+    store: SnapshotStore,
+    observation: SourceObservation,
+    *,
+    evidence: CompactSourceEvidence | None = None,
 ) -> Iterator[tuple[ParseOutcome, tuple[HistoricalFileReference, ...]]]:
     """Yield one parse outcome per accepted bulk-archive member, offline, holding none of them.
 
@@ -655,7 +774,14 @@ def _stream_bulk_submissions(
                 member_name=member.name,
             )
             decoded = _json_document(member.payload, f"bulk member {member.name!r}")
-            yield parse_submissions_document(decoded, location)
+            parsed = parse_submissions_document(decoded, location)
+            if evidence is not None:
+                # Recorded here because this is the only point at which the member's bytes and
+                # its parse both exist, and recording it anywhere else would mean either a
+                # second traversal of a 1.56 GB archive or retaining what the stream exists to
+                # drop (accepted Decision 112 §§4.A, 4.E).
+                evidence.absorb(member.name, member.payload, parsed[0])
+            yield parsed
     except ArchiveDefenceError as exc:
         message = f"accepted bulk archive refused by the archive defences: {exc}"
         raise OfflineParseError(message) from exc
@@ -940,9 +1066,99 @@ def _membership_cik(raw_value_json: object) -> int | None:
         return None
 
 
+def _stored_membership_rows(connection: sqlite3.Connection) -> Iterator[Mapping[str, Any]]:
+    """Every persisted membership observation, in canonical order."""
+    cursor = connection.execute(
+        "SELECT o.accession_plain, o.accession_observation_id, o.field_name, o.raw_value_json, "
+        "o.source_observation_id, o.parsed_record_id, o.observed_at_utc, o.conflict_indicator "
+        "FROM census_accession_observations AS o "
+        "WHERE o.field_name IN (?, ?) "
+        "ORDER BY o.accession_plain, o.accession_observation_id",
+        SUBMISSIONS_MEMBERSHIP_FIELDS,
+    )
+    for row in cursor:
+        yield dict(row)
+
+
+def _reconstructed_membership_rows(
+    connection: sqlite3.Connection,
+) -> Iterator[Mapping[str, Any]]:
+    """The membership observation each canonical accession row implies, in canonical order.
+
+    The compact contract's membership half (accepted Decision 112 §§4.C, 6). The submissions
+    ``cik`` observation of an accession's first witness is not stored, because the canonical
+    row carries the same value with the same provenance; this restores it as the row it would
+    have been. A second witness, a malformed rendering, and every full-index observation are
+    stored rather than reconstructed, so they arrive through the other cursor and are not
+    duplicated here.
+
+    One ordered scan of ``census_accessions``, consumed lazily, so the memory bound Decision
+    094 §6.4 requires is unchanged.
+    """
+    # The ``NOT EXISTS`` probe is a range over the accepted unique index
+    # ``(accession_plain, source_observation_id, parsed_record_id, field_name)`` -- one seek per
+    # accession, no intermediate, and the same shape accepted Decision 111 established for the
+    # conflict pass. A row whose observation *is* stored was back-filled beside a rival and
+    # must not be reconstructed as well.
+    cursor = connection.execute(
+        "SELECT a.accession_plain, a.source_observation_id, a.parsed_record_id, "
+        "a.first_observed_at_utc, printf('%010d', a.registrant_cik_numeric) "
+        "AS registrant_cik_padded "
+        "FROM census_accessions AS a "
+        "WHERE a.registrant_cik_numeric IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM census_accession_observations AS o "
+        "WHERE o.accession_plain = a.accession_plain "
+        "AND o.source_observation_id = a.source_observation_id "
+        "AND o.parsed_record_id = a.parsed_record_id AND o.field_name = 'cik') "
+        "ORDER BY a.accession_plain"
+    )
+    for row in cursor:
+        padded = str(row["registrant_cik_padded"])
+        accession_plain = str(row["accession_plain"])
+        observation_id = str(row["source_observation_id"])
+        parsed_id = str(row["parsed_record_id"])
+        yield {
+            "accession_plain": accession_plain,
+            "accession_observation_id": _stable_id(
+                "accession-observation", accession_plain, observation_id, parsed_id, "cik"
+            ),
+            "field_name": "cik",
+            "raw_value_json": _stable_json(padded),
+            "source_observation_id": observation_id,
+            "parsed_record_id": parsed_id,
+            "observed_at_utc": str(row["first_observed_at_utc"]),
+            "conflict_indicator": 0,
+        }
+
+
+def _merged_membership_rows(
+    connection: sqlite3.Connection,
+    *,
+    compact: bool,
+) -> Iterator[Mapping[str, Any]]:
+    """The membership rows the projection reads, whichever evidence contract wrote them.
+
+    Under the full-observation contract this is one cursor. Under the compact contract it is
+    the ordered merge of the stored rows and the reconstructed ones, on
+    ``(accession_plain, accession_observation_id)`` -- the same key and the same direction the
+    single cursor ordered by, so the merged stream is indistinguishable from it.
+    """
+    stored = _stored_membership_rows(connection)
+    if not compact:
+        yield from stored
+        return
+    yield from heapq.merge(
+        stored,
+        _reconstructed_membership_rows(connection),
+        key=lambda row: (str(row["accession_plain"]), str(row["accession_observation_id"])),
+    )
+
+
 def _stream_membership_groups(
     connection: sqlite3.Connection,
     eligible: Mapping[str, str],
+    *,
+    compact: bool = False,
 ) -> Iterator[_MembershipGroup]:
     """Yield one accession's membership group at a time, in canonical accession order.
 
@@ -950,14 +1166,7 @@ def _stream_membership_groups(
     boundary, so peak memory is one accession's membership and provenance rather than the
     whole catalog's (**Decision 094 §6.4**).
     """
-    cursor = connection.execute(
-        "SELECT o.accession_plain, o.field_name, o.raw_value_json, o.source_observation_id, "
-        "o.parsed_record_id, o.observed_at_utc, o.conflict_indicator "
-        "FROM census_accession_observations AS o "
-        "WHERE o.field_name IN (?, ?) "
-        "ORDER BY o.accession_plain, o.accession_observation_id",
-        SUBMISSIONS_MEMBERSHIP_FIELDS,
-    )
+    cursor = _merged_membership_rows(connection, compact=compact)
     current: str | None = None
     submissions: set[int] = set()
     full_index: set[int] = set()
@@ -1191,6 +1400,7 @@ def materialize_census_associations(
     connection: sqlite3.Connection,
     *,
     eligible_observations: Mapping[str, str] | None = None,
+    compact_evidence: bool = False,
 ) -> AssociationTotality:
     """Write the canonical **Decision 083 R58** relation and its completeness state.
 
@@ -1253,7 +1463,7 @@ def materialize_census_associations(
     multi = 0
 
     with transaction(connection) as active:
-        for group in _stream_membership_groups(connection, eligible):
+        for group in _stream_membership_groups(connection, eligible, compact=compact_evidence):
             invalid_renderings += group.invalid_renderings
             if not _accession_is_known(active, group.accession_plain):
                 # A full-index row never creates an accession (**R23** §5.1). Membership
@@ -1330,7 +1540,7 @@ def materialize_census_associations(
         # `_project_membership_group` is pure and reads nothing the loop above writes: the
         # membership observations, the field resolutions, and the registrant set are all
         # untouched by this projection, so the second pass necessarily reaches the same answer.
-        for group in _stream_membership_groups(connection, eligible):
+        for group in _stream_membership_groups(connection, eligible, compact=compact_evidence):
             if not _accession_is_known(active, group.accession_plain) or not group.union:
                 continue
             projection = _project_membership_group(

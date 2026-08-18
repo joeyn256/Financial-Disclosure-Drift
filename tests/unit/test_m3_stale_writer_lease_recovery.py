@@ -1239,14 +1239,16 @@ def test_the_spent_activation_constant_is_withdrawn_and_leaves_no_token_behind()
 
     # Decision 107 §4 (R117) was the capability separation that preceded the reconciliation: E0
     # execution was disabled *before* the lease was touched, so clearing the lease could not
-    # re-enable E0-v2 as a side effect. Accepted Decision 108 §2 (R120) has since reactivated E0
-    # — by a separate owner instrument issued on the verified recovery, never granted by it —
-    # and §3 (R119) has withdrawn the spent transition grant. Both neighbours are asserted in
-    # full by `test_m3_e0.py::test_the_shipped_activation_constants_match_the_governing_record`;
-    # what matters here is the direction this file owns: whatever those two currently hold,
-    # neither is recovery authority, and this surface stays `None` across both of their moves.
+    # re-enable E0-v2 as a side effect. Accepted Decision 108 §2 (R120) then reactivated E0 — by
+    # a separate owner instrument issued on the verified recovery, never granted by it — §3
+    # (R119) withdrew the spent transition grant, and §5 (R122) has withdrawn the E0 instrument
+    # again on its one interrupted invocation's return. Both
+    # neighbours are asserted in full by
+    # `test_m3_e0.py::test_the_shipped_activation_constants_match_the_governing_record`; what
+    # matters here is the direction this file owns: whatever those two currently hold, neither is
+    # recovery authority, and this surface stayed `None` across every one of their moves.
     assert e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY is None
-    assert e0.M3_3_E0_EXECUTION_AUTHORITY == "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"
+    assert e0.M3_3_E0_EXECUTION_AUTHORITY is None
 
 
 def _subparser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:

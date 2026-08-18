@@ -194,31 +194,44 @@ re-derived from this constant, and no verification path recomputes an authority 
 catalog would need both a new owner instrument and a reviewed source change.
 """
 
-M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"
+M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None
 """The governed token authorizing one real M3.3-E0 offline parse.
 
 ``None`` means the E0 ``execute`` mode is **not enabled** and returns exit ``3``. Held
 independently of :data:`PRE_E0_CATALOG_TRANSITION_AUTHORITY` on purpose: a successful
 transition is not E0 authority, and E0 success is not linkage-gate closure or E1 authority.
 
-**Accepted Decision 108 §2 (R120) — this is the separate owner instrument Decision 107 §5
-reserved, and it authorizes exactly one real E0-v2 execution.** Decision 101 §8 activated the
-``…_v1`` generation and that invocation was interrupted; Decision 107 §4 (R117) then set this
-constant to ``None`` *before* the stale writer lease was reconciled, precisely so that clearing
-the lease could not re-enable E0 as a side effect of an unrelated operation's success. That
-reconciliation is complete, verified, owner-accepted, and closed, and the read-only successor
-preflight measured every frozen predicate as PASS — so the instrument is issued here, on that
-evidence, by reviewed source change and by nothing else.
+**Accepted Decision 108 §5 (R122) — the one authorized E0-v2 invocation has returned, so the
+grant is spent and this constant is back to ``None``.** §2 (R120) briefly held the separate owner
+instrument Decision 107 §5 reserved, issued for exactly one ``m3 offline-parse --mode execute``.
+That invocation **started** and was **interrupted**: it reached a durable ``BACKUP_VERIFIED`` and
+no further, wrote no terminal record and no execution receipt, and is therefore
+``UNDETERMINED / NOT COMPLETE``. R122 requires the withdrawal once the single invocation has
+returned **whatever its outcome**, and an interrupted one is exactly the case the rule was written
+for: a grant that survived a run it did not complete would read as permission to try again.
 
-**Activation is necessary and never sufficient.** Every frozen Decision 094 §5 and Decision 103
-§10 successor predicate still runs, still conjunctively, still fail-closed; ``preflight`` stays
-strictly read-only and a passing one remains a measurement rather than permission. The value is
-spent by its one use: Decision 108 §5 (R122) requires this constant back to ``None`` once the
-single invocation has returned, whatever its outcome, so a second E0 would need both a new owner
-instrument and a reviewed source change to a ``…_v3`` generation.
+**Nothing here re-runs, resumes, or repairs that run.** ``m3_3_e0_offline_parse_v2`` is
+create-once and now exists, so the namespace alone would refuse a second attempt even were this
+constant reopened — as one already was, after the interruption. Both gates are shut on purpose,
+and neither the interruption nor the preserved evidence is authority to reopen either. A
+successor run needs **both** a new owner instrument and a reviewed source change to a ``…_v3``
+generation, exactly as Decision 103 §3 (R105) requires and exactly as the ``…_v1`` interruption
+already required once.
 
-E0-v2 success is not linkage-gate closure, migration ``0016`` authority, persistence-bridge
-authority, or E1/E2 authority; each remains a separate owner act.
+The spent token's literal is deliberately **not** retained anywhere in this module, for the same
+reason Decision 104 removed Decision 103's illustrative one and Decision 107 §5 removed its own:
+a governed token left lying in source is a value a later reader can mistake for the shipped
+state. No verification path recomputes an authority digest from this constant, and the
+interrupted run wrote no terminal record to bind one into.
+
+**Activation was necessary and never sufficient**, and that did not change: every frozen
+Decision 094 §5 and Decision 103 §10 successor predicate ran, conjunctively and fail-closed,
+``preflight`` stayed strictly read-only, and a passing one remained a measurement rather than
+permission. What ended the run was not a predicate.
+
+E0-v2 completion is not linkage-gate closure, migration ``0016`` authority, persistence-bridge
+authority, or E1/E2 authority; each remains a separate owner act — and an interrupted E0-v2 is
+none of them either.
 """
 
 TRANSITION_RUN_NAMESPACE: Final = "m3_3_pre_e0_catalog_transition_0013_0015_v1"
@@ -4138,12 +4151,18 @@ def e0_execute(
 ) -> ExecuteOutcome:
     """Run the real M3.3-E0 offline metadata parse (Decision 094 §9.1).
 
-    **Reachable, for exactly one invocation.** Accepted Decision 108 §2 (R120) sets
-    :data:`M3_3_E0_EXECUTION_AUTHORITY` to its governed token, so the first statement now
-    returns that authority instead of refusing with exit ``3``. Nothing else about this
-    function moved for that: the activation change was constant-only, exactly as the machine
-    below was built to allow. The grant is spent by its one use (§5, R122), and the frozen
-    successor predicates below still run in full — activation is necessary, never sufficient.
+    **Not reachable.** :data:`M3_3_E0_EXECUTION_AUTHORITY` is ``None``, so the first statement
+    below refuses with exit ``3`` before a private root is resolved, a lease is taken, or a
+    catalog page is read. Decision 108 §2 (R120) briefly held that constant open for exactly
+    one invocation; that invocation started, was interrupted at ``BACKUP_VERIFIED``, wrote no
+    terminal, and Decision 108 §5 (R122) withdrew the grant on its return, as it requires whatever
+    the outcome. Nothing about this function moved in either direction: both changes were
+    constant-only, exactly as the machine below was built to allow, and the frozen successor
+    predicates still run in full when it is next opened.
+
+    Reopening the constant alone would not make this run again: ``create_run_namespace`` below
+    is create-once and ``m3_3_e0_offline_parse_v2`` now exists, which is how a post-interruption
+    attempt was in fact refused. A successor needs a ``…_v3`` generation and a new instrument.
 
     The write set is the §6.1 sixteen tables plus the category-A
     ``census_plan_sources.parser_state`` transition, enforced by the accepted SQLite

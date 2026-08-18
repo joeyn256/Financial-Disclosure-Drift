@@ -517,29 +517,31 @@ def test_the_shipped_activation_constants_match_the_governing_record() -> None:
     its own separate owner act — which is the independence §7.2 requires. Decision 107 §4 (R117)
     then set the E0 constant back to ``None`` before the stale writer lease was reconciled, so
     that clearing the lease could not re-enable E0-v2 as a side effect of an unrelated
-    operation's success. **Decision 108 now moves both, in opposite directions and for the same
-    reason**: §3 (R119) withdraws the spent transition grant, and §2 (R120) issues the separate
-    E0-v2 instrument Decision 107 §5 reserved. Each half is asserted so neither can drift into
-    the other — an E0 activation that also reopened the transition would be exactly the coupling
-    R117 existed to prevent.
+    operation's success. Decision 108 §3 (R119) withdrew the spent transition grant and §2
+    (R120) issued the separate E0-v2 instrument Decision 107 §5 reserved. **Decision 108 §5
+    (R122) has now withdrawn that instrument too**: the one
+    invocation it authorized started, was interrupted at ``BACKUP_VERIFIED`` with no terminal
+    record, and R122 requires the withdrawal on return **whatever the outcome**. All three
+    governed execute constants are therefore ``None`` again, and each half is asserted so a
+    later reopening of one cannot drift into another.
 
-    Both **spent** Decision 101 tokens' absence from the whole file is asserted for the same
-    reason Decision 104's disabled-constant test asserts its own: a consumed grant reintroduced
-    under another name, in a default argument, or in a comment a later reader could mistake for
-    the shipped state would otherwise go unnoticed.
+    Every **spent** token's absence from the whole file is asserted for the same reason
+    Decision 104's disabled-constant test asserts its own: a consumed grant reintroduced under
+    another name, in a default argument, or in a comment a later reader could mistake for the
+    shipped state would otherwise go unnoticed. The D108 literal joins that list here — an
+    interrupted run consumes its grant exactly as a complete one does.
     """
     withdrawn_transition_value = "M3_3_D101_PRE_E0_CATALOG_TRANSITION_AUTHORIZED"
     withdrawn_e0_value = "M3_3_D101_E0_EXECUTION_AUTHORIZED"
+    withdrawn_e0_v2_value = "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"
     assert e0.PRE_E0_CATALOG_TRANSITION_AUTHORITY is None
-    assert e0.M3_3_E0_EXECUTION_AUTHORITY == "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"
+    assert e0.M3_3_E0_EXECUTION_AUTHORITY is None
     source = Path(e0.__file__).read_text(encoding="utf-8")
     assert "PRE_E0_CATALOG_TRANSITION_AUTHORITY: Final[str | None] = None\n" in source
-    assert (
-        'M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"'
-        in source
-    )
+    assert "M3_3_E0_EXECUTION_AUTHORITY: Final[str | None] = None\n" in source
     assert withdrawn_transition_value not in source
     assert withdrawn_e0_value not in source
+    assert withdrawn_e0_v2_value not in source
 
 
 @pytest.mark.parametrize(
@@ -1767,17 +1769,19 @@ def test_e0_preflight_requires_a_complete_transition_terminal(
 ) -> None:
     """§9.1: an absent transition terminal is UNDETERMINED, never permission.
 
-    The refusal is the assertion. ``e0_execute_enabled`` is reported alongside it and is now
-    ``True`` under accepted Decision 108 §2, which is what makes the point sharper rather than
-    weaker: the refusal is the absent transition terminal, it stood at the previous activation
-    state, and it stands at this one. **An activated E0 is refused by exactly the same
-    predicate.** The fact is rendered so an operator reading a refusal can tell the two apart.
+    The refusal is the assertion. ``e0_execute_enabled`` is reported alongside it and is back to
+    ``False`` under accepted Decision 108 §5 (R122), which is what
+    makes the point sharper rather than weaker: the refusal is the absent transition terminal,
+    and it has now stood unchanged across three different activation states — disabled, briefly
+    activated by D108 §2, and disabled again on the interrupted invocation's return. **An
+    activated E0 is refused by exactly the same predicate as a disabled one.** The fact is
+    rendered so an operator reading a refusal can tell the two apart.
     """
     build_catalog(evidence_root, head=15)
     report = e0.e0_preflight(evidence_root=evidence_root, config=config)
     assert not report.passed
     assert any("transition terminal record is absent" in item for item in report.refusals)
-    assert report.facts["e0_execute_enabled"] is True
+    assert report.facts["e0_execute_enabled"] is False
 
 
 def test_e0_preflight_passes_after_a_complete_transition(
@@ -4648,53 +4652,55 @@ def test_decision_105_grants_no_recovery_authority() -> None:
     assert "M3_3_D107_REAL_STALE_WRITER_LEASE_RECONCILIATION_AUTHORIZED" not in source
 
 
-def test_the_shipped_e0_door_is_the_d108_instrument_and_nothing_else(
+def test_the_shipped_e0_door_is_shut_and_the_constant_is_still_the_only_one(
     monkeypatch: pytest.MonkeyPatch, config: _Config, tmp_path: Path
 ) -> None:
-    """Decision 108 §2 (R120): E0 ``execute`` is enabled, by that token and by nothing else.
+    """Decision 108 §5 (R122): E0 ``execute`` is shut, and shut by that constant alone.
 
     Deliberately **not** monkeypatched for the first half. Every other execute test here injects
     a disposable token, which is the only honest way to exercise the machine; this one is the
     complement, and its whole value is that it runs the door the repository actually ships.
 
-    Its ancestor asserted the opposite shape while Decision 107 §4 (R117) held E0 shut. The
-    property under test survived that inversion unchanged, and is what both halves establish
-    together: the constant is the **sole** door. Shipped, activation passes and the *next* gate
-    — root resolution, with no variable set — refuses at exit ``1``; patched to ``None``, the
-    identical call refuses at exit ``3`` from a gate that runs ahead of root resolution and
-    consults no lease, catalog page, namespace, or receipt. Activation is necessary and never
-    sufficient, in both directions.
+    This test has now asserted both shapes: shut under Decision 107 §4 (R117), open under
+    Decision 108 §2 (R120), and shut again here on the interrupted invocation's return. The
+    property under test survived every inversion unchanged, and is what both halves establish
+    together: the constant is the **sole** door. Shipped, the refusal is exit ``3`` from a gate
+    that runs ahead of root resolution and consults no lease, catalog page, namespace, or
+    receipt; patched to a disposable token, the identical call passes that gate and the *next*
+    one — root resolution, with no variable set — refuses at exit ``1``. Activation is necessary
+    and never sufficient, in both directions.
 
     No evidence root is offered on either path, so a passing gate cannot reach private state
-    here — which is why the exit ``1`` is the *positive* evidence that the door opened.
+    here — which is why the exit ``1`` is the *positive* evidence that the door would open.
     """
-    assert e0.M3_3_E0_EXECUTION_AUTHORITY == "M3_3_D108_E0_V2_EXECUTION_AUTHORIZED"
+    assert e0.M3_3_E0_EXECUTION_AUTHORITY is None
 
     for environ in ({}, {EVIDENCE_ROOT_ENV: ""}):
-        opened = e0.run_offline_parse_command(
+        shut = e0.run_offline_parse_command(
             mode="execute", config=config, repository_root=tmp_path, environ=environ
         )
-        assert opened.exit_code == e0.EXIT_CONFIG_ERROR
-        assert not any("is None" in line for line in opened.lines)
+        assert shut.exit_code == e0.EXIT_STAGE_NOT_ENABLED
+        assert any("is None" in line for line in shut.lines)
 
-    monkeypatch.setattr(e0, "M3_3_E0_EXECUTION_AUTHORITY", None)
-    shut = e0.run_offline_parse_command(
+    monkeypatch.setattr(e0, "M3_3_E0_EXECUTION_AUTHORITY", "TEST-ONLY-DISPOSABLE-TOKEN")
+    opened = e0.run_offline_parse_command(
         mode="execute", config=config, repository_root=tmp_path, environ={}
     )
-    assert shut.exit_code == e0.EXIT_STAGE_NOT_ENABLED
-    assert any("is None" in line for line in shut.lines)
+    assert opened.exit_code == e0.EXIT_CONFIG_ERROR
+    assert not any("is None" in line for line in opened.lines)
 
 
 def test_the_two_neighbouring_execute_surfaces_stay_shut_as_shipped(
     evidence_root: Path, transitioned: Path, config: _Config, tmp_path: Path
 ) -> None:
-    """Decision 108 §3 (R119) and §1: activating E0 reopens neither of its neighbours.
+    """Decision 108 §3 (R119) and §1: E0's neighbours stay shut across every move E0 makes.
 
     This is the capability separation from the other side. Decision 107 §4 shut E0 so that a
     successful reconciliation could not re-enable it; the same rule read forward says an E0
-    instrument may not re-enable the transition or the recovery, whose grants are both spent.
-    Deliberately **not** monkeypatched, for the same reason as the test above: these are the
-    doors the repository actually ships.
+    instrument may not re-enable the transition or the recovery, whose grants are both spent —
+    and neither may an E0 *interruption*, which is the state this now holds across. All three
+    constants are ``None`` again. Deliberately **not** monkeypatched, for the same reason as the
+    test above: these are the doors the repository actually ships.
 
     The evidence root is the fully transitioned one on purpose — a COMPLETE transition terminal
     is exactly the state from which an operator might expect to re-run the transition, and it

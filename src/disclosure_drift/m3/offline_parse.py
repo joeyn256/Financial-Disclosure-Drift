@@ -49,9 +49,11 @@ from typing import Any, ClassVar, Final, Literal
 from disclosure_drift.errors import DisclosureDriftError
 from disclosure_drift.m3.compact_evidence import (
     CompactEvidenceSidecar,
+    CorroborationDigest,
     MemberManifestEntry,
     ProjectionDigest,
     canonical_projection,
+    corroboration_observations,
     materialized_fields,
 )
 from disclosure_drift.paths import DataTree
@@ -61,12 +63,17 @@ from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
 # ``_stable_id`` is the accepted census identifier convention. It is imported rather
 # than reimplemented so exactly one derivation of an accession-observation identity
 # exists in the repository (M3.3 contract §20: no second persistence implementation).
-from disclosure_drift.sec.census import CensusCatalog, _stable_id
+from disclosure_drift.sec.census import (
+    CensusCatalog,
+    ResolutionEvidence,
+    _stable_id,
+    reconstructed_accession_resolution,
+)
 from disclosure_drift.sec.census import _json as _stable_json
 from disclosure_drift.sec.identifiers import IdentifierError, normalize_cik, parse_accession
 from disclosure_drift.sec.observation_catalog import load_observations
 from disclosure_drift.sec.parsers.base import ParseOutcome, RecordLocation, merge_outcomes
-from disclosure_drift.sec.parsers.full_index import parse_company_index
+from disclosure_drift.sec.parsers.full_index import INDEX_ROW_PREFIX, parse_company_index
 from disclosure_drift.sec.parsers.historical import parse_historical_submissions
 from disclosure_drift.sec.parsers.sic import parse_sic_reference
 from disclosure_drift.sec.parsers.submissions import (
@@ -259,6 +266,9 @@ FULL_INDEX_MEMBERSHIP_SOURCE_IDS: Final[frozenset[str]] = frozenset({"sec_full_i
 #: source order, row order, or proximity heuristic, all of which are prohibited.
 SUBMISSIONS_MEMBERSHIP_FIELDS: Final[tuple[str, ...]] = ("cik", "cik_padded")
 FULL_INDEX_MEMBERSHIP_FIELDS: Final[tuple[str, ...]] = ("cik_padded",)
+_INDEX_MEMBERSHIP_FIELD: Final = FULL_INDEX_MEMBERSHIP_FIELDS[0]
+#: The submissions-side field the canonical accession row reconstructs (D112 §2.3).
+_SUBMISSIONS_MEMBERSHIP_FIELD: Final = SUBMISSIONS_MEMBERSHIP_FIELDS[0]
 
 #: The two Decision 012 fields whose resolution must be ``resolved`` or
 #: ``resolved_by_correction`` with ``blocks_dependents = 0`` before an accession's
@@ -848,15 +858,60 @@ def _parse_source(
     raise OfflineParseError(message)
 
 
-#: Native-identity prefix the accepted full-index parser stamps on every data row.
-_INDEX_ROW_PREFIX: Final = "index_row:"
+@dataclass(frozen=True, slots=True)
+class FullIndexCorroboration:
+    """What one ``company.idx`` quarter's R23 materialization produced (D113 §§9-10).
 
-#: The full-index native fields Decision 012 already maps to canonical accession fields.
-#: ``cik_padded`` is the one that establishes registrant membership (**R23** §5.2);
-#: ``form_type`` and ``date_filed`` enter as consistency evidence only, and Decision 012
-#: gives ``full_index`` authority level 3, so neither can overwrite an authoritative
-#: value established by an entity-submissions observation at level 2 (**R23** §5.5).
-_INDEX_OBSERVED_FIELDS: Final[tuple[str, ...]] = ("cik_padded", "form_type", "date_filed")
+    ``corroborating`` rows are the ones represented by their parsed record alone; ``exceptions``
+    are the ones D113 §10 keeps as explicit observation rows. Under the full-observation
+    contract every bound row is an exception by definition, because nothing is compacted.
+    """
+
+    written: int
+    unbound: tuple[str, ...]
+    index_rows: int = 0
+    corroborating: int = 0
+    exceptions: int = 0
+    omitted_observations: int = 0
+    digest: str = ""
+
+
+def _corroboration_disposition(
+    payload: Mapping[str, object],
+    canonical: sqlite3.Row | None,
+    *,
+    cik_padded: str,
+) -> str:
+    """Whether one bound index row merely corroborates the canonical accession (D113 §9).
+
+    ``corroborating`` requires the row to agree with everything the canonical accession row
+    already states and to add no member to the association set: the same registrant, the same
+    form, the same filing date, and a canonical row that actually carries all three. Anything
+    else -- a co-registrant, a disagreement, or a canonical value not yet established -- is a
+    D113 §10 exception and keeps its observation rows, because each of those can change a
+    Decision 012 resolution, the association set, or the totality classification, and §10
+    forbids compacting any of them into a boolean.
+
+    Requiring the canonical values to be present is not caution for its own sake: an accession
+    whose canonical column is NULL cannot reconstruct the observation the omitted row carried,
+    so omitting it there would not be reconstructible and would break D113 §12.
+    """
+    if canonical is None:
+        return "exception"
+    registrant = canonical["registrant_cik_padded"]
+    form = canonical["form_type"]
+    filing_date = canonical["filing_date_sec"]
+    if registrant is None or form is None or filing_date is None:
+        return "exception"
+    if str(registrant) != cik_padded:
+        return "exception"
+    observed_form = payload.get("form_type")
+    observed_date = payload.get("date_filed")
+    if observed_form is not None and str(observed_form) != str(form):
+        return "exception"
+    if observed_date is not None and str(observed_date) != str(filing_date):
+        return "exception"
+    return "corroborating"
 
 
 def _materialize_full_index_registrants(
@@ -865,7 +920,8 @@ def _materialize_full_index_registrants(
     observation: SourceObservation,
     parser_run_id: str,
     recorded: str,
-) -> tuple[int, tuple[str, ...]]:
+    compact: bool = False,
+) -> FullIndexCorroboration:
     """**R23** -- candidate-facing registrant evidence from stored ``company.idx`` rows.
 
     The accepted parser has already run and its rows are durable in
@@ -879,22 +935,39 @@ def _materialize_full_index_registrants(
     ``parsed_record_id`` foreign key correct by construction rather than by a second
     derivation of the accepted identifier.
 
-    Returns the number of observation rows written and the accessions the index listed
-    that the authoritative accession layer does not carry. Those are reported, never
-    created: ``census_accession_observations.accession_plain`` is a foreign key into
+    Under the accepted **Decision 113 §9** contract a row that merely corroborates an
+    already-canonical accession writes no observation row at all. Its parsed record is the
+    assertion -- accession identity, quarter identity, CIK, form, filing date, line number, and
+    a ``record_sha256`` over the complete raw row -- and :func:`census._corroboration_rows`
+    restores from it the identical observations this function would have written. Everything
+    D113 §10 names stays explicit.
+
+    Accessions are looked up **one at a time** against the primary key rather than preloaded
+    into a set (accepted Decision 110 §8). The preloaded form held one string per accession in
+    the catalog, which on E0's first planned source is roughly 21.5 million strings and about
+    2.9 GB -- on its own more than this host's whole memory budget, in a path D110 did not
+    reach because no index quarter had been parsed yet. The same lookup now also returns the
+    canonical values the corroboration verdict needs, so the per-row cost is one seek either
+    way.
+
+    Returns the counts, the corroboration digest, and the accessions the index listed that the
+    authoritative accession layer does not carry. Those are reported, never created:
+    ``census_accession_observations.accession_plain`` is a foreign key into
     ``census_accessions``, so an index-only accession is refused by the schema as well
     as by this check (**R23** §5.1).
     """
-    known = {
-        str(row["accession_plain"])
-        for row in connection.execute("SELECT accession_plain FROM census_accessions").fetchall()
-    }
     rows = connection.execute(
-        "SELECT parsed_record_id, payload_json FROM census_parsed_records "
+        "SELECT parsed_record_id, native_identity, record_sha256, payload_json "
+        "FROM census_parsed_records "
         "WHERE parser_run_id = ? AND native_identity LIKE ? ORDER BY parsed_record_id",
-        (parser_run_id, f"{_INDEX_ROW_PREFIX}%"),
-    ).fetchall()
+        (parser_run_id, f"{INDEX_ROW_PREFIX}%"),
+    )
+    digest = CorroborationDigest(observation.source_id, observation.logical_sha256 or "")
     written = 0
+    index_rows = 0
+    corroborating = 0
+    exceptions = 0
+    omitted = 0
     unbound: set[str] = set()
     with transaction(connection) as active:
         for row in rows:
@@ -904,13 +977,37 @@ def _materialize_full_index_registrants(
             plain, cik_padded = _index_identity(payload)
             if plain is None or cik_padded is None:
                 continue
-            if plain not in known:
+            index_rows += 1
+            canonical = active.execute(
+                "SELECT form_type, filing_date_sec, "
+                "CASE WHEN registrant_cik_numeric IS NULL THEN NULL "
+                "ELSE printf('%010d', registrant_cik_numeric) END AS registrant_cik_padded "
+                "FROM census_accessions WHERE accession_plain = ?",
+                (plain,),
+            ).fetchone()
+            if canonical is None:
                 unbound.add(plain)
                 continue
-            for field in _INDEX_OBSERVED_FIELDS:
-                value = payload.get(field)
-                if value is None:
-                    continue
+            disposition = (
+                _corroboration_disposition(payload, canonical, cik_padded=cik_padded)
+                if compact
+                else "materialized"
+            )
+            observed = dict(corroboration_observations(payload, cik_padded=cik_padded))
+            digest.record(
+                native_identity=str(row["native_identity"]),
+                record_sha256=str(row["record_sha256"]),
+                accession_plain=plain,
+                cik_padded=cik_padded,
+                observed=observed,
+                disposition=disposition,
+            )
+            if disposition == "corroborating":
+                corroborating += 1
+                omitted += len(observed)
+                continue
+            exceptions += 1
+            for field, value in observed.items():
                 active.execute(
                     "INSERT OR IGNORE INTO census_accession_observations "
                     "(accession_observation_id, accession_plain, source_observation_id, "
@@ -928,12 +1025,20 @@ def _materialize_full_index_registrants(
                         observation.observation_id,
                         str(row["parsed_record_id"]),
                         field,
-                        json.dumps(cik_padded if field == "cik_padded" else value, sort_keys=True),
+                        _stable_json(value),
                         recorded,
                     ),
                 )
                 written += 1
-    return written, tuple(sorted(unbound))
+    return FullIndexCorroboration(
+        written=written,
+        unbound=tuple(sorted(unbound)),
+        index_rows=index_rows,
+        corroborating=corroborating,
+        exceptions=exceptions,
+        omitted_observations=omitted,
+        digest=digest.hexdigest(),
+    )
 
 
 def _index_payload(raw: object) -> Mapping[str, object] | None:
@@ -1131,6 +1236,162 @@ def _reconstructed_membership_rows(
         }
 
 
+def _corroborated_membership_rows(
+    connection: sqlite3.Connection,
+) -> Iterator[Mapping[str, Any]]:
+    """The membership rows the full-index corroboration assertions imply (D113 §9).
+
+    A corroborating ``company.idx`` row writes no ``cik_padded`` observation; its parsed record
+    is the assertion. This restores the row that assertion implies -- the same deterministic
+    identifier, the same rendering, the same provenance -- so the §6.2 membership projection
+    sees the corroboration it must see to call an association set corroborated, and the
+    accepted §9.5 totality is unchanged.
+
+    One ordered scan over ``idx_census_parsed_identity``. The parser stamps
+    ``index_row:{dashed accession}:{line}`` and the dashes sit at fixed positions, so scanning
+    by native identity is scanning by accession; rows for one accession are buffered and sorted
+    on the observation identifier, which is bounded by how many quarters list one accession
+    rather than by the source.
+
+    The "was this row kept explicit?" probe is asked **after** the payload is decoded, on the
+    full ``(accession, source observation, parsed record, field)`` key. That is the accepted
+    unique index's own prefix, so it is one seek. Asked the obvious way -- a correlated
+    ``NOT EXISTS`` on ``parsed_record_id`` alone inside the scan -- it cannot use that index at
+    all, because ``parsed_record_id`` is its third column, and every index row would scan the
+    whole observation table: the same shape D112 §2.6 removed from the duplicate-flag
+    derivation, measured here as a real source that had not finished in fifty-two minutes.
+    """
+    buffered: list[Mapping[str, Any]] = []
+    current: str | None = None
+    for row in connection.execute(
+        "SELECT p.parsed_record_id, p.source_observation_id, p.payload_json, p.recorded_at_utc "
+        "FROM census_parsed_records AS p "
+        "WHERE p.native_identity >= ? AND p.native_identity < ? "
+        "ORDER BY p.native_identity",
+        (INDEX_ROW_PREFIX, f"{INDEX_ROW_PREFIX};"),
+    ):
+        payload = _index_payload(row["payload_json"])
+        if payload is None:
+            continue
+        plain, cik_padded = _index_identity(payload)
+        if plain is None or cik_padded is None:
+            continue
+        if _membership_observation_stored(
+            connection, plain, str(row["source_observation_id"]), str(row["parsed_record_id"])
+        ):
+            # D113 §10 kept this row explicit, so the stored cursor already carries it.
+            continue
+        if not _accession_is_known(connection, plain):
+            # **R23** §5.1: a full-index row never creates an accession, and the accepted
+            # materialization writes no observation for one the authoritative layer does not
+            # carry. Reconstructing one here would hand the §6.4 projection a group for an
+            # accession that does not exist, which it counts as an orphan -- a totality
+            # difference the full-observation path never produces.
+            continue
+        if plain != current:
+            yield from sorted(buffered, key=lambda item: str(item["accession_observation_id"]))
+            buffered = []
+            current = plain
+        buffered.append(
+            {
+                "accession_plain": plain,
+                "accession_observation_id": _stable_id(
+                    "accession-observation",
+                    plain,
+                    str(row["source_observation_id"]),
+                    str(row["parsed_record_id"]),
+                    _INDEX_MEMBERSHIP_FIELD,
+                ),
+                "field_name": _INDEX_MEMBERSHIP_FIELD,
+                "raw_value_json": _stable_json(cik_padded),
+                "source_observation_id": str(row["source_observation_id"]),
+                "parsed_record_id": str(row["parsed_record_id"]),
+                "observed_at_utc": str(row["recorded_at_utc"]),
+                "conflict_indicator": 0,
+            }
+        )
+    yield from sorted(buffered, key=lambda item: str(item["accession_observation_id"]))
+
+
+def _membership_observation_stored(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+    source_observation_id: str,
+    parsed_record_id: str,
+) -> bool:
+    """Whether one index row's membership observation is stored rather than reconstructed.
+
+    One seek against the accepted
+    ``(accession_plain, source_observation_id, parsed_record_id, field_name)`` unique index.
+    """
+    return (
+        connection.execute(
+            "SELECT 1 FROM census_accession_observations WHERE accession_plain = ? "
+            "AND source_observation_id = ? AND parsed_record_id = ? AND field_name = ?",
+            (accession_plain, source_observation_id, parsed_record_id, _INDEX_MEMBERSHIP_FIELD),
+        ).fetchone()
+        is not None
+    )
+
+
+def _preserve_reconstructed_membership(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+    compact: bool,
+) -> int:
+    """Materialize the ``cik`` observation the canonical row implies, before it is cleared.
+
+    The compact contract omits an accession's submissions-side membership observation because
+    ``census_accessions.registrant_cik_numeric`` carries the identical value with the identical
+    provenance, so the row is reconstructible (D112 §2.3). §6.4 item 2 then **clears that very
+    column** on a multi-registrant accession, which makes the omitted row unreconstructible from
+    that point on. Writing it once, immediately before the clear, keeps the evidence and keeps
+    the two association traversals reading the same group.
+
+    The row is byte-for-byte the one the full-observation contract already holds: the same
+    deterministic identifier, the same rendering, the same provenance triple, and
+    ``conflict_indicator = 0`` -- which is the accepted conflict pass's own answer here, because
+    it marks rivals within one ``field_name`` and a full-index co-registrant observes
+    ``cik_padded`` rather than ``cik``. Where a second submissions witness *did* disagree, the
+    incumbent is already stored and this is an ``INSERT OR IGNORE`` no-op.
+
+    Returns:
+        1 when a row was written, 0 otherwise.
+    """
+    if not compact:
+        return 0
+    row = connection.execute(
+        "SELECT source_observation_id, parsed_record_id, first_observed_at_utc, "
+        "printf('%010d', registrant_cik_numeric) AS registrant_cik_padded "
+        "FROM census_accessions WHERE accession_plain = ? AND registrant_cik_numeric IS NOT NULL",
+        (accession_plain,),
+    ).fetchone()
+    if row is None:
+        return 0
+    connection.execute(
+        "INSERT OR IGNORE INTO census_accession_observations "
+        "(accession_observation_id, accession_plain, source_observation_id, parsed_record_id, "
+        "field_name, raw_value_json, observed_at_utc, conflict_indicator) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+        (
+            _stable_id(
+                "accession-observation",
+                accession_plain,
+                str(row["source_observation_id"]),
+                str(row["parsed_record_id"]),
+                _SUBMISSIONS_MEMBERSHIP_FIELD,
+            ),
+            accession_plain,
+            str(row["source_observation_id"]),
+            str(row["parsed_record_id"]),
+            _SUBMISSIONS_MEMBERSHIP_FIELD,
+            _stable_json(str(row["registrant_cik_padded"])),
+            str(row["first_observed_at_utc"]),
+        ),
+    )
+    return 1
+
+
 def _merged_membership_rows(
     connection: sqlite3.Connection,
     *,
@@ -1139,9 +1400,10 @@ def _merged_membership_rows(
     """The membership rows the projection reads, whichever evidence contract wrote them.
 
     Under the full-observation contract this is one cursor. Under the compact contract it is
-    the ordered merge of the stored rows and the reconstructed ones, on
-    ``(accession_plain, accession_observation_id)`` -- the same key and the same direction the
-    single cursor ordered by, so the merged stream is indistinguishable from it.
+    the ordered merge of three streams -- the stored rows, the canonical accession rows'
+    reconstruction (D112), and the full-index corroboration assertions' reconstruction
+    (D113 §9) -- on ``(accession_plain, accession_observation_id)``: the same key and the same
+    direction the single cursor ordered by, so the merged stream is indistinguishable from it.
     """
     stored = _stored_membership_rows(connection)
     if not compact:
@@ -1150,6 +1412,7 @@ def _merged_membership_rows(
     yield from heapq.merge(
         stored,
         _reconstructed_membership_rows(connection),
+        _corroborated_membership_rows(connection),
         key=lambda row: (str(row["accession_plain"]), str(row["accession_observation_id"])),
     )
 
@@ -1230,7 +1493,12 @@ def _stream_membership_groups(
         yield _finish(current)
 
 
-def _blocking_fields_clear(connection: sqlite3.Connection, accession_plain: str) -> bool:
+def _blocking_fields_clear(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+    *,
+    compact: bool = False,
+) -> bool:
     """Whether one accession's latest Decision 012 resolutions clear §6.2 item 5.
 
     ``form`` and ``official_filing_date`` must each be ``resolved`` or
@@ -1248,6 +1516,12 @@ def _blocking_fields_clear(connection: sqlite3.Connection, accession_plain: str)
     ``(accession, field)`` for every accession in the catalog, which on E0's first planned source
     is roughly 43 million entries and several gigabytes -- memory proportional to the parsed
     record count, which is exactly what the memory invariant forbids.
+
+    Under the accepted **Decision 113 §4** contract an accession whose resolution is the
+    implicit default has no rows here at all, and silence is then not a missing resolution but
+    an omitted one. The reader reconstructs it rather than failing the accession closed, which
+    is the difference between a row that is absent because nothing resolved it and a row that
+    is absent because the canonical evidence already states it.
     """
     latest: dict[str, bool] = {}
     for row in connection.execute(
@@ -1259,6 +1533,14 @@ def _blocking_fields_clear(connection: sqlite3.Connection, accession_plain: str)
     ):
         latest[str(row["field_name"])] = str(row["status"]) in _RESOLVED_STATUSES and not int(
             row["blocks_dependents"]
+        )
+    if compact and not latest:
+        resolution = reconstructed_accession_resolution(connection, accession_plain)
+        return all(
+            (item := resolution.fields.get(field)) is not None
+            and item.status in _RESOLVED_STATUSES
+            and not item.blocks_dependents
+            for field in _MEMBERSHIP_BLOCKING_FIELDS
         )
     return all(latest.get(field, False) for field in _MEMBERSHIP_BLOCKING_FIELDS)
 
@@ -1476,12 +1758,25 @@ def materialize_census_associations(
             projection = _project_membership_group(
                 group,
                 known_registrants=known_registrants,
-                clear=_blocking_fields_clear(active, group.accession_plain),
+                clear=_blocking_fields_clear(
+                    active, group.accession_plain, compact=compact_evidence
+                ),
             )
             unbindable_members += projection.unbindable
             provenance_failures += projection.provenance_failures
 
             if projection.is_multi:
+                # The scalar is the column the compact contract reconstructs this accession's
+                # submissions-side membership observation *from*, so clearing it destroys that
+                # evidence. Back-fill it first, for the same reason D112 §2.2 back-fills an
+                # incumbent before writing a rival: otherwise the completeness pass below --
+                # which re-derives the verdict rather than remembering it -- reads a group with
+                # no submissions side, finds it unestablished, and disagrees with the pass that
+                # counted it. Measured on the real first source with one real `company.idx`
+                # quarter, that is 8 established multi-registrant accessions the §9.5 totality
+                # invariant then refused. A no-op under the full contract and wherever the row
+                # is already stored.
+                _preserve_reconstructed_membership(active, group.accession_plain, compact_evidence)
                 # §6.4 item 2: the scalar must already be NULL when the second substantive
                 # relation row is inserted, which is exactly when migration ``0014``'s trigger
                 # becomes able to observe the cardinality. Clearing it before the first insert
@@ -1546,7 +1841,9 @@ def materialize_census_associations(
             projection = _project_membership_group(
                 group,
                 known_registrants=known_registrants,
-                clear=_blocking_fields_clear(active, group.accession_plain),
+                clear=_blocking_fields_clear(
+                    active, group.accession_plain, compact=compact_evidence
+                ),
             )
             if not projection.is_established:
                 continue
@@ -1789,6 +2086,13 @@ class SourceLayerPhase:
     accession_resolutions: int
     full_index_registrant_observations: int
     full_index_unbound_accessions: tuple[str, ...]
+    #: One entry per parsed ``company.idx`` quarter, carrying its D113 §9 corroboration
+    #: counts and replay digest. Reported rather than persisted here: where the compact
+    #: contract is in force the caller writes it to the run-local sidecar, which is the only
+    #: place D113 §11 authorizes evidence of this shape to live.
+    full_index_corroborations: tuple[tuple[SourceObservation, FullIndexCorroboration], ...] = ()
+    #: The D113 §8 resolution-completeness evidence for this phase's one resolution pass.
+    resolution_evidence: ResolutionEvidence | None = None
 
 
 def materialize_source_layer(
@@ -1821,6 +2125,7 @@ def materialize_source_layer(
 
     outcomes: list[PlannedSourceOutcome] = []
     index_runs: list[tuple[SourceObservation, str]] = []
+    corroborations: list[tuple[SourceObservation, FullIndexCorroboration]] = []
     index_observations = 0
     index_unbound: set[str] = set()
     parsed_any = False
@@ -1898,17 +2203,24 @@ def materialize_source_layer(
     # order, which is exactly what the accepted source binding forbids.
     recorded = utc_now()
     for observation, run_id in index_runs:
-        written, unbound = _materialize_full_index_registrants(
-            connection, observation=observation, parser_run_id=run_id, recorded=recorded
+        corroboration = _materialize_full_index_registrants(
+            connection,
+            observation=observation,
+            parser_run_id=run_id,
+            recorded=recorded,
+            compact=bool(catalog.compact_evidence),
         )
-        index_observations += written
-        index_unbound.update(unbound)
+        index_observations += corroboration.written
+        index_unbound.update(corroboration.unbound)
+        corroborations.append((observation, corroboration))
     resolutions = catalog.count_persisted_accession_resolutions() if parsed_any else 0
     return SourceLayerPhase(
         outcomes=tuple(outcomes),
         accession_resolutions=resolutions,
         full_index_registrant_observations=index_observations,
         full_index_unbound_accessions=tuple(sorted(index_unbound)),
+        full_index_corroborations=tuple(corroborations),
+        resolution_evidence=catalog.resolution_evidence,
     )
 
 

@@ -47,7 +47,6 @@ import importlib
 import json
 import os
 import re
-import shutil
 import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, suppress
@@ -57,6 +56,11 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from disclosure_drift.config import EVIDENCE_ROOT_ENV
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.m3.capacity_plan import (
+    CapacityVerdict,
+    capacity_verdict,
+    plan_fingerprint,
+)
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.receipt import (
     INTERRUPTION_STATES_V4,
@@ -506,7 +510,14 @@ They are keyword defaults rather than hardcoded comparisons so a disposable test
 its own temporary catalog's identity; production supplies neither and gets these.
 """
 
-#: Decision 094 §5.2 predicate 11: three catalog copies plus a gibibyte of headroom.
+#: Decision 094 §5.2 predicate 11 as it originally stood: three copies of the *current*
+#: catalog plus a gibibyte. Retained as the historical floor rather than as the predicate.
+#: Accepted **Decision 113 §19** replaces it, because the current catalog is the pre-E0 one --
+#: about 0.36 GB, since E0 has never run -- so the old form admitted any host with roughly
+#: 2.1 GB free while a complete execution needs two orders of magnitude more. The requirement
+#: is now computed from measured densities and the planned work
+#: (:data:`~disclosure_drift.m3.capacity_plan.E0_WORKING_STATE_REQUIREMENT`), and the floor is
+#: kept only so the predicate can never ask for *less* than it used to.
 DISK_HEADROOM_BYTES: Final = 1_073_741_824
 DISK_CATALOG_MULTIPLE: Final = 3
 
@@ -2407,11 +2418,35 @@ def _packaged_target_migrations() -> tuple[Migration, ...]:
     return tuple(selected)
 
 
-def _disk_predicate(catalog_path: Path, catalog_bytes: int) -> tuple[bool, int, int]:
-    """Whether free space covers three catalog copies plus a gibibyte (§5.2 predicate 11)."""
-    required = DISK_CATALOG_MULTIPLE * catalog_bytes + DISK_HEADROOM_BYTES
-    available = shutil.disk_usage(catalog_path.parent).free
-    return available >= required, available, required
+def _disk_predicate(catalog_path: Path, catalog_bytes: int) -> tuple[CapacityVerdict, int]:
+    """Whether free space covers a **complete** E0 execution (§5.2 predicate 11, D113 §19).
+
+    The requirement is the accepted projected working state for the planned sources plus the
+    run's overhead plus the governed reserve, never a multiple of the artifact that has not
+    been written yet. The historical three-copies floor is kept as a lower bound so the
+    predicate can only ever demand more than it used to, never less.
+
+    The catalog's own source plan is fingerprinted through a **strictly read-only** handle and
+    checked against the plan the densities were measured over, so a changed plan fails closed
+    rather than being answered from a projection that has stopped describing the work. A
+    catalog that cannot be fingerprinted at all -- no plan table, an unreadable file -- is the
+    same answer for the same reason, which is why the failure is swallowed into a refusal here
+    rather than raised: predicate 11 reports, it does not abort the other twelve.
+    """
+    from disclosure_drift.storage.catalog import strictly_read_only_connection
+
+    floor = DISK_CATALOG_MULTIPLE * catalog_bytes + DISK_HEADROOM_BYTES
+    try:
+        with strictly_read_only_connection(catalog_path) as connection:
+            plan = plan_fingerprint(connection)
+    except (sqlite3.Error, OSError):
+        plan = _UNREADABLE_PLAN
+    return capacity_verdict(catalog_path.parent, plan), floor
+
+
+#: What a catalog whose plan cannot be read at all fingerprints to. An empty digest and zero
+#: sources equal no accepted requirement, so the predicate refuses rather than guessing.
+_UNREADABLE_PLAN: Final[tuple[str, int]] = ("", 0)
 
 
 def _network_switches_disabled(config: object) -> bool:
@@ -2971,11 +3006,18 @@ def _shared_preflight(
                 "the private root's runs directory is not owned by the effective operator"
             )
 
-    ok, available, required = _disk_predicate(catalog_path, measured.catalog_bytes)
-    facts["free_disk_bytes"] = available
-    facts["required_disk_bytes"] = required
-    if not ok:
-        refusals.append(f"available bytes {available} are fewer than the required {required}")
+    verdict, floor = _disk_predicate(catalog_path, measured.catalog_bytes)
+    facts["free_disk_bytes"] = verdict.available_bytes
+    facts["required_disk_bytes"] = max(verdict.required_bytes, floor)
+    facts["projected_working_state_bytes"] = verdict.working_state_bytes
+    facts["governed_reserve_bytes"] = verdict.reserve_bytes
+    facts["capacity_requirement_identity"] = verdict.requirement_identity
+    if not verdict.satisfied:
+        refusals.append(verdict.describe())
+    elif verdict.available_bytes < floor:
+        refusals.append(
+            f"available bytes {verdict.available_bytes} are fewer than the required {floor}"
+        )
 
     facts["network_switches_disabled"] = _network_switches_disabled(config)
     if not facts["network_switches_disabled"]:

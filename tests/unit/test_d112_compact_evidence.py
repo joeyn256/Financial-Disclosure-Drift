@@ -65,6 +65,7 @@ from disclosure_drift.m3.compact_evidence import (  # noqa: E402
     EVIDENCE_CONTRACT_KEY,
     FULL_EVIDENCE,
     GOVERNED_ACCESSION_FIELDS,
+    INDEX_PAYLOAD_OMITTED_FIELDS,
     CompactEvidenceSidecar,
     MemberManifestEntry,
     ProjectionDigest,
@@ -79,6 +80,7 @@ from disclosure_drift.sec.census import (  # noqa: E402
     CensusCatalog,
 )
 from disclosure_drift.sec.observation_catalog import load_observations  # noqa: E402
+from disclosure_drift.sec.parsers.full_index import INDEX_ROW_PREFIX  # noqa: E402
 from disclosure_drift.sec.source_registry import SOURCES  # noqa: E402
 from disclosure_drift.storage.sqlite import connect, transaction  # noqa: E402
 
@@ -189,17 +191,29 @@ def _document(cik: int, filings: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: A fixed archive-member timestamp. ``writestr`` with a plain name stamps ``time.localtime()``,
+#: which makes the archive's own bytes -- and therefore its ``logical_sha256`` -- depend on the
+#: second the fixture happened to be built in. Two worlds built either side of a second boundary
+#: then carry different artifact digests, and every proof that binds the artifact identity into
+#: an evidence identity fails intermittently. Pinning it makes the frozen artifact actually
+#: frozen, which is what a replay proof assumes.
+_ARCHIVE_TIMESTAMP: tuple[int, int, int, int, int, int] = (2026, 1, 1, 0, 0, 0)
+
+
 def _write_bulk_archive(path: Path) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "CIK0000000001-member-000000.json",
-            json.dumps(_document(1, _member_one()), sort_keys=True),
-        )
-        archive.writestr(
-            "CIK0000000002-member-000001.json",
-            json.dumps(_document(2, _member_two()), sort_keys=True),
-        )
+        for name, document in (
+            ("CIK0000000001-member-000000.json", _document(1, _member_one())),
+            ("CIK0000000002-member-000001.json", _document(2, _member_two())),
+            # A registrant the submissions layer knows and that files nothing itself. It exists
+            # so the index's co-registrant is **bindable**, which is what lets a joint filing
+            # reach `established` and therefore lets the association pass clear its scalar.
+            ("CIK0000000003-member-000002.json", _document(3, [])),
+        ):
+            info = zipfile.ZipInfo(name, date_time=_ARCHIVE_TIMESTAMP)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, json.dumps(document, sort_keys=True))
     return path.read_bytes()
 
 
@@ -216,6 +230,18 @@ def _write_company_index(path: Path) -> bytes:
         # A corroborating row for an accession already established, same registrant.
         f"SYNTHETIC 2                   10-K        2           2024-02-01  "
         f"edgar/data/2/{_ORDINARY}.txt",
+        # The submissions-side registrant of the joint filing above, so its membership set is
+        # fully corroborated and the accession can reach `established` with two members. That
+        # is the shape §6.4 item 2 clears the canonical scalar for, and clearing it is what
+        # destroys the column the compact contract reconstructs the submissions witness from.
+        f"SYNTHETIC 2                   10-K        2           2024-02-01  "
+        f"edgar/data/2/{_INDEX_JOINT}.txt",
+        # An accession the submissions layer does not carry. **R23** §5.1: a full-index row
+        # never creates one, so it stays unbound and contributes no membership under either
+        # contract. It is here because a reconstruction that forgot the rule would hand the
+        # §6.4 projection an orphan group and change the accepted totality.
+        "SYNTHETIC 4                   10-K        4           2024-02-01  "
+        "edgar/data/4/0000000004-24-000009.txt",
     ]
     payload = ("\n".join(lines) + "\n").encode("utf-8")
     path.write_bytes(payload)
@@ -275,8 +301,17 @@ class _StubWriter:
         self.connection = connection
 
 
-def _run(root: Path, *, compact: bool) -> Path:
-    """Parse, resolve, and associate the whole world under one evidence contract."""
+def _run(root: Path, *, compact: bool, capture: dict[str, Any] | None = None) -> Path:
+    """Parse, resolve, and associate the whole world under one evidence contract.
+
+    Args:
+        root: Where the disposable world is built.
+        compact: Which evidence contract to run under.
+        capture: Filled, when given, with the run-local evidence the accepted D113 §§8-9
+            contract accumulates but does not persist in the catalog -- the resolution
+            evidence and each index quarter's corroboration result. Optional so the D112
+            proofs, which are about durable rows, are unchanged by its presence.
+    """
     database, tree = _build_world(root)
     policy = COMPACT_EVIDENCE if compact else FULL_EVIDENCE
     store = op.SnapshotStore(tree)
@@ -297,14 +332,21 @@ def _run(root: Path, *, compact: bool) -> Path:
         result = catalog.persist(
             outcome, historical_references=references, source_observation_id=index.observation_id
         )
-        op._materialize_full_index_registrants(
+        corroboration = op._materialize_full_index_registrants(
             connection,
             observation=index,
             parser_run_id=result.parser_run_id,
             recorded=world._AT,
+            compact=compact,
         )
         catalog.count_persisted_accession_resolutions()
-        op.materialize_census_associations(connection, compact_evidence=compact)
+        totality = op.materialize_census_associations(connection, compact_evidence=compact)
+        if capture is not None:
+            capture["resolution_evidence"] = catalog.resolution_evidence
+            capture["corroboration"] = corroboration
+            capture["index_observation"] = index
+            capture["totality"] = totality
+            capture["unbound"] = corroboration.unbound
     return database
 
 
@@ -430,6 +472,17 @@ def test_the_reconstruction_inverts_the_projection() -> None:
 # ==========================================================================
 # D112 §10 -- output and information equivalence
 # ==========================================================================
+#: The tables the compact contract must leave **physically** identical.
+#:
+#: ``census_accession_field_resolutions`` and ``census_accession_cohort_resolutions`` were in
+#: this tuple under D112, where the compact contract wrote every resolution row. Accepted
+#: **Decision 113 §4** omits the ones whose complete content the canonical evidence already
+#: implies and §12 states in terms that "the physical number of resolution/corroboration rows
+#: is intentionally allowed to differ", so physical equality is no longer the claim for those
+#: two. Their **logical** equality -- reconstruction included -- is proved in
+#: ``test_d113_compact_derived_evidence.py``, which is a strictly stronger comparison than the
+#: one removed here: it holds over the same columns *and* requires the omitted rows to be
+#: rebuildable from what remains.
 _EQUAL_TABLES = (
     "census_parser_runs",
     "census_quarantined_records",
@@ -438,8 +491,6 @@ _EQUAL_TABLES = (
     "census_registrant_observations",
     "census_accessions",
     "census_accession_registrants",
-    "census_accession_field_resolutions",
-    "census_accession_cohort_resolutions",
     "census_historical_references",
     "census_malformed_historical_references",
     "census_candidate_lineage_edges",
@@ -469,10 +520,17 @@ def test_parsed_records_agree_on_everything_but_the_redundant_payload(
     )
 
 
-def test_the_compact_payload_is_a_labelled_projection_of_accession_records_only(
+def test_the_compact_payload_is_a_labelled_projection_of_the_two_named_classes(
     both_paths: tuple[Path, Path],
 ) -> None:
-    """Only accession-class payloads shrink, and the projection says so about itself."""
+    """Exactly two record classes shrink, and each projection says so about itself.
+
+    D112 §7 projects an accession-class payload to the governed fields. Accepted **Decision 113
+    §3.C** drops one further key, ``raw_line``, from an index-row payload: it is the complete
+    source text of a row the same payload already decomposes field by field, and
+    ``record_sha256`` still digests the complete record. Every other class is untouched, which
+    is what stops the projection from being a general licence to drop payload.
+    """
     full, compact = both_paths
     with connect(full, writer=False) as reference, connect(compact, writer=False) as subject:
         for row in subject.execute(
@@ -486,12 +544,16 @@ def test_the_compact_payload_is_a_labelled_projection_of_accession_records_only(
                     ).fetchone()["payload_json"]
                 )
             )
+            identity = str(row["native_identity"])
             payload = json.loads(str(row["payload_json"]))
-            if not str(row["native_identity"]).startswith("accession:"):
+            if not identity.startswith(("accession:", INDEX_ROW_PREFIX)):
                 assert payload == original
                 continue
             assert payload.pop(EVIDENCE_CONTRACT_KEY) == COMPACT_EVIDENCE_CONTRACT
             assert payload == {key: value for key, value in original.items() if key in payload}
+            if identity.startswith(INDEX_ROW_PREFIX):
+                assert set(original) - set(payload) == INDEX_PAYLOAD_OMITTED_FIELDS
+                continue
             assert set(payload) <= {*GOVERNED_ACCESSION_FIELDS, "accessionNumber"}
 
 
@@ -956,7 +1018,7 @@ def test_the_sidecar_records_a_manifest_row_for_every_member(tmp_path: Path) -> 
     sidecar = CompactEvidenceSidecar(sidecar_path)
     try:
         members = sidecar.members(evidence.source_observation_id)
-        assert len(members) == evidence.members == 2
+        assert len(members) == evidence.members == 3
         for ordinal, row in enumerate(members):
             assert row["member_ordinal"] == ordinal
             assert str(row["member_name"]).endswith(".json")

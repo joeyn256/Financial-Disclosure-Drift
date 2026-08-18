@@ -50,7 +50,7 @@ from disclosure_drift.config import (
     SECRET_ENV_VARS,
 )
 from disclosure_drift.errors import SingleWriterViolationError
-from disclosure_drift.m3 import e0
+from disclosure_drift.m3 import capacity_plan, e0
 from disclosure_drift.m3 import offline_parse as op
 from disclosure_drift.m3 import rehearsal_world as rw
 from disclosure_drift.m3.receipt import (
@@ -486,6 +486,42 @@ def bound(evidence_root: Path, catalog: Path, monkeypatch: pytest.MonkeyPatch) -
 @pytest.fixture
 def config() -> _Config:
     return _Config()
+
+
+@pytest.fixture(autouse=True)
+def _ample_free_space(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Report free space that satisfies the accepted D113 §19 capacity requirement.
+
+    Every test in this module but the capacity ones is about a *different* predicate, and the
+    corrected requirement is a projection of a complete real execution -- roughly 97 GB on the
+    accepted plan -- so on a host with less than that free, each of them would fail on disk
+    before reaching what it actually tests. The reading is stubbed rather than the requirement
+    lowered, because lowering it in a test is exactly the defect D113 §19 closes.
+
+    The catalog's source plan is stubbed for the same reason. This module's disposable catalog
+    reaches the accepted plan size with **synthetic filler rows**, so its per-source composition
+    is not -- and cannot be -- the accepted one, and the corrected predicate correctly refuses a
+    plan its densities were not measured against. Stubbing the fingerprint says "treat this
+    fixture's plan as the accepted plan" rather than weakening the check;
+    :func:`test_a_plan_the_requirement_was_not_measured_against_refuses` runs it unstubbed.
+
+    A test that needs the real predicate re-stubs ``shutil.disk_usage`` in its own body, which
+    runs after this fixture and therefore wins.
+    """
+    import shutil as shutil_module
+
+    ample = capacity_plan.E0_WORKING_STATE_REQUIREMENT.required_bytes() + 1024**3
+    usage = shutil_module._ntuple_diskusage(total=ample * 2, used=ample, free=ample)
+    monkeypatch.setattr(shutil_module, "disk_usage", lambda _path: usage)
+    monkeypatch.setattr(
+        e0,
+        "plan_fingerprint",
+        lambda _connection: (
+            capacity_plan.E0_WORKING_STATE_REQUIREMENT.plan_fingerprint,
+            capacity_plan.E0_WORKING_STATE_REQUIREMENT.plan_sources,
+        ),
+    )
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -993,20 +1029,82 @@ def test_an_existing_run_namespace_refuses(
     assert any("create-once" in item for item in report.refusals)
 
 
-def test_the_disk_predicate_requires_three_copies_plus_a_gibibyte(
-    evidence_root: Path, bound: M32World, config: _Config, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§5.2 predicate 11, measured against a stubbed free-space reading."""
+def _free_space(monkeypatch: pytest.MonkeyPatch, free: int) -> None:
+    """Report exactly ``free`` bytes available, whatever this host actually has."""
     import shutil as shutil_module
 
-    class _Usage:
-        free = 1
+    usage = shutil_module._ntuple_diskusage(total=max(free, 1) * 2, used=max(free, 1), free=free)
+    monkeypatch.setattr(shutil_module, "disk_usage", lambda _path: usage)
 
-    monkeypatch.setattr(shutil_module, "disk_usage", lambda _path: _Usage())
+
+def test_the_disk_predicate_requires_a_complete_execution_not_three_catalog_copies(
+    evidence_root: Path, bound: M32World, config: _Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§5.2 predicate 11 as accepted **Decision 113 §19** corrects it.
+
+    The old form asked for three copies of the *current* catalog plus a gibibyte. The current
+    catalog is the pre-E0 one, so that admitted a host with about 2.1 GB free -- a host on
+    which a real execution provably could not finish. Free space enough for the old form and
+    nowhere near enough for a real run must now refuse, and the refusal must name the
+    projection it refused on.
+    """
+    _free_space(monkeypatch, e0.DISK_CATALOG_MULTIPLE * 400_000_000 + e0.DISK_HEADROOM_BYTES)
     report = e0.transition_preflight(evidence_root=evidence_root, config=config)
     assert not report.passed
-    assert any("fewer than the required" in item for item in report.refusals)
+    assert any("a complete execution requires" in item for item in report.refusals)
+    assert int(report.facts["required_disk_bytes"]) == (
+        capacity_plan.E0_WORKING_STATE_REQUIREMENT.required_bytes()
+    )
+    assert int(report.facts["projected_working_state_bytes"]) > 0
+    assert int(report.facts["governed_reserve_bytes"]) == capacity_plan.GOVERNED_RESERVE_BYTES
+    assert (
+        str(report.facts["capacity_requirement_identity"])
+        == capacity_plan.E0_WORKING_STATE_REQUIREMENT.identity()
+    )
+
+
+def test_the_disk_predicate_never_asks_for_less_than_the_historical_floor(
+    evidence_root: Path, bound: M32World, config: _Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corrected predicate may only ever demand more than the one it replaced."""
+    _free_space(monkeypatch, 1)
+    report = e0.transition_preflight(evidence_root=evidence_root, config=config)
+    assert not report.passed
     assert int(report.facts["required_disk_bytes"]) >= e0.DISK_HEADROOM_BYTES
+
+
+def test_a_plan_the_requirement_was_not_measured_against_refuses(
+    evidence_root: Path, bound: M32World, config: _Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§19: a stale projection is refused rather than answered from.
+
+    Run with the plan fingerprint **unstubbed**, so the real fixture plan -- synthetic filler
+    rows that reach the accepted size with a different composition -- is compared against the
+    plan the densities were measured over. It does not match, and free space cannot rescue it:
+    the projection describes different work.
+    """
+    monkeypatch.setattr(e0, "plan_fingerprint", capacity_plan.plan_fingerprint)
+    _free_space(monkeypatch, capacity_plan.E0_WORKING_STATE_REQUIREMENT.required_bytes() * 10)
+    report = e0.transition_preflight(evidence_root=evidence_root, config=config)
+    assert not report.passed
+    assert any("was measured against" in item for item in report.refusals)
+
+
+def test_an_unreadable_plan_refuses_rather_than_guessing() -> None:
+    """§19: a catalog whose plan cannot be read at all fails closed, by the same comparison."""
+    verdict = capacity_plan.capacity_verdict(Path("/"), e0._UNREADABLE_PLAN)
+    assert not verdict.plan_matches
+    assert not verdict.satisfied
+    assert "was measured against" in verdict.describe()
+
+
+def test_ample_free_space_clears_the_capacity_predicate(
+    evidence_root: Path, bound: M32World, config: _Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity: a predicate that always refused would pass both tests above."""
+    _free_space(monkeypatch, capacity_plan.E0_WORKING_STATE_REQUIREMENT.required_bytes())
+    report = e0.transition_preflight(evidence_root=evidence_root, config=config)
+    assert not any("a complete execution requires" in item for item in report.refusals)
 
 
 def test_preflight_changes_no_catalog_byte_and_creates_no_governed_artifact(

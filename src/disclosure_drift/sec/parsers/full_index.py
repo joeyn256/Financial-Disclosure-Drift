@@ -36,6 +36,7 @@ from disclosure_drift.sec.parsers.base import (
 __all__ = [
     "FULL_INDEX_PARSER_ID",
     "FULL_INDEX_PARSER_VERSION",
+    "INDEX_ROW_PREFIX",
     "REGION_INDEX_ROWS",
     "IndexRow",
     "parse_company_index",
@@ -44,6 +45,10 @@ __all__ = [
 FULL_INDEX_PARSER_ID: Final = "company-idx"
 FULL_INDEX_PARSER_VERSION: Final = "company-idx/1.0"
 REGION_INDEX_ROWS: Final = "company_index.rows"
+
+#: The native-identity prefix this parser stamps on every data row. Stated once here, where
+#: the identity is built, so the readers that select index rows by it cannot drift from it.
+INDEX_ROW_PREFIX: Final = "index_row:"
 
 _SEPARATOR: Final = re.compile(r"^-{10,}\s*$")
 _HEADER: Final = re.compile(r"company\s+name.*form\s+type.*cik", re.IGNORECASE)
@@ -120,7 +125,7 @@ def parse_company_index(text: str, location: RecordLocation) -> ParseOutcome:
         )
         records.append(
             ParsedRecord(
-                native_identity=(f"index_row:{row.accession_plain or 'unparsed'}:{offset}"),
+                native_identity=(f"{INDEX_ROW_PREFIX}{row.accession_plain or 'unparsed'}:{offset}"),
                 payload={
                     "company_name": row.company_name,
                     "form_type": row.form_type,

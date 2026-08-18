@@ -44,6 +44,36 @@ full set of rows that disagree rather than by the newcomer alone.
 
 Nothing here deletes raw evidence. The frozen artifact is untouched and remains the complete
 record; this is a derived index over it (D112 §5).
+
+**The accepted Decision 113 extension (contract ``e0-compact-evidence/2``).** D112's own
+principle -- persist an entry only where it carries information the canonical row does not
+already carry -- was applied to the raw observation layer and left the two layers that D112 §7
+measured as the remaining cost. D113 applies it to both:
+
+4. **Implicit default resolutions** (:data:`DEFAULT_CANONICAL_RESOLUTION`,
+   :func:`is_default_resolution`). A Decision 012 resolution whose complete governed content
+   is a deterministic pure function of already-persisted canonical evidence is not written.
+   Its content is *defined* by replaying the resolver over the reconstructed observation
+   stream, so the logical resolution set is unchanged and only its physical row count moves
+   (D113 §§4, 12). Anything carrying information beyond the canonical row -- a competing
+   value, a conflict, ambiguity, a malformed alternative, a non-default authority choice, a
+   prior-cohort history -- is materialized, because the rule is *checked* per accession rather
+   than assumed: what is omitted is exactly what the reconstruction reproduces.
+5. **Compact full-index corroboration** (:func:`corroboration_observations`,
+   :func:`compact_index_payload`). A ``company.idx`` row that corroborates an already-canonical
+   accession is represented by the parsed record the traversal already wrote -- accession
+   identity, quarter identity, form, filing date, CIK, line number, and a ``record_sha256``
+   over the **complete** raw row -- rather than by three further observation rows that repeat
+   it. The row's duplicated ``raw_line`` payload is dropped for the same reason the accession
+   payload was (D113 §§3.C, 9). Disagreement, ambiguity, malformed rows, and anything that
+   changes association totality are stored explicitly and are never compacted into a boolean
+   (D113 §10).
+
+**Neither rule is trusted; both are bound.** :class:`ResolutionDigest` folds the *logical*
+resolution -- implicit and explicit alike -- into one ordered digest, and
+:class:`CorroborationDigest` does the same for every corroboration assertion, both from
+artifact-derived ingredients only, so an independent replay reproduces them without reproducing
+this run's identifiers (D113 §§8, 9).
 """
 
 from __future__ import annotations
@@ -57,26 +87,52 @@ from datetime import date
 from pathlib import Path
 from typing import Final
 
+from disclosure_drift.sec.accession_resolution import (
+    RESOLUTION_POLICY_VERSION,
+    AccessionResolution,
+)
 from disclosure_drift.sec.identifiers import IdentifierError, normalize_cik
 
 __all__ = [
+    "ALWAYS_ABSENT_RESOLUTION_FIELDS",
     "COMPACT_EVIDENCE_CONTRACT",
+    "COMPACT_EVIDENCE_CONTRACT_V1",
+    "DEFAULT_CANONICAL_RESOLUTION",
     "EVIDENCE_CONTRACT_KEY",
     "GOVERNED_ACCESSION_FIELDS",
+    "INDEX_CORROBORATION_FIELDS",
+    "INDEX_PAYLOAD_OMITTED_FIELDS",
     "MEMBERSHIP_ACCESSION_FIELDS",
     "CompactEvidencePolicy",
     "CompactEvidenceSidecar",
+    "CorroborationDigest",
     "MemberManifestEntry",
     "ProjectionDigest",
+    "ResolutionDigest",
     "canonical_projection",
+    "compact_index_payload",
+    "corroboration_observations",
+    "is_default_resolution",
     "materialized_fields",
     "reconstructed_observations",
 ]
 
+#: The Decision 112 contract, retained as a named historical constant. No E0 execution ever
+#: ran under it -- D112 §6's capacity gate stopped before the first-source canary -- so no
+#: durable evidence anywhere carries this label. It is kept so the version string is never
+#: reused for different semantics, which is what D113 §11 forbids.
+COMPACT_EVIDENCE_CONTRACT_V1: Final = "e0-compact-evidence/1"
+
 #: The contract's explicit version. It is written into every run-local evidence record and
 #: into the E0 freeze identity, so a later reader can never mistake compact evidence for the
 #: full-observation evidence M2 acquisition produced under the earlier contract.
-COMPACT_EVIDENCE_CONTRACT: Final = "e0-compact-evidence/1"
+#:
+#: **Version 2 is version 1 plus two rules, and changes none of version 1's.** The accession
+#: observation omission rule, the parsed-record projection, and the projection digest are
+#: exactly what D112 accepted. What ``/2`` adds is the Decision 113 implicit-resolution rule
+#: (:data:`DEFAULT_CANONICAL_RESOLUTION`) and the full-index corroboration representation
+#: (:func:`corroboration_observations`), neither of which ``/1`` can state.
+COMPACT_EVIDENCE_CONTRACT: Final = "e0-compact-evidence/2"
 
 #: The key a compact parsed-record payload carries so no reader can mistake a governed
 #: projection for the complete raw record. A source-native SEC field name is camel-cased
@@ -451,6 +507,266 @@ def compact_parsed_payload(payload: Mapping[str, object]) -> Mapping[str, object
 
 
 # --------------------------------------------------------------------------- #
+# The Decision 113 implicit resolution rule (D113 §§4-8)
+# --------------------------------------------------------------------------- #
+#: The name of the implicit rule an omitted Decision 012 resolution resolves under. It is
+#: written into the run-local evidence, so a reader is told which rule reconstructs the rows
+#: it cannot see rather than having to infer that any are missing.
+DEFAULT_CANONICAL_RESOLUTION: Final = "DEFAULT_CANONICAL_RESOLUTION"
+
+#: The Decision 012 canonical fields no source class in ``RESOLVABLE_SOURCE_IDS`` can carry,
+#: so every accession's resolution of them is the identical ``absent`` result (D113 §6).
+#:
+#: This is a property of ``census.CANONICAL_FIELD_BY_SOURCE_FIELD``: no source-native field
+#: name maps to either, so no observation of either can exist and no resolver branch but
+#: ``absent`` is reachable. It is stated here as the contract's source-class metadata and held
+#: in step with the map by test rather than by comment -- and it is deliberately *not* a
+#: special case in the omission rule below. An accession that unexpectedly carried one would
+#: differ from its reconstruction and would be materialized by the general rule, which is what
+#: D113 §6's final paragraph requires.
+ALWAYS_ABSENT_RESOLUTION_FIELDS: Final[frozenset[str]] = frozenset(
+    {"amendment_relationship", "submitter_cik"}
+)
+
+
+def is_default_resolution(
+    resolution: AccessionResolution,
+    reconstructed: AccessionResolution,
+) -> bool:
+    """Whether one accession's resolution is exactly what its canonical evidence implies.
+
+    The D113 §4 predicate, decided by **comparison rather than by rule**: ``reconstructed`` is
+    the resolution the reader will rebuild from the canonical row, the corroboration
+    assertions, and the frozen contract, and the row is omitted only when the real resolution
+    is indistinguishable from it. Every §5 case -- a competing witness, a conflict, ambiguity,
+    a malformed alternative, an authority-level choice, a prior-cohort history, any non-default
+    resolution -- makes the two differ and is therefore materialized without needing its own
+    clause here.
+
+    ``resolution_hash`` covers every governed component of both the field resolutions and the
+    cohort consequence and excludes the wall clock, which is precisely the comparison this
+    predicate wants.
+    """
+    return resolution.resolution_hash() == reconstructed.resolution_hash()
+
+
+class ResolutionDigest:
+    """The D113 §8 resolution-completeness digest over the **logical** resolution set.
+
+    One running SHA-256 over a canonical line per accession, in the order the resolution pass
+    resolved them -- which is ascending accession order, because that is the order the accepted
+    keyset scan produces -- covering *both* the implicitly reconstructed default resolutions and
+    the explicitly materialized exception ones. Physical row omission cannot move it, which is
+    exactly what makes it the evidence that omission changed nothing: the full-observation path
+    and the compact path fold the same lines and reach the same digest.
+
+    Every ingredient is the resolver's own output over evidence derived from the frozen
+    artifact -- status, normalized value, authority class, correction reference, reason codes,
+    materiality, blocking state, the resolver's own detail text, and the winning and competing
+    **counts**. Observation identifiers themselves are excluded for the reason
+    :class:`ProjectionDigest` excludes parsed-record identifiers: they are properties of *this*
+    catalog's source registration rather than of the evidence, and a replay in a separate world
+    must reach the same digest without reproducing them. The counts keep the structural fact --
+    how many witnesses competed -- inside the digest.
+
+    Memory is one line at a time; nothing proportional to the accession count is retained.
+    """
+
+    __slots__ = ("_accessions", "_digest")
+
+    SEPARATOR: Final = "\x1f"
+
+    def __init__(self) -> None:
+        self._digest = hashlib.sha256()
+        self._accessions = 0
+        self._absorb(
+            (
+                "resolution",
+                RESOLUTION_POLICY_VERSION,
+                COMPACT_EVIDENCE_CONTRACT,
+                DEFAULT_CANONICAL_RESOLUTION,
+            )
+        )
+
+    def _absorb(self, parts: Sequence[str]) -> None:
+        self._digest.update(self.SEPARATOR.join(parts).encode("utf-8"))
+        self._digest.update(b"\x1e")
+
+    def record(self, resolution: AccessionResolution) -> None:
+        """Fold one accession's complete logical resolution into the digest."""
+        self._accessions += 1
+        fields: list[object] = []
+        for name in sorted(resolution.fields):
+            item = resolution.fields[name]
+            fields.append(
+                [
+                    name,
+                    item.status,
+                    None if item.value is None else str(item.value),
+                    item.authority,
+                    item.correction_evidence_id,
+                    sorted(item.reason_codes),
+                    int(item.is_material),
+                    int(item.blocks_dependents),
+                    item.detail,
+                    len(item.winning_observation_ids),
+                    len(item.competing_observation_ids),
+                ]
+            )
+        self._absorb(
+            (
+                "accession",
+                resolution.accession_plain,
+                _json(fields),
+                _json(
+                    [
+                        resolution.official_filing_cohort,
+                        resolution.accepted_cohort,
+                        sorted(resolution.prior_filing_cohorts),
+                        int(resolution.cohort_boundary_crossed),
+                        int(resolution.requires_2024_approval),
+                        sorted(resolution.extra_reason_codes),
+                    ]
+                ),
+            )
+        )
+
+    @property
+    def accessions(self) -> int:
+        """How many accessions have been folded in."""
+        return self._accessions
+
+    def hexdigest(self) -> str:
+        """The resolution-completeness digest so far."""
+        digest = self._digest.copy()
+        digest.update(f"count{self.SEPARATOR}{self._accessions}".encode())
+        return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# The Decision 113 compact full-index corroboration representation (D113 §§9-10)
+# --------------------------------------------------------------------------- #
+#: The three source-native fields the accepted **R23** materialization observes from one
+#: ``company.idx`` row, ascending, and the only definition of that set in the repository.
+#: ``cik_padded`` is the one that establishes registrant membership (**R23** §5.2);
+#: ``form_type`` and ``date_filed`` enter as consistency evidence only, and Decision 012 gives
+#: ``full_index`` authority level 3, so neither can overwrite an authoritative value
+#: established by an entity-submissions observation at level 2 (**R23** §5.5). Every one is a
+#: key of ``census.CANONICAL_FIELD_BY_SOURCE_FIELD``, held so by test.
+INDEX_CORROBORATION_FIELDS: Final[tuple[str, ...]] = ("cik_padded", "date_filed", "form_type")
+
+#: The index-row payload key the compact contract does not persist (D113 §3.C). ``raw_line`` is
+#: the complete source text of a row every other key of the same payload already decomposes,
+#: and no accepted consumer reads it: the two readers of an ``index_row:`` payload take
+#: ``accession_plain``, ``cik_padded``, ``form_type``, ``date_filed`` and ``problems``, and a
+#: malformed row's raw text is separately retained by ``census_quarantined_records.raw_excerpt``.
+#: ``record_sha256`` still digests the **complete** record including ``raw_line``, so the
+#: omission is bound rather than silent and altering the omitted text still moves the identity.
+INDEX_PAYLOAD_OMITTED_FIELDS: Final[frozenset[str]] = frozenset({"raw_line"})
+
+
+def compact_index_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """One ``company.idx`` row's payload without its duplicated raw line (D113 §3.C).
+
+    Returns:
+        Every other key unchanged, carrying :data:`EVIDENCE_CONTRACT_KEY` so the projection is
+        self-describing rather than a payload that merely happens to be missing a field.
+    """
+    projected: dict[str, object] = {
+        key: value for key, value in payload.items() if key not in INDEX_PAYLOAD_OMITTED_FIELDS
+    }
+    projected[EVIDENCE_CONTRACT_KEY] = COMPACT_EVIDENCE_CONTRACT
+    return projected
+
+
+def corroboration_observations(
+    payload: Mapping[str, object],
+    *,
+    cik_padded: str,
+) -> Iterator[tuple[str, object]]:
+    """Yield the ``(field_name, value)`` pairs one index-row assertion implies.
+
+    The inverse of the corroboration omission: exactly the pairs the accepted R23
+    materialization would have written for this row, in ascending field order, with the CIK
+    already canonicalized by the caller's identity check so the rendering matches the stored
+    one byte for byte.
+
+    Args:
+        payload: The persisted ``index_row:`` parsed-record payload.
+        cik_padded: The row's canonical zero-padded CIK, from the caller's identity check.
+    """
+    for field_name in INDEX_CORROBORATION_FIELDS:
+        value = cik_padded if field_name == "cik_padded" else payload.get(field_name)
+        if value is None:
+            continue
+        yield field_name, value
+
+
+class CorroborationDigest:
+    """The D113 §9 replay binding over every full-index corroboration assertion.
+
+    One running SHA-256 over a canonical line per index row, in the traversal order the
+    accepted materialization reads them, folding the row's own artifact-derived identity: its
+    native identity, its content digest over the **complete** raw row, the accession it binds
+    to, the CIK, form and filing date it asserts, and the disposition the materialization gave
+    it. Replaying the frozen quarter reproduces every line.
+
+    ``parsed_record_id`` and wall clocks are excluded for :class:`ProjectionDigest`'s reason.
+    ``record_sha256`` is what keeps the omitted ``raw_line`` inside the binding: altering the
+    raw text of a row moves its content digest and therefore moves this digest, which is the
+    D113 §13.D proof.
+    """
+
+    __slots__ = ("_digest", "_rows")
+
+    SEPARATOR: Final = "\x1f"
+
+    def __init__(self, source_id: str, artifact_sha256: str) -> None:
+        self._digest = hashlib.sha256()
+        self._rows = 0
+        self._absorb(("corroboration", source_id, artifact_sha256, COMPACT_EVIDENCE_CONTRACT))
+
+    def _absorb(self, parts: Sequence[str]) -> None:
+        self._digest.update(self.SEPARATOR.join(parts).encode("utf-8"))
+        self._digest.update(b"\x1e")
+
+    def record(
+        self,
+        *,
+        native_identity: str,
+        record_sha256: str,
+        accession_plain: str,
+        cik_padded: str,
+        observed: Mapping[str, object],
+        disposition: str,
+    ) -> None:
+        """Fold one index row's corroboration assertion into the digest."""
+        self._rows += 1
+        self._absorb(
+            (
+                "row",
+                native_identity,
+                record_sha256,
+                accession_plain,
+                cik_padded,
+                _json({key: observed[key] for key in sorted(observed)}),
+                disposition,
+            )
+        )
+
+    @property
+    def rows(self) -> int:
+        """How many assertions have been folded in."""
+        return self._rows
+
+    def hexdigest(self) -> str:
+        """The corroboration digest so far."""
+        digest = self._digest.copy()
+        digest.update(f"count{self.SEPARATOR}{self._rows}".encode())
+        return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
 # The run-local evidence sidecar (D112 §8)
 # --------------------------------------------------------------------------- #
 #: The sidecar's fixed name inside the run-local working directory.
@@ -458,7 +774,7 @@ COMPACT_EVIDENCE_SIDECAR_FILENAME: Final = "compact_evidence.sqlite3"
 
 #: The sidecar's explicit schema version. D112 §8 requires one, and requires it to be part of
 #: the E0 freeze identity, so a later reader can tell exactly which shape it is looking at.
-COMPACT_EVIDENCE_SCHEMA_VERSION: Final = 1
+COMPACT_EVIDENCE_SCHEMA_VERSION: Final = 2
 
 _SIDECAR_SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS compact_evidence_schema (
@@ -499,13 +815,52 @@ CREATE TABLE IF NOT EXISTS compact_source_evidence (
     contract            TEXT NOT NULL,
     schema_version      INTEGER NOT NULL
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS compact_resolution_evidence (
+    resolution_scope    TEXT PRIMARY KEY,
+    policy_version      TEXT NOT NULL,
+    implicit_rule       TEXT NOT NULL,
+    always_absent_fields_json TEXT NOT NULL,
+    accessions          INTEGER NOT NULL CHECK (accessions >= 0),
+    implicit_resolutions INTEGER NOT NULL CHECK (implicit_resolutions >= 0),
+    explicit_resolutions INTEGER NOT NULL CHECK (explicit_resolutions >= 0),
+    omitted_field_rows  INTEGER NOT NULL CHECK (omitted_field_rows >= 0),
+    materialized_field_rows INTEGER NOT NULL CHECK (materialized_field_rows >= 0),
+    omitted_cohort_rows INTEGER NOT NULL CHECK (omitted_cohort_rows >= 0),
+    materialized_cohort_rows INTEGER NOT NULL CHECK (materialized_cohort_rows >= 0),
+    completeness_digest TEXT NOT NULL,
+    contract            TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS compact_corroboration_evidence (
+    source_observation_id TEXT PRIMARY KEY,
+    source_id           TEXT NOT NULL,
+    artifact_sha256     TEXT NOT NULL,
+    index_rows          INTEGER NOT NULL CHECK (index_rows >= 0),
+    corroborating       INTEGER NOT NULL CHECK (corroborating >= 0),
+    exceptions          INTEGER NOT NULL CHECK (exceptions >= 0),
+    unbound             INTEGER NOT NULL CHECK (unbound >= 0),
+    omitted_observations INTEGER NOT NULL CHECK (omitted_observations >= 0),
+    materialized_observations INTEGER NOT NULL CHECK (materialized_observations >= 0),
+    corroboration_digest TEXT NOT NULL,
+    contract            TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL
+) STRICT;
 """
 
 
 class CompactEvidenceSidecar:
-    """The run-local member manifest and completeness digest (D112 §§4.A, 4.E, 8).
+    """The run-local compact evidence: manifest, digests, and both compaction rules' results.
 
-    Deliberately **not** a migration and deliberately **not** a table in the working catalog.
+    D112 §§4.A, 4.E and 8 put the member manifest and the projection digest here. D113 §11 adds
+    two more shapes, for the same reason and under the same rules: ``compact_resolution_evidence``,
+    which records the implicit rule's name, the always-absent field set, the implicit/explicit
+    split, the omitted and materialized row counts, and the resolution-completeness digest; and
+    ``compact_corroboration_evidence``, which records each full-index quarter's row counts, its
+    corroborating/exception split, and its corroboration digest. Both enter :meth:`identity`.
+
+    It is deliberately **not** a migration and deliberately **not** a table in the working catalog.
     Migration ``0016`` is reserved for the later operational persistence bridge and the
     operational catalog stays at head ``0015``; the working catalog is a byte-for-byte schema
     twin of it and must stay one. The manifest and digest evidence has no home in ``0015`` --
@@ -633,6 +988,116 @@ class CompactEvidenceSidecar:
             ).fetchall()
         )
 
+    def record_resolution(
+        self,
+        *,
+        resolution_scope: str,
+        accessions: int,
+        implicit_resolutions: int,
+        explicit_resolutions: int,
+        omitted_field_rows: int,
+        materialized_field_rows: int,
+        omitted_cohort_rows: int,
+        materialized_cohort_rows: int,
+        completeness_digest: str,
+    ) -> None:
+        """Persist the D113 §8 resolution-completeness evidence for one resolution pass.
+
+        The digest is over the **logical** resolution set, so the counts beside it are the
+        only place the physical/logical split is recorded -- which is what lets a reader see
+        that rows are missing on purpose rather than discover it.
+        """
+        self._connection.execute(
+            "INSERT INTO compact_resolution_evidence (resolution_scope, policy_version, "
+            "implicit_rule, always_absent_fields_json, accessions, implicit_resolutions, "
+            "explicit_resolutions, omitted_field_rows, materialized_field_rows, "
+            "omitted_cohort_rows, materialized_cohort_rows, completeness_digest, contract, "
+            "schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(resolution_scope) DO UPDATE SET "
+            "accessions = excluded.accessions, "
+            "implicit_resolutions = excluded.implicit_resolutions, "
+            "explicit_resolutions = excluded.explicit_resolutions, "
+            "omitted_field_rows = excluded.omitted_field_rows, "
+            "materialized_field_rows = excluded.materialized_field_rows, "
+            "omitted_cohort_rows = excluded.omitted_cohort_rows, "
+            "materialized_cohort_rows = excluded.materialized_cohort_rows, "
+            "completeness_digest = excluded.completeness_digest",
+            (
+                resolution_scope,
+                RESOLUTION_POLICY_VERSION,
+                DEFAULT_CANONICAL_RESOLUTION,
+                _json(sorted(ALWAYS_ABSENT_RESOLUTION_FIELDS)),
+                accessions,
+                implicit_resolutions,
+                explicit_resolutions,
+                omitted_field_rows,
+                materialized_field_rows,
+                omitted_cohort_rows,
+                materialized_cohort_rows,
+                completeness_digest,
+                COMPACT_EVIDENCE_CONTRACT,
+                COMPACT_EVIDENCE_SCHEMA_VERSION,
+            ),
+        )
+
+    def record_corroboration(
+        self,
+        *,
+        source_observation_id: str,
+        source_id: str,
+        artifact_sha256: str,
+        index_rows: int,
+        corroborating: int,
+        exceptions: int,
+        unbound: int,
+        omitted_observations: int,
+        materialized_observations: int,
+        corroboration_digest: str,
+    ) -> None:
+        """Persist one full-index quarter's D113 §9 corroboration evidence."""
+        self._connection.execute(
+            "INSERT INTO compact_corroboration_evidence (source_observation_id, source_id, "
+            "artifact_sha256, index_rows, corroborating, exceptions, unbound, "
+            "omitted_observations, materialized_observations, corroboration_digest, contract, "
+            "schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(source_observation_id) DO UPDATE SET "
+            "index_rows = excluded.index_rows, corroborating = excluded.corroborating, "
+            "exceptions = excluded.exceptions, unbound = excluded.unbound, "
+            "omitted_observations = excluded.omitted_observations, "
+            "materialized_observations = excluded.materialized_observations, "
+            "corroboration_digest = excluded.corroboration_digest",
+            (
+                source_observation_id,
+                source_id,
+                artifact_sha256,
+                index_rows,
+                corroborating,
+                exceptions,
+                unbound,
+                omitted_observations,
+                materialized_observations,
+                corroboration_digest,
+                COMPACT_EVIDENCE_CONTRACT,
+                COMPACT_EVIDENCE_SCHEMA_VERSION,
+            ),
+        )
+
+    def resolution_evidence(self, resolution_scope: str) -> Mapping[str, object] | None:
+        """One resolution pass's persisted evidence row, or ``None``."""
+        row = self._connection.execute(
+            "SELECT * FROM compact_resolution_evidence WHERE resolution_scope = ?",
+            (resolution_scope,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def corroboration_evidence(self, source_observation_id: str) -> Mapping[str, object] | None:
+        """One full-index quarter's persisted corroboration evidence row, or ``None``."""
+        row = self._connection.execute(
+            "SELECT * FROM compact_corroboration_evidence WHERE source_observation_id = ?",
+            (source_observation_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
     def identity(self) -> str:
         """A deterministic digest over everything the sidecar holds.
 
@@ -645,6 +1110,8 @@ class CompactEvidenceSidecar:
         for table, order in (
             ("compact_source_evidence", "source_observation_id"),
             ("compact_source_members", "source_observation_id, member_ordinal"),
+            ("compact_resolution_evidence", "resolution_scope"),
+            ("compact_corroboration_evidence", "source_observation_id"),
         ):
             for row in self._connection.execute(
                 f"SELECT * FROM {table} ORDER BY {order}"  # noqa: S608 - fixed literals

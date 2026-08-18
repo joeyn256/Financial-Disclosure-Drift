@@ -9,12 +9,16 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from disclosure_drift.m3.compact_evidence import (
     FULL_EVIDENCE,
     CompactEvidencePolicy,
+    ResolutionDigest,
+    compact_index_payload,
     compact_parsed_payload,
+    corroboration_observations,
+    is_default_resolution,
     materialized_fields,
     reconstructed_observations,
 )
@@ -33,6 +37,7 @@ from disclosure_drift.sec.parsers.base import (
     ParseOutcome,
     QuarantinedRecord,
 )
+from disclosure_drift.sec.parsers.full_index import INDEX_ROW_PREFIX
 from disclosure_drift.sec.parsers.submissions import HistoricalFileReference
 from disclosure_drift.sec.parsers.versions import require_parser_version
 from disclosure_drift.sec.temporal import acceptance_date_sec, cohort_label_for_value
@@ -377,6 +382,49 @@ class _StreamedRunAccumulator:
         }
 
 
+@dataclass
+class ResolutionEvidence:
+    """What one catalog's Decision 012 resolution produced, physically and logically (D113 §8).
+
+    The digest is over the **logical** resolution set -- every accession's complete resolution,
+    whether its rows were written or left to the reconstruction -- so it is identical under both
+    evidence contracts and a single comparison proves the omission cost nothing. The counts
+    beside it are the only record of the physical/logical split, which is what stops a missing
+    row from looking like an accident.
+
+    It **accumulates** across every resolution call on one ``CensusCatalog``, so a caller that
+    resolves in chunks reaches the same digest and the same counts as one that resolves the
+    whole catalog at once. E0 does the latter, and does it once.
+    """
+
+    digest: ResolutionDigest = dataclass_field(default_factory=ResolutionDigest)
+    accessions: int = 0
+    implicit: int = 0
+    explicit: int = 0
+    omitted_field_rows: int = 0
+    materialized_field_rows: int = 0
+    omitted_cohort_rows: int = 0
+    materialized_cohort_rows: int = 0
+
+    def record(self, resolution: AccessionResolution, *, implicit: bool) -> None:
+        """Fold one accession's resolution in and count how it was represented."""
+        self.digest.record(resolution)
+        self.accessions += 1
+        rows = len(resolution.fields)
+        if implicit:
+            self.implicit += 1
+            self.omitted_field_rows += rows
+            self.omitted_cohort_rows += 1
+        else:
+            self.explicit += 1
+            self.materialized_field_rows += rows
+            self.materialized_cohort_rows += 1
+
+    def completeness_digest(self) -> str:
+        """The D113 §8 resolution-completeness digest over the full logical result."""
+        return self.digest.hexdigest()
+
+
 class CensusCatalog:
     """Single-writer persistence from parsed source records into normalized census rows."""
 
@@ -402,11 +450,22 @@ class CensusCatalog:
         self._writer = writer
         self._approved_2024_transitions = dict(approved_2024_transitions or {})
         self._compact = compact_evidence
+        self._resolution_evidence = ResolutionEvidence()
 
     @property
     def compact_evidence(self) -> CompactEvidencePolicy:
         """Which evidence contract this catalog writes and reads under."""
         return self._compact
+
+    @property
+    def resolution_evidence(self) -> ResolutionEvidence:
+        """The D113 §8 evidence the resolution pass accumulated.
+
+        Built under **both** contracts, because its digest is over the *logical* resolution
+        set: that is what lets the full-observation path and the compact path be compared on
+        one value rather than table by table.
+        """
+        return self._resolution_evidence
 
     def persist(
         self,
@@ -960,14 +1019,22 @@ class CensusCatalog:
     def _persisted_payload(self, record: ParsedRecord) -> Mapping[str, object]:
         """The payload this contract stores for one parsed record.
 
-        Identical to the parsed payload except for an accession-class record under the compact
-        contract, whose full payload is read by nothing and is reduced to the governed
-        projection (accepted Decision 112 §7). ``record_sha256`` is untouched and still digests
-        the complete raw record, so the row's identity does not move.
+        Identical to the parsed payload except for two record classes under the compact
+        contract, and ``record_sha256`` is untouched in both cases so no row's identity moves:
+
+        * an **accession-class** record, whose full payload is read by nothing and is reduced
+          to the governed projection (accepted Decision 112 §7);
+        * an **index-row** record, whose ``raw_line`` is the complete source text of a row the
+          same payload already decomposes field by field, dropped by accepted Decision 113
+          §3.C while every parsed field, the line number, and the problems list stay.
         """
-        if not self._compact or not record.native_identity.startswith("accession:"):
+        if not self._compact:
             return record.payload
-        return compact_parsed_payload(record.payload)
+        if record.native_identity.startswith("accession:"):
+            return compact_parsed_payload(record.payload)
+        if record.native_identity.startswith(INDEX_ROW_PREFIX):
+            return compact_index_payload(record.payload)
+        return record.payload
 
     @staticmethod
     def _insert_quarantine(
@@ -1384,20 +1451,77 @@ class CensusCatalog:
                 if accessions is not None
                 else self._iter_observed_accessions(connection)
             ):
-                observations = self._field_observations(connection, accession_plain)
+                stored, reconstructed = self._observation_rows(connection, accession_plain)
                 prior = self._prior_filing_dates(connection, accession_plain)
+                approved = self._approved_2024_transitions.get(accession_plain, False)
                 resolution = resolve_accession(
                     accession_plain,
-                    observations,
+                    _observations_from_rows(accession_plain, self._ordered(stored + reconstructed)),
                     prior_filing_dates=prior,
-                    approved_2024_transition=self._approved_2024_transitions.get(
-                        accession_plain, False
-                    ),
+                    approved_2024_transition=approved,
                 )
-                self._persist_resolution(connection, resolution)
+                implicit = self._is_implicit_resolution(
+                    accession_plain,
+                    resolution,
+                    stored=stored,
+                    reconstructed=reconstructed,
+                    prior=prior,
+                    approved=approved,
+                )
+                if not implicit:
+                    self._persist_resolution(connection, resolution)
+                self._resolution_evidence.record(resolution, implicit=implicit)
                 self._project_canonical(connection, resolution)
                 bounded.unit()
                 yield accession_plain, resolution
+
+    def _is_implicit_resolution(
+        self,
+        accession_plain: str,
+        resolution: AccessionResolution,
+        *,
+        stored: Sequence[Mapping[str, Any]],
+        reconstructed: Sequence[Mapping[str, Any]],
+        prior: Sequence[str],
+        approved: bool,
+    ) -> bool:
+        """Whether this resolution is D113 §4's ``DEFAULT_CANONICAL_RESOLUTION``.
+
+        Decided by rebuilding the resolution the *reader* will rebuild -- from the reconstructed
+        observation stream alone, with no prior-cohort history and no approval -- and comparing.
+        Nothing is assumed about which cases are default: a competing witness, a conflict, a
+        malformed alternative, an authority-level choice, a prior filing date, and an approved
+        2024 transition all make the two differ and are all therefore materialized (D113 §5).
+
+        The fast path is the ordinary one. When an accession carries no stored observation, no
+        prior filing date and no approval, the two inputs are the same list and the comparison
+        cannot fail; skipping the second resolve keeps the pass one resolution per accession on
+        the path that is 99 % of a real source.
+        """
+        if not self._compact:
+            return False
+        if not stored and not prior and not approved:
+            return True
+        return is_default_resolution(
+            resolution,
+            resolve_accession(
+                accession_plain,
+                _observations_from_rows(accession_plain, self._ordered(list(reconstructed))),
+            ),
+        )
+
+    def _ordered(self, rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+        """Observation rows in the order one ``ORDER BY accession_observation_id`` produced.
+
+        The full-observation path reads a single ordered cursor. A compact read is up to three
+        streams -- the stored rows, the canonical row's reconstruction, and the full-index
+        corroboration assertions -- so it is re-sorted on the same key rather than left in
+        concatenation order: the resolver's ranking ignores order, but the winning and competing
+        identifier lists it records do not.
+        """
+        if self._compact:
+            rows.sort(key=lambda item: str(item["accession_observation_id"]))
+        return rows
 
     def _iter_observed_accessions(self, connection: sqlite3.Connection) -> Iterator[str]:
         """Every accession carrying at least one observation, ascending, in bounded pages.
@@ -1428,6 +1552,34 @@ class CensusCatalog:
             yield from page
             after = page[-1]
 
+    def _observation_rows(
+        self,
+        connection: sqlite3.Connection,
+        accession_plain: str,
+    ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+        """One accession's observation rows, split into the stored and the reconstructed.
+
+        Under the full-observation contract everything is stored and the second list is empty.
+        Under the compact contract the stored rows are joined by two reconstructions, each
+        carrying the same value, the same provenance, and the same deterministic identifier the
+        omitted row would have carried:
+
+        * the canonical ``census_accessions`` row's own governed fields
+          (:func:`reconstructed_observations`, accepted D112 §4.C);
+        * every full-index corroboration assertion bound to this accession
+          (:func:`corroboration_observations`, accepted D113 §9).
+
+        The split matters beyond ordering: whether an accession carries a *stored* observation
+        is exactly what separates D113 §4's implicit default from §5's materialized exception.
+        """
+        stored = _stored_observation_rows(connection, accession_plain)
+        rows: list[Mapping[str, Any]] = list(stored)
+        if not self._compact:
+            return rows, []
+        reconstructed = _reconstructed_rows(connection, accession_plain, stored)
+        reconstructed += _corroboration_rows(connection, accession_plain, stored)
+        return rows, reconstructed
+
     def _field_observations(
         self,
         connection: sqlite3.Connection,
@@ -1437,78 +1589,17 @@ class CensusCatalog:
 
         Ordering here is only for reproducibility of the *input list*; the resolver's
         ranking never consults it, so the canonical result is unchanged by it.
-
-        Under the compact contract the persisted rows are joined by the ones the canonical
-        ``census_accessions`` row implies (:func:`reconstructed_observations`). Each carries
-        the same value, the same provenance, and the same deterministic identifier the omitted
-        row would have carried, so the resolver receives the identical input either way.
         """
-        stored = connection.execute(
-            "SELECT o.accession_observation_id, o.source_observation_id, o.parsed_record_id, "
-            "o.field_name, o.raw_value_json, o.observed_at_utc, s.source_id, s.logical_sha256 "
-            "FROM census_accession_observations AS o "
-            "JOIN census_source_observations AS s "
-            "  ON s.observation_id = o.source_observation_id "
-            "WHERE o.accession_plain = ? "
-            "ORDER BY o.accession_observation_id",
-            (accession_plain,),
-        ).fetchall()
-        rows: list[Mapping[str, Any]] = list(stored)
-        if self._compact:
-            rows += _reconstructed_rows(connection, accession_plain, stored)
-        # The full-observation path reads one ``ORDER BY accession_observation_id`` result. A
-        # compact read is two streams, so it is re-sorted on the same key rather than left in
-        # concatenation order -- the resolver's ranking ignores order, but the winning and
-        # competing identifier lists it records do not.
-        if self._compact:
-            rows.sort(key=lambda item: str(item["accession_observation_id"]))
-        observations: list[AccessionFieldObservation] = []
-        for row in rows:
-            canonical = CANONICAL_FIELD_BY_SOURCE_FIELD.get(str(row["field_name"]))
-            if canonical is None:
-                continue
-            source_id = str(row["source_id"])
-            if source_id not in RESOLVABLE_SOURCE_IDS:
-                continue
-            try:
-                value = json.loads(str(row["raw_value_json"]))
-            except (TypeError, ValueError):
-                continue
-            if value is None or str(value).strip() == "":
-                continue
-            observations.append(
-                AccessionFieldObservation(
-                    observation_id=str(row["accession_observation_id"]),
-                    source_id=source_id,
-                    accession_plain=accession_plain,
-                    field_name=canonical,
-                    value=value,
-                    observed_at_utc=str(row["observed_at_utc"]),
-                    source_version=(
-                        None if row["logical_sha256"] is None else str(row["logical_sha256"])[:16]
-                    ),
-                )
-            )
-        return observations
+        stored, reconstructed = self._observation_rows(connection, accession_plain)
+        return _observations_from_rows(accession_plain, self._ordered(stored + reconstructed))
 
     @staticmethod
     def _prior_filing_dates(
         connection: sqlite3.Connection,
         accession_plain: str,
     ) -> list[str]:
-        """Return filing dates from earlier persisted resolutions.
-
-        Earlier derived resolutions are retained, so a correction's cohort consequences
-        can be recorded rather than overwritten.
-        """
-        rows = connection.execute(
-            "SELECT resolved_value FROM census_accession_field_resolutions "
-            "WHERE accession_plain = ? AND field_name = 'official_filing_date' "
-            "AND status IN ('resolved', 'resolved_by_correction') "
-            "ORDER BY resolved_at_utc",
-            (accession_plain,),
-        ).fetchall()
-        return [str(row["resolved_value"]) for row in rows if row["resolved_value"]]
+        """Return filing dates from earlier persisted resolutions."""
+        return _prior_filing_dates(connection, accession_plain)
 
     @staticmethod
     def _persist_resolution(
@@ -2206,7 +2297,7 @@ def _count_metric(
 def _reconstructed_rows(
     connection: sqlite3.Connection,
     accession_plain: str,
-    stored: Sequence[sqlite3.Row],
+    stored: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
     """Yield the observation rows one canonical accession row implies, shaped as read rows.
 
@@ -2262,6 +2353,217 @@ def _reconstructed_rows(
         for field, value in reconstructed_observations(dict(row))
         if field not in written
     ]
+
+
+def _stored_observation_rows(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+) -> list[Mapping[str, Any]]:
+    """One accession's persisted ``census_accession_observations`` rows, ordered by identity.
+
+    Typed as mappings rather than as ``sqlite3.Row`` so a stored row and a reconstructed one are
+    the same thing to every caller. ``Row`` supports the whole read interface used here; the
+    cast states that rather than copying every row into a ``dict`` per accession, which on E0's
+    first planned source would be one allocation per observation for no gain.
+    """
+    return cast(
+        "list[Mapping[str, Any]]",
+        connection.execute(
+            "SELECT o.accession_observation_id, o.source_observation_id, o.parsed_record_id, "
+            "o.field_name, o.raw_value_json, o.observed_at_utc, s.source_id, s.logical_sha256 "
+            "FROM census_accession_observations AS o "
+            "JOIN census_source_observations AS s "
+            "  ON s.observation_id = o.source_observation_id "
+            "WHERE o.accession_plain = ? "
+            "ORDER BY o.accession_observation_id",
+            (accession_plain,),
+        ).fetchall(),
+    )
+
+
+def _prior_filing_dates(connection: sqlite3.Connection, accession_plain: str) -> list[str]:
+    """Filing dates from earlier persisted resolutions of this accession.
+
+    Earlier derived resolutions are retained, so a correction's cohort consequences can be
+    recorded rather than overwritten. Under the compact contract an accession with an implicit
+    resolution has none by construction -- a prior filing date is exactly one of the things
+    that stops a resolution being the default -- so the two readings agree.
+    """
+    return [
+        str(row["resolved_value"])
+        for row in connection.execute(
+            "SELECT resolved_value FROM census_accession_field_resolutions "
+            "WHERE accession_plain = ? AND field_name = 'official_filing_date' "
+            "AND status IN ('resolved', 'resolved_by_correction') "
+            "ORDER BY resolved_at_utc",
+            (accession_plain,),
+        ).fetchall()
+        if row["resolved_value"]
+    ]
+
+
+def reconstructed_accession_resolution(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+) -> AccessionResolution:
+    """The Decision 012 resolution one accession's compact evidence implies (D113 §4).
+
+    ``DEFAULT_CANONICAL_RESOLUTION`` made executable: the reader rebuilds the omitted rows by
+    replaying the accepted resolver over the observation stream the canonical accession row and
+    the full-index corroboration assertions imply, under the frozen contract. It is the same
+    stream, in the same order, that the resolution pass itself resolved, so the answer is the
+    row that was not written rather than an approximation of it.
+
+    Safe to ask about **any** accession, materialized or not: stored observations are read as
+    well, so an accession whose rows *were* written reconstructs to the same resolution they
+    hold. The caller decides which source to trust; the accepted reader prefers the persisted
+    row and falls back to this only where none exists.
+    """
+    stored = _stored_observation_rows(connection, accession_plain)
+    rows: list[Mapping[str, Any]] = list(stored)
+    rows += _reconstructed_rows(connection, accession_plain, stored)
+    rows += _corroboration_rows(connection, accession_plain, stored)
+    rows.sort(key=lambda item: str(item["accession_observation_id"]))
+    return resolve_accession(
+        accession_plain,
+        _observations_from_rows(accession_plain, rows),
+        prior_filing_dates=_prior_filing_dates(connection, accession_plain),
+    )
+
+
+def _observations_from_rows(
+    accession_plain: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[AccessionFieldObservation]:
+    """Turn persisted or reconstructed observation rows into Decision 012 observations.
+
+    One function, so a reconstructed row is filtered, decoded, and typed by exactly the code a
+    stored row is: an unmapped source field, an unresolvable source, undecodable JSON, and a
+    blank value are dropped identically whichever cursor produced the row.
+    """
+    observations: list[AccessionFieldObservation] = []
+    for row in rows:
+        canonical = CANONICAL_FIELD_BY_SOURCE_FIELD.get(str(row["field_name"]))
+        if canonical is None:
+            continue
+        source_id = str(row["source_id"])
+        if source_id not in RESOLVABLE_SOURCE_IDS:
+            continue
+        try:
+            value = json.loads(str(row["raw_value_json"]))
+        except (TypeError, ValueError):
+            continue
+        if value is None or str(value).strip() == "":
+            continue
+        observations.append(
+            AccessionFieldObservation(
+                observation_id=str(row["accession_observation_id"]),
+                source_id=source_id,
+                accession_plain=accession_plain,
+                field_name=canonical,
+                value=value,
+                observed_at_utc=str(row["observed_at_utc"]),
+                source_version=(
+                    None if row["logical_sha256"] is None else str(row["logical_sha256"])[:16]
+                ),
+            )
+        )
+    return observations
+
+
+def _corroboration_rows(
+    connection: sqlite3.Connection,
+    accession_plain: str,
+    stored: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """The observation rows one accession's full-index corroboration assertions imply.
+
+    The D113 §9 reader half. A ``company.idx`` row that corroborates an already-canonical
+    accession is not repeated as three observation rows; the parsed record the traversal
+    already wrote *is* the assertion, carrying the accession it binds to, the quarter's source
+    identity, the CIK, form and filing date it asserts, its line number, and a
+    ``record_sha256`` over the complete raw row. This restores the observations that assertion
+    implies, with the identical deterministic identifiers, values, and provenance.
+
+    ``observed_at_utc`` comes from the parsed record's own ``recorded_at_utc`` rather than from
+    the materialization pass's run-level clock, because a reconstruction must read a persisted
+    value and not a wall clock it cannot see. It feeds nothing but the relation row's audit
+    timestamps; no classification, no resolution, and no membership verdict reads it.
+
+    A row whose observations *are* stored -- a disagreement, a co-registrant, anything D113 §10
+    keeps explicit -- is skipped here, exactly as :func:`_reconstructed_rows` skips a
+    back-filled incumbent, so nothing is ever reconstructed on top of itself.
+    """
+    written = {
+        (str(item["parsed_record_id"]), str(item["field_name"]))
+        for item in stored
+        if item["parsed_record_id"] is not None
+    }
+    # A range over ``idx_census_parsed_identity``: the parser stamps
+    # ``index_row:{dashed accession}:{line}``, so one seek finds every quarter's row for this
+    # accession. ``:`` is 0x3A and ``;`` is 0x3B, so the half-open bound is exact.
+    prefix = f"{INDEX_ROW_PREFIX}{parse_accession(accession_plain).dashed}:"
+    rows: list[Mapping[str, Any]] = []
+    for record in connection.execute(
+        "SELECT p.parsed_record_id, p.source_observation_id, p.payload_json, "
+        "p.recorded_at_utc, s.source_id, s.logical_sha256 "
+        "FROM census_parsed_records AS p "
+        "JOIN census_source_observations AS s "
+        "  ON s.observation_id = p.source_observation_id "
+        "WHERE p.native_identity >= ? AND p.native_identity < ? "
+        "ORDER BY p.parsed_record_id",
+        (prefix, f"{prefix};"),
+    ).fetchall():
+        payload = _index_assertion(record["payload_json"])
+        if payload is None:
+            continue
+        plain, cik_padded = payload
+        if plain != accession_plain:
+            continue
+        parsed_id = str(record["parsed_record_id"])
+        observation_id = str(record["source_observation_id"])
+        decoded = json.loads(str(record["payload_json"]))
+        rows += [
+            {
+                "accession_observation_id": _stable_id(
+                    "accession-observation", accession_plain, observation_id, parsed_id, field
+                ),
+                "source_observation_id": observation_id,
+                "parsed_record_id": parsed_id,
+                "field_name": field,
+                "raw_value_json": _json(value),
+                "observed_at_utc": str(record["recorded_at_utc"]),
+                "source_id": str(record["source_id"]),
+                "logical_sha256": record["logical_sha256"],
+            }
+            for field, value in corroboration_observations(decoded, cik_padded=cik_padded)
+            if (parsed_id, field) not in written
+        ]
+    return rows
+
+
+def _index_assertion(raw: object) -> tuple[str, str] | None:
+    """One index-row payload's ``(accession_plain, cik_padded)``, or ``None``.
+
+    The same refusals the accepted R23 materialization applies, restated for the reader so a
+    row it never observed is never reconstructed: a payload the parser recorded ``problems``
+    for establishes nothing, and a malformed accession or CIK contributes nothing rather than
+    contributing a guessed one.
+    """
+    try:
+        decoded = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, dict) or decoded.get("problems"):
+        return None
+    accession = decoded.get("accession_plain")
+    cik = decoded.get("cik_padded")
+    if not isinstance(accession, str) or not isinstance(cik, str):
+        return None
+    try:
+        return parse_accession(accession).plain, normalize_cik(cik)[1]
+    except IdentifierError:
+        return None
 
 
 def _stable_id(*parts: str) -> str:

@@ -142,6 +142,107 @@ STREAMED_STRUCTURAL_DETAIL_LIMIT: Final = 1_000
 #: that the page itself is never a meaningful share of memory.
 _ACCESSION_PAGE_SIZE: Final = 10_000
 
+#: Batch size meaning "do not split this logical write at all".
+#:
+#: One transaction for the whole write is the accepted behaviour, and it stays the default
+#: everywhere the operational catalog is the target: a source either lands entirely or not
+#: at all, and no partially written source is ever durable. Splitting is opt-in and is for a
+#: **run-local working catalog** only, where bounded durable progress is the point.
+SINGLE_TRANSACTION: Final = 0
+
+
+class BoundedTransaction:
+    """One logical write carried out as one, or as a bounded series, of real transactions.
+
+    A single transaction spanning an entire source is correct and is what the operational
+    catalog gets. It stops being *executable* once the source is large enough: every page the
+    write dirties has to stay in the journal until the one commit, so the journal grows with
+    the whole source rather than with any bounded unit of work, and the page cache spills
+    long before the end (the accepted D111 remediation instrument).
+
+    With a positive ``batch_size`` this commits after that many units and immediately opens
+    the next transaction. What that buys is bounded journal residency and bounded lost work
+    on interruption. What it must not buy -- and does not -- is a different result: the rows,
+    their identities, and their order are decided by the writer, and a commit boundary is
+    only a point at which already-decided rows become durable.
+
+    A committed batch is **execution progress, never a disposition**. Nothing here records
+    that a source succeeded; the caller does that once, after the last unit, and a run
+    interrupted between batches leaves committed rows and no success claim
+    (the accepted D111 remediation instrument).
+
+    ``checkpoint`` additionally truncates the write-ahead log at each boundary, which is what
+    keeps the log itself bounded rather than merely the transaction. It is for a run-local
+    working catalog with exactly one connection; it is not used against the operational
+    catalog, where a concurrent reader legitimately holds frames the checkpoint would wait on.
+    """
+
+    __slots__ = ("_batch_size", "_checkpoint", "_connection", "_open", "_seen", "batches")
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        batch_size: int = SINGLE_TRANSACTION,
+        checkpoint: bool = False,
+    ) -> None:
+        if batch_size < 0:
+            message = f"batch size must not be negative; got {batch_size}"
+            raise ValueError(message)
+        self._connection = connection
+        self._batch_size = batch_size
+        self._checkpoint = checkpoint
+        self._open = False
+        self._seen = 0
+        #: How many real transactions the logical write actually committed.
+        self.batches = 0
+
+    def __enter__(self) -> BoundedTransaction:
+        self._begin()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        if exc_type is not None:
+            self._rollback()
+            return
+        self._commit()
+
+    def unit(self) -> None:
+        """Count one unit of work and close the batch when it is full.
+
+        Called between units, never inside one: the boundary is only ever at a point where
+        the writer has finished everything one unit implies.
+        """
+        self._seen += 1
+        if self._batch_size and self._seen >= self._batch_size:
+            self._commit()
+            self._seen = 0
+            self._begin()
+
+    def _begin(self) -> None:
+        self._connection.execute("BEGIN IMMEDIATE")
+        self._open = True
+
+    def _commit(self) -> None:
+        if not self._open:
+            return
+        if self._connection.in_transaction:
+            self._connection.execute("COMMIT")
+        self._open = False
+        self.batches += 1
+        if self._checkpoint:
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def _rollback(self) -> None:
+        if self._open and self._connection.in_transaction:
+            self._connection.execute("ROLLBACK")
+        self._open = False
+
 
 @dataclass(slots=True)
 class _StreamedRunAccumulator:
@@ -349,6 +450,7 @@ class CensusCatalog:
             for quarantined_record in outcome.quarantined:
                 self._insert_quarantine(connection, parser_run_id, quarantined_record, started)
             self._insert_structural(connection, parser_run_id, observation_id, outcome, started)
+            self._flush_run_level_derivations(connection, observation_id)
             self._insert_historical_references(connection, observation_id, historical_references)
             # A structural failure means at least one nested region yielded an unknown
             # count. The run is recorded as failed so that no consumer can read its
@@ -387,6 +489,8 @@ class CensusCatalog:
         parser_id: str,
         parser_version: str,
         source_observation_id: str,
+        batch_size: int = SINGLE_TRANSACTION,
+        checkpoint_batches: bool = False,
     ) -> ParserWriteResult:
         """Persist one logical parser run from a **stream** of per-part outcomes.
 
@@ -414,12 +518,29 @@ class CensusCatalog:
         The one deliberate difference is the run summary's ``structural`` array, which is
         bounded here and complete in :meth:`persist`; see :func:`_streamed_summary`.
 
+        **Batching.** By default this is one transaction, exactly as before: a source lands
+        whole or not at all. A positive ``batch_size`` splits it into that many parts per real
+        transaction, which is required against a **run-local working catalog** because a single
+        transaction over a source this large cannot keep its journal bounded (accepted
+        the accepted D111 instrument). Batching changes durability granularity and nothing
+        else -- every row, identity, and order is decided before any boundary is reached, so
+        two different batch sizes produce byte-identical governed output.
+
+        A batched run is **truthful while incomplete**: the run row is seeded ``failed``, which
+        is the state the accepted vocabulary already reserves for "do not read this run's
+        counts as a real observation", and it is corrected to the real terminal only after the
+        last part. An interruption therefore leaves committed rows under a run that claims
+        nothing, never a partial source wearing a success (the accepted D111 instrument).
+
         Args:
             outcomes: Each part's outcome paired with the historical-file references it named.
                 Consumed exactly once, lazily.
             parser_id: The **run-level** parser id, as ``merge_outcomes`` would have set it.
             parser_version: The run-level parser version, likewise.
             source_observation_id: The one observation every part belongs to.
+            batch_size: Parts per real transaction, or :data:`SINGLE_TRANSACTION` for one.
+            checkpoint_batches: Truncate the write-ahead log at each batch boundary. For a
+                run-local working catalog with one connection; not for the operational catalog.
         """
         observation_id = self._require_streamed_observation(source_observation_id)
         parser_run_id = _stable_id("parser-run", observation_id, parser_id, parser_version)
@@ -450,12 +571,19 @@ class CensusCatalog:
         accessions = 0
         parsed = 0
         quarantined = 0
-        with transaction(self._writer.connection) as connection:
+        connection = self._writer.connection
+        with BoundedTransaction(
+            connection, batch_size=batch_size, checkpoint=checkpoint_batches
+        ) as bounded:
+            # Seeded ``failed`` rather than ``completed``: with a positive batch size this row
+            # is durable long before the run is over, and the accepted meaning of ``failed`` is
+            # exactly "no consumer may read this run's counts -- including zero -- as a real
+            # observation". A run that never reaches its last part keeps it.
             connection.execute(
                 "INSERT INTO census_parser_runs "
                 "(parser_run_id, source_observation_id, parser_id, parser_version, "
                 "started_at_utc, finished_at_utc, parsed_count, quarantined_count, "
-                "outcome, summary_json) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'completed', '{}')",
+                "outcome, summary_json) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'failed', '{}')",
                 (parser_run_id, observation_id, parser_id, authoritative, started, started),
             )
             for outcome, references in outcomes:
@@ -476,7 +604,11 @@ class CensusCatalog:
                     self._require_streamed_location(item.location.observation_id, observation_id)
                 self._insert_structural(connection, parser_run_id, observation_id, outcome, started)
                 accumulator.absorb(outcome, references)
+                # One part is one unit: the boundary is only ever reached where every row that
+                # part implies has already been written.
+                bounded.unit()
             accumulator.apply_duplicate_identities(connection, parser_run_id)
+            self._flush_run_level_derivations(connection, observation_id)
             self._insert_historical_references(
                 connection, observation_id, accumulator.historical_references
             )
@@ -888,8 +1020,6 @@ class CensusCatalog:
                 source_field,
                 observed,
             )
-        self._candidate_edges(connection, record.location.observation_id, kind="company_name")
-        self._candidate_edges(connection, record.location.observation_id, kind="ticker")
         return 1
 
     def _normalize_alias(
@@ -925,8 +1055,6 @@ class CensusCatalog:
                 source,
                 observed,
             )
-        self._candidate_edges(connection, record.location.observation_id, kind="company_name")
-        self._candidate_edges(connection, record.location.observation_id, kind="ticker")
         return 1
 
     def _normalize_accession(
@@ -1019,13 +1147,15 @@ class CensusCatalog:
                     0,
                 ),
             )
-        self._mark_accession_conflicts(connection, accession.plain)
         return 1
 
     # -- Decision 012 resolution pass --------------------------------------- #
     def resolve_persisted_accessions(
         self,
         accessions: Sequence[str] | None = None,
+        *,
+        batch_size: int = SINGLE_TRANSACTION,
+        checkpoint_batches: bool = False,
     ) -> Mapping[str, AccessionResolution]:
         """Resolve canonical accession fields from every persisted observation.
 
@@ -1041,11 +1171,18 @@ class CensusCatalog:
         Returns:
             The resolution per accession, keyed by plain accession number.
         """
-        return dict(self.iter_persisted_accession_resolutions(accessions))
+        return dict(
+            self.iter_persisted_accession_resolutions(
+                accessions, batch_size=batch_size, checkpoint_batches=checkpoint_batches
+            )
+        )
 
     def count_persisted_accession_resolutions(
         self,
         accessions: Sequence[str] | None = None,
+        *,
+        batch_size: int = SINGLE_TRANSACTION,
+        checkpoint_batches: bool = False,
     ) -> int:
         """Resolve exactly as :meth:`resolve_persisted_accessions` does, and count the results.
 
@@ -1055,11 +1192,19 @@ class CensusCatalog:
         a number this method can produce with none of them (accepted Decision 110 §8). On E0's
         first planned source that mapping is roughly 21.5 million entries.
         """
-        return sum(1 for _ in self.iter_persisted_accession_resolutions(accessions))
+        return sum(
+            1
+            for _ in self.iter_persisted_accession_resolutions(
+                accessions, batch_size=batch_size, checkpoint_batches=checkpoint_batches
+            )
+        )
 
     def iter_persisted_accession_resolutions(
         self,
         accessions: Sequence[str] | None = None,
+        *,
+        batch_size: int = SINGLE_TRANSACTION,
+        checkpoint_batches: bool = False,
     ) -> Iterator[tuple[str, AccessionResolution]]:
         """Yield each accession's resolution as it is written, retaining none of them.
 
@@ -1073,27 +1218,44 @@ class CensusCatalog:
         long-lived cursor would have to stay open across every resolution's write transaction.
         The order is identical -- ascending ``accession_plain``, which is what the unpaged query
         also produced.
+
+        One transaction per accession is the default and is what the operational catalog gets.
+        A positive ``batch_size`` groups that many accessions into one real transaction instead,
+        for the run-local working catalog: each accession reads only its own persisted evidence
+        and writes only its own rows, so grouping changes when the rows become durable and
+        nothing about what they are (the accepted D111 remediation instrument).
+
+        Args:
+            accessions: Restrict to these accessions; default is every observed accession.
+            batch_size: Accessions per real transaction, or :data:`SINGLE_TRANSACTION` for one
+                transaction each.
+            checkpoint_batches: Truncate the write-ahead log at each batch boundary.
         """
         connection = self._writer.connection
-        for accession_plain in (
-            list(accessions)
-            if accessions is not None
-            else self._iter_observed_accessions(connection)
-        ):
-            observations = self._field_observations(connection, accession_plain)
-            prior = self._prior_filing_dates(connection, accession_plain)
-            resolution = resolve_accession(
-                accession_plain,
-                observations,
-                prior_filing_dates=prior,
-                approved_2024_transition=self._approved_2024_transitions.get(
-                    accession_plain, False
-                ),
-            )
-            with transaction(connection) as write:
-                self._persist_resolution(write, resolution)
-                self._project_canonical(write, resolution)
-            yield accession_plain, resolution
+        with BoundedTransaction(
+            connection,
+            batch_size=batch_size or 1,
+            checkpoint=checkpoint_batches,
+        ) as bounded:
+            for accession_plain in (
+                list(accessions)
+                if accessions is not None
+                else self._iter_observed_accessions(connection)
+            ):
+                observations = self._field_observations(connection, accession_plain)
+                prior = self._prior_filing_dates(connection, accession_plain)
+                resolution = resolve_accession(
+                    accession_plain,
+                    observations,
+                    prior_filing_dates=prior,
+                    approved_2024_transition=self._approved_2024_transitions.get(
+                        accession_plain, False
+                    ),
+                )
+                self._persist_resolution(connection, resolution)
+                self._project_canonical(connection, resolution)
+                bounded.unit()
+                yield accession_plain, resolution
 
     @staticmethod
     def _iter_observed_accessions(connection: sqlite3.Connection) -> Iterator[str]:
@@ -1436,21 +1598,29 @@ class CensusCatalog:
         ``census_malformed_historical_references`` with its raw entry intact. Nothing
         is discarded, and a valid sibling is still recorded as retrievable.
         """
-        for reference in references:
-            row = connection.execute(
-                "SELECT payload_json FROM census_parsed_records "
-                "WHERE source_observation_id = ? AND native_identity LIKE 'registrant:%' "
-                "ORDER BY parsed_record_id LIMIT 1",
-                (observation_id,),
-            ).fetchone()
-            cik: str | None = None
-            if row is not None:
-                payload = json.loads(str(row["payload_json"]))
-                try:
-                    cik = normalize_cik(str(payload.get("cik")))[1]
-                except IdentifierError:
-                    cik = None
+        references = list(references)
+        if not references:
+            return
+        # The registrant CIK is a property of the *observation*, not of the reference, so
+        # it is resolved once. It used to be resolved inside the loop, which repeated an
+        # identical sort of every parsed record of the source per reference -- on E0's
+        # first planned source that is 4,675 sorts of tens of millions of rows for one
+        # answer (the accepted D111 remediation instrument). The value is unchanged.
+        row = connection.execute(
+            "SELECT payload_json FROM census_parsed_records "
+            "WHERE source_observation_id = ? AND native_identity LIKE 'registrant:%' "
+            "ORDER BY parsed_record_id LIMIT 1",
+            (observation_id,),
+        ).fetchone()
+        cik: str | None = None
+        if row is not None:
+            payload = json.loads(str(row["payload_json"]))
+            try:
+                cik = normalize_cik(str(payload.get("cik")))[1]
+            except IdentifierError:
+                cik = None
 
+        for reference in references:
             if not reference.is_retrievable or reference.name is None:
                 connection.execute(
                     "INSERT OR IGNORE INTO census_malformed_historical_references "
@@ -1581,23 +1751,71 @@ class CensusCatalog:
                         ),
                     )
 
-    @staticmethod
-    def _mark_accession_conflicts(
+    def _flush_run_level_derivations(
+        self,
         connection: sqlite3.Connection,
-        accession_plain: str,
+        observation_id: str,
     ) -> None:
-        fields = connection.execute(
-            "SELECT field_name FROM census_accession_observations "
-            "WHERE accession_plain = ? GROUP BY field_name "
-            "HAVING COUNT(DISTINCT raw_value_json) > 1",
-            (accession_plain,),
-        ).fetchall()
-        for row in fields:
-            connection.execute(
-                "UPDATE census_accession_observations SET conflict_indicator = 1 "
-                "WHERE accession_plain = ? AND field_name = ?",
-                (accession_plain, str(row["field_name"])),
-            )
+        """Apply the derivations that are functions of the run's **whole** observation.
+
+        Candidate lineage edges and accession conflict indicators used to be recomputed
+        after **every** record, which made each of them quadratic in the record count: one
+        full ``GROUP BY`` over every registrant observation of the source per registrant
+        record (twice), and one grouped read plus update per accession record. Measured on
+        E0's first planned source that is the dominant latency cost -- the marginal cost of
+        a 40-member block grew 5x across the first 400 members alone (accepted Decision 111
+        section 6).
+
+        Computing each once, after the last record, writes **exactly** the same rows,
+        because both derivations are monotone in the evidence they read:
+
+        * :meth:`_candidate_edges` emits every pair of CIKs that share one alias value. The
+          set of CIKs sharing a value only ever grows as records are added, and the pairs
+          from any prefix are a subset of the pairs from the whole. The final call therefore
+          produces the union of every per-record call, and the edge identity does not depend
+          on when it was computed.
+        * A conflict indicator is only ever raised, never cleared, and it is a function of
+          the distinct raw values recorded for one ``(accession, field)``. The final pass
+          sees every value any record contributed, so it raises exactly the flags the
+          per-record calls raised between them.
+
+        What changes is the number of times each is computed, not what either decides.
+        """
+        self._candidate_edges(connection, observation_id, kind="company_name")
+        self._candidate_edges(connection, observation_id, kind="ticker")
+        self._mark_accession_conflicts(connection)
+
+    @staticmethod
+    def _mark_accession_conflicts(connection: sqlite3.Connection) -> None:
+        """Raise the conflict indicator wherever one accession field carries rival values.
+
+        One set-based statement rather than a grouped read and an update per accession.
+        It is deliberately not scoped to the current run: an accession's conflicts are a
+        property of **all** its observations regardless of which source contributed them,
+        the flag is only ever raised, and every earlier run already ran this same pass over
+        its own accessions -- so an untouched accession is re-examined and found already
+        correct rather than changed. Scoping it to the run would additionally require a
+        scan the schema has no index for.
+
+        Written as a correlated ``EXISTS`` rather than the ``GROUP BY ... HAVING
+        COUNT(DISTINCT ...)`` it reads like, and the difference is memory rather than taste.
+        The grouped form has to build one temporary B-tree over **every** accession
+        observation in the catalog before it can answer, which is an intermediate
+        proportional to the whole source and is exactly what the accepted Decision 110
+        section 8 memory invariant forbids. The ``EXISTS`` form asks the same question one
+        row at a time, and each probe is an index range over a single accession's handful of
+        observations. Both mark exactly the rows in a group whose values disagree: a group
+        holds two different values if and only if each of its rows has a sibling that
+        differs from it.
+        """
+        connection.execute(
+            "UPDATE census_accession_observations AS o SET conflict_indicator = 1 "
+            "WHERE o.conflict_indicator = 0 AND EXISTS ("
+            "SELECT 1 FROM census_accession_observations AS rival "
+            "WHERE rival.accession_plain = o.accession_plain "
+            "AND rival.field_name = o.field_name "
+            "AND rival.raw_value_json <> o.raw_value_json)"
+        )
 
     @staticmethod
     def _blocking_metric(connection: sqlite3.Connection) -> QAMetric:

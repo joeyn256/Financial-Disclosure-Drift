@@ -4220,6 +4220,22 @@ def e0_execute(
     #: as each disposition event becomes durable so a disclosed failure can still report it.
     already_present: dict[tuple[str, str], int] = {}
 
+    # **Decision 110 §5, fail fast.** `create_run_namespace` below is still the authority on
+    # create-once, and it still runs under the lease where the rest of the mutable predicates
+    # are rechecked -- this check does not replace it and is not sufficient on its own. It
+    # exists so a *refused repeat* invocation never reaches the lease at all: taking the writer
+    # lease writes a fresh `held` document over whatever the previous run left, so a doomed
+    # attempt that was always going to be refused for a consumed namespace would still churn
+    # the one file that records how the previous run ended. That is what happened after the v2
+    # jetsam kill. Refusing here means the lease document of a killed predecessor is never even
+    # opened for writing by an attempt that cannot legally proceed.
+    if namespace_directory(evidence_root, namespace).exists():
+        message = (
+            f"run namespace {validate_namespace(namespace)!r} already exists; a namespace is "
+            "create-once and is never reused, resumed, repaired, or overwritten"
+        )
+        raise PreflightRefusalError(message)
+
     with CatalogWriter(catalog_path, catalog_path.parent) as writer:
         try:
             measured = _recheck_under_lease(

@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from typing import ClassVar, Final, Literal
@@ -79,6 +79,7 @@ __all__ = [
     "FULL_INDEX_MEMBERSHIP_FIELDS",
     "FULL_INDEX_MEMBERSHIP_SOURCE_IDS",
     "PROHIBITED_IMPORT_PREFIXES",
+    "STREAMED_SOURCE_IDS",
     "SUBMISSIONS_MEMBERSHIP_FIELDS",
     "SUBMISSIONS_MEMBERSHIP_SOURCE_IDS",
     "VALIDATION_OR_PROVENANCE_ONLY_SOURCE_IDS",
@@ -613,41 +614,73 @@ def _historical_registrant_cik(
         raise OfflineParseError(message) from exc
 
 
-def _parse_bulk_submissions(
-    store: SnapshotStore, observation: SourceObservation
-) -> tuple[ParseOutcome, tuple[HistoricalFileReference, ...]]:
-    """Traverse the accepted bulk archive and parse each member, offline.
+#: The run-level parser identity one bulk-archive traversal writes, whether it is streamed
+#: into the catalog or merged first. Named once because ``persist_streamed`` is handed it
+#: directly, where the merged path used to read it off the merged outcome.
+_BULK_PARSER_ID: Final = "submissions-json"
 
-    Identical member handling to the accepted orchestrator path, minus retrieval.
+
+def _stream_bulk_submissions(
+    store: SnapshotStore, observation: SourceObservation
+) -> Iterator[tuple[ParseOutcome, tuple[HistoricalFileReference, ...]]]:
+    """Yield one parse outcome per accepted bulk-archive member, offline, holding none of them.
+
+    The **bounded-memory** traversal accepted Decision 110 §8 requires, and the reason it is a
+    generator rather than a list. The accepted first planned source is a 1.56 GB archive of
+    985,834 JSON members that expand to 5.71 GB and parse to roughly 22.5 million records; the
+    previous implementation materialised every member and every member's outcome before
+    persisting any of them, which measured 92.6 KB retained per member and was what the kernel
+    killed at 33.9 GB after 63 minutes without one durable source boundary (D109 finding F1).
+
+    Member handling is unchanged -- the same defences, the same decoder, the same pure parser,
+    in the same order. What changed is only that each member's outcome leaves this function
+    immediately and nothing accumulates behind it.
+
+    Raises:
+        OfflineParseError: the archive is refused by the archive defences, or a member's
+            payload is not a decodable JSON object.
     """
     store.verify_payload(observation)
     path = store.payload_path(observation)
     try:
-        members = tuple(
-            iter_members(
-                path,
-                name_suffix=".json",
-                archive_relative_path=observation.relative_storage_path,
-                archive_sha256=observation.logical_sha256,
+        for member in iter_members(
+            path,
+            name_suffix=".json",
+            archive_relative_path=observation.relative_storage_path,
+            archive_sha256=observation.logical_sha256,
+        ):
+            location = RecordLocation(
+                observation.observation_id,
+                observation.source_id,
+                member_name=member.name,
             )
-        )
+            decoded = _json_document(member.payload, f"bulk member {member.name!r}")
+            yield parse_submissions_document(decoded, location)
     except ArchiveDefenceError as exc:
         message = f"accepted bulk archive refused by the archive defences: {exc}"
         raise OfflineParseError(message) from exc
+
+
+def _parse_bulk_submissions(
+    store: SnapshotStore, observation: SourceObservation
+) -> tuple[ParseOutcome, tuple[HistoricalFileReference, ...]]:
+    """Traverse the accepted bulk archive and parse each member, offline, merging the result.
+
+    Identical member handling to the accepted orchestrator path, minus retrieval. This is the
+    **merged** form of :func:`_stream_bulk_submissions`, and it retains every member's records:
+    it is correct only where the archive is small enough to hold, which is true of a synthetic
+    fixture and false of the accepted first planned source. E0's own driver therefore streams
+    (see :func:`materialize_source_layer`); this stays as the total per-source parse path
+    :func:`_parse_source` promises, so a caller that legitimately wants one outcome still has
+    one, derived from the same traversal rather than a second implementation of it.
+    """
     version = SOURCES["sec_bulk_submissions"].parser_version
     outcomes: list[ParseOutcome] = []
     references: list[HistoricalFileReference] = []
-    for member in members:
-        location = RecordLocation(
-            observation.observation_id,
-            observation.source_id,
-            member_name=member.name,
-        )
-        decoded = _json_document(member.payload, f"bulk member {member.name!r}")
-        outcome, member_references = parse_submissions_document(decoded, location)
+    for outcome, member_references in _stream_bulk_submissions(store, observation):
         outcomes.append(outcome)
         references.extend(member_references)
-    return merge_outcomes("submissions-json", version, outcomes), tuple(references)
+    return merge_outcomes(_BULK_PARSER_ID, version, outcomes), tuple(references)
 
 
 def _parse_source(
@@ -988,33 +1021,136 @@ def _stream_membership_groups(
         yield _finish(current)
 
 
-def _blocking_field_states(connection: sqlite3.Connection) -> Mapping[str, bool]:
-    """Whether each accession's latest Decision 012 resolutions clear §6.2 item 5.
+def _blocking_fields_clear(connection: sqlite3.Connection, accession_plain: str) -> bool:
+    """Whether one accession's latest Decision 012 resolutions clear §6.2 item 5.
 
     ``form`` and ``official_filing_date`` must each be ``resolved`` or
     ``resolved_by_correction`` with ``blocks_dependents = 0``. A missing resolution is a
     failure, not a pass: silence about a material field never establishes a set.
 
-    The latest resolution per ``(accession, field)`` wins, matching the accepted reader
-    in ``candidate_snapshot`` -- ordering by ``resolved_at_utc`` and taking the last.
+    The latest resolution per ``(accession, field)`` wins, matching the accepted reader in
+    ``candidate_snapshot`` -- ordering by ``resolved_at_utc`` and taking the last.
+    ``policy_version`` breaks a tie, because it is the remaining component of this table's
+    primary key and two resolutions of the same field at the same instant would otherwise be
+    separated by nothing.
+
+    Asked one accession at a time, against the primary-key index, rather than preloaded for the
+    whole catalog (accepted Decision 110 §8). The preloaded form held one entry per
+    ``(accession, field)`` for every accession in the catalog, which on E0's first planned source
+    is roughly 43 million entries and several gigabytes -- memory proportional to the parsed
+    record count, which is exactly what the memory invariant forbids.
     """
-    latest: dict[tuple[str, str], bool] = {}
+    latest: dict[str, bool] = {}
     for row in connection.execute(
-        "SELECT accession_plain, field_name, status, blocks_dependents "
+        "SELECT field_name, status, blocks_dependents "
         "FROM census_accession_field_resolutions "
-        "WHERE field_name IN (?, ?) "
-        "ORDER BY accession_plain, field_name, resolved_at_utc",
-        _MEMBERSHIP_BLOCKING_FIELDS,
-    ).fetchall():
-        key = (str(row["accession_plain"]), str(row["field_name"]))
-        latest[key] = str(row["status"]) in _RESOLVED_STATUSES and not int(row["blocks_dependents"])
-    accessions = {accession for accession, _ in latest}
-    return {
-        accession: all(
-            latest.get((accession, field), False) for field in _MEMBERSHIP_BLOCKING_FIELDS
+        "WHERE accession_plain = ? AND field_name IN (?, ?) "
+        "ORDER BY field_name, resolved_at_utc, policy_version",
+        (accession_plain, *_MEMBERSHIP_BLOCKING_FIELDS),
+    ):
+        latest[str(row["field_name"])] = str(row["status"]) in _RESOLVED_STATUSES and not int(
+            row["blocks_dependents"]
         )
-        for accession in accessions
-    }
+    return all(latest.get(field, False) for field in _MEMBERSHIP_BLOCKING_FIELDS)
+
+
+def _accession_is_known(connection: sqlite3.Connection, accession_plain: str) -> bool:
+    """Whether the authoritative accession layer carries this accession.
+
+    One primary-key lookup, rather than a preloaded set of every ``accession_plain`` in the
+    catalog (accepted Decision 110 §8). On E0's first planned source that set would hold roughly
+    21.5 million accession strings and cost about 2.9 GB -- on its own more than the whole memory
+    budget this host has. The predicate is unchanged; only where the answer comes from is.
+    """
+    return (
+        connection.execute(
+            "SELECT 1 FROM census_accessions WHERE accession_plain = ?",
+            (accession_plain,),
+        ).fetchone()
+        is not None
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _GroupProjection:
+    """Everything **Decision 094 §6.4** decides about one accession's membership group.
+
+    Pure: derived from the group, the known-registrant set, and the §6.2 item 5 verdict, and
+    from nothing this projection writes. That is what lets the completeness pass recompute it
+    from the same evidence instead of the first pass carrying an accession-sized list of results
+    across the whole traversal -- the ordering law §6.4 item 5 states is about *when* completeness
+    is written, not about where the decision is remembered.
+    """
+
+    candidates: tuple[tuple[int, tuple[object, ...]], ...]
+    provenance_failures: int
+    conflicting: bool
+    uncorroborated: int
+    unbindable: int
+    is_multi: bool
+    is_established: bool
+    scalar: int | None
+
+
+def _project_membership_group(
+    group: _MembershipGroup, *, known_registrants: Collection[int], clear: bool
+) -> _GroupProjection:
+    """Derive §6.4's verdict for one group without writing anything."""
+    members = group.union
+    bindable = tuple(cik for cik in members if cik in known_registrants)
+    unbindable = len(members) - len(bindable)
+    candidates: list[tuple[int, tuple[object, ...]]] = []
+    levels: list[str] = []
+    conflicting = False
+    provenance_failures = 0
+    for cik in bindable:
+        witnesses = group.witnesses.get(cik, ())
+        if not witnesses:
+            provenance_failures += 1
+            continue
+        conflicting = conflicting or any(item.conflicting for item in witnesses)
+        chosen = witnesses[0]
+        level = _evidence_level_for(witnesses, fields_clear=clear)
+        levels.append(level)
+        candidates.append(
+            (
+                cik,
+                (
+                    normalize_cik(cik)[1],
+                    _SUBSTANTIVE,
+                    level,
+                    chosen.source_observation_id,
+                    chosen.parsed_record_id,
+                    min(item.observed_at_utc for item in witnesses),
+                    max(item.observed_at_utc for item in witnesses),
+                ),
+            )
+        )
+    # §6.2 condition 2. Counted in **members**, which is what the §9.5 name says: an accession
+    # missing three corroborations is a bigger evidence gap than one missing a single member,
+    # and collapsing both to "1 accession" would hide that.
+    uncorroborated = len(group.submissions - group.full_index)
+    is_established = (
+        bool(group.submissions)
+        and bool(group.full_index)
+        and not uncorroborated
+        and unbindable == 0
+        and group.invalid_renderings == 0
+        and clear
+        and len(bindable) == len(members)
+        and bool(levels)
+        and all(level == "provisional" for level in levels)
+    )
+    return _GroupProjection(
+        candidates=tuple(candidates),
+        provenance_failures=provenance_failures,
+        conflicting=conflicting,
+        uncorroborated=uncorroborated,
+        unbindable=unbindable,
+        is_multi=len(bindable) > 1,
+        is_established=is_established,
+        scalar=bindable[0] if len(bindable) == 1 else None,
+    )
 
 
 def _evidence_level_for(
@@ -1097,18 +1233,15 @@ def materialize_census_associations(
     )
     known_registrants = {
         int(row["cik_numeric"])
-        for row in connection.execute("SELECT cik_numeric FROM census_registrants").fetchall()
+        for row in connection.execute("SELECT cik_numeric FROM census_registrants")
     }
-    known_accessions = {
-        str(row["accession_plain"])
-        for row in connection.execute("SELECT accession_plain FROM census_accessions").fetchall()
-    }
-    fields_clear = _blocking_field_states(connection)
 
-    # Bounded accumulators only. Each holds one small tuple per accession -- never a membership
-    # or provenance group -- so §6.4's "at most one accession's group in memory" still holds
-    # while completeness is genuinely written last, after the whole relation is total.
-    established: list[tuple[str, int | None]] = []
+    # Bounded accumulators only: counters, and one accession's group at a time. Nothing here
+    # holds a per-accession entry, so peak memory does not follow the parsed record count
+    # (accepted Decision 110 §8). ``known_registrants`` is the one preloaded set that stays,
+    # because it is bounded by the *registrant* count -- roughly 985,000 integers, about 60 MB --
+    # rather than by the accession count, which is more than twenty times larger and made of
+    # strings.
     relation_rows = 0
     invalid_renderings = 0
     provenance_failures = 0
@@ -1122,21 +1255,23 @@ def materialize_census_associations(
     with transaction(connection) as active:
         for group in _stream_membership_groups(connection, eligible):
             invalid_renderings += group.invalid_renderings
-            if group.accession_plain not in known_accessions:
+            if not _accession_is_known(active, group.accession_plain):
                 # A full-index row never creates an accession (**R23** §5.1). Membership
                 # evidence bound to an accession the authoritative layer does not carry is
                 # reported, never repaired into a relation row.
                 orphans += 1
                 continue
-            members = group.union
-            if not members:
+            if not group.union:
                 continue
-            bindable = tuple(cik for cik in members if cik in known_registrants)
-            unbindable = len(members) - len(bindable)
-            unbindable_members += unbindable
-            clear = fields_clear.get(group.accession_plain, False)
+            projection = _project_membership_group(
+                group,
+                known_registrants=known_registrants,
+                clear=_blocking_fields_clear(active, group.accession_plain),
+            )
+            unbindable_members += projection.unbindable
+            provenance_failures += projection.provenance_failures
 
-            if len(bindable) > 1:
+            if projection.is_multi:
                 # §6.4 item 2: the scalar must already be NULL when the second substantive
                 # relation row is inserted, which is exactly when migration ``0014``'s trigger
                 # becomes able to observe the cardinality. Clearing it before the first insert
@@ -1147,26 +1282,7 @@ def materialize_census_associations(
                     (group.accession_plain,),
                 )
 
-            levels: list[str] = []
-            conflicting = False
-            for cik in bindable:
-                witnesses = group.witnesses.get(cik, ())
-                if not witnesses:
-                    provenance_failures += 1
-                    continue
-                conflicting = conflicting or any(item.conflicting for item in witnesses)
-                chosen = witnesses[0]
-                level = _evidence_level_for(witnesses, fields_clear=clear)
-                levels.append(level)
-                candidate = (
-                    normalize_cik(cik)[1],
-                    _SUBSTANTIVE,
-                    level,
-                    chosen.source_observation_id,
-                    chosen.parsed_record_id,
-                    min(item.observed_at_utc for item in witnesses),
-                    max(item.observed_at_utc for item in witnesses),
-                )
+            for cik, candidate in projection.candidates:
                 existing = _existing_relation_row(active, group.accession_plain, cik)
                 if existing is not None:
                     persisted = tuple(existing)
@@ -1190,32 +1306,14 @@ def materialize_census_associations(
                 )
                 relation_rows += 1
 
-            # §6.2 condition 2. Counted in **members**, which is what the §9.5 name says: an
-            # accession missing three corroborations is a bigger evidence gap than one missing
-            # a single member, and collapsing both to "1 accession" would hide that.
-            uncorroborated = group.submissions - group.full_index
-            missing_corroboration += len(uncorroborated)
-            if conflicting:
+            missing_corroboration += projection.uncorroborated
+            if projection.conflicting:
                 # A conflict is an accepted observation carrying the conflict indicator -- not
                 # merely a blocked resolution, and never two distinct valid CIKs, which §9.5
                 # says explicitly may not increment a conflict count.
                 membership_conflicts += 1
-            is_established = (
-                bool(group.submissions)
-                and bool(group.full_index)
-                and not uncorroborated
-                and unbindable == 0
-                and group.invalid_renderings == 0
-                and clear
-                and len(bindable) == len(members)
-                and bool(levels)
-                and all(level == "provisional" for level in levels)
-            )
-            if is_established:
-                established.append(
-                    (group.accession_plain, bindable[0] if len(bindable) == 1 else None)
-                )
-                if len(bindable) == 1:
+            if projection.is_established:
+                if projection.scalar is not None:
                     singletons += 1
                 else:
                     multi += 1
@@ -1224,15 +1322,32 @@ def materialize_census_associations(
         # window can be observed in which an accession claims a complete set it has not yet
         # materialized. Migration ``0014``'s own trigger refuses the claim from the other
         # direction; this ordering is what keeps the lawful write shape available at all.
-        for accession_plain, scalar in established:
+        #
+        # It is a **second traversal** of the same evidence rather than a list carried across
+        # the first (accepted Decision 110 §8). Remembering the established accessions cost one
+        # tuple each, which on E0's first planned source is roughly 21.5 million of them and
+        # about 2.9 GB. The verdict is recomputed instead, which is sound because
+        # `_project_membership_group` is pure and reads nothing the loop above writes: the
+        # membership observations, the field resolutions, and the registrant set are all
+        # untouched by this projection, so the second pass necessarily reaches the same answer.
+        for group in _stream_membership_groups(connection, eligible):
+            if not _accession_is_known(active, group.accession_plain) or not group.union:
+                continue
+            projection = _project_membership_group(
+                group,
+                known_registrants=known_registrants,
+                clear=_blocking_fields_clear(active, group.accession_plain),
+            )
+            if not projection.is_established:
+                continue
             active.execute(
                 "UPDATE census_accessions SET registrant_cik_numeric = ? WHERE accession_plain = ?",
-                (scalar, accession_plain),
+                (projection.scalar, group.accession_plain),
             )
             active.execute(
                 "UPDATE census_accessions SET registrant_set_completeness = ? "
                 "WHERE accession_plain = ?",
-                (_ESTABLISHED, accession_plain),
+                (_ESTABLISHED, group.accession_plain),
             )
 
         # §6.4: the projection transaction is all-or-nothing, so the totality is measured
@@ -1267,11 +1382,13 @@ def _membership_observation_counts(connection: sqlite3.Connection) -> tuple[int,
     eligible = membership_observation_sources(connection)
     submissions = 0
     substantive = 0
+    # Iterated, never `fetchall`ed: this is one row per membership observation, which on E0's
+    # first planned source is tens of millions of them (accepted Decision 110 §8).
     for row in connection.execute(
         "SELECT source_observation_id, field_name FROM census_accession_observations "
         "WHERE field_name IN (?, ?)",
         SUBMISSIONS_MEMBERSHIP_FIELDS,
-    ).fetchall():
+    ):
         source_id = eligible.get(str(row["source_observation_id"]))
         if source_id is None:
             continue
@@ -1322,38 +1439,32 @@ def _measure_association_totality(
             (_SUBSTANTIVE,),
         ).fetchone()[0]
     )
-    cardinality = {
-        str(row["accession_plain"]): int(row["members"])
-        for row in connection.execute(
-            "SELECT accession_plain, COUNT(*) AS members FROM census_accession_registrants "
-            "WHERE association_class = ? GROUP BY accession_plain",
-            (_SUBSTANTIVE,),
-        ).fetchall()
-    }
     zero_relation = 0
     singleton = 0
     multi = 0
     singleton_mismatch = 0
     multi_nonnull = 0
+    # One lazy pass, and the cardinality is carried by the query rather than by a Python map of
+    # every accession (accepted Decision 110 §8). ``sole`` is read with ``MIN`` and is consulted
+    # only where the count is exactly 1, so it is that single row's CIK -- the same value the
+    # per-accession lookup returned, without a query per established accession.
     for row in connection.execute(
-        "SELECT accession_plain, registrant_cik_numeric FROM census_accessions "
-        "WHERE registrant_set_completeness = ? ORDER BY accession_plain",
-        (_ESTABLISHED,),
-    ).fetchall():
-        plain = str(row["accession_plain"])
+        "SELECT a.accession_plain, a.registrant_cik_numeric, "
+        "(SELECT COUNT(*) FROM census_accession_registrants AS r "
+        " WHERE r.accession_plain = a.accession_plain AND r.association_class = ?) AS members, "
+        "(SELECT MIN(r.registrant_cik_numeric) FROM census_accession_registrants AS r "
+        " WHERE r.accession_plain = a.accession_plain AND r.association_class = ?) AS sole "
+        "FROM census_accessions AS a WHERE a.registrant_set_completeness = ? "
+        "ORDER BY a.accession_plain",
+        (_SUBSTANTIVE, _SUBSTANTIVE, _ESTABLISHED),
+    ):
         scalar = row["registrant_cik_numeric"]
-        members = cardinality.get(plain, 0)
+        members = int(row["members"])
         if members == 0:
             zero_relation += 1
         elif members == 1:
             singleton += 1
-            sole = int(
-                connection.execute(
-                    "SELECT registrant_cik_numeric FROM census_accession_registrants "
-                    "WHERE accession_plain = ? AND association_class = ?",
-                    (plain, _SUBSTANTIVE),
-                ).fetchone()[0]
-            )
+            sole = int(row["sole"])
             if scalar is None or int(scalar) != sole:
                 singleton_mismatch += 1
         else:
@@ -1411,6 +1522,28 @@ def _measure_association_totality(
         unbindable_registrant_member_count=unbindable_members,
         unestablished_membership_conflict_count=membership_conflicts,
     )
+
+
+#: The sources E0 persists by streaming rather than by merging first (Decision 110 §8).
+#:
+#: Membership is a statement about *scale*, not about semantics: these are the sources whose
+#: parsed output does not fit in memory, and nothing else about how they are parsed, classified,
+#: or accounted for differs. Every other source keeps the merged path unchanged, so this is the
+#: whole of the behavioural difference and it is enumerable.
+STREAMED_SOURCE_IDS: Final[frozenset[str]] = frozenset({"sec_bulk_submissions"})
+
+#: ``census_parser_runs.outcome`` to the accepted ``census_plan_sources.parser_state`` terminal.
+#:
+#: The merged path derives the terminal from the outcome object with :func:`_parser_state_for`;
+#: a streamed run has no such object left, so it reads the state the same write already recorded.
+#: The two agree by construction -- ``persist`` and ``persist_streamed`` choose the run state by
+#: the identical rule -- and this mapping is one-to-one so neither can drift into the other's
+#: vocabulary unnoticed.
+_STREAMED_PARSER_STATE: Final[Mapping[str, str]] = {
+    "failed": "failed",
+    "completed_with_quarantine": "quarantined",
+    "completed": "completed",
+}
 
 
 def _parser_state_for(outcome: ParseOutcome) -> str:
@@ -1507,14 +1640,27 @@ def materialize_source_layer(
             )
             raise OfflineParseError(message)
         observation = observations[bound_id]
-        outcome, references = _parse_source(connection, store, observation)
-        result = catalog.persist(
-            outcome,
-            historical_references=references,
-            source_observation_id=observation.observation_id,
-        )
+        if observation.source_id in STREAMED_SOURCE_IDS:
+            # **Decision 110 §8.** The bulk archive is persisted member by member rather than
+            # merged first: the merged form retains every record of a 985,834-member source at
+            # once, which is the D109 finding F1 kill. The rows, their identities, and their
+            # order are the same either way -- only the residency changes.
+            result = catalog.persist_streamed(
+                _stream_bulk_submissions(store, observation),
+                parser_id=_BULK_PARSER_ID,
+                parser_version=SOURCES[observation.source_id].parser_version,
+                source_observation_id=observation.observation_id,
+            )
+            after = _STREAMED_PARSER_STATE[result.run_outcome]
+        else:
+            outcome, references = _parse_source(connection, store, observation)
+            result = catalog.persist(
+                outcome,
+                historical_references=references,
+                source_observation_id=observation.observation_id,
+            )
+            after = _parser_state_for(outcome)
         parsed_any = True
-        after = _parser_state_for(outcome)
         with transaction(connection) as active:
             active.execute(
                 "UPDATE census_plan_sources SET parser_state = ? "
@@ -1547,7 +1693,7 @@ def materialize_source_layer(
         )
         index_observations += written
         index_unbound.update(unbound)
-    resolutions = len(catalog.resolve_persisted_accessions()) if parsed_any else 0
+    resolutions = catalog.count_persisted_accession_resolutions() if parsed_any else 0
     return SourceLayerPhase(
         outcomes=tuple(outcomes),
         accession_resolutions=resolutions,

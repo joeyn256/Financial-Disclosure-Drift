@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date
 from typing import Any, Final, Literal
 
@@ -19,7 +20,12 @@ from disclosure_drift.sec.accession_resolution import (
 )
 from disclosure_drift.sec.calendar import CALENDAR_DERIVATION_VERSION
 from disclosure_drift.sec.identifiers import IdentifierError, normalize_cik, parse_accession
-from disclosure_drift.sec.parsers.base import ParsedRecord, ParseOutcome, QuarantinedRecord
+from disclosure_drift.sec.parsers.base import (
+    PARSER_LAYER_VERSION,
+    ParsedRecord,
+    ParseOutcome,
+    QuarantinedRecord,
+)
 from disclosure_drift.sec.parsers.submissions import HistoricalFileReference
 from disclosure_drift.sec.parsers.versions import require_parser_version
 from disclosure_drift.sec.temporal import acceptance_date_sec, cohort_label_for_value
@@ -90,6 +96,11 @@ class ParserWriteResult:
     normalized_registrants: int
     normalized_accessions: int
     already_present: bool = False
+    #: The state written to ``census_parser_runs.outcome``. Set by
+    #: :meth:`CensusCatalog.persist_streamed`, whose caller has no merged
+    #: :class:`~disclosure_drift.sec.parsers.base.ParseOutcome` left to derive it from.
+    #: :meth:`CensusCatalog.persist` leaves it empty; that path still reads the outcome itself.
+    run_outcome: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +120,152 @@ class QAMetric:
             "value": self.value,
             "detail": self.detail,
             "dimension": dict(sorted(self.dimension.items())),
+        }
+
+
+#: The most structural observations a streamed run's summary carries verbatim.
+#:
+#: The merged :meth:`CensusCatalog.persist` renders every structural observation into
+#: ``census_parser_runs.summary_json``. On the accepted first planned source that is 1,976,418
+#: observations and roughly 1.35 GB of JSON in one cell -- which exceeds SQLite's
+#: ``SQLITE_MAX_LENGTH`` of 1,000,000,000 bytes outright, so the merged shape cannot produce a
+#: valid row for that source at any memory budget. The detail is not lost by bounding it: every
+#: observation is already persisted individually in ``census_structural_observations``, which is
+#: its authoritative home, and the summary's copy was always a duplicate. What the summary keeps
+#: is the subset that changes the run's meaning -- the observations whose counts may not be
+#: believed -- plus an explicit accounting of what was observed, so a reader is never left to
+#: infer from a short array that the source was quiet.
+STREAMED_STRUCTURAL_DETAIL_LIMIT: Final = 1_000
+
+#: How many accessions one page of :meth:`CensusCatalog._iter_observed_accessions` holds.
+#: Large enough that paging costs a negligible number of extra index seeks, small enough
+#: that the page itself is never a meaningful share of memory.
+_ACCESSION_PAGE_SIZE: Final = 10_000
+
+
+@dataclass(slots=True)
+class _StreamedRunAccumulator:
+    """The bounded run-level state :meth:`CensusCatalog.persist_streamed` may retain.
+
+    Everything ``merge_outcomes`` accumulates falls into one of three classes, and this keeps
+    only the first two:
+
+    * **Bounded by the schema or by anomalies** -- unknown field paths, normalization warnings,
+      duplicate identities, required-field failures, quarantine reason codes, and historical-file
+      references. Measured across the whole accepted first planned source these come to 19
+      distinct unknown paths, 0 warnings, 0 duplicates, 14,250 failures, and 4,675 references.
+      They are kept whole.
+    * **Bounded by construction** -- counts. Kept as integers.
+    * **Proportional to the source** -- the structural observations themselves, at just over two
+      per archive member. Only the blocking ones are kept, and only up to
+      :data:`STREAMED_STRUCTURAL_DETAIL_LIMIT`; the rows themselves are already durable before
+      this sees them.
+
+    Nothing here holds a parsed record, a payload, or an archive member, so its size does not
+    follow the source.
+    """
+
+    unknown_fields: set[str] = dataclass_field(default_factory=set)
+    normalization_warnings: list[str] = dataclass_field(default_factory=list)
+    duplicate_identities: list[tuple[str, int]] = dataclass_field(default_factory=list)
+    required_field_failures: list[tuple[str, str]] = dataclass_field(default_factory=list)
+    quarantine_reason_codes: set[str] = dataclass_field(default_factory=set)
+    structural_reason_codes: set[str] = dataclass_field(default_factory=set)
+    historical_references: list[HistoricalFileReference] = dataclass_field(default_factory=list)
+    structural_observed: int = 0
+    blocking_structural: int = 0
+    retained_structural: list[Mapping[str, object]] = dataclass_field(default_factory=list)
+
+    def absorb(self, outcome: ParseOutcome, references: Sequence[HistoricalFileReference]) -> None:
+        """Fold one part's outcome into the run-level state and keep nothing else."""
+        self.unknown_fields.update(outcome.unknown_fields)
+        self.normalization_warnings.extend(outcome.normalization_warnings)
+        self.duplicate_identities.extend(outcome.duplicate_identities)
+        self.required_field_failures.extend(outcome.required_field_failures)
+        for quarantined in outcome.quarantined:
+            self.quarantine_reason_codes.update(quarantined.reason_codes)
+        self.historical_references.extend(references)
+        for observed in outcome.structural:
+            self.structural_observed += 1
+            self.structural_reason_codes.update(observed.reason_codes)
+            if not observed.blocks_success:
+                continue
+            self.blocking_structural += 1
+            if len(self.retained_structural) < STREAMED_STRUCTURAL_DETAIL_LIMIT:
+                self.retained_structural.append(observed.as_record())
+
+    def apply_duplicate_identities(
+        self, connection: sqlite3.Connection, parser_run_id: str
+    ) -> None:
+        """Raise ``duplicate_indicator`` for every identity any part reported as duplicated.
+
+        The merged path decides this per record against the whole run's duplicate list, which a
+        stream cannot have while its records are being written. Applying it once at the end over
+        the accumulated identities reaches the same rows with the same final value, and touches
+        only rows this run inserted.
+        """
+        identities = sorted({identity for identity, _ in self.duplicate_identities})
+        if not identities:
+            return
+        for identity in identities:
+            connection.execute(
+                "UPDATE census_parsed_records SET duplicate_indicator = 1 "
+                "WHERE parser_run_id = ? AND native_identity = ?",
+                (parser_run_id, identity),
+            )
+
+    def reason_codes(self) -> tuple[str, ...]:
+        """The run's reason codes, by the same rule :attr:`ParseOutcome.reason_codes` uses."""
+        codes: set[str] = set()
+        if self.unknown_fields:
+            codes.add("PARSER_SCHEMA_DRIFT_OBSERVED")
+        if self.duplicate_identities:
+            codes.add("PARSER_DUPLICATE_SOURCE_RECORD")
+        if self.required_field_failures:
+            codes.add("SEC_SCHEMA_REQUIRED_FIELD_MISSING")
+        codes.update(self.quarantine_reason_codes)
+        codes.update(self.structural_reason_codes)
+        return tuple(sorted(codes))
+
+    def summary(
+        self, *, parser_id: str, parser_version: str, parsed: int, quarantined: int
+    ) -> Mapping[str, object]:
+        """The streamed run summary: :meth:`ParseOutcome.summary`'s shape, bounded.
+
+        Every key the merged summary carries is present and carries the same value, computed by
+        the same rule. ``structural`` is the one array that is a subset rather than the whole,
+        and ``structural_detail`` states exactly what that subset is and where the rest lives --
+        so the bound is disclosed in the record itself rather than inferred from a short array.
+        """
+        return {
+            "parser_id": parser_id,
+            "parser_version": parser_version,
+            "layer_version": PARSER_LAYER_VERSION,
+            "counts": {
+                "parsed": parsed,
+                "quarantined": quarantined,
+                "duplicate_identities": len(self.duplicate_identities),
+                "required_field_failures": len(self.required_field_failures),
+                "unknown_fields": len(self.unknown_fields),
+                "normalization_warnings": len(self.normalization_warnings),
+                "structural_observations": self.structural_observed,
+                "structural_failures": self.blocking_structural,
+            },
+            "counts_are_trustworthy": self.blocking_structural == 0,
+            "unknown_field_paths": sorted(self.unknown_fields),
+            "normalization_warnings": list(self.normalization_warnings),
+            "duplicate_identities": [list(item) for item in self.duplicate_identities],
+            "required_field_failures": [list(item) for item in self.required_field_failures],
+            "reason_codes": list(self.reason_codes()),
+            "structural": [dict(item) for item in self.retained_structural],
+            "structural_detail": {
+                "scope": "blocking_only",
+                "observed": self.structural_observed,
+                "blocking": self.blocking_structural,
+                "retained": len(self.retained_structural),
+                "retention_limit": STREAMED_STRUCTURAL_DETAIL_LIMIT,
+                "table": "census_structural_observations",
+            },
         }
 
 
@@ -222,6 +379,167 @@ class CensusCatalog:
             normalized_registrants=registrants,
             normalized_accessions=accessions,
         )
+
+    def persist_streamed(
+        self,
+        outcomes: Iterable[tuple[ParseOutcome, Sequence[HistoricalFileReference]]],
+        *,
+        parser_id: str,
+        parser_version: str,
+        source_observation_id: str,
+    ) -> ParserWriteResult:
+        """Persist one logical parser run from a **stream** of per-part outcomes.
+
+        The bounded-memory twin of :meth:`persist`, for a source whose parts are too numerous
+        to merge in memory first (accepted Decision 110 §8, Workstream B). It writes the same
+        one ``census_parser_runs`` row, with the same ``parser_run_id`` preimage, and the same
+        rows in the same order into every other table -- but it consumes each part, writes it,
+        and drops it, so nothing proportional to the whole source is ever resident.
+
+        Three details make the streamed result identical to the merged one rather than merely
+        similar:
+
+        * **Duplicate identities are applied at the end.** ``merge_outcomes`` concatenates the
+          per-part duplicate lists, so a record's run-level duplicate flag can depend on a part
+          that has not been read yet. Each record is therefore inserted with its own part's
+          verdict and one bounded ``UPDATE`` afterwards raises the flag for every identity any
+          part reported. The flag is not part of any identity preimage, so no row's id moves.
+        * **Historical references are applied at the end.** :meth:`_insert_historical_references`
+          resolves its CIK from the lowest-``parsed_record_id`` registrant record of the whole
+          observation, so it must not run until every part's records exist.
+        * **Interleaving is safe.** Quarantine and structural rows go to tables that record
+          normalization neither reads nor writes, so writing them per part rather than in three
+          passes cannot change what normalization sees.
+
+        The one deliberate difference is the run summary's ``structural`` array, which is
+        bounded here and complete in :meth:`persist`; see :func:`_streamed_summary`.
+
+        Args:
+            outcomes: Each part's outcome paired with the historical-file references it named.
+                Consumed exactly once, lazily.
+            parser_id: The **run-level** parser id, as ``merge_outcomes`` would have set it.
+            parser_version: The run-level parser version, likewise.
+            source_observation_id: The one observation every part belongs to.
+        """
+        observation_id = self._require_streamed_observation(source_observation_id)
+        parser_run_id = _stable_id("parser-run", observation_id, parser_id, parser_version)
+        existing = self._writer.connection.execute(
+            "SELECT parsed_count, quarantined_count, outcome FROM census_parser_runs "
+            "WHERE parser_run_id = ?",
+            (parser_run_id,),
+        ).fetchone()
+        if existing is not None:
+            return ParserWriteResult(
+                parser_run_id=parser_run_id,
+                parsed=int(existing["parsed_count"]),
+                quarantined=int(existing["quarantined_count"]),
+                normalized_registrants=0,
+                normalized_accessions=0,
+                already_present=True,
+                run_outcome=str(existing["outcome"]),
+            )
+
+        authoritative = require_parser_version(
+            parser_id,
+            parser_version,
+            context=f"parser run for observation {observation_id}",
+        )
+        started = utc_now()
+        accumulator = _StreamedRunAccumulator()
+        registrants = 0
+        accessions = 0
+        parsed = 0
+        quarantined = 0
+        with transaction(self._writer.connection) as connection:
+            connection.execute(
+                "INSERT INTO census_parser_runs "
+                "(parser_run_id, source_observation_id, parser_id, parser_version, "
+                "started_at_utc, finished_at_utc, parsed_count, quarantined_count, "
+                "outcome, summary_json) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'completed', '{}')",
+                (parser_run_id, observation_id, parser_id, authoritative, started, started),
+            )
+            for outcome, references in outcomes:
+                for record in outcome.records:
+                    self._require_streamed_location(record.location.observation_id, observation_id)
+                    parsed_id = self._insert_record(connection, parser_run_id, record, outcome)
+                    normalized = self._normalize_record(connection, parsed_id, record, started)
+                    registrants += normalized[0]
+                    accessions += normalized[1]
+                    parsed += 1
+                for quarantined_record in outcome.quarantined:
+                    self._require_streamed_location(
+                        quarantined_record.location.observation_id, observation_id
+                    )
+                    self._insert_quarantine(connection, parser_run_id, quarantined_record, started)
+                    quarantined += 1
+                for item in outcome.structural:
+                    self._require_streamed_location(item.location.observation_id, observation_id)
+                self._insert_structural(connection, parser_run_id, observation_id, outcome, started)
+                accumulator.absorb(outcome, references)
+            accumulator.apply_duplicate_identities(connection, parser_run_id)
+            self._insert_historical_references(
+                connection, observation_id, accumulator.historical_references
+            )
+            if accumulator.blocking_structural:
+                state = "failed"
+            elif quarantined:
+                state = "completed_with_quarantine"
+            else:
+                state = "completed"
+            connection.execute(
+                "UPDATE census_parser_runs SET finished_at_utc = ?, parsed_count = ?, "
+                "quarantined_count = ?, outcome = ?, summary_json = ? "
+                "WHERE parser_run_id = ?",
+                (
+                    utc_now(),
+                    parsed,
+                    quarantined,
+                    state,
+                    _json(
+                        accumulator.summary(
+                            parser_id=parser_id,
+                            parser_version=authoritative,
+                            parsed=parsed,
+                            quarantined=quarantined,
+                        )
+                    ),
+                    parser_run_id,
+                ),
+            )
+        return ParserWriteResult(
+            parser_run_id=parser_run_id,
+            parsed=parsed,
+            quarantined=quarantined,
+            normalized_registrants=registrants,
+            normalized_accessions=accessions,
+            run_outcome=state,
+        )
+
+    def _require_streamed_observation(self, observation_id: str) -> str:
+        """The streamed twin of :meth:`_observation_id`'s catalog-presence check.
+
+        The merged path derives the observation from the records themselves and refuses when
+        they disagree. A stream cannot look at all its records first, so the caller states the
+        observation and every part is checked against it as it arrives -- same refusal, one
+        record earlier.
+        """
+        exists = self._writer.connection.execute(
+            "SELECT 1 FROM census_source_observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+        if exists is None:
+            message = f"source observation {observation_id!r} is not in the catalog"
+            raise ValueError(message)
+        return observation_id
+
+    @staticmethod
+    def _require_streamed_location(observed: str, expected: str) -> None:
+        if observed != expected:
+            message = (
+                "parser outcome must belong to exactly one source observation; found "
+                f"{sorted({observed, expected})}"
+            )
+            raise ValueError(message)
 
     def qa_metrics(self, census_run_id: str) -> tuple[QAMetric, ...]:
         """Build and persist the deterministic Stage M2.2 QA summary."""
@@ -723,20 +1041,45 @@ class CensusCatalog:
         Returns:
             The resolution per accession, keyed by plain accession number.
         """
+        return dict(self.iter_persisted_accession_resolutions(accessions))
+
+    def count_persisted_accession_resolutions(
+        self,
+        accessions: Sequence[str] | None = None,
+    ) -> int:
+        """Resolve exactly as :meth:`resolve_persisted_accessions` does, and count the results.
+
+        Same writes, same order, same determinism -- the only difference is that the
+        resolutions are not collected. E0 reports the resolution *count* and reads nothing else,
+        so building the mapping would retain one :class:`AccessionResolution` per accession for
+        a number this method can produce with none of them (accepted Decision 110 §8). On E0's
+        first planned source that mapping is roughly 21.5 million entries.
+        """
+        return sum(1 for _ in self.iter_persisted_accession_resolutions(accessions))
+
+    def iter_persisted_accession_resolutions(
+        self,
+        accessions: Sequence[str] | None = None,
+    ) -> Iterator[tuple[str, AccessionResolution]]:
+        """Yield each accession's resolution as it is written, retaining none of them.
+
+        The shared implementation behind :meth:`resolve_persisted_accessions` and
+        :meth:`count_persisted_accession_resolutions`, so there is one resolution order and one
+        set of writes rather than two that must be kept in step.
+
+        When no explicit list is given the targets are paged with a keyset scan over the
+        ``(accession_plain, ...)`` unique index rather than read with ``fetchall``. Two reasons,
+        both required: the full list is one string per accession and does not fit, and a single
+        long-lived cursor would have to stay open across every resolution's write transaction.
+        The order is identical -- ascending ``accession_plain``, which is what the unpaged query
+        also produced.
+        """
         connection = self._writer.connection
-        targets = (
+        for accession_plain in (
             list(accessions)
             if accessions is not None
-            else [
-                str(row["accession_plain"])
-                for row in connection.execute(
-                    "SELECT DISTINCT accession_plain FROM census_accession_observations "
-                    "ORDER BY accession_plain"
-                ).fetchall()
-            ]
-        )
-        resolved: dict[str, AccessionResolution] = {}
-        for accession_plain in targets:
+            else self._iter_observed_accessions(connection)
+        ):
             observations = self._field_observations(connection, accession_plain)
             prior = self._prior_filing_dates(connection, accession_plain)
             resolution = resolve_accession(
@@ -750,8 +1093,25 @@ class CensusCatalog:
             with transaction(connection) as write:
                 self._persist_resolution(write, resolution)
                 self._project_canonical(write, resolution)
-            resolved[accession_plain] = resolution
-        return resolved
+            yield accession_plain, resolution
+
+    @staticmethod
+    def _iter_observed_accessions(connection: sqlite3.Connection) -> Iterator[str]:
+        """Every accession carrying at least one observation, ascending, in bounded pages."""
+        after = ""
+        while True:
+            page = [
+                str(row["accession_plain"])
+                for row in connection.execute(
+                    "SELECT DISTINCT accession_plain FROM census_accession_observations "
+                    "WHERE accession_plain > ? ORDER BY accession_plain LIMIT ?",
+                    (after, _ACCESSION_PAGE_SIZE),
+                ).fetchall()
+            ]
+            if not page:
+                return
+            yield from page
+            after = page[-1]
 
     @staticmethod
     def _field_observations(

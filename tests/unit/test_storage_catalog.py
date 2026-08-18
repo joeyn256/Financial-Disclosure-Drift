@@ -14,7 +14,11 @@ import pytest
 from disclosure_drift.errors import CatalogWriteError, GateFailureError, SingleWriterViolationError
 from disclosure_drift.reasons import REASON_CODES
 from disclosure_drift.storage import catalog as catalog_module
-from disclosure_drift.storage.catalog import CatalogWriter, read_only_connection
+from disclosure_drift.storage.catalog import (
+    CatalogWriter,
+    LeaseFormatError,
+    read_only_connection,
+)
 from disclosure_drift.storage.sqlite import (
     REQUIRED_SQLITE_VERSION,
     apply_migrations,
@@ -371,7 +375,17 @@ def test_released_metadata_is_diagnostic_and_recoverable(tmp_path: Path) -> None
         assert successor.lease.lease_id != first_id
 
 
-def test_old_metadata_without_a_held_lock_is_safely_recovered(tmp_path: Path) -> None:
+def test_old_metadata_without_a_held_lock_is_preserved_rather_than_recovered(
+    tmp_path: Path,
+) -> None:
+    """Decision 110 §5 item 6: a lease this module did not write is evidence, not free space.
+
+    This document is missing ``host_fingerprint`` and ``state``, so the strict reader cannot
+    account for its meaning. Before Decision 110 the free advisory lock alone was enough to
+    overwrite it and proceed, which is exactly the class of evidence loss D109 finding F2
+    recorded. Age is not authority either: the recorded expiry is a quarter of a century old
+    and still does not license a takeover.
+    """
     path = tmp_path / "catalog" / "sec.sqlite3"
     lock_path = tmp_path / "locks" / "catalog_writer.lease"
     lock_path.parent.mkdir(parents=True)
@@ -386,9 +400,12 @@ def test_old_metadata_without_a_held_lock_is_safely_recovered(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    with CatalogWriter(path, tmp_path / "locks") as catalog:
-        catalog.migrate()
-        assert catalog.lease.lease_id != "old-owner"
+    before = lock_path.read_bytes()
+
+    with pytest.raises(LeaseFormatError, match="missing required field"):
+        CatalogWriter(path, tmp_path / "locks").__enter__()
+
+    assert lock_path.read_bytes() == before
 
 
 def test_non_owner_release_cannot_change_active_metadata(tmp_path: Path) -> None:
@@ -411,10 +428,21 @@ def _wait_for(path: Path, *, timeout: float = 5.0) -> None:
         time.sleep(0.01)
 
 
-def test_process_termination_releases_the_advisory_lock(tmp_path: Path) -> None:
+def test_process_termination_releases_the_lock_but_preserves_the_held_lease(
+    tmp_path: Path,
+) -> None:
+    """**A8.** The kernel frees the lock; it does not release the lease, and neither may we.
+
+    This is the D109 finding F2 sequence reproduced end to end with a real process: a writer
+    takes the lease, the process is killed outright, and the advisory lock is gone while the
+    persisted document still records ``held``. Before Decision 110 the next ordinary
+    acquisition truncated that document within seconds and the interruption provenance was
+    unrecoverable. Now the killed writer's lease survives the attempt byte for byte.
+    """
     database = tmp_path / "catalog" / "sec.sqlite3"
     locks = tmp_path / "locks"
     ready = tmp_path / "ready"
+    lease = locks / "catalog_writer.lease"
     program = (
         "import sys,time;"
         "from pathlib import Path;"
@@ -430,14 +458,22 @@ def test_process_termination_releases_the_advisory_lock(tmp_path: Path) -> None:
     )
     try:
         _wait_for(ready)
-        with pytest.raises(SingleWriterViolationError):
+        with pytest.raises(SingleWriterViolationError, match="another catalog writer"):
             CatalogWriter(database, locks).__enter__()
     finally:
-        process.terminate()
+        process.kill()
         process.wait(timeout=5)
 
-    with CatalogWriter(database, locks) as recovered:
-        assert recovered.lease.lease_id
+    held = lease.read_bytes()
+    assert json.loads(held.decode("utf-8"))["state"] == "held"
+
+    # The lock really is free -- an advisory lock is the only thing process death releases.
+    with catalog_module.exclusive_lease_lock(lease, writable=False):
+        pass
+
+    with pytest.raises(SingleWriterViolationError, match="records 'held'"):
+        CatalogWriter(database, locks).__enter__()
+    assert lease.read_bytes() == held
 
 
 def test_simultaneous_process_acquisition_has_exactly_one_winner(tmp_path: Path) -> None:

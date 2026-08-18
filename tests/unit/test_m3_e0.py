@@ -49,6 +49,7 @@ from disclosure_drift.config import (
     RUNTIME_ROOT_ENV_VARS,
     SECRET_ENV_VARS,
 )
+from disclosure_drift.errors import SingleWriterViolationError
 from disclosure_drift.m3 import e0
 from disclosure_drift.m3 import offline_parse as op
 from disclosure_drift.m3 import rehearsal_world as rw
@@ -64,7 +65,11 @@ from disclosure_drift.m3.receipt import (
     inspect_receipt,
 )
 from disclosure_drift.paths import DataTree
-from disclosure_drift.storage.catalog import CatalogWriter, strictly_read_only_connection
+from disclosure_drift.storage.catalog import (
+    CatalogWriter,
+    lease_path,
+    strictly_read_only_connection,
+)
 from disclosure_drift.storage.sqlite import (
     applied_versions,
     apply_migrations,
@@ -4227,6 +4232,110 @@ def test_e0_preflight_passes_its_lease_predicate_once_the_lease_reads_released(
     assert report.facts["writer_lease"] == "released"
 
 
+# ==========================================================================
+# Accepted Decision 110 §5 -- the writer lease is evidence before it is a lock
+#
+# D109 finding F2, accepted MAJOR: ordinary `CatalogWriter` acquisition overwrote a persisted
+# `held` lease as soon as it won a *free* advisory lock, and did so before the create-once
+# predicates refused the attempt -- which is how the interrupted v2 run's stale lease was
+# destroyed 3.96 seconds after the kernel killed it. The lease-level family lives in
+# `test_d110_lease_evidence_preservation.py`; what belongs here is the E0 surface's own share:
+# that a refused execute never reaches the lease at all, and that the fail-fast check added in
+# front of it did not become the create-once authority.
+# ==========================================================================
+
+
+def test_a8_a_post_interruption_e0_execute_cannot_replace_a_stale_held_lease(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """**A8.** The 2026-08-18 sequence, end to end, on the surface that produced it.
+
+    A killed E0 leaves a `held` lease and a free advisory lock. The next execute -- authorized,
+    predicate-passing, and doomed only by the consumed namespace it does not yet know about --
+    used to take that lock and truncate the document before anything refused it. Now the
+    document is what refuses, and it survives the attempt byte for byte.
+    """
+    lease = _lease_document(evidence_root)
+    before = lease.read_bytes()
+
+    with pytest.raises(SingleWriterViolationError, match="records 'held'"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    assert lease.read_bytes() == before
+    assert not e0.namespace_directory(evidence_root, e0.E0_RUN_NAMESPACE).exists()
+
+
+def test_a9_a_consumed_namespace_refuses_before_the_lease_is_touched(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """**A9.** A repeat invocation that cannot legally proceed does not churn the lease document.
+
+    Taking the writer lease *writes* -- a fresh `held` document over whatever the previous run
+    left. Before D110 the create-once refusal happened under that lease, so the doomed attempt
+    still overwrote the predecessor's record on its way to being refused. The fail-fast check
+    moves the refusal in front of the acquisition, and the proof is that the lease is not opened
+    for writing at all: the modification time is compared alongside the bytes, because a rewrite
+    that happened to reproduce the same document would still move it.
+    """
+    e0.create_run_namespace(evidence_root, e0.E0_RUN_NAMESPACE)
+    lease = lease_path(_catalog_path(evidence_root).parent)
+    before = lease.read_bytes()
+    before_mtime = lease.stat().st_mtime_ns
+
+    with pytest.raises(e0.PreflightRefusalError, match="already exists"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    assert lease.read_bytes() == before
+    assert lease.stat().st_mtime_ns == before_mtime
+
+
+def test_a9_the_early_check_preserves_a_predecessors_lease_byte_for_byte(
+    evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
+) -> None:
+    """**A9**, with the two failure modes composed as they actually occurred together.
+
+    The v2 kill left both a consumed namespace and a stale `held` lease. Either one alone now
+    refuses; the point of ordering the namespace check first is that the refusal an operator
+    gets is the one that costs nothing, and the lease never even opens for writing.
+    """
+    e0.create_run_namespace(evidence_root, e0.E0_RUN_NAMESPACE)
+    lease = _lease_document(evidence_root)
+    before = lease.read_bytes()
+
+    with pytest.raises(e0.PreflightRefusalError, match="already exists"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    assert lease.read_bytes() == before
+
+
+def test_a10_the_under_lease_create_once_recheck_still_decides_the_race(
+    evidence_root: Path,
+    transitioned: Path,
+    config: _Config,
+    activated_e0: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A10.** The early check is a courtesy; `mkdir` without ``exist_ok`` is the authority.
+
+    The window the fail-fast check cannot close is the one between itself and the acquisition:
+    a namespace created *after* it passes. That is simulated here by creating the directory from
+    inside the under-lease section, and the assertion is that `create_run_namespace` refuses on
+    its own -- an atomic `mkdir`, not a prior existence check, is what makes a namespace
+    create-once. Deleting the early check would leave this test passing, which is exactly the
+    relationship D110 §5 asks for: "NOT authoritative by itself".
+    """
+    real = e0.input_observation_set_digest
+
+    def create_then_measure(connection: object) -> str:
+        e0.create_run_namespace(evidence_root, e0.E0_RUN_NAMESPACE)
+        return real(connection)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(e0, "input_observation_set_digest", create_then_measure)
+
+    with pytest.raises(e0.E0Error, match="never reused, resumed, repaired, or overwritten"):
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+
+
 def test_e0_requires_the_interrupted_predecessor_to_be_present(
     evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
 ) -> None:
@@ -4353,15 +4462,42 @@ def test_the_accepted_predecessor_shape_is_undetermined_not_complete(
 def test_an_existing_v2_namespace_refuses_the_create_once_execution(
     evidence_root: Path, transitioned: Path, config: _Config, activated_e0: None
 ) -> None:
-    """N5: create-once is create-once for the successor generation too."""
+    """N5: create-once is create-once for the successor generation too.
+
+    Three independent gates say so, and this proves all three rather than whichever one happens
+    to fire first. Accepted Decision 110 §5 added the outermost of them -- a fail-fast check
+    ahead of the writer lease, so a doomed repeat never writes a `held` document over the record
+    of how the previous run ended -- and the point of asserting the inner two separately is that
+    the new one did not become the authority. It is deliberately the weakest: remove it and N5
+    still holds.
+    """
     e0.create_run_namespace(evidence_root, e0.E0_RUN_NAMESPACE)
 
     report = e0.e0_preflight(evidence_root=evidence_root, config=config)
     assert not report.passed
     assert any("already exists; it is create-once" in item for item in report.refusals)
 
-    with pytest.raises(e0.PreflightRefusalError, match="under-lease recheck diverged"):
+    with pytest.raises(e0.PreflightRefusalError, match="already exists; a namespace is"):
         e0.e0_execute(evidence_root=evidence_root, config=config)
+
+    # With only the D110 fail-fast check silenced -- the first lookup of the E0 namespace, and
+    # nothing else -- the under-lease recheck refuses on its own.
+    real = e0.namespace_directory
+    silenced = {"done": False}
+
+    def redirect(root: Path, name: str) -> Path:
+        if name == e0.E0_RUN_NAMESPACE and not silenced["done"]:
+            silenced["done"] = True
+            return root / "never-created"
+        return real(root, name)
+
+    with (
+        pytest.MonkeyPatch.context() as patch,
+        pytest.raises(e0.PreflightRefusalError, match="under-lease recheck diverged"),
+    ):
+        patch.setattr(e0, "namespace_directory", redirect)
+        e0.e0_execute(evidence_root=evidence_root, config=config)
+    assert silenced["done"]
 
 
 def test_the_successor_writes_its_own_namespace_backup_and_event_sequence(

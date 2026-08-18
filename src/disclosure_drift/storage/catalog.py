@@ -92,6 +92,14 @@ _LEASE_OPTIONAL_KEYS: Final[frozenset[str]] = frozenset(
 
 _LEASE_TIMESTAMP_PATTERN: Final = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 
+#: The largest persisted lease this module will read. It is the bound
+#: :meth:`CatalogWriter._read_locked_metadata` has always used, restated as a constant because
+#: accepted Decision 110 §5 now reads the same file on the *acquisition* path, and a second
+#: literal would be a second contract. A file larger than this was not written by this module,
+#: so it is refused rather than truncated to fit -- Decision 105's fail-closed rule, applied to
+#: the one case that reaches bytes before any predicate.
+_LEASE_READ_LIMIT: Final = 64 * 1024
+
 ELIGIBLE_FORM_TYPES: Final[tuple[tuple[str, bool, bool, str], ...]] = (
     ("10-K", False, True, "Original annual report."),
     ("10-K/A", True, True, "Amendment to an annual report."),
@@ -503,6 +511,25 @@ class CatalogWriter:
             message = f"unable to acquire catalog writer advisory lock: {exc}"
             raise CatalogWriteError(message) from exc
 
+        # **Decision 110 §5.** A persisted lease is evidence before it is a lock, and the two
+        # can disagree: `flock` lives on the open file description and the kernel drops it when
+        # a process dies, so a SIGKILL -- a jetsam memory-pressure kill, an operator `kill -9`,
+        # a power loss -- leaves the advisory lock free while the document on disk still records
+        # `held`. Until now the next acquisition truncated that document as soon as it won the
+        # free lock, which is how the interrupted M3.3-E0 v2 run's stale `held` lease was
+        # destroyed 3.96 seconds after the kill, and destroyed it *before* the create-once
+        # predicates refused the attempt that overwrote it. So the pre-existing document is read
+        # first, through the same strict reader every other gate uses, and anything that is not
+        # "absent" or "structurally valid and exactly `released`" refuses without writing a byte.
+        # Converting a `held` lease to `released` is the governed Decision 103 R3
+        # reconciliation's job alone.
+        try:
+            self._refuse_unacquirable_lease(descriptor)
+        except BaseException:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+            raise
+
         encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
         try:
             os.ftruncate(descriptor, 0)
@@ -521,6 +548,65 @@ class CatalogWriter:
             acquired_at_utc=acquired_at_utc,
             expires_at_utc=expires_at_utc,
         )
+
+    @staticmethod
+    def _refuse_unacquirable_lease(descriptor: int) -> None:
+        """Refuse unless the persisted lease is absent or records exactly ``released``.
+
+        Called with the exclusive advisory lock already held and before any byte is written,
+        so the decision is made on the document the previous writer actually left behind. The
+        four outcomes are accepted Decision 110 §5 items 3-6:
+
+        * **Absent** -- a zero-length file, which is what ``O_CREAT`` itself leaves on a first
+          acquisition and what a crash between ``open`` and the first write leaves. There is no
+          document, so there is nothing to preserve and acquisition proceeds.
+        * **Valid and ``released``** -- the state both release paths write. Acquisition proceeds.
+        * **Valid and ``held``** -- refused, whatever the recorded pid, whatever the recorded
+          expiry, and whatever the advisory lock currently says. Those three are exactly the
+          signals that made the old overwrite look safe, and each of them is true of a lease a
+          jetsam kill left behind.
+        * **Anything else** -- unreadable, malformed, torn, oversized, or recording a state this
+          module never writes. Refused, because a document whose meaning cannot be accounted
+          for is not evidence that the catalog is free.
+
+        Nothing is written on any path through this method, including every refusal.
+
+        Raises:
+            SingleWriterViolationError: a structurally valid lease records ``held``.
+            LeaseFormatError: a lease exists and is not a structurally valid ``released``
+                document.
+        """
+        size = os.fstat(descriptor).st_size
+        if size == 0:
+            return
+        if size > _LEASE_READ_LIMIT:
+            message = (
+                f"the persisted catalog writer lease is {size} bytes, larger than the "
+                f"{_LEASE_READ_LIMIT}-byte bound this module writes within; it was not written "
+                "here and is preserved rather than overwritten"
+            )
+            raise LeaseFormatError(message)
+        lease = read_persisted_lease(os.pread(descriptor, size, 0))
+        if lease.state == LEASE_STATE_RELEASED:
+            return
+        if lease.state == LEASE_STATE_HELD:
+            message = (
+                "the persisted catalog writer lease records "
+                f"{LEASE_STATE_HELD!r} (pid {lease.writer_pid}, acquired "
+                f"{lease.acquired_at_utc}, expires {lease.expires_at_utc})\n"
+                "A free advisory lock does not release it: a lease whose writer was killed "
+                "outright leaves the lock free and the document held, and that document is the "
+                "only surviving record of the interruption.\n"
+                "Fix: reconcile it through the governed stale-writer-lease recovery, which is "
+                "the one path permitted to record the transition. Never delete or overwrite it."
+            )
+            raise SingleWriterViolationError(message)
+        message = (
+            f"the persisted catalog writer lease records state {lease.state!r}, which is "
+            f"neither {LEASE_STATE_HELD!r} nor {LEASE_STATE_RELEASED!r}; a lease this module "
+            "did not write is preserved rather than overwritten"
+        )
+        raise LeaseFormatError(message)
 
     def _read_lease_file(self) -> Mapping[str, Any] | None:
         try:

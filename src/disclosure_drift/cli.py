@@ -373,6 +373,62 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         ),
     )
 
+    # Accepted Decision 116 §5. A canary-only surface, deliberately unlike the two PRE-E0
+    # commands above: it holds no authority constant, creates no run namespace under the
+    # private root, applies no migration, and writes every byte it produces into a disposable
+    # world beneath an operator-supplied work root outside both the checkout and the private
+    # evidence root. Its one selector is the plan's own source_instance_id — there is no path
+    # option, no source-directory option, no all-sources mode, and no continuation.
+    canary = m3_subparsers.add_parser(
+        _M3_3_CANARY_COMMAND,
+        help="Run exactly one governed planned source into a disposable compact world.",
+        description=(
+            "Materializes exactly one planned source, named by its own census_plan_sources "
+            "source_instance_id, into a run-local Decision 111 working catalog under the "
+            "supplied --work-root, bound explicitly to the accepted e0-compact-evidence/2 "
+            "contract and emitting its Decision 112 §8 sidecar. The accepted operational "
+            "catalog is opened strictly read-only on every path and no writer lease is taken "
+            "on it; nothing is promoted, no migration is applied, and no E0 authority or run "
+            "namespace is involved. One invocation runs one source and stops: there is no "
+            "continuation to a second. preflight validates every predicate and creates "
+            "nothing. A completed run is not an authorization for M3.3-E0 or anything else."
+        ),
+    )
+    _add_config_argument(canary)
+    canary.add_argument(
+        "--mode",
+        required=True,
+        choices=_M3_3_CANARY_MODES,
+        help=(
+            "preflight validates the plan selection, the world, and the boundaries read-only "
+            "and creates nothing; run builds the disposable world and parses that one source."
+        ),
+    )
+    canary.add_argument(
+        "--source-instance-id",
+        required=True,
+        metavar="SOURCE_INSTANCE_ID",
+        help=(
+            "The one planned source's own census_plan_sources key. An identifier the accepted "
+            "plan does not carry, or carries more than once, is refused."
+        ),
+    )
+    canary.add_argument(
+        "--run-id",
+        required=True,
+        metavar="RUN_ID",
+        help="This disposable world's identity. Create-once: an existing world is refused.",
+    )
+    canary.add_argument(
+        "--work-root",
+        required=True,
+        metavar="ABSOLUTE_PATH",
+        help=(
+            "Absolute directory the disposable world is built under. Refused if it is inside "
+            "the repository checkout, or is, contains, or lies inside the private evidence root."
+        ),
+    )
+
     for name, gate, summary in _M3_3_GATED_COMMANDS:
         gated = m3_subparsers.add_parser(
             name,
@@ -1425,6 +1481,14 @@ _M3_3_PRE_E0_COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
 _M3_3_RECOVERY_COMMAND: Final = "reconcile-writer-lease"
 _M3_3_RECOVERY_MODES: Final[tuple[str, ...]] = ("preflight", "execute")
 
+#: Accepted Decision 116 §5's disposable single-source canary surface. It sits apart from the
+#: PRE-E0 commands and from the recovery surface because it is neither a stage nor a
+#: reconciliation: it runs one governed source into a disposable world and returns. Its second
+#: mode is `run` rather than `execute` on purpose — `execute` is E0's governed, authority-gated
+#: verb, and this path has no authority to gate.
+_M3_3_CANARY_COMMAND: Final = "canary-source"
+_M3_3_CANARY_MODES: Final[tuple[str, ...]] = ("preflight", "run")
+
 #: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
 #: the command set is complete and each **refuses**: the owner gate it names has not been
 #: issued, and no acceptance, rehearsal, suite, commit, or tag issues one.
@@ -1584,6 +1648,8 @@ def _m3_command(
         return _m3_pre_e0_command(command, args, config, logger)
     if command == _M3_3_RECOVERY_COMMAND:
         return _m3_reconcile_writer_lease_command(args, config, logger)
+    if command == _M3_3_CANARY_COMMAND:
+        return _m3_canary_source_command(args, logger)
 
     try:
         evidence_root = require_external_evidence_root(args.evidence_root, _repository_root())
@@ -1682,6 +1748,53 @@ def _m3_reconcile_writer_lease_command(
         mode=mode, config=config, repository_root=_repository_root()
     )
     return _report_pre_e0_result(result, command=_M3_3_RECOVERY_COMMAND, mode=mode, logger=logger)
+
+
+def _m3_canary_source_command(args: argparse.Namespace, logger: Logger) -> int:
+    """Dispatch the accepted Decision 116 §5 disposable single-source canary surface.
+
+    Routing and rendering only, exactly like the two surfaces above. Every predicate, every
+    boundary, the disposable world, and every durable byte live in
+    :mod:`disclosure_drift.m3.single_source_canary`, so this layer cannot become a second place
+    where a canary is judged runnable.
+
+    It takes no ``config`` argument beyond the one ``main`` already loaded and validated: this
+    path reads no configuration value, and the private root comes from the fixed unlogged
+    environment variable through the module's own boundary. Nothing printed here can carry the
+    private root or the work root — the module returns counts, digests, enum tokens, and names
+    relative to the disposable world.
+    """
+    from disclosure_drift.m3.single_source_canary import run_canary_source_command
+
+    mode = str(args.mode)
+    try:
+        result = run_canary_source_command(
+            mode=mode,
+            run_id=str(args.run_id),
+            source_instance_id=str(args.source_instance_id),
+            work_root=str(args.work_root),
+            repository_root=_repository_root(),
+        )
+    except (DisclosureDriftError, sqlite3.Error) as exc:
+        print(f"m3 {_M3_3_CANARY_COMMAND} failed: {exc}", file=sys.stderr)
+        logger.error("m3 %s --mode %s did not pass", _M3_3_CANARY_COMMAND, mode)
+        return EXIT_GATE_FAILURE
+    except OSError as exc:
+        # An OSError ordinarily carries the offending filename, which may be an absolute
+        # personal path. Report the error class alone.
+        print(
+            f"m3 {_M3_3_CANARY_COMMAND} failed: {type(exc).__name__} while reading or writing "
+            "a canary artifact",
+            file=sys.stderr,
+        )
+        logger.error("m3 %s failed on a filesystem error", _M3_3_CANARY_COMMAND)
+        return EXIT_GATE_FAILURE
+    stream = sys.stdout if result.exit_code == EXIT_OK else sys.stderr
+    for line in result.lines:
+        print(line, file=stream)
+    if result.exit_code != EXIT_OK:
+        logger.error("m3 %s --mode %s did not pass", _M3_3_CANARY_COMMAND, mode)
+    return result.exit_code
 
 
 def _report_pre_e0_result(

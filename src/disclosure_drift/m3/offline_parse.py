@@ -64,6 +64,7 @@ from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
 # than reimplemented so exactly one derivation of an accession-observation identity
 # exists in the repository (M3.3 contract §20: no second persistence implementation).
 from disclosure_drift.sec.census import (
+    SINGLE_TRANSACTION,
     CensusCatalog,
     ResolutionEvidence,
     _stable_id,
@@ -102,18 +103,24 @@ __all__ = [
     "SUBMISSIONS_MEMBERSHIP_SOURCE_IDS",
     "VALIDATION_OR_PROVENANCE_ONLY_SOURCE_IDS",
     "AssociationTotality",
+    "CompactSourceEvidence",
+    "FullIndexCorroboration",
     "OfflineParseError",
     "OfflineParseReport",
     "PlannedSource",
+    "SelectedPlannedSource",
+    "SingleSourceOutcome",
     "SourceLayerPhase",
     "PlannedSourceOutcome",
     "SourceDisposition",
     "classify_planned_source",
     "load_planned_sources",
     "materialize_census_associations",
+    "materialize_one_planned_source",
     "materialize_source_layer",
     "membership_observation_sources",
     "run_offline_metadata_parse",
+    "select_planned_source",
     "unavailable_source_ids",
     "write_containment",
 ]
@@ -2221,6 +2228,242 @@ def materialize_source_layer(
         full_index_unbound_accessions=tuple(sorted(index_unbound)),
         full_index_corroborations=tuple(corroborations),
         resolution_evidence=catalog.resolution_evidence,
+    )
+
+
+# --------------------------------------------------------------------------
+# The one-source entry point (accepted Decision 116 §5)
+# --------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class SelectedPlannedSource:
+    """Exactly one planned source, named by its own plan key, and where it sits in the plan.
+
+    The *only* selector is ``census_plan_sources.source_instance_id``. There is no path
+    argument, no source-directory option, and no ``source_id`` shorthand: a ``source_id``
+    names seventy full-index quarters at once, and a path would be exactly the operator
+    discovery **R13** forbids. An identifier the accepted plan does not carry, or carries
+    more than once, is refused rather than disambiguated.
+    """
+
+    source: PlannedSource
+    #: 1-based position in :func:`load_planned_sources` order, which is the plan's own key.
+    plan_position: int
+    #: How many rows the accepted plan holds, so a position can be read as "n of m".
+    plan_source_count: int
+
+
+def select_planned_source(
+    connection: sqlite3.Connection, source_instance_id: str
+) -> SelectedPlannedSource:
+    """Return the single planned source ``source_instance_id`` names, or refuse.
+
+    Reads the accepted plan through :func:`load_planned_sources`, so the enumeration, its
+    order, and every field are the ones the whole-plan driver uses. Nothing is ranked,
+    defaulted, or matched by prefix.
+
+    Raises:
+        OfflineParseError: the identifier names no planned source, or names more than one.
+    """
+    planned = load_planned_sources(connection)
+    matches = [
+        (position, source)
+        for position, source in enumerate(planned, start=1)
+        if source.source_instance_id == source_instance_id
+    ]
+    if not matches:
+        message = (
+            f"no planned source carries source_instance_id {source_instance_id!r}; the "
+            f"accepted plan holds {len(planned)} rows and a source outside it is refused "
+            "rather than parsed"
+        )
+        raise OfflineParseError(message)
+    if len(matches) > 1:
+        message = (
+            f"source_instance_id {source_instance_id!r} names {len(matches)} planned rows; "
+            "exactly one source is run per invocation and an ambiguous identifier is "
+            "refused rather than disambiguated"
+        )
+        raise OfflineParseError(message)
+    position, source = matches[0]
+    return SelectedPlannedSource(
+        source=source, plan_position=position, plan_source_count=len(planned)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SingleSourceOutcome:
+    """What one planned source's materialization produced, and nothing about any other.
+
+    The compact-evidence fields are populated only when a sidecar was supplied and the
+    source was parsed; under the full-observation contract they stay at their empty
+    defaults, because D112 §§4.A and 4.E evidence is a property of the compact contract
+    rather than of every parse.
+    """
+
+    outcome: PlannedSourceOutcome
+    observation: SourceObservation | None = None
+    #: One entry when the source is a ``company.idx`` quarter, ``None`` otherwise.
+    corroboration: FullIndexCorroboration | None = None
+    completeness_digest: str = ""
+    members: int = 0
+    records: int = 0
+    omitted_field_observations: int = 0
+    materialized_field_observations: int = 0
+
+
+def materialize_one_planned_source(
+    *,
+    writer: CatalogWriter,
+    tree: DataTree,
+    catalog: CensusCatalog,
+    selected: SelectedPlannedSource,
+    sidecar: CompactEvidenceSidecar | None = None,
+    recorded: str | None = None,
+    batch_size: int = SINGLE_TRANSACTION,
+    checkpoint_batches: bool = False,
+) -> SingleSourceOutcome:
+    """Materialize **exactly one** planned source, and stop.
+
+    The one-source twin of :func:`materialize_source_layer`, for a bounded canary that must
+    be able to prove it stopped rather than merely be expected to. Every step is the same
+    accepted call the whole-plan driver makes -- the same classification, the same plan-bound
+    observation, the same pure parsers, the same ``CensusCatalog``, the same
+    ``parser_state`` transition, and the same **R23** full-index materialization -- so this
+    is a second *entry point*, never a second parser.
+
+    What it deliberately does **not** do is anything the plan's other rows imply. It never
+    enumerates a second source, never continues after this one, and never runs the
+    catalog-wide resolution or the Decision 094 §6.4 association projection: those are
+    phases of a whole run, and a caller that wants them runs them itself, in that order,
+    inside the same containment.
+
+    Args:
+        writer: The single logical writer for the catalog being written -- for a canary,
+            a **run-local working catalog**, never the accepted operational one.
+        tree: The data tree the frozen source artifacts are read from.
+        catalog: The census catalog to persist through, carrying the evidence contract the
+            caller chose. Passed in rather than built here so the compact contract is bound
+            explicitly by the caller and can never be defaulted on by this function.
+        selected: The one source, from :func:`select_planned_source`.
+        sidecar: The run-local compact-evidence sidecar, when the caller runs under the
+            compact contract. ``None`` writes no D112 §8 evidence at all.
+        recorded: The timestamp the **R23** materialization records. Defaults to now.
+        batch_size: Parts per real transaction for the streamed path (accepted D111).
+        checkpoint_batches: Whether to truncate the write-ahead log at each boundary.
+
+    Raises:
+        OfflineParseError: any fail-closed condition, always before a durable write.
+    """
+    connection = writer.connection
+    source = selected.source
+    observations = _observations_by_id(connection)
+    bound = None if source.observation_id is None else observations.get(source.observation_id)
+    disposition = classify_planned_source(source, bound)
+    if disposition != "E0_REQUIRED_PARSE":
+        return SingleSourceOutcome(
+            outcome=PlannedSourceOutcome(
+                source_instance_id=source.source_instance_id,
+                source_id=source.source_id,
+                disposition=disposition,
+                parser_state_before=source.parser_state,
+                parser_state_after=source.parser_state,
+                detail=(
+                    "accepted source preserved as failed or unavailable"
+                    if disposition == "E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE"
+                    else "deliberately untouched: parser output is not used by "
+                    "the authoritative candidate builder"
+                ),
+            ),
+            observation=bound,
+        )
+    if bound is None:  # pragma: no cover - classify_planned_source already refused
+        message = (
+            f"planned source {source.source_instance_id!r} lost its plan-bound observation "
+            "between classification and parse"
+        )
+        raise OfflineParseError(message)
+
+    store = SnapshotStore(tree)
+    store.adopt(observations.values())
+    evidence = (
+        None
+        if sidecar is None
+        else CompactSourceEvidence(
+            source_observation_id=bound.observation_id,
+            source_id=bound.source_id,
+            artifact_sha256=bound.logical_sha256 or "",
+            artifact_byte_length=bound.content_size_bytes or 0,
+            sidecar=sidecar,
+        )
+    )
+    if bound.source_id in STREAMED_SOURCE_IDS:
+        result = catalog.persist_streamed(
+            _stream_bulk_submissions(store, bound, evidence=evidence),
+            parser_id=_BULK_PARSER_ID,
+            parser_version=SOURCES[bound.source_id].parser_version,
+            source_observation_id=bound.observation_id,
+            batch_size=batch_size,
+            checkpoint_batches=checkpoint_batches,
+        )
+        after = _STREAMED_PARSER_STATE[result.run_outcome]
+    else:
+        outcome, references = _parse_source(connection, store, bound)
+        if evidence is not None:
+            # A single-payload artifact is its own single member, named by the frozen
+            # store's own relative path -- a property of the artifact, not of this run.
+            # ``classify_planned_source`` already required ``has_payload``, which is
+            # exactly this field being present; it is re-asserted rather than defaulted,
+            # because a blank member name would name nothing in the manifest.
+            member_name = bound.relative_storage_path
+            if member_name is None:  # pragma: no cover - has_payload already required it
+                message = (
+                    f"planned source {source.source_instance_id!r} was classified parseable "
+                    "but its bound observation records no stored payload path"
+                )
+                raise OfflineParseError(message)
+            # The payload is loaded again through the same integrity-verifying reader
+            # rather than held across the parse: retaining a second copy of bytes the
+            # parse has already dropped is exactly the residency Decision 110 §8 removed.
+            evidence.absorb(member_name, _payload_bytes(store, bound), outcome)
+        result = catalog.persist(
+            outcome, historical_references=references, source_observation_id=bound.observation_id
+        )
+        after = _parser_state_for(outcome)
+    with transaction(connection) as active:
+        active.execute(
+            "UPDATE census_plan_sources SET parser_state = ? "
+            "WHERE census_run_id = ? AND source_instance_id = ?",
+            (after, source.census_run_id, source.source_instance_id),
+        )
+    corroboration = None
+    if source.source_id == "sec_full_index_company":
+        corroboration = _materialize_full_index_registrants(
+            connection,
+            observation=bound,
+            parser_run_id=result.parser_run_id,
+            recorded=utc_now() if recorded is None else recorded,
+            compact=bool(catalog.compact_evidence),
+        )
+    completeness = "" if evidence is None else evidence.finish()
+    return SingleSourceOutcome(
+        outcome=PlannedSourceOutcome(
+            source_instance_id=source.source_instance_id,
+            source_id=source.source_id,
+            disposition=disposition,
+            parser_run_id=result.parser_run_id,
+            parsed_records=result.parsed,
+            quarantined_records=result.quarantined,
+            parser_state_before=source.parser_state,
+            parser_state_after=after,
+            already_present=result.already_present,
+        ),
+        observation=bound,
+        corroboration=corroboration,
+        completeness_digest=completeness,
+        members=0 if evidence is None else evidence.members,
+        records=0 if evidence is None else evidence.records,
+        omitted_field_observations=0 if evidence is None else evidence.omitted,
+        materialized_field_observations=0 if evidence is None else evidence.materialized,
     )
 
 

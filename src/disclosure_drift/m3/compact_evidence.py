@@ -1098,6 +1098,30 @@ class CompactEvidenceSidecar:
         ).fetchone()
         return None if row is None else dict(row)
 
+    def member_manifest_digest(self, source_observation_id: str) -> str:
+        """A deterministic identity over one source's member manifest, and nothing else.
+
+        The same rows :meth:`identity` folds for ``compact_source_members``, folded by the
+        same rule and restricted to one source, so a caller can report the manifest's
+        identity without either recomputing it from the parse or defining a second digest.
+        An empty manifest -- a single-payload source parsed with no sidecar member -- still
+        has an identity, which is the digest of the header alone.
+        """
+        digest = hashlib.sha256()
+        digest.update(
+            f"{COMPACT_EVIDENCE_CONTRACT}\x1f{COMPACT_EVIDENCE_SCHEMA_VERSION}\x1f"
+            f"{source_observation_id}".encode()
+        )
+        self._fold(
+            digest,
+            self._connection.execute(
+                "SELECT * FROM compact_source_members WHERE source_observation_id = ? "
+                "ORDER BY member_ordinal",
+                (source_observation_id,),
+            ).fetchall(),
+        )
+        return digest.hexdigest()
+
     def identity(self) -> str:
         """A deterministic digest over everything the sidecar holds.
 
@@ -1113,9 +1137,21 @@ class CompactEvidenceSidecar:
             ("compact_resolution_evidence", "resolution_scope"),
             ("compact_corroboration_evidence", "source_observation_id"),
         ):
-            for row in self._connection.execute(
-                f"SELECT * FROM {table} ORDER BY {order}"  # noqa: S608 - fixed literals
-            ).fetchall():
-                digest.update(_json({key: row[key] for key in sorted(row.keys())}).encode("utf-8"))
-                digest.update(b"\x1e")
+            self._fold(
+                digest,
+                self._connection.execute(
+                    f"SELECT * FROM {table} ORDER BY {order}"  # noqa: S608 - fixed literals
+                ).fetchall(),
+            )
         return digest.hexdigest()
+
+    @staticmethod
+    def _fold(digest: hashlib._Hash, rows: Sequence[sqlite3.Row]) -> None:
+        """Absorb sidecar rows into ``digest``, canonically and in the order given.
+
+        Stated once so :meth:`identity` and :meth:`member_manifest_digest` cannot drift into
+        two renderings of the same rows.
+        """
+        for row in rows:
+            digest.update(_json({key: row[key] for key in sorted(row.keys())}).encode("utf-8"))
+            digest.update(b"\x1e")

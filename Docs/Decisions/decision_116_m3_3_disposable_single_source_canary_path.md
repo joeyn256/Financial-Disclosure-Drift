@@ -1,7 +1,7 @@
 # Decision 116 — The Disposable Single-Source Compact Canary Execution Path
 
 ```text
-STATUS: ACCEPTED — OWNER IMPLEMENTATION INSTRUMENT, RULINGS R6–R9
+STATUS: ACCEPTED — OWNER IMPLEMENTATION INSTRUMENT, RULINGS R6–R13
 DATE: 2026-08-18
 OWNER: Joey authorization; Sol/GPT-5.6 owner rulings
 OUTCOME: M3_3_D116_DISPOSABLE_SINGLE_SOURCE_EXECUTION_PATH
@@ -15,10 +15,12 @@ HTTP_AUTHORIZATION: NONE
 REQUEST_CEILING: 0
 ```
 
-This record carries four owner rulings and the bounded implementation the fourth of them
-authorized. It grants **no execution authority of any kind**: all three activation constants remain
-`None`, migration `0016` remains unapplied, no E0-v3 namespace exists, and the next real source
-parse requires a new owner instrument that this record is not.
+This record carries eight owner rulings and the bounded implementation they authorized: **R6–R9**
+(§§2–4 and §12), issued 2026-08-18 with the path itself, and **R10–R13** (§§20–23), issued
+2026-08-19 as a pre-acceptance correction of that implementation. It grants **no execution
+authority of any kind**: all three activation constants remain `None`, migration `0016` remains
+unapplied, no E0-v3 namespace exists, and the next real source parse requires a new owner instrument
+that this record is not.
 
 Decisions 091–115 remain binding on every point they name. Decision 113's compact derived-evidence
 ruling — the contract `e0-compact-evidence/2`, the implicit-resolution rule, the compact
@@ -314,3 +316,114 @@ Decision 113's compaction ruling or its stop rule beyond the host capacity dispo
 does not change any frozen research definition, cohort, quota, seed, or selector, does not add or
 alter a migration, does not write to the private evidence root, and does not authorize a push or a
 tag.
+
+## 20. R10 — the final-gate procedure
+
+The D116 full-gate history is **accepted**. The first `make check-fast` was terminated after the
+implementation tree changed underneath it and therefore supplies no claimed verdict; the subsequent
+gate, run on the final D116 tree, passed at **4,733 passed / 1 skipped / 0 failed**. No procedural
+finding remains open on it, and the superseded tree is not re-run.
+
+The rule the ruling fixes for anything that follows: **a gate is run on a finished tree.** All
+source and documentation edits complete first, then exactly one `make check-fast`, and no file is
+edited while it runs. A gate whose tree changed under it is reported as terminated and claims
+nothing. If a final gate fails, only directly in-scope corrections are made and one further final
+gate is permitted — never a recursive polish loop — and every invocation is reported truthfully.
+
+## 21. R11 — the disposable work-root invariant is enforced at the production library boundary
+
+**Classification: MAJOR, corrected before acceptance.**
+
+As first implemented, the §7 work-root boundary was established at the operator entry point, and
+`run_single_source_canary()` accepted an *already-validated* work root. A direct production caller
+of the library function could therefore reach a location the operator surface would have refused —
+the invariant existed, but it belonged to the wrapper rather than to the run.
+
+**The rule.** The invariant belongs inside the production library execution boundary. A direct
+caller of `run_single_source_canary()` must not be able to create a writable world at the
+authoritative private evidence root, beneath it, at a parent that contains it, inside the repository
+checkout, through a relative or unresolved disposable root, or at any other location
+`require_disposable_work_root()` already prohibits. The refusal happens **before** any directory,
+working catalog, sidecar, or result document exists.
+
+**One rule, not two implementations.** `require_disposable_work_root()` remains the single place the
+rule is stated, unchanged. A boundary function `require_canary_work_root()` applies that primitive to
+each evidence root a run must stay clear of, and states no containment arithmetic of its own:
+
+1. the evidence tree the run itself reads its frozen artifacts from, taken from the run's own
+   `DataTree` input rather than declared beside it, so it cannot disagree with what the run opens;
+2. the authoritative private evidence root the **process** declares, whenever it declares one — read
+   from the environment rather than from an argument, so it is not a caller's to route around. In
+   ordinary operation these are the same root, because the operator surface builds the tree from it.
+
+The repository checkout is derived from the package's own location, and absoluteness and symlink
+resolution come from the same primitive, so none of the three is declared by the caller either.
+
+**The operator surface keeps its early refusal**, so an operator learns the rule immediately and
+without a traceback. That refusal is now a convenience; the run's own is the invariant, and both go
+through the one primitive so they cannot disagree about a lawful root.
+
+**What this does not change.** Create-once world semantics, the strictly read-only handle on the
+accepted catalog, the compact-contract binding, the digests, the result surface, E0, the source
+plan, the migrations, and the network posture are all untouched. No architectural change beyond
+sharing and enforcing the existing path-safety invariant was required or made.
+
+**What the tests must prove.** Direct library calls — not merely operator calls — fail closed for
+each prohibited category: a work root that is the private evidence root, one inside it, one that
+contains it, one inside the repository checkout, a relative one, and a symlink that resolves onto
+the private evidence root. For each refusal: no world directory, no working catalog, no sidecar, no
+result document, and the accepted operational catalog byte-identical with no parsed rows. Also
+proved: the refusal names no path; the process-declared authoritative root is refused even when the
+declared tree is elsewhere, while a lawful root still runs with that variable set; one lawful direct
+invocation still builds its world and its result on a tiny fixture; the operator surface and the run
+refuse the identical root; the boundary calls the accepted primitive rather than restating it; and
+the create-once protections stay green.
+
+## 22. R12 — a single-payload source is one logical manifest member
+
+**Owner accepted.** For a governed planned source whose frozen artifact is a single payload rather
+than a membered archive:
+
+- the frozen artifact **itself** is the single logical member;
+- its frozen `relative_storage_path` is the deterministic logical member name;
+- the compact member-manifest binding binds that artifact's governed payload identity and length
+  under the **same** accepted folding semantics the manifest already uses;
+- no absolute host path is part of the identity;
+- the representation is deterministic across independent worlds.
+
+This extends the accepted member representation to an already planned source class. It is **not**
+new semantic compaction, **not** permission to change archive-member semantics, and **not**
+permission to change the accepted digest folding rules — all three remain closed exactly as §8
+states.
+
+The proofs are preserved and pinned: independent-world digest equality for both a streamed archive
+source and a single-payload source; exactly one manifest member for the single-payload source, named
+by the `relative_storage_path` read back from the catalog rather than restated; the member's payload
+digest and byte length equal to the source artifact's; no absolute path in the member name or the
+result surface; and — pinned on a clone, so no accepted semantics move to state it — the member name
+is *inside* the member-manifest identity, since altering it moves that identity while an unaltered
+clone reproduces it exactly.
+
+## 23. R13 — the two navigation entries
+
+Both cleared before acceptance, and nothing else:
+
+1. **`Docs/decision_index.md`** gains the repository-consistent Decision 116 navigation entry, in
+   the formatting convention of the surrounding entries. No historical entry is rewritten.
+2. **`Docs/change_impact_map.md`** gains a minimal Decision 116 change-set entry. §12's earlier
+   authorization covered the R9 correction only, so the record's own change-set navigation was
+   correctly absent until now. The entry is navigational and concise: the additive `m3
+   canary-source` operator surface, single-source selection, the Decision 111 working-catalog
+   wiring, the explicit `e0-compact-evidence/2` binding, the compact sidecar and digest emission,
+   the E0 / network / migration separation, the §21 library-boundary work-root enforcement, the R6
+   and R9 status-truth corrections, and the §22 single-payload logical-member ruling. It is not a
+   historical rewrite and not a general documentation cleanup.
+
+The correction's own change set is `src/disclosure_drift/m3/single_source_canary.py`,
+`tests/unit/test_d116_single_source_canary.py`, this record, its registry line, and the two
+navigation files named above. `Milestones/STATUS.md` is touched only where a statement became
+factually false because of this correction, and it pre-claims no owner acceptance.
+
+**This record is still not owner acceptance of the implementation.** §18's token states readiness
+for review; the correction token `M3_3_D116_CORRECTION_READY_FOR_OWNER_ACCEPTANCE` states the same
+thing about the corrected tree, and neither authorizes a real source, a push, or a tag.

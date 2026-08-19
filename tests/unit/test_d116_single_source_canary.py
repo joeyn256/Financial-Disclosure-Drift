@@ -398,6 +398,197 @@ def test_a_lawful_work_root_resolves(tmp_path: Path) -> None:
 
 
 # ==========================================================================
+# R11: the work-root invariant belongs to the run, not to the operator surface
+# ==========================================================================
+#: The checkout the library derives for itself. Never written to -- a refusal happens before
+#: any directory is created, which is exactly what these cases assert.
+_CHECKOUT = Path(canary.__file__).resolve().parents[3]
+
+
+def _unlawful_work_root(kind: str, tmp_path: Path, private: Path) -> Path:
+    """One unlawful disposable work root of each prohibited category."""
+    if kind == "the private evidence root itself":
+        return private
+    if kind == "inside the private evidence root":
+        return private / "work"
+    if kind == "a parent containing the private evidence root":
+        return tmp_path
+    if kind == "inside the repository checkout":
+        return _CHECKOUT / "d116-canary-work"
+    if kind == "a relative path":
+        return Path("d116-relative-work")
+    if kind == "a symlink resolving onto the private evidence root":
+        alias = tmp_path / "alias"
+        alias.symlink_to(private, target_is_directory=True)
+        return alias
+    raise AssertionError(kind)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "the private evidence root itself",
+        "inside the private evidence root",
+        "a parent containing the private evidence root",
+        "inside the repository checkout",
+        "a relative path",
+        "a symlink resolving onto the private evidence root",
+    ],
+)
+def test_a_direct_library_call_refuses_every_unlawful_work_root(tmp_path: Path, kind: str) -> None:
+    """R11: the run establishes the boundary itself, so no caller can supply its way past it.
+
+    Every input other than the work root is the one a successful run uses -- the same stand-in
+    private root, the same catalog, the same planned source -- so the refusal can only be the
+    boundary. Nothing is created for any of them: no world directory, no working catalog, no
+    result document, and the accepted catalog's own bytes do not move.
+    """
+    private = _private_root(tmp_path)
+    database = _catalog(private)
+    before = file_digest(database)[0]
+    work_root = _unlawful_work_root(kind, tmp_path, private)
+    with pytest.raises(canary.SingleSourceCanaryError):
+        canary.run_single_source_canary(
+            operational_catalog=database,
+            tree=DataTree.from_root(private),
+            work_root=work_root,
+            run_id="unlawful",
+            source_instance_id=_BULK_INSTANCE,
+        )
+    world = (Path.cwd() / work_root) / "unlawful"
+    assert not world.exists()
+    assert not (world / "working_catalog.sqlite3").exists()
+    assert not (world / canary.CANARY_RESULT_FILENAME).exists()
+    assert not (world / "compact_evidence.sqlite3").exists()
+    assert file_digest(database)[0] == before
+    assert _count(database, "SELECT COUNT(*) AS n FROM census_parsed_records") == 0
+
+
+def test_the_unlawful_work_root_refusal_names_no_path(tmp_path: Path) -> None:
+    """R11 reuses the accepted primitive, so it also inherits its no-leak refusal messages."""
+    private = _private_root(tmp_path)
+    with pytest.raises(canary.SingleSourceCanaryError) as excinfo:
+        canary.run_single_source_canary(
+            operational_catalog=_catalog(private),
+            tree=DataTree.from_root(private),
+            work_root=private / "work",
+            run_id="unlawful",
+            source_instance_id=_BULK_INSTANCE,
+        )
+    assert str(private) not in str(excinfo.value)
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+def test_the_authoritative_root_is_refused_even_when_the_declared_tree_is_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R11: the process's own authoritative root is not a caller's to route around.
+
+    A caller reading a stand-in tree could otherwise aim its writable world at the real
+    evidence root, because that root is nowhere in its arguments. It is in the process, and
+    that is where the run reads it from. A lawful root still runs with the variable set,
+    which is what makes this a boundary rather than a blanket refusal.
+    """
+    private = _private_root(tmp_path)
+    authoritative = tmp_path / "authoritative"
+    authoritative.mkdir()
+    monkeypatch.setenv(EVIDENCE_ROOT_ENV, str(authoritative))
+    with pytest.raises(canary.SingleSourceCanaryError, match="private evidence root"):
+        canary.run_single_source_canary(
+            operational_catalog=_catalog(private),
+            tree=DataTree.from_root(private),
+            work_root=authoritative / "work",
+            run_id="authoritative",
+            source_instance_id=_BULK_INSTANCE,
+        )
+    assert not (authoritative / "work").exists()
+    result = canary.run_single_source_canary(
+        operational_catalog=_catalog(private),
+        tree=DataTree.from_root(private),
+        work_root=tmp_path / "work",
+        run_id="lawful-under-declaration",
+        source_instance_id=_BULK_INSTANCE,
+    )
+    assert result.parsed_records > 0
+
+
+def test_one_lawful_direct_library_call_still_builds_its_world(tmp_path: Path) -> None:
+    """R11: enforcing the boundary refuses unlawful roots and nothing else."""
+    private = _private_root(tmp_path)
+    work_root = tmp_path / "work"
+    result = canary.run_single_source_canary(
+        operational_catalog=_catalog(private),
+        tree=DataTree.from_root(private),
+        work_root=work_root,
+        run_id="lawful-1",
+        source_instance_id=_BULK_INSTANCE,
+    )
+    world = work_root / "lawful-1"
+    assert (world / "working_catalog.sqlite3").is_file()
+    assert (world / canary.CANARY_RESULT_FILENAME).is_file()
+    assert result.operational_catalog_unchanged
+    assert result.parsed_records > 0
+
+
+def test_the_operator_surface_and_the_run_refuse_the_same_root(tmp_path: Path) -> None:
+    """R11 generality: one primitive, so the early refusal and the run's cannot disagree.
+
+    The operator surface keeps its own early refusal -- an operator should not need a
+    traceback to learn the rule -- and the run refuses the identical root on its own.
+    """
+    private = _private_root(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    for mode in ("preflight", "run"):
+        with pytest.raises(canary.SingleSourceCanaryError, match="private evidence root"):
+            canary.run_canary_source_command(
+                mode=mode,
+                run_id="shared-rule",
+                source_instance_id=_BULK_INSTANCE,
+                work_root=str(private / "work"),
+                repository_root=checkout,
+                environ={EVIDENCE_ROOT_ENV: str(private)},
+            )
+    with pytest.raises(canary.SingleSourceCanaryError, match="private evidence root"):
+        canary.run_single_source_canary(
+            operational_catalog=_catalog(private),
+            tree=DataTree.from_root(private),
+            work_root=private / "work",
+            run_id="shared-rule",
+            source_instance_id=_BULK_INSTANCE,
+        )
+    assert not (private / "work").exists()
+
+
+def test_the_library_boundary_states_the_rule_once(tmp_path: Path) -> None:
+    """R11 generality: the boundary calls the accepted primitive rather than restating it.
+
+    Asserted structurally, because a second implementation that agreed today is exactly the
+    thing that drifts later: the boundary's body names ``require_disposable_work_root`` and
+    contains no containment arithmetic of its own.
+    """
+    source = ast.parse(Path(canary.__file__).read_text(encoding="utf-8"))
+    boundary = next(
+        node
+        for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "require_canary_work_root"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(boundary)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "require_disposable_work_root" in called
+    named = {node.id for node in ast.walk(boundary) if isinstance(node, ast.Name)} | {
+        node.attr for node in ast.walk(boundary) if isinstance(node, ast.Attribute)
+    }
+    assert not named & {"_comparable", "_within", "casefold", "realpath", "parts", "relative_to"}
+    work = tmp_path / "work"
+    work.mkdir()
+    assert canary.require_canary_work_root(work, tree=DataTree.from_root(tmp_path / "p")) == work
+
+
+# ==========================================================================
 # Section 8: the compact contract, bound explicitly rather than inherited
 # ==========================================================================
 def test_the_accepted_compact_contract_is_what_the_sidecar_records(
@@ -509,17 +700,85 @@ def test_a_source_with_no_corroboration_reports_an_empty_digest_rather_than_a_fa
 
 
 def test_a_single_payload_source_is_its_own_member(index_run: tuple[Any, Path, Any]) -> None:
-    """§6: the path is not written for the bulk archive alone; one payload is one member."""
-    result, _private, world_paths = index_run
+    """R12 and §6: a governed single-payload source is exactly one logical manifest member.
+
+    The frozen artifact *is* the member, its frozen ``relative_storage_path`` is the member's
+    deterministic logical name -- read back from the catalog rather than restated here -- and
+    the member manifest binds that artifact's governed payload identity and length under the
+    accepted folding semantics. Nothing about the host is in it: no absolute path reaches the
+    member name, the manifest, or the result surface.
+    """
+    result, private, world_paths = index_run
     assert result.members == 1
+    with connect(_catalog(private), writer=False) as connection:
+        frozen = str(
+            connection.execute(
+                "SELECT relative_storage_path FROM census_source_observations "
+                "WHERE observation_id = ?",
+                (d112._INDEX_OBSERVATION,),
+            ).fetchone()["relative_storage_path"]
+        )
     sidecar = CompactEvidenceSidecar(world_paths.sidecar)
     try:
         members = sidecar.members(d112._INDEX_OBSERVATION)
         assert len(members) == 1
-        assert str(members[0]["member_name"]) == d112._INDEX_RELATIVE
-        assert int(members[0]["payload_byte_length"]) > 0
+        member = members[0]
+        assert str(member["member_name"]) == frozen == d112._INDEX_RELATIVE
+        assert not str(member["member_name"]).startswith("/")
+        assert int(member["payload_byte_length"]) == result.source_artifact_byte_length > 0
+        assert str(member["payload_sha256"]) == result.source_artifact_sha256
     finally:
         sidecar.close()
+    rendered = json.dumps(result.as_record())
+    for leak in ("/private/", "/Users/", "/var/folders", "://"):
+        assert leak not in rendered, f"the single-payload result carries {leak}"
+
+
+def _sidecar_clone(source: Path, target: Path) -> None:
+    """A separate database holding a completed sidecar's rows, journal included."""
+    origin = sqlite3.connect(source)
+    try:
+        clone = sqlite3.connect(target)
+        try:
+            origin.backup(clone)
+        finally:
+            clone.close()
+    finally:
+        origin.close()
+
+
+def test_the_single_payload_member_name_binds_the_member_manifest_identity(
+    index_run: tuple[Any, Path, Any], tmp_path: Path
+) -> None:
+    """R12: the logical member name is *in* the accepted identity, not beside it.
+
+    Pinned by moving the one field and observing the identity move, on a clone, so nothing
+    about the accepted folding semantics has to change to state the property. The unmutated
+    clone reproduces the identity exactly, which is what makes the difference attributable to
+    the member name rather than to the copy.
+    """
+    result, _private, world_paths = index_run
+    control = tmp_path / "control.sqlite3"
+    mutated = tmp_path / "mutated.sqlite3"
+    _sidecar_clone(world_paths.sidecar, control)
+    _sidecar_clone(world_paths.sidecar, mutated)
+    connection = sqlite3.connect(mutated)
+    try:
+        connection.execute(
+            "UPDATE compact_source_members SET member_name = ?", ("raw/sec/indexes/other.idx",)
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    digests = []
+    for database in (control, mutated):
+        sidecar = CompactEvidenceSidecar(database)
+        try:
+            digests.append(sidecar.member_manifest_digest(d112._INDEX_OBSERVATION))
+        finally:
+            sidecar.close()
+    assert digests[0] == result.member_manifest_digest
+    assert digests[1] != result.member_manifest_digest
 
 
 # ==========================================================================
@@ -635,10 +894,12 @@ def test_a_failed_run_leaves_the_accepted_catalog_unchanged(tmp_path: Path) -> N
 
 def test_a_missing_accepted_catalog_is_refused(tmp_path: Path) -> None:
     """Nothing is created to stand in for an absent authoritative input."""
+    private = tmp_path / "private"
+    private.mkdir()
     with pytest.raises(canary.SingleSourceCanaryError, match="does not exist"):
         canary.run_single_source_canary(
-            operational_catalog=tmp_path / "absent.sqlite3",
-            tree=DataTree.from_root(tmp_path),
+            operational_catalog=private / "absent.sqlite3",
+            tree=DataTree.from_root(private),
             work_root=tmp_path / "work",
             run_id="absent",
             source_instance_id=_BULK_INSTANCE,

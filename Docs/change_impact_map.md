@@ -921,6 +921,42 @@ supplies their writer and their consumer rule, and writes neither to the accepte
 activation constant, running the transition, running E0, the Decision 093 linkage diagnostic, the
 persistence bridge, migration `0016`, E1, E2, M3.4, network, SEC, HTTP, a push, or a tag.
 
+## Decision 116 — the disposable single-source compact canary execution path (real impact)
+
+[Decision 116](Decisions/decision_116_m3_3_disposable_single_source_canary_path.md)
+(`ACCEPTED — OWNER IMPLEMENTATION INSTRUMENT, RULINGS R6–R13`) adds an **additive, canary-only**
+path that runs exactly one governed planned source under `e0-compact-evidence/2` into a disposable
+world and stops. It is a second entry point, never a second parser: every parse call, identity,
+digest, and durable row comes from the accepted modules.
+
+**What it does not touch.** No research definition, cohort, quota, seed, or selector. No migration —
+`0001`–`0015` are byte-unchanged and `0016` does not exist. No E0 authority constant, no E0 run
+namespace, no `m3/e0.py` import, no acquisition, transport, HTTP, or network path. Nothing is
+promoted, the accepted operational catalog is opened `SQLITE_OPEN_READONLY` on every path with no
+writer lease taken on it, and the private evidence root receives no write.
+
+| Surface touched | Change | Nearest tests |
+|---|---|---|
+| `src/disclosure_drift/m3/single_source_canary.py` | **new** — the whole canary path: one-source selection by `census_plan_sources.source_instance_id` with no path argument and no all-source fallback; the create-once disposable world; the Decision 111 `WorkingCatalog` wiring; the **explicit** `e0-compact-evidence/2` binding at the one `CensusCatalog` constructed; the Decision 112 §8 sidecar and digest emission; and the write-once result document. **§21 (R11)**: the work-root invariant is enforced by `run_single_source_canary()` itself through the accepted `require_disposable_work_root()` primitive, before any world exists — not only by the operator wrapper | `tests/unit/test_d116_single_source_canary.py` |
+| `src/disclosure_drift/m3/offline_parse.py` | the one-source entry point beside the accepted whole-plan driver — `select_planned_source`, `materialize_one_planned_source`. The whole-plan driver, its traversal, and its semantics are unchanged | `tests/unit/test_m3_offline_parse.py`, `tests/unit/test_d116_single_source_canary.py` |
+| `src/disclosure_drift/m3/compact_evidence.py` | one additive read-only accessor: the member-manifest identity over rows the sidecar already holds, folded by the **same** rule its own identity uses. **§22 (R12)**: a single-payload source is one logical member named by its frozen `relative_storage_path`. Nothing persisted changes and no accepted digest semantics move | `tests/unit/test_d112_compact_evidence.py`, `tests/unit/test_d116_single_source_canary.py` |
+| `src/disclosure_drift/cli.py` | the `m3 canary-source --mode {preflight,run}` operator surface, sitting apart from the two PRE-E0 surfaces. Routing and rendering only; it takes no path option and prints no absolute path | `tests/integration/test_m3_cli.py`, `tests/unit/test_d116_single_source_canary.py` |
+| `Docs/change_impact_map.md`, `Milestones/STATUS.md` | **R6 and R9 status-truth corrections only** — the live mutation-anchor partition is 38 recovered / 36 resolved / `['M19', 'M21']` superseded per [Decision 114](Decisions/decision_114_m3_3_m21_live_anchor_supersession.md), and the active blocker is acceptance of the execution path rather than `LOCAL_CAPACITY_INSUFFICIENT_AFTER_D113`. Historical prose is preserved | `tests/unit/test_audit_tooling.py` |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d116_single_source_canary.py`. Compact
+evidence and bounded-parse neighbours, because the canary reuses their fixtures and their contract:
+`tests/unit/test_d112_compact_evidence.py`, `tests/unit/test_d110_bounded_parse_memory.py`. The
+one-source entry point's own module: `tests/unit/test_m3_offline_parse.py`. Operator surface:
+`tests/integration/test_m3_cli.py`. Campaign-audit truthfulness, because the R9 correction is
+asserted against the shipped tree: `tests/unit/test_audit_tooling.py`.
+
+**Expected identity movement: none.** No accepted preimage, digest, policy chain, or frozen identity
+tuple changes, and semantic compaction stays closed.
+
+**What it does not authorize.** Running any real source, creating a D115 disposable world or run
+identity, enabling any activation constant, an E0-v3 namespace, migration `0016`, the persistence
+bridge, E1, E2, M3.4, network, SEC, HTTP, a push, or a tag.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

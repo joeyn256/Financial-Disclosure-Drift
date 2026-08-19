@@ -93,6 +93,7 @@ __all__ = [
     "SingleSourceCanaryError",
     "create_world",
     "preflight_single_source_canary",
+    "require_canary_work_root",
     "require_disposable_work_root",
     "resolve_private_root",
     "run_single_source_canary",
@@ -223,6 +224,70 @@ def require_disposable_work_root(
             "evidence tree must not lie inside a disposable work tree"
         )
         raise SingleSourceCanaryError(message)
+    return resolved
+
+
+def _package_repository_root() -> Path:
+    """The repository checkout this package is installed from.
+
+    Derived from this module's own location rather than accepted as an argument, so a direct
+    library caller cannot declare a decoy checkout and have a disposable world created inside
+    the real one. It is the rule the operator surface already uses, one directory deeper
+    because this module sits under ``m3``.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def _authoritative_private_root(repository_root: Path) -> Path | None:
+    """The private evidence root this **process** declares, or ``None`` when it declares none.
+
+    Read from the real process environment rather than from any argument, so the containment
+    rule below cannot be declared away by the caller it constrains. When the variable is unset
+    there is no authoritative evidence tree in this process for a work root to be inside of,
+    and the rule has nothing to say; when it is set it must be lawful, exactly as it must be
+    for every other surface that resolves it.
+    """
+    if not os.environ.get(EVIDENCE_ROOT_ENV, "").strip():
+        return None
+    return resolve_private_root(repository_root)
+
+
+def require_canary_work_root(work_root: str | Path, *, tree: DataTree) -> Path:
+    """Enforce the disposable work-root invariant at the **library** execution boundary.
+
+    Accepted Decision 116 §7 puts every writable canary output outside the repository checkout
+    and outside the authoritative evidence tree. That invariant belongs to the *run*, not to
+    the operator surface: a direct library caller must not be able to reach a location the
+    operator surface would have refused, so the run establishes it itself rather than trusting
+    that whoever called it already did.
+
+    One rule, not two. :func:`require_disposable_work_root` is the accepted primitive and stays
+    the only place the rule is stated; this function applies it to each evidence root a run must
+    stay clear of:
+
+    * ``tree.data_root`` -- the evidence tree this very run reads its frozen artifacts from.
+      Taken from the run's own input rather than declared beside it, so it cannot disagree with
+      what the run actually opens;
+    * the authoritative private evidence root the process declares, whenever it declares one.
+      In ordinary operation these are the same root, because the operator surface builds the
+      tree from it; they differ only for a caller reading a stand-in tree, and that caller is
+      still held to the authoritative one.
+
+    The repository checkout, absoluteness, and symlink resolution come from the same primitive
+    and are derived rather than declared, so none of them is a caller's to soften.
+
+    Returns:
+        The resolved work root. Validating an already-validated root returns it unchanged, so
+        the operator surface's early refusal and this one cannot disagree about a lawful root.
+
+    Raises:
+        SingleSourceCanaryError: the work root is not a lawful disposable location.
+    """
+    repository_root = _package_repository_root()
+    resolved = require_disposable_work_root(work_root, repository_root, tree.data_root)
+    authoritative = _authoritative_private_root(repository_root)
+    if authoritative is not None:
+        require_disposable_work_root(work_root, repository_root, authoritative)
     return resolved
 
 
@@ -605,6 +670,8 @@ def run_single_source_canary(
 
     The whole path, in order:
 
+    0. establish the write boundary: refuse any work root that is not a lawful disposable
+       location, before a directory, a catalog, or a result document exists to refuse it for;
     1. select the one source from the accepted plan, through a strictly read-only handle;
     2. create the disposable world, once, refusing an identity that already has one;
     3. copy the accepted catalog into a D111 run-local working catalog, read-only on the source;
@@ -623,8 +690,9 @@ def run_single_source_canary(
     Args:
         operational_catalog: The accepted catalog. Opened strictly read-only, always.
         tree: The data tree the frozen source artifacts are read from.
-        work_root: The operator's disposable work root, already validated by
-            :func:`require_disposable_work_root`.
+        work_root: The disposable work root. Validated **here**, by
+            :func:`require_canary_work_root`, before any world exists -- a caller's own prior
+            validation is welcome and is never what this run relies on.
         run_id: This world's identity. Create-once.
         source_instance_id: The one planned source's own plan key.
         batch_size: Parts per real transaction, defaulting to the accepted D113 §14 value.
@@ -634,12 +702,16 @@ def run_single_source_canary(
         OfflineParseError: any accepted fail-closed parse condition, unchanged.
         WorkingCatalogError: the disposable working catalog could not be built safely.
     """
+    # 0. The write boundary, established before anything is measured, opened, or created.
+    #    Accepted Decision 116 §7 is the run's own invariant, so an unlawful work root fails
+    #    closed here rather than at whichever caller happened to check.
+    resolved_work_root = require_canary_work_root(work_root, tree=tree)
     started = utc_now()
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
         raise SingleSourceCanaryError(message)
     catalog_before, _ = file_digest(operational_catalog)
-    free_before = shutil.disk_usage(_measurable(work_root)).free
+    free_before = shutil.disk_usage(_measurable(resolved_work_root)).free
 
     # 1. The one source, and the plan it came from. Strictly read-only: this handle cannot
     #    write, and it is closed before the working copy is taken.
@@ -648,7 +720,7 @@ def run_single_source_canary(
         fingerprint, _ = plan_fingerprint(reader)
 
     # 2. The disposable world. Create-once, and never under the private evidence root.
-    world = create_world(work_root, run_id)
+    world = create_world(resolved_work_root, run_id)
 
     # 3-7. Everything writable, inside the world.
     with WorkingCatalog(operational_catalog, world.directory) as working:
@@ -938,6 +1010,11 @@ def run_canary_source_command(
     Routing, boundary resolution, and rendering only. Every predicate, identity, and durable
     write lives above, so the operator surface cannot become a second place where a canary is
     judged runnable.
+
+    The work root is refused here early, so an operator learns immediately and without a
+    stack trace, and it is refused again by :func:`run_single_source_canary` itself. That is
+    deliberate redundancy through **one** primitive rather than two rules: this refusal is a
+    convenience, and the run's own is the invariant.
 
     No line this returns carries the private root, the work root, or any absolute path: the
     result is rendered from counts, digests, enum tokens, and world-relative names.

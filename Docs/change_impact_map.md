@@ -957,6 +957,51 @@ tuple changes, and semantic compaction stays closed.
 identity, enabling any activation constant, an E0-v3 namespace, migration `0016`, the persistence
 bridge, E1, E2, M3.4, network, SEC, HTTP, a push, or a tag.
 
+## Decision 119 — the cache-bound persistence correction and the prefix surface (real impact)
+
+[Decision 119](Decisions/decision_119_m3_3_cache_bound_persistence_and_prefix_diagnostic.md)
+(`ACCEPTED — OWNER IMPLEMENTATION INSTRUMENT, RULINGS R21–R28`) makes exactly **one** performance
+change and adds a diagnostic-only way to measure it. The single change is an explicit **512 MiB**
+page cache — `PRAGMA cache_size = -524288` — on the **run-local writable** Decision 111 working
+catalog, correcting the [Decision 118](Decisions/decision_118_m3_3_read_only_performance_diagnosis.md)
+§1 cause of the [Decision 117](Decisions/decision_117_m3_3_first_source_canary_throughput_failure.md)
+throughput failure. The diagnostic surface is `m3 canary-source --mode profile-prefix
+--member-limit N`, which runs the exact accepted path over the first *N* governed members and
+stops before any source-level finalization.
+
+**What it does not touch.** No research definition, cohort, quota, seed, or selector. No
+migration — `0001`–`0015` are byte-unchanged and `0016` does not exist. No evidence contract, no
+digest, no capacity constant, no schema, and no index. No sidecar transaction semantics,
+`synchronous`, `journal_mode`, batch size, checkpoint cadence, `cache_spill`, `mmap_size`, parser,
+lookup, or source ordering — Decision 119 §3 states that list, and Decision 118 §§5–7's deferrals
+stay deferred. No E0 authority constant, no E0 run namespace, no acquisition, transport, HTTP, or
+network path. The governed operational catalog, every read-only connection, and SQLite's global
+defaults receive **no cache mutation**, and the preserved D117 world is not opened.
+
+| Surface touched | Change | Nearest tests |
+|---|---|---|
+| `src/disclosure_drift/m3/working_catalog.py` | the optional `cache_bytes` budget on `WorkingCatalog`, defaulting to `None` so every existing caller is behaviourally unchanged; the `cache_size_pragma` primitive that converts a byte budget to SQLite's negative kibibyte form and refuses one it cannot state exactly; and read-back accessors for the requested and **effective** setting | `tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_d111_bounded_persistence.py` |
+| `src/disclosure_drift/m3/offline_parse.py` | the **internal** `max_members` cap on the accepted bulk member stream (default `None`); `materialize_planned_source_prefix` and `DiagnosticPrefixOutcome`; `DIAGNOSTIC_PREFIX_CLASSIFICATION`; and the §5 (R27) `CompactSourceEvidence._seen` residency correction, which is documentation only. `materialize_one_planned_source` is **unchanged** and does not expose the cap | `tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_m3_offline_parse.py`, `tests/unit/test_d110_bounded_parse_memory.py` |
+| `src/disclosure_drift/m3/single_source_canary.py` | the accepted 512 MiB binding on the canary's working catalog; the preflight's requested-cache report; and `run_single_source_prefix_profile` with `CanaryPrefixResult` and its own create-once result document | `tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_d116_single_source_canary.py` |
+| `src/disclosure_drift/cli.py` | the third `canary-source` mode `profile-prefix` and the `--member-limit` argument. Routing and rendering only; `run` refuses a limit | `tests/unit/test_d119_cache_and_prefix.py`, `tests/integration/test_m3_cli.py` |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d119_cache_and_prefix.py`. The canary path
+it extends: `tests/unit/test_d116_single_source_canary.py`. The working catalog and the streamed
+traversal it touches: `tests/unit/test_d111_bounded_persistence.py`,
+`tests/unit/test_d110_bounded_parse_memory.py`, `tests/unit/test_m3_offline_parse.py`. The evidence
+contracts whose digests must not move: `tests/unit/test_d112_compact_evidence.py`,
+`tests/unit/test_d113_compact_derived_evidence.py`. Operator surface and boundaries:
+`tests/integration/test_m3_cli.py`, `tests/unit/test_m3_3_boundaries.py`.
+
+**Expected identity movement: none.** No accepted preimage, digest, policy chain, or frozen
+identity tuple changes. Two canaries over one accepted catalog differing only in the cache budget
+are required to produce identical identities and identical durable counts, and do.
+
+**What it does not authorize.** Running any real source, retrying the D117 canary, opening the
+preserved D117 world for parsing, creating a real prefix world, the three-source canary, the real
+replay proof, enabling any activation constant, an E0-v3 namespace, migration `0016`, the
+persistence bridge, E1, E2, M3.4, network, SEC, HTTP, a push, or a tag.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

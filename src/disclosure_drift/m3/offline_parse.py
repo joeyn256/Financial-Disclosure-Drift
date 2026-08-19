@@ -92,6 +92,7 @@ from disclosure_drift.storage.sqlite import transaction, utc_now
 
 __all__ = [
     "CANDIDATE_SUBSTANTIVE_SOURCE_IDS",
+    "DIAGNOSTIC_PREFIX_CLASSIFICATION",
     "E0_PERMITTED_PLAN_COLUMNS",
     "E0_PERMITTED_TABLES",
     "E0_PROHIBITED_TABLES",
@@ -104,6 +105,7 @@ __all__ = [
     "VALIDATION_OR_PROVENANCE_ONLY_SOURCE_IDS",
     "AssociationTotality",
     "CompactSourceEvidence",
+    "DiagnosticPrefixOutcome",
     "FullIndexCorroboration",
     "OfflineParseError",
     "OfflineParseReport",
@@ -117,6 +119,7 @@ __all__ = [
     "load_planned_sources",
     "materialize_census_associations",
     "materialize_one_planned_source",
+    "materialize_planned_source_prefix",
     "materialize_source_layer",
     "membership_observation_sources",
     "run_offline_metadata_parse",
@@ -642,6 +645,39 @@ def _historical_registrant_cik(
         raise OfflineParseError(message) from exc
 
 
+#: What a bounded diagnostic member prefix is, stated as a token rather than as prose.
+#:
+#: A prefix is **never** a parsed source, a completed source, or a successful canary, and no
+#: accepted complete-source identity may be derived from one. The token exists so that a result
+#: document, a rendered operator line, and a test all say the same single thing about what was
+#: run, and so that a reader who sees it cannot mistake it for a disposition: the accepted
+#: ``SourceDisposition`` vocabulary is closed and this deliberately is not a member of it
+#: (accepted Decision 119 §6).
+DIAGNOSTIC_PREFIX_CLASSIFICATION: Final = "INCOMPLETE_DIAGNOSTIC_PREFIX"
+
+
+class _DiagnosticPrefixLimit(Exception):  # noqa: N818 - a control signal, not an error
+    """Internal: the diagnostic member cap was reached, so the traversal stops here.
+
+    Deliberately **not** a :class:`~disclosure_drift.errors.DisclosureDriftError`. Nothing has
+    gone wrong -- a bounded prefix reaching its bound is the requested outcome -- and an operator
+    surface that renders a ``DisclosureDriftError`` as a failure must not render this one.
+
+    It is raised inside the member stream and caught by
+    :func:`materialize_planned_source_prefix`, which is the only function that can cause it to
+    exist. Between those two points it passes through
+    :meth:`~disclosure_drift.sec.census.CensusCatalog.persist_streamed`, and that is the whole
+    reason it is an exception rather than a return: the accepted
+    :class:`~disclosure_drift.sec.census.BoundedTransaction` rolls the open batch back and the
+    seeded ``failed`` run row therefore stands, which is the accepted interruption behaviour
+    unchanged. A prefix leaves committed batches and **no** run claiming to have completed.
+    """
+
+    def __init__(self, members: int) -> None:
+        super().__init__(f"diagnostic member prefix stopped after {members} members")
+        self.members = members
+
+
 #: The run-level parser identity one bulk-archive traversal writes, whether it is streamed
 #: into the catalog or merged first. Named once because ``persist_streamed`` is handed it
 #: directly, where the merged path used to read it off the merged outcome.
@@ -654,9 +690,21 @@ class CompactSourceEvidence:
 
     The member manifest and the completeness digest are both properties of the frozen artifact
     and of the pure parse of it, so both are built here rather than derived later from durable
-    rows -- rows the compact contract deliberately does not write. Nothing proportional to the
-    source is retained: each member's manifest entry is written and dropped, and the digest is
-    one running hash.
+    rows -- rows the compact contract deliberately does not write. Each member's manifest entry
+    is written and dropped, and the digest is one running hash, so **neither the members nor
+    their records accumulate**.
+
+    **One structure here does grow with the source, and it is stated rather than implied.**
+    ``_seen`` retains the native identity of every distinct accession record the traversal has
+    met, because :func:`~disclosure_drift.m3.compact_evidence.materialized_fields` needs to know
+    whether the record in hand is a first witness or a rival, and that question is about the
+    whole source rather than about the member. It is one interned identity string per distinct
+    accession -- not a record, not a payload, and not a manifest entry -- and it is therefore
+    proportional to the source's **accession count**. Accepted Decision 119 §5 (R27) corrects an
+    earlier claim in this docstring that nothing proportional to the source was retained; that
+    claim was true of the members and false of ``_seen``. The structure itself is deliberately
+    **unchanged**: dropping it would change which observation rows the compact contract
+    materializes, which is an accepted evidence semantic and not a performance decision.
 
     An auditor reparsing the frozen artifact reaches the same manifest and the same digest,
     which is what keeps the omitted ordinary field values cryptographically represented
@@ -758,6 +806,7 @@ def _stream_bulk_submissions(
     observation: SourceObservation,
     *,
     evidence: CompactSourceEvidence | None = None,
+    max_members: int | None = None,
 ) -> Iterator[tuple[ParseOutcome, tuple[HistoricalFileReference, ...]]]:
     """Yield one parse outcome per accepted bulk-archive member, offline, holding none of them.
 
@@ -772,12 +821,24 @@ def _stream_bulk_submissions(
     in the same order. What changed is only that each member's outcome leaves this function
     immediately and nothing accumulates behind it.
 
+    **The diagnostic member cap** (``max_members``, accepted Decision 119 §6) changes nothing
+    about which members are traversed or in what order: it is a count of members already
+    yielded, checked at the point the consumer asks for the next one. ``None`` -- the default,
+    and what every production caller passes -- is the traversal exactly as it was.
+
+    A cap that is set **always** ends the traversal by raising :class:`_DiagnosticPrefixLimit`,
+    including when the archive runs out of members first. That is deliberate: the consumer's
+    normal exhaustion path finalizes a parser run, and a bounded prefix must never reach it, not
+    even when its bound happens to be the whole archive.
+
     Raises:
         OfflineParseError: the archive is refused by the archive defences, or a member's
             payload is not a decodable JSON object.
+        _DiagnosticPrefixLimit: ``max_members`` was set and the traversal has stopped.
     """
     store.verify_payload(observation)
     path = store.payload_path(observation)
+    processed = 0
     try:
         for member in iter_members(
             path,
@@ -799,9 +860,16 @@ def _stream_bulk_submissions(
                 # drop (accepted Decision 112 §§4.A, 4.E).
                 evidence.absorb(member.name, member.payload, parsed[0])
             yield parsed
+            # After the yield, so the count is of members the consumer has finished writing
+            # rather than of members handed to it.
+            processed += 1
+            if max_members is not None and processed >= max_members:
+                raise _DiagnosticPrefixLimit(processed)
     except ArchiveDefenceError as exc:
         message = f"accepted bulk archive refused by the archive defences: {exc}"
         raise OfflineParseError(message) from exc
+    if max_members is not None:
+        raise _DiagnosticPrefixLimit(processed)
 
 
 def _parse_bulk_submissions(
@@ -2309,6 +2377,166 @@ class SingleSourceOutcome:
     records: int = 0
     omitted_field_observations: int = 0
     materialized_field_observations: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticPrefixOutcome:
+    """What a bounded diagnostic member prefix traversed. **Never a source disposition.**
+
+    Accepted Decision 119 §6. Read the field list for what it does *not* carry: there is no
+    ``disposition``, no ``parser_state_after``, no ``completeness_digest``, and no member
+    manifest identity, because a prefix reached none of them. Those are the properties of a
+    finished source, and a type that could express them would be a type a prefix could be
+    mistaken for.
+
+    :data:`DIAGNOSTIC_PREFIX_CLASSIFICATION` is the only classification this type can carry.
+    """
+
+    source_instance_id: str
+    source_id: str
+    observation: SourceObservation
+    #: The bound the caller asked for. Reported beside what actually happened rather than
+    #: instead of it, because an archive can run out of members before the bound is reached.
+    requested_member_limit: int
+    #: Members the traversal finished handing to the persistence path. Their ordinals are
+    #: exactly ``0 .. members_processed - 1``, which is the manifest's own ordering.
+    members_processed: int
+    records: int
+    omitted_field_observations: int
+    materialized_field_observations: int
+    classification: str = DIAGNOSTIC_PREFIX_CLASSIFICATION
+
+    @property
+    def source_finalized(self) -> bool:
+        """Always ``False``, structurally: no path in this module can produce it otherwise."""
+        return False
+
+
+def materialize_planned_source_prefix(
+    *,
+    writer: CatalogWriter,
+    tree: DataTree,
+    catalog: CensusCatalog,
+    selected: SelectedPlannedSource,
+    max_members: int,
+    sidecar: CompactEvidenceSidecar | None = None,
+    batch_size: int = SINGLE_TRANSACTION,
+    checkpoint_batches: bool = False,
+) -> DiagnosticPrefixOutcome:
+    """Traverse the **first ``max_members``** governed members of one planned source, and stop.
+
+    The diagnostic-only surface accepted Decision 119 §6 authorizes, so that the accepted
+    materialization path can be *measured* at real scale without committing to a whole source.
+    It is the same machinery: the same plan selection, the same classification, the same
+    plan-bound observation, the same ``SnapshotStore``, the same member ordering, the same pure
+    parser, the same :class:`~disclosure_drift.sec.census.CensusCatalog`, the same compact
+    member-recording path, and the same batched persistence. The one difference is where it
+    stops.
+
+    **What it deliberately never reaches.** Everything
+    :func:`materialize_one_planned_source` does *after* the member traversal is source-level
+    finalization, and none of it runs here: no ``census_plan_sources.parser_state`` transition,
+    no **R23** full-index materialization, no source-level compact evidence row, no completeness
+    digest, and no :class:`SingleSourceOutcome`. It also runs no catalog-wide resolution and no
+    Decision 094 §6.4 association projection -- those were never this function's to run.
+    The parser run the persistence path seeded stays ``failed``, which is the accepted meaning
+    of "no consumer may read this run's counts as a real observation".
+
+    **Why the cap is refused for anything but a streamed source.** A prefix is a bound on a
+    member *ordering*. A single-payload source is exactly one indivisible logical member
+    (accepted Decision 116 §22), so there is no prefix boundary inside it, and admitting one
+    would mean finalizing a complete parser run under a mode whose entire purpose is to never
+    finalize. It is refused rather than silently promoted to a whole-source parse.
+
+    Args:
+        writer: The single logical writer -- a **run-local working catalog**, never the
+            accepted operational one.
+        tree: The data tree the frozen source artifacts are read from.
+        catalog: The census catalog to persist through, carrying the caller's evidence
+            contract, exactly as the complete-source entry point requires.
+        selected: The one source, from :func:`select_planned_source`.
+        max_members: How many governed members to traverse. Must be positive; there is no
+            "unbounded prefix", and a zero or negative bound is refused rather than read as
+            "all of them".
+        sidecar: The run-local compact-evidence sidecar. Members are recorded through the same
+            path the complete run uses; the source-level row is not written.
+        batch_size: Parts per real transaction, unchanged.
+        checkpoint_batches: Whether to truncate the write-ahead log at each boundary.
+
+    Raises:
+        OfflineParseError: the bound is not positive, the source is not one a prefix is defined
+            over, the source is not classified for parsing, or its parser run already exists.
+    """
+    if max_members <= 0:
+        message = (
+            f"a diagnostic member prefix needs a positive bound; got {max_members}. There is "
+            "no unbounded prefix, and a non-positive bound is refused rather than read as "
+            "'every member'"
+        )
+        raise OfflineParseError(message)
+    connection = writer.connection
+    source = selected.source
+    observations = _observations_by_id(connection)
+    bound = None if source.observation_id is None else observations.get(source.observation_id)
+    disposition = classify_planned_source(source, bound)
+    if disposition != "E0_REQUIRED_PARSE" or bound is None:
+        message = (
+            f"planned source {source.source_instance_id!r} classifies as {disposition!r} and "
+            "is not parsed; a diagnostic prefix measures a real parse and refuses rather than "
+            "reporting an empty one"
+        )
+        raise OfflineParseError(message)
+    if bound.source_id not in STREAMED_SOURCE_IDS:
+        message = (
+            f"source {bound.source_id!r} has one indivisible logical member, so no member "
+            "prefix is defined over it; a diagnostic prefix is refused rather than run as a "
+            "whole-source parse under a diagnostic name"
+        )
+        raise OfflineParseError(message)
+    store = SnapshotStore(tree)
+    store.adopt(observations.values())
+    evidence = (
+        None
+        if sidecar is None
+        else CompactSourceEvidence(
+            source_observation_id=bound.observation_id,
+            source_id=bound.source_id,
+            artifact_sha256=bound.logical_sha256 or "",
+            artifact_byte_length=bound.content_size_bytes or 0,
+            sidecar=sidecar,
+        )
+    )
+    try:
+        catalog.persist_streamed(
+            _stream_bulk_submissions(store, bound, evidence=evidence, max_members=max_members),
+            parser_id=_BULK_PARSER_ID,
+            parser_version=SOURCES[bound.source_id].parser_version,
+            source_observation_id=bound.observation_id,
+            batch_size=batch_size,
+            checkpoint_batches=checkpoint_batches,
+        )
+    except _DiagnosticPrefixLimit as stop:
+        processed = stop.members
+    else:
+        # Unreachable through the stream, which always raises when a cap is set. It is
+        # reachable when ``persist_streamed`` short-circuits on an existing parser run and
+        # never consumes the generator at all -- a measurement of nothing, refused.
+        message = (
+            f"planned source {source.source_instance_id!r} already carries a parser run in "
+            "this catalog, so a diagnostic prefix would traverse no member; a prefix profile "
+            "runs against a fresh disposable world"
+        )
+        raise OfflineParseError(message)
+    return DiagnosticPrefixOutcome(
+        source_instance_id=source.source_instance_id,
+        source_id=source.source_id,
+        observation=bound,
+        requested_member_limit=max_members,
+        members_processed=processed,
+        records=0 if evidence is None else evidence.records,
+        omitted_field_observations=0 if evidence is None else evidence.omitted,
+        materialized_field_observations=0 if evidence is None else evidence.materialized,
+    )
 
 
 def materialize_one_planned_source(

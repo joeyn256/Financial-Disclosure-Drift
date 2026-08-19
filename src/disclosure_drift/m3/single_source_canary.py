@@ -63,17 +63,20 @@ from disclosure_drift.m3.compact_evidence import (
 )
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.offline_parse import (
+    DIAGNOSTIC_PREFIX_CLASSIFICATION,
     AssociationTotality,
     SelectedPlannedSource,
     SingleSourceOutcome,
     materialize_census_associations,
     materialize_one_planned_source,
+    materialize_planned_source_prefix,
     select_planned_source,
     write_containment,
 )
 from disclosure_drift.m3.working_catalog import (
     WORKING_CATALOG_FILENAME,
     WorkingCatalog,
+    cache_size_pragma,
     file_digest,
 )
 from disclosure_drift.paths import DataTree
@@ -84,9 +87,13 @@ from disclosure_drift.storage.sqlite import applied_versions, utc_now
 __all__ = [
     "CANARY_BATCH_SIZE",
     "CANARY_CONTRACT",
+    "CANARY_PREFIX_RESULT_FILENAME",
     "CANARY_RESULT_FILENAME",
     "CANARY_RESOLUTION_SCOPE",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
+    "WORKING_CATALOG_CACHE_BYTES",
+    "WORKING_CATALOG_CACHE_SIZE_PRAGMA",
+    "CanaryPrefixResult",
     "CanaryPreflight",
     "CanaryResult",
     "CanaryWorld",
@@ -97,6 +104,7 @@ __all__ = [
     "require_disposable_work_root",
     "resolve_private_root",
     "run_single_source_canary",
+    "run_single_source_prefix_profile",
     "validate_run_id",
 ]
 
@@ -119,6 +127,31 @@ OPERATIONAL_CATALOG_RELATIVE_PATH: Final = "catalogs/m3_2a_operational.sqlite3"
 
 #: The create-once result document, written into the disposable world when a run completes.
 CANARY_RESULT_FILENAME: Final = "canary_result.json"
+
+#: The create-once result document a bounded diagnostic prefix writes. A **different** name from
+#: the complete-source one on purpose: a world holding a prefix result holds no canary result,
+#: and no reader that goes looking for one can be handed the other.
+CANARY_PREFIX_RESULT_FILENAME: Final = "canary_prefix_result.json"
+
+#: The explicit page-cache budget the disposable canary's writable working catalog runs under
+#: (accepted **Decision 119 §4**, ruling C1): 512 MiB.
+#:
+#: SQLite configures no ``cache_size`` unless one is asked for, so before this the working
+#: catalog wrote through SQLite's own default of about 2 MiB. Accepted Decision 118 measured
+#: that against a working set two orders of magnitude larger and found the resulting
+#: random-write amplification -- a lower bound of 13.22x physical writes, a write-ahead log
+#: lower bound of 169.61 GiB, and cold page access 45-85x warm -- to be the primary constraint
+#: on real materialization throughput.
+#:
+#: It is an **execution parameter**, not an evidence semantic: it changes how much memory the
+#: write may use and moves no row, no ordering, no digest, and no identity. It is bound here
+#: rather than in :mod:`~disclosure_drift.m3.working_catalog` so that the D111 mechanism stays
+#: opt-in and every other caller keeps the behaviour it already had.
+WORKING_CATALOG_CACHE_BYTES: Final = 512 * 1024 * 1024
+
+#: What :data:`WORKING_CATALOG_CACHE_BYTES` resolves to in SQLite's negative ``cache_size``
+#: form, which is the value the writable working connection must report: ``-524288`` KiB.
+WORKING_CATALOG_CACHE_SIZE_PRAGMA: Final = cache_size_pragma(WORKING_CATALOG_CACHE_BYTES)
 
 #: Parts per real transaction, with write-ahead-log truncation at each boundary. This is the
 #: configuration accepted **Decision 113 §14** measured the real densities under, so a canary
@@ -334,6 +367,11 @@ class CanaryWorld:
         """The create-once result document."""
         return self.directory / CANARY_RESULT_FILENAME
 
+    @property
+    def prefix_result(self) -> Path:
+        """The create-once result document a bounded diagnostic prefix writes."""
+        return self.directory / CANARY_PREFIX_RESULT_FILENAME
+
 
 def create_world(work_root: Path, run_id: str) -> CanaryWorld:
     """Create one disposable world exactly once, at mode ``0700``.
@@ -415,6 +453,14 @@ class CanaryPreflight:
     operational_catalog_byte_length: int
     work_root_free_bytes: int
     world_absent: bool
+    #: The page-cache budget the run would give its writable working catalog, and the
+    #: ``PRAGMA cache_size`` value it resolves to. Reported by a preflight because a preflight
+    #: creates nothing and therefore has no connection to read the effective value from: this
+    #: is the **requested** setting, stated so it can be verified before a run rather than
+    #: reconstructed after one. Both are host-independent constants, so a preflight record
+    #: stays deterministic.
+    working_catalog_cache_bytes: int | None
+    working_catalog_cache_size_pragma: int | None
 
     def as_record(self) -> Mapping[str, object]:
         """A deterministic, path-free rendering."""
@@ -436,6 +482,8 @@ class CanaryPreflight:
             "operational_catalog_byte_length": self.operational_catalog_byte_length,
             "work_root_free_bytes": self.work_root_free_bytes,
             "world_absent": self.world_absent,
+            "working_catalog_cache_bytes": self.working_catalog_cache_bytes,
+            "working_catalog_cache_size_pragma": self.working_catalog_cache_size_pragma,
         }
 
 
@@ -445,13 +493,24 @@ def preflight_single_source_canary(
     work_root: Path,
     run_id: str,
     source_instance_id: str,
+    cache_bytes: int | None = WORKING_CATALOG_CACHE_BYTES,
 ) -> CanaryPreflight:
     """Validate every predicate a run needs, read-only, and create nothing.
+
+    Args:
+        operational_catalog: The accepted catalog. Opened strictly read-only.
+        work_root: The disposable work root free space is measured under.
+        run_id: The world identity whose absence is checked.
+        source_instance_id: The one planned source's own plan key.
+        cache_bytes: The page-cache budget a run would request for its writable working
+            catalog, reported rather than applied -- a preflight opens no writable connection.
+            An unrepresentable budget is refused here, before a run could discover it.
 
     Raises:
         SingleSourceCanaryError: a predicate the run depends on does not hold.
         OfflineParseError: the identifier names no planned source, or names more than one.
     """
+    cache_pragma = None if cache_bytes is None else cache_size_pragma(cache_bytes)
     validate_run_id(run_id)
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
@@ -481,6 +540,8 @@ def preflight_single_source_canary(
         operational_catalog_byte_length=byte_length,
         work_root_free_bytes=shutil.disk_usage(_measurable(work_root)).free,
         world_absent=not (work_root / run_id).exists(),
+        working_catalog_cache_bytes=cache_bytes,
+        working_catalog_cache_size_pragma=cache_pragma,
     )
 
 
@@ -665,6 +726,7 @@ def run_single_source_canary(
     run_id: str,
     source_instance_id: str,
     batch_size: int = CANARY_BATCH_SIZE,
+    cache_bytes: int | None = WORKING_CATALOG_CACHE_BYTES,
 ) -> CanaryResult:
     """Run **exactly one** governed planned source into a disposable world, and stop.
 
@@ -696,6 +758,11 @@ def run_single_source_canary(
         run_id: This world's identity. Create-once.
         source_instance_id: The one planned source's own plan key.
         batch_size: Parts per real transaction, defaulting to the accepted D113 §14 value.
+        cache_bytes: The page-cache budget for the **run-local writable** working catalog,
+            defaulting to the accepted :data:`WORKING_CATALOG_CACHE_BYTES`. ``None`` restores
+            SQLite's own default and is what the equivalence proof runs against: the budget is
+            an execution parameter, so two runs that differ only in it must reach byte-identical
+            evidence. It reaches no other connection and no other database.
 
     Raises:
         SingleSourceCanaryError: a canary precondition failed.
@@ -723,7 +790,7 @@ def run_single_source_canary(
     world = create_world(resolved_work_root, run_id)
 
     # 3-7. Everything writable, inside the world.
-    with WorkingCatalog(operational_catalog, world.directory) as working:
+    with WorkingCatalog(operational_catalog, world.directory, cache_bytes=cache_bytes) as working:
         sidecar = CompactEvidenceSidecar(world.sidecar)
         try:
             materialized = _materialize(
@@ -981,6 +1048,331 @@ def _result(
 
 
 # --------------------------------------------------------------------------- #
+# The bounded diagnostic prefix
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CanaryPrefixResult:
+    """What one bounded diagnostic member prefix measured. **Not a canary result.**
+
+    Accepted **Decision 119 §8**. It is a separate type from :class:`CanaryResult`, written to a
+    separate filename, and carrying a separate classification, because the one thing a prefix
+    must never be is mistakable for a finished source. Read the field list for what is absent:
+    there is no ``disposition``, no ``member_manifest_digest``, no ``projection_digest``, no
+    ``resolution_digest``, no ``corroboration_digest``, and no ``compact_evidence_identity``.
+    A prefix reached none of them, so it reports none of them, and no accepted complete-source
+    identity can be synthesized from this document.
+
+    What it does carry is measurement: how far the traversal got, what that cost, and enough
+    durable state to tell a reader that the source was **not** finalized.
+    """
+
+    contract: str
+    #: Always :data:`~disclosure_drift.m3.offline_parse.DIAGNOSTIC_PREFIX_CLASSIFICATION`.
+    classification: str
+    evidence_contract: str
+    run_id: str
+    started_at_utc: str
+    completed_at_utc: str
+
+    # -- the one source -------------------------------------------------- #
+    source_instance_id: str
+    source_id: str
+    plan_position: int
+    plan_source_count: int
+    plan_fingerprint: str
+    source_observation_id: str
+    source_artifact_sha256: str
+    source_artifact_byte_length: int
+
+    # -- how far the traversal got --------------------------------------- #
+    requested_member_limit: int
+    members_processed: int
+    #: The manifest ordinals actually recorded, which for a prefix of ``n`` members are
+    #: ``0`` and ``n - 1``. ``-1`` in both when no member was recorded.
+    member_ordinal_first: int
+    member_ordinal_last: int
+    recorded_member_count: int
+    #: Payload bytes those members represent, summed from the manifest rows the traversal
+    #: already wrote. Not re-read from the archive: this is the cost that was actually paid.
+    member_payload_byte_length: int
+    parsed_accession_count: int
+    parsed_records: int
+    omitted_field_observations: int
+    materialized_field_observations: int
+
+    # -- what is durable in the working catalog -------------------------- #
+    #: Durable counts are read **after** the stop, so they are what survived the accepted
+    #: batch semantics rather than what the traversal handed to them. A prefix that ends
+    #: between two commit boundaries loses its open batch, exactly as any interruption does,
+    #: so ``durable_*`` can legitimately trail ``members_processed``.
+    durable_canonical_accession_count: int
+    durable_parsed_record_count: int
+    durable_accession_observation_count: int
+    durable_parser_run_count: int
+    #: Must be ``0``. A parser run that claimed a terminal would be a partial source wearing
+    #: a success, which is exactly what the accepted interruption semantics prevent.
+    durable_parser_runs_claiming_completion: int
+
+    # -- proof that the source was not finalized ------------------------- #
+    parser_state_before: str
+    parser_state_after: str
+    source_finalized: bool
+    run_local_progress_state: str
+
+    # -- the execution parameters ---------------------------------------- #
+    batch_size: int
+    working_catalog_cache_bytes: int | None
+    working_catalog_cache_size_pragma: int | None
+    #: What the writable working connection **reported**, read back from SQLite itself.
+    working_catalog_effective_cache_size_pragma: int
+
+    # -- the disposable world -------------------------------------------- #
+    world_relative_working_catalog: str
+    world_relative_sidecar: str
+    working_catalog_byte_length: int
+    working_catalog_wal_byte_length: int
+    compact_sidecar_byte_length: int
+    migration_head: int
+
+    # -- the accepted catalog, before and after -------------------------- #
+    operational_catalog_sha256_before: str
+    operational_catalog_sha256_after: str
+    work_root_free_bytes_before: int
+    work_root_free_bytes_after: int
+
+    @property
+    def operational_catalog_unchanged(self) -> bool:
+        """Whether the accepted catalog is byte-identical to what the profile started from."""
+        return self.operational_catalog_sha256_before == self.operational_catalog_sha256_after
+
+    def as_record(self) -> Mapping[str, object]:
+        """The complete measurement as a plain mapping, carrying no absolute path."""
+        record: dict[str, object] = {}
+        for name in self.__slots__:
+            record[name] = getattr(self, name)
+        record["operational_catalog_unchanged"] = self.operational_catalog_unchanged
+        return record
+
+
+def _durable_prefix_counts(connection: sqlite3.Connection) -> Mapping[str, int]:
+    """Row counts a prefix reports, read from the working catalog after it stopped."""
+    tables = {
+        "durable_canonical_accession_count": "census_accessions",
+        "durable_parsed_record_count": "census_parsed_records",
+        "durable_accession_observation_count": "census_accession_observations",
+        "durable_parser_run_count": "census_parser_runs",
+    }
+    counted = {
+        key: int(
+            connection.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]  # noqa: S608
+        )
+        for key, table in tables.items()
+    }
+    counted["durable_parser_runs_claiming_completion"] = int(
+        connection.execute(
+            "SELECT COUNT(*) AS n FROM census_parser_runs WHERE outcome <> 'failed'"
+        ).fetchone()["n"]
+    )
+    return counted
+
+
+def _durable_parser_state(connection: sqlite3.Connection, selected: SelectedPlannedSource) -> str:
+    """The plan row's ``parser_state`` as it stands in the working catalog after the stop."""
+    row = connection.execute(
+        "SELECT parser_state FROM census_plan_sources WHERE census_run_id = ? "
+        "AND source_instance_id = ?",
+        (selected.source.census_run_id, selected.source.source_instance_id),
+    ).fetchone()
+    if row is None:  # pragma: no cover - the row was read from this very catalog's copy
+        message = "the planned source vanished from the working catalog between copy and read"
+        raise SingleSourceCanaryError(message)
+    return str(row["parser_state"])
+
+
+def _recorded_members(sidecar_path: Path, observation_id: str) -> Mapping[str, int]:
+    """Aggregate the manifest rows the prefix wrote, read-only, once, after the traversal.
+
+    Deliberately one aggregate over rows that already exist rather than any measurement taken
+    inside the hot loop: accepted **Decision 119 §8** puts per-record instrumentation outside
+    this path, and a prefix that paid to measure itself would not be measuring the accepted
+    path any more.
+    """
+    connection = sqlite3.connect(f"{sidecar_path.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT COUNT(*) AS members, "
+            "COALESCE(SUM(payload_byte_length), 0) AS payload_bytes, "
+            "COALESCE(SUM(parsed_accessions), 0) AS accessions, "
+            "COALESCE(MIN(member_ordinal), -1) AS first_ordinal, "
+            "COALESCE(MAX(member_ordinal), -1) AS last_ordinal "
+            "FROM compact_source_members WHERE source_observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return {
+        "members": int(row["members"]),
+        "payload_bytes": int(row["payload_bytes"]),
+        "accessions": int(row["accessions"]),
+        "first_ordinal": int(row["first_ordinal"]),
+        "last_ordinal": int(row["last_ordinal"]),
+    }
+
+
+def run_single_source_prefix_profile(
+    *,
+    operational_catalog: Path,
+    tree: DataTree,
+    work_root: Path,
+    run_id: str,
+    source_instance_id: str,
+    member_limit: int,
+    batch_size: int = CANARY_BATCH_SIZE,
+    cache_bytes: int | None = WORKING_CATALOG_CACHE_BYTES,
+) -> CanaryPrefixResult:
+    """Materialize the **first ``member_limit`` members** of one source, and stop. Diagnostic.
+
+    Accepted **Decision 119 §6**. Every boundary :func:`run_single_source_canary` establishes is
+    established here identically and through the same primitives -- the work root is refused
+    unless it lies outside both the checkout and the authoritative evidence tree, the accepted
+    catalog is opened strictly read-only on every path with no writer lease, the world is
+    create-once, the D111 working catalog carries every write, and the compact contract is bound
+    explicitly. The differences are that it stops after a bounded number of members and that it
+    finalizes nothing.
+
+    **It can never produce a canary success.** There is no path from here to a source
+    disposition, to the catalog-wide resolution pass, to the Decision 094 §6.4 association
+    projection, to a source-level compact evidence row, or to any of the five accepted
+    identities. The run-local progress ledger is left recording ``in_progress``, which is the
+    truth, and the result document is written under its own name with its own classification.
+
+    Args:
+        operational_catalog: The accepted catalog. Opened strictly read-only, always.
+        tree: The data tree the frozen source artifacts are read from.
+        work_root: The disposable work root, validated here before any world exists.
+        run_id: This world's identity. Create-once.
+        source_instance_id: The one planned source's own plan key.
+        member_limit: How many governed members to traverse. Must be positive.
+        batch_size: Parts per real transaction, defaulting to the accepted D113 §14 value.
+        cache_bytes: The page-cache budget for the run-local writable working catalog.
+
+    Raises:
+        SingleSourceCanaryError: a canary precondition failed, or the bound is not positive.
+        OfflineParseError: any accepted fail-closed parse condition, unchanged.
+        WorkingCatalogError: the disposable working catalog could not be built safely.
+    """
+    if member_limit <= 0:
+        message = (
+            f"a diagnostic prefix needs a positive --member-limit; got {member_limit}. There "
+            "is no unbounded prefix: a complete source is what --mode run is for"
+        )
+        raise SingleSourceCanaryError(message)
+    resolved_work_root = require_canary_work_root(work_root, tree=tree)
+    started = utc_now()
+    if not operational_catalog.is_file():
+        message = "the accepted operational catalog does not exist at its fixed relative path"
+        raise SingleSourceCanaryError(message)
+    catalog_before, _ = file_digest(operational_catalog)
+    free_before = shutil.disk_usage(_measurable(resolved_work_root)).free
+
+    with strictly_read_only_connection(operational_catalog) as reader:
+        selected = select_planned_source(reader, source_instance_id)
+        fingerprint, _ = plan_fingerprint(reader)
+
+    world = create_world(resolved_work_root, run_id)
+
+    with WorkingCatalog(operational_catalog, world.directory, cache_bytes=cache_bytes) as working:
+        connection = working.connection
+        sidecar = CompactEvidenceSidecar(world.sidecar)
+        try:
+            writer = _WorkingCatalogWriter(working)
+            catalog = CensusCatalog(writer, compact_evidence=COMPACT_EVIDENCE)
+            with write_containment(connection):
+                working.ledger.begin_source(
+                    selected.source.source_instance_id, selected.source.source_id
+                )
+                outcome = materialize_planned_source_prefix(
+                    writer=writer,
+                    tree=tree,
+                    catalog=catalog,
+                    selected=selected,
+                    max_members=member_limit,
+                    sidecar=sidecar,
+                    batch_size=batch_size,
+                    checkpoint_batches=True,
+                )
+            # Nothing between the stop and here advances the source: the ledger is left
+            # ``in_progress``, and every statement below reads.
+            counts = _durable_prefix_counts(connection)
+            parser_state_after = _durable_parser_state(connection, selected)
+            progress = working.ledger.progress(selected.source.source_instance_id)
+            effective_cache = working.effective_cache_size_pragma
+            requested_cache = working.requested_cache_bytes
+            requested_cache_pragma = working.requested_cache_size_pragma
+            migration_head = working.identity.migration_head
+            working.checkpoint()
+            wal_bytes = working.wal_byte_length()
+        finally:
+            sidecar.close()
+
+    recorded = _recorded_members(world.sidecar, outcome.observation.observation_id)
+    result = CanaryPrefixResult(
+        contract=CANARY_CONTRACT,
+        classification=DIAGNOSTIC_PREFIX_CLASSIFICATION,
+        evidence_contract=COMPACT_EVIDENCE_CONTRACT,
+        run_id=world.run_id,
+        started_at_utc=started,
+        completed_at_utc=utc_now(),
+        source_instance_id=selected.source.source_instance_id,
+        source_id=selected.source.source_id,
+        plan_position=selected.plan_position,
+        plan_source_count=selected.plan_source_count,
+        plan_fingerprint=fingerprint,
+        source_observation_id=outcome.observation.observation_id,
+        source_artifact_sha256=outcome.observation.logical_sha256 or "",
+        source_artifact_byte_length=int(outcome.observation.content_size_bytes or 0),
+        requested_member_limit=outcome.requested_member_limit,
+        members_processed=outcome.members_processed,
+        member_ordinal_first=recorded["first_ordinal"],
+        member_ordinal_last=recorded["last_ordinal"],
+        recorded_member_count=recorded["members"],
+        member_payload_byte_length=recorded["payload_bytes"],
+        parsed_accession_count=recorded["accessions"],
+        parsed_records=outcome.records,
+        omitted_field_observations=outcome.omitted_field_observations,
+        materialized_field_observations=outcome.materialized_field_observations,
+        durable_canonical_accession_count=counts["durable_canonical_accession_count"],
+        durable_parsed_record_count=counts["durable_parsed_record_count"],
+        durable_accession_observation_count=counts["durable_accession_observation_count"],
+        durable_parser_run_count=counts["durable_parser_run_count"],
+        durable_parser_runs_claiming_completion=counts["durable_parser_runs_claiming_completion"],
+        parser_state_before=selected.source.parser_state,
+        parser_state_after=parser_state_after,
+        source_finalized=outcome.source_finalized,
+        run_local_progress_state="absent" if progress is None else progress.state,
+        batch_size=batch_size,
+        working_catalog_cache_bytes=requested_cache,
+        working_catalog_cache_size_pragma=requested_cache_pragma,
+        working_catalog_effective_cache_size_pragma=effective_cache,
+        world_relative_working_catalog=WORKING_CATALOG_FILENAME,
+        world_relative_sidecar=COMPACT_EVIDENCE_SIDECAR_FILENAME,
+        working_catalog_byte_length=world.working_catalog.stat().st_size,
+        working_catalog_wal_byte_length=wal_bytes,
+        compact_sidecar_byte_length=world.sidecar.stat().st_size,
+        migration_head=migration_head,
+        operational_catalog_sha256_before=catalog_before,
+        operational_catalog_sha256_after=file_digest(operational_catalog)[0],
+        work_root_free_bytes_before=free_before,
+        work_root_free_bytes_after=shutil.disk_usage(world.directory).free,
+    )
+    _write_once(
+        world.prefix_result, json.dumps(result.as_record(), indent=2, sort_keys=True).encode()
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # The operator surface
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
@@ -1004,6 +1396,7 @@ def run_canary_source_command(
     work_root: str,
     repository_root: Path,
     environ: Mapping[str, str] | None = None,
+    member_limit: int | None = None,
 ) -> CanaryOperatorResult:
     """Run one ``m3 canary-source`` invocation and render it.
 
@@ -1018,10 +1411,32 @@ def run_canary_source_command(
 
     No line this returns carries the private root, the work root, or any absolute path: the
     result is rendered from counts, digests, enum tokens, and world-relative names.
+
+    **The member limit belongs to exactly one mode.** ``profile-prefix`` requires a positive
+    one; ``preflight`` and ``run`` refuse one outright rather than ignoring it. That asymmetry
+    is the point of accepted **Decision 119 §6**: ``run`` is the only mode that may establish a
+    complete source, so it must not be reachable with a bound attached, not even a bound that
+    would have been harmless.
     """
+    limit = _validated_member_limit(mode, member_limit)
     private_root = resolve_private_root(repository_root, environ=environ)
     operational_catalog = private_root / OPERATIONAL_CATALOG_RELATIVE_PATH
     resolved_work_root = require_disposable_work_root(work_root, repository_root, private_root)
+    if limit is not None:
+        # ``profile-prefix`` is the only mode a bound can survive validation under, so this
+        # branch is entered by the bound itself rather than by a second reading of the mode.
+        prefix = run_single_source_prefix_profile(
+            operational_catalog=operational_catalog,
+            tree=DataTree.from_root(private_root),
+            work_root=resolved_work_root,
+            run_id=run_id,
+            source_instance_id=source_instance_id,
+            member_limit=limit,
+        )
+        return CanaryOperatorResult(
+            exit_code=_EXIT_OK if prefix.operational_catalog_unchanged else _EXIT_GATE_FAILURE,
+            lines=_render(prefix.as_record(), title="canary-source profile-prefix"),
+        )
     if mode == "preflight":
         report = preflight_single_source_canary(
             operational_catalog=operational_catalog,
@@ -1034,7 +1449,9 @@ def run_canary_source_command(
             lines=_render(report.as_record(), title="canary-source preflight"),
         )
     if mode != "run":
-        message = f"unknown canary mode {mode!r}; the modes are 'preflight' and 'run'"
+        message = (
+            f"unknown canary mode {mode!r}; the modes are 'preflight', 'run', and 'profile-prefix'"
+        )
         raise SingleSourceCanaryError(message)
     result = run_single_source_canary(
         operational_catalog=operational_catalog,
@@ -1047,6 +1464,39 @@ def run_canary_source_command(
         exit_code=_EXIT_OK if result.operational_catalog_unchanged else _EXIT_GATE_FAILURE,
         lines=_render(result.as_record(), title="canary-source run"),
     )
+
+
+def _validated_member_limit(mode: str, member_limit: int | None) -> int | None:
+    """Return the bound ``mode`` may run under: a positive one, or ``None`` for every other mode.
+
+    Refusing a bound anywhere but the diagnostic prefix is what keeps ``run`` complete-source
+    only, and returning the validated bound rather than merely checking it is what keeps the
+    caller from having to read the mode a second time.
+
+    Raises:
+        SingleSourceCanaryError: the mode and the bound do not belong together.
+    """
+    if mode == "profile-prefix":
+        if member_limit is None:
+            message = (
+                "canary mode 'profile-prefix' requires an explicit positive --member-limit; "
+                "it has no default, because a prefix with no bound is a whole source"
+            )
+            raise SingleSourceCanaryError(message)
+        if member_limit <= 0:
+            message = (
+                f"--member-limit must be positive; got {member_limit}. Zero and negative "
+                "bounds are refused rather than read as 'every member'"
+            )
+            raise SingleSourceCanaryError(message)
+        return member_limit
+    if member_limit is not None:
+        message = (
+            f"canary mode {mode!r} takes no --member-limit; only 'profile-prefix' is bounded, "
+            "and 'run' is complete-source-only so that it alone can establish a real source"
+        )
+        raise SingleSourceCanaryError(message)
+    return None
 
 
 def _render(record: Mapping[str, object], *, title: str) -> tuple[str, ...]:

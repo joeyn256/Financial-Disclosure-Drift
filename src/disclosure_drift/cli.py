@@ -391,7 +391,11 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
             "on it; nothing is promoted, no migration is applied, and no E0 authority or run "
             "namespace is involved. One invocation runs one source and stops: there is no "
             "continuation to a second. preflight validates every predicate and creates "
-            "nothing. A completed run is not an authorization for M3.3-E0 or anything else."
+            "nothing. profile-prefix is a diagnostic-only third mode: it runs the same path "
+            "over the first --member-limit governed members and stops before any source-level "
+            "finalization, so it never reports a parsed source, a complete-source identity, or "
+            "a canary success. A completed run is not an authorization for M3.3-E0 or "
+            "anything else."
         ),
     )
     _add_config_argument(canary)
@@ -401,7 +405,9 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         choices=_M3_3_CANARY_MODES,
         help=(
             "preflight validates the plan selection, the world, and the boundaries read-only "
-            "and creates nothing; run builds the disposable world and parses that one source."
+            "and creates nothing; run builds the disposable world and parses that one source; "
+            "profile-prefix is diagnostic only -- it runs the same path over the first "
+            "--member-limit governed members, finalizes nothing, and can never report success."
         ),
     )
     canary.add_argument(
@@ -426,6 +432,17 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         help=(
             "Absolute directory the disposable world is built under. Refused if it is inside "
             "the repository checkout, or is, contains, or lies inside the private evidence root."
+        ),
+    )
+    canary.add_argument(
+        "--member-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Diagnostic prefix bound: how many governed members profile-prefix traverses "
+            "before it stops. Required and positive for --mode profile-prefix; refused for "
+            "every other mode, because run is complete-source-only."
         ),
     )
 
@@ -1486,8 +1503,11 @@ _M3_3_RECOVERY_MODES: Final[tuple[str, ...]] = ("preflight", "execute")
 #: reconciliation: it runs one governed source into a disposable world and returns. Its second
 #: mode is `run` rather than `execute` on purpose — `execute` is E0's governed, authority-gated
 #: verb, and this path has no authority to gate.
+#: Its third mode is diagnostic and is deliberately named as such: `profile-prefix` measures
+#: the accepted materialization path over a bounded number of members and finalizes nothing
+#: (accepted Decision 119 §6). `run` stays complete-source-only and refuses a bound.
 _M3_3_CANARY_COMMAND: Final = "canary-source"
-_M3_3_CANARY_MODES: Final[tuple[str, ...]] = ("preflight", "run")
+_M3_3_CANARY_MODES: Final[tuple[str, ...]] = ("preflight", "run", "profile-prefix")
 
 #: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
 #: the command set is complete and each **refuses**: the owner gate it names has not been
@@ -1774,6 +1794,7 @@ def _m3_canary_source_command(args: argparse.Namespace, logger: Logger) -> int:
             source_instance_id=str(args.source_instance_id),
             work_root=str(args.work_root),
             repository_root=_repository_root(),
+            member_limit=None if args.member_limit is None else int(args.member_limit),
         )
     except (DisclosureDriftError, sqlite3.Error) as exc:
         print(f"m3 {_M3_3_CANARY_COMMAND} failed: {exc}", file=sys.stderr)

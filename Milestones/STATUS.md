@@ -1,10 +1,84 @@
 # Milestones/STATUS.md — concrete-state ledger
 
-CURRENT_STAGE: M3.3 PRE-E0 — THE D113 LOCAL CAPACITY INSUFFICIENCY IS CLEARED ON THIS HOST BY OWNER RULING R6, AND THE DISPOSABLE SINGLE-SOURCE COMPACT CANARY EXECUTION PATH IS IMPLEMENTED AND READY FOR OWNER REVIEW. Decision 113 remains the accepted compact derived-evidence contract (e0-compact-evidence/2), unchanged and still off by default. What moved is the capacity verdict and the execution path, and nothing else. CAPACITY: measured available about 107.09 GiB against about 90.54 GiB required — projected working state about 69.33 GB, overhead about 1.05 GB, governed reserve 25 GiB, projected remaining reserve about 41.54 GiB, shortfall 0 — under requirement identity 791618e03a8ed6028d6b0ba70f1fca4473d2434b52e99ec1ddddaec97dba2b31, which the accepted capacity_plan module reproduces term for term. The classification LOCAL_CAPACITY_INSUFFICIENT_AFTER_D113 is NO LONGER the active host blocker (M3_3_D115_CAPACITY_GATE_OWNER_CLEARED). THAT IS NOT E0-v3 AUTHORIZATION. D115: the prior authorization is CLOSED AND WAS NEVER EXECUTED (M3_3_D115_EXECUTION_AUTHORITY_CLOSED_UNEXECUTED) — no disposable world was created, no execution command was constructed, and no real source was parsed. It stopped before any of that because the repository had no supported path that could run exactly one governed planned source under the compact-evidence contract and be relied on to stop (M3_3_D115_EXECUTION_PATH_BLOCKER_OWNER_CONFIRMED). EXECUTION PATH: that path now exists as the additive, canary-only m3 canary-source operator surface over src/disclosure_drift/m3/single_source_canary.py plus a one-source entry point in the accepted offline-parse driver. It selects exactly one census_plan_sources row by source_instance_id and refuses an absent or ambiguous identifier, takes no path argument, opens the accepted operational catalog strictly read-only on every path and takes no writer lease on it, builds a Decision 111 run-local working catalog inside a create-once disposable world beneath an operator-supplied work root refused unless it lies outside both the checkout and the private evidence root — refused by the library run itself under owner ruling R11, not only by the operator surface — binds e0-compact-evidence/2 EXPLICITLY, emits the Decision 112 §8 sidecar with the member manifest, the projection digest, the ResolutionDigest, the CorroborationDigest, and the compact-evidence identity, terminates after that one source with no continuation to a second, promotes nothing, applies no migration, and involves no E0 authority constant and no E0 run namespace. It is proved by 50 targeted tests including two-world identity determinism, the direct-library work-root refusals, and the single-payload logical-member pins.
-ACTIVE_BLOCKER: THE DISPOSABLE SINGLE-SOURCE COMPACT EXECUTION PATH IS IMPLEMENTED AND OWNER-REVIEWED, ITS PRE-ACCEPTANCE CORRECTIONS (RULINGS R10–R13) ARE APPLIED, AND IT IS NOT OWNER-ACCEPTED; NO REAL-CANARY AUTHORIZATION EXISTS. The capacity condition that blocked M3.3-E0 after Decision 113 is cleared under owner ruling R6; the blocker that replaces it is acceptance of the execution path, not storage. Nothing in this repository — not this file, not a passing gate, not a local commit — is that acceptance. The first-source canary, the three-source canary, and the real replay proof remain NOT RUN, and the next real source execution requires a NEW owner instrument. All three execution authorities are None, migration 0016 is unapplied and the operational catalog stays at head 0015, no E0-v3 namespace exists, and both tracked network switches stay false at request ceiling 0.
-IMPLEMENTATION_AUTHORIZATION: EXERCISED — THE D116 OWNER IMPLEMENTATION INSTRUMENT (RULINGS R6–R9) AUTHORIZED THE BOUNDED DISPOSABLE SINGLE-SOURCE CANARY EXECUTION PATH, ITS TESTS, ONE LOCAL COMMIT, AND TWO NAMED CURRENT-STATE DOCUMENTATION CORRECTIONS. The touched source paths are src/disclosure_drift/m3/single_source_canary.py (new), src/disclosure_drift/m3/offline_parse.py, src/disclosure_drift/m3/compact_evidence.py, src/disclosure_drift/cli.py, and tests/unit/test_d116_single_source_canary.py (new), with the Decision 116 record, the registry line, and the two R9 documentation corrections — Docs/change_impact_map.md's stale live mutation-anchor partition and this file — which are the documentation paths that instrument expressly authorized. THE D116 PRE-ACCEPTANCE CORRECTION INSTRUMENT (RULINGS R10–R13) THEN AUTHORIZED ONE FURTHER LOCAL COMMIT: the R11 library-boundary work-root enforcement in src/disclosure_drift/m3/single_source_canary.py and its tests, the durable R10–R13 record sections and the registry line, and the two R13 navigation entries in Docs/decision_index.md and Docs/change_impact_map.md. NO real SEC source was parsed, no D115 run identity or world was created, no migration was applied, nothing was promoted, and the commit is local and unpushed with no tag.
-NEXT_AUTHORIZED_ACTION: RETURN THE CORRECTED IMPLEMENTATION TO THE PROJECT OWNER (GPT-5.6 Sol) FOR ACCEPTANCE AND STOP. The completion token M3_3_D116_CORRECTION_READY_FOR_OWNER_ACCEPTANCE states that the R10–R13 correction is finished and, like M3_3_D116_DISPOSABLE_SINGLE_SOURCE_EXECUTION_PATH_READY_FOR_OWNER_REVIEW before it, is NOT owner acceptance. Do not push, do not tag, and do not execute the real canary: a new owner instrument is required before any real source is parsed, and neither R6's cleared capacity nor a green gate supplies one.
+CURRENT_STAGE: M3.3 PRE-E0 — D116 IS OWNER-ACCEPTED AND PUBLISHED, THE FIRST REAL SINGLE-SOURCE CANARY (D117) RAN AND FAILED AT A THROUGHPUT GATE, THE D118 READ-ONLY DIAGNOSIS OF THAT FAILURE IS OWNER-ACCEPTED, AND THE CURRENT WORK IS THE D119 BOUNDED CACHE-BOUND PERSISTENCE CORRECTION. D116: accepted (M3_3_D116_DISPOSABLE_SINGLE_SOURCE_EXECUTION_PATH) and published to origin/main; the disposable single-source compact canary path is the accepted execution path. D117: the first REAL canary ran over the accepted sec_bulk_submissions first planned source and was STOPPED AT A THROUGHPUT GATE (M3_3_D117_THROUGHPUT_FAILURE_OWNER_ACCEPTED) — no source terminal, none of the five complete-source identities, NO SUCCESS TOKEN. What held: the accepted operational catalog stayed byte-identical and was never opened for writing, every write landed in the run-local D111 working catalog, memory stayed bounded, and committed batches were durable under a parser run that claimed nothing. The world it left, about 25.65 GiB, is PRESERVED DIAGNOSTIC EVIDENCE and must not be resumed, modified, promoted, vacuumed, reindexed, or deleted. D118: the cause is accepted (M3_3_D118_READ_ONLY_PERFORMANCE_DIAGNOSIS_OWNER_ACCEPTED, rulings R21–R26) as SQLite random-write amplification against a working set far larger than effective cache residency — an 8 GiB host, a 25.65 GiB working catalog, and NO cache_size ever configured so about 2 MiB of page cache carried the whole write, with a >= 169.61 GiB WAL lower bound, a >= 13.22x physical-write amplification lower bound, cold access about 45-85x warm, throughput decaying with database size, and CPU parsing NOT dominant. R21 supersedes the D113 §14 performance samples AS A PREDICTIVE ASSUMPTION ONLY, and with them the former 8-hour first-source gate, WITHOUT authorizing a longer run; R23 records projection/resolution/association/final evidence as UNMEASURED at real scale; R24 records the capacity density as STRAINED BUT NOT INVALIDATED at about +28.2% above the accepted submissions density with NO capacity constant or model change; R25 and R26 defer the sidecar autocommit cadence and every schema and index change. D119 (current): C1 ONLY — an explicit 512 MiB page cache, PRAGMA cache_size = -524288, on the run-local WRITABLE D111 working catalog alone, opt-in through a cache_bytes parameter defaulting to None and requested explicitly by the D116 canary path — plus a diagnostic-only m3 canary-source --mode profile-prefix --member-limit N surface that runs the exact accepted path over the first N governed members and stops before any source-level finalization, classified INCOMPLETE_DIAGNOSTIC_PREFIX. C1 is the ONLY performance behaviour that moved. MIGRATION HEAD REMAINS 0015 and 0016 is absent. E0-v3 REMAINS UNAUTHORIZED. NO THREE-SOURCE CANARY IS AUTHORIZED.
+ACTIVE_BLOCKER: THE D119 CACHE CORRECTION AND PREFIX DIAGNOSTIC SURFACE ARE IMPLEMENTED AND NOT OWNER-ACCEPTED, AND NO REAL EXECUTION AUTHORIZATION OF ANY KIND EXISTS. Nothing in this repository — not this file, not a passing gate, not a local commit, not the D119 completion token — is that acceptance. The D117 retry, the three-source canary, and the real replay proof remain NOT RUN and NOT AUTHORIZED, and D118 R23 states that no full-source retry follows from improved materialization throughput alone: a later bounded finalization measurement is required first. All three execution authorities are None, migration 0016 is unapplied and the operational catalog stays at head 0015, no E0-v3 namespace exists, both tracked network switches stay false at request ceiling 0, and the preserved D117 world stays unopened.
+IMPLEMENTATION_AUTHORIZATION: EXERCISED — THE D119 OWNER IMPLEMENTATION INSTRUMENT (RULINGS R21–R28) AUTHORIZED THE 512 MiB WORKING-CATALOG CACHE CORRECTION, THE BOUNDED DIAGNOSTIC PREFIX SURFACE, THEIR TESTS, THE D117/D118/D119 GOVERNANCE RECORDS, THE NAVIGATION ENTRIES, THE TWO NAMED DOCUMENTATION CORRECTIONS, AND ONE LOCAL COMMIT. The touched source paths are src/disclosure_drift/m3/working_catalog.py, src/disclosure_drift/m3/offline_parse.py, src/disclosure_drift/m3/single_source_canary.py, src/disclosure_drift/cli.py, and tests/unit/test_d119_cache_and_prefix.py (new), with Docs/Decisions/decision_117_*.md, decision_118_*.md, and decision_119_*.md (all new), the three registry lines, the Docs/decision_index.md and Docs/change_impact_map.md navigation entries, and the two corrections that instrument expressly named — R28 (this file) and R27 (the CompactSourceEvidence._seen docstring, documentation only, the structure unchanged). NO real SEC source was parsed, no real prefix world was created, the preserved D117 world was not opened, no migration was applied, nothing was promoted, and the commit is local and unpushed with no tag.
+NEXT_AUTHORIZED_ACTION: RETURN THE D119 IMPLEMENTATION TO THE PROJECT OWNER (GPT-5.6 Sol) FOR REVIEW AND STOP. The completion token M3_3_D119_CACHE_PREFIX_IMPLEMENTATION_READY_FOR_OWNER_REVIEW states that the bounded implementation is finished; it is NOT owner acceptance, NOT D120 authorization, NOT D117 retry authorization, NOT three-source authorization, and NOT E0-v3 authorization. Do not push, do not tag, and do not run D120: a new owner instrument is required before any real source is parsed, and neither a cleared cache nor a green gate supplies one.
 
+
+> **CONTROLLING CURRENT POSITION, 2026-08-19 (LATEST) — accepted
+> [Decision 119](../Docs/Decisions/decision_119_m3_3_cache_bound_persistence_and_prefix_diagnostic.md),
+> outcome `M3_3_D119_CACHE_BOUND_PERSISTENCE_AND_PREFIX_DIAGNOSTIC`, over accepted
+> [Decision 117](../Docs/Decisions/decision_117_m3_3_first_source_canary_throughput_failure.md)
+> and [Decision 118](../Docs/Decisions/decision_118_m3_3_read_only_performance_diagnosis.md).**
+> **None of the three grants execution authority.** All three activation constants are `None`,
+> migration `0016` is unapplied, the operational catalog stays at head `0015`, no E0-v3 namespace
+> exists, and nothing below reopens any of them.
+>
+> **D116 is accepted and published (R21–R28 entry state).** The disposable single-source compact
+> canary path — `M3_3_D116_DISPOSABLE_SINGLE_SOURCE_EXECUTION_PATH` — is the accepted execution
+> path, and the position recorded below it stands.
+>
+> **D117: the first real canary ran, and failed.** One governed planned source, the accepted
+> `sec_bulk_submissions` first source, **stopped at a throughput gate**:
+> `M3_3_D117_THROUGHPUT_FAILURE_OWNER_ACCEPTED`. No source reached a terminal, none of the five
+> complete-source identities was emitted, and **no success token was issued**. The safety
+> architecture held — the accepted operational catalog byte-identical and never opened for
+> writing, every write in the run-local Decision 111 working catalog, bounded memory, and
+> committed batches durable under a parser run that claimed nothing. Its world, about
+> `25.65 GiB`, is **preserved diagnostic evidence**: it may not be resumed, modified, promoted,
+> vacuumed, reindexed, or deleted, and it must never be opened for writing.
+>
+> **D118: the cause is accepted, and one predictive assumption falls with it.**
+> `M3_3_D118_READ_ONLY_PERFORMANCE_DIAGNOSIS_OWNER_ACCEPTED`, rulings **R21–R26**. The primary
+> cause (R22) is **SQLite random-write amplification interacting with a working set far larger
+> than effective cache residency**: an `8 GiB` host, a `25.65 GiB` working catalog, and **no
+> `cache_size` ever configured**, so about `2 MiB` of page cache carried the whole write — a
+> `>= 169.61 GiB` write-ahead-log lower bound, a `>= 13.22x` physical-write amplification lower
+> bound, cold access about `45-85x` warm, throughput decaying with database size, and CPU parsing
+> **not** dominant. **R21** supersedes the Decision 113 §14 performance samples **as a predictive
+> assumption only** — they never left the RAM-resident regime — and with them the former 8-hour
+> first-source gate, **without authorizing a longer run**. **R23**: projection, resolution,
+> association, and final evidence remain **unmeasured at real scale**, and no full-source retry
+> follows from improved materialization throughput alone. **R24**: the Decision 113 capacity
+> density is **`STRAINED BUT NOT INVALIDATED`**, with observed real prefix density about
+> **`+28.2%`** above the accepted submissions density, recorded for later recalibration and
+> changing **no** capacity constant or model. **R25** and **R26** defer the 316,000 synchronous
+> `FULL` sidecar autocommit transactions and every schema and index change.
+>
+> **D119: one correction, and a way to measure it.** **C1** is an explicit **512 MiB** page-cache
+> budget — `PRAGMA cache_size = -524288` — on the **run-local writable** Decision 111 working
+> catalog alone. It is opt-in through a `cache_bytes` parameter defaulting to `None`, so every
+> existing caller is behaviourally unchanged; the D116 canary path requests it explicitly; and it
+> reaches neither the governed operational catalog, nor any read-only connection, nor SQLite's
+> global defaults. It is an **execution parameter, not an evidence semantic** — two canaries over
+> one accepted catalog differing only in it produce identical identities, identical durable
+> counts, and an identical result record but for what a clock or a filesystem decides. **C1 is
+> the only performance behaviour that moved**: the sidecar autocommit cadence,
+> `synchronous = FULL`, WAL, batch size `250`, per-batch checkpointing, `cache_spill`,
+> `mmap_size`, the schema and its indexes, the parsers, the lookup logic, the source ordering, and
+> every digest are unchanged.
+>
+> **The prefix surface is diagnostic and cannot become anything else.**
+> `m3 canary-source --mode profile-prefix --member-limit N` runs the **exact** accepted path over
+> the first *N* governed members and stops **before source-level finalization**. It reaches no
+> `parser_state` transition, no **R23** full-index materialization, no resolution pass, no
+> Decision 094 §6.4 association projection, and none of the five complete-source identities; its
+> classification is `INCOMPLETE_DIAGNOSTIC_PREFIX`, deliberately outside the accepted
+> `SourceDisposition` vocabulary; it writes its own result document rather than the canary one;
+> and it is create-once and fail-closed. The bound is an **internal** stream parameter defaulting
+> to `None` that `materialize_one_planned_source` does not expose, so the production path cannot
+> supply one, and **`--mode run` stays complete-source-only and refuses a limit**. A bound equal
+> to the whole archive is still a diagnostic prefix.
+>
+> **It is implemented and proved, and it is not accepted.** This position records readiness for
+> owner review only. No acceptance, no green gate, and no local commit constitutes owner
+> acceptance or authorization to run anything real.
+>
+> **Real state is untouched.** No real SEC source was parsed, no real prefix world was created,
+> the preserved D117 world was not opened, the accepted operational catalog is unchanged at
+> migration head `0015`, the private evidence root received no write, and the frozen source
+> artifacts are unchanged.
 
 > **CONTROLLING CURRENT POSITION, 2026-08-18 (LATEST) — accepted
 > [Decision 116](../Docs/Decisions/decision_116_m3_3_disposable_single_source_canary_path.md),

@@ -49,6 +49,8 @@ from disclosure_drift.storage.sqlite import (
 
 __all__ = [
     "PROGRESS_LEDGER_FILENAME",
+    "SQLITE_DEFAULT_CACHE_SIZE_PRAGMA",
+    "cache_size_pragma",
     "file_digest",
     "WORKING_CATALOG_FILENAME",
     "RunProgressLedger",
@@ -84,6 +86,43 @@ WORKING_CATALOG_FILENAME: Final = "working_catalog.sqlite3"
 
 #: The run-local progress ledger's fixed name, beside the working catalog.
 PROGRESS_LEDGER_FILENAME: Final = "run_progress.sqlite3"
+
+#: What SQLite's own default ``cache_size`` reports when nothing configures one: 2000 pages,
+#: which at the 1 KiB granularity of the negative form is about 2 MiB. Named here so a test can
+#: assert that an unconfigured connection is genuinely unconfigured rather than merely different
+#: from the budget under test.
+SQLITE_DEFAULT_CACHE_SIZE_PRAGMA: Final = -2000
+
+
+def cache_size_pragma(cache_bytes: int) -> int:
+    """Return the ``PRAGMA cache_size`` value that requests ``cache_bytes`` of page cache.
+
+    SQLite reads a **negative** ``cache_size`` as a kibibyte budget and a positive one as a
+    page count. A page count is the wrong unit here: it silently means a different amount of
+    memory at a different ``page_size``, so a budget stated in bytes is converted to the
+    negative form rather than divided by an assumed page size.
+
+    Args:
+        cache_bytes: The requested budget in bytes. Must be a positive whole number of
+            kibibytes -- a fractional kibibyte has no representation in this form, and
+            rounding one silently would make the effective budget disagree with the requested
+            one.
+
+    Raises:
+        WorkingCatalogError: the budget is not a positive whole number of kibibytes.
+    """
+    if cache_bytes <= 0:
+        message = f"a working-catalog cache budget must be positive; got {cache_bytes} bytes"
+        raise WorkingCatalogError(message)
+    kibibytes, remainder = divmod(cache_bytes, 1024)
+    if remainder:
+        message = (
+            f"a working-catalog cache budget must be a whole number of kibibytes; "
+            f"{cache_bytes} bytes is not"
+        )
+        raise WorkingCatalogError(message)
+    return -kibibytes
+
 
 #: The four states the accepted D111 instrument requires a run-local source to be
 #: distinguishable between.
@@ -322,14 +361,31 @@ class WorkingCatalog:
     Leaving closes both. The accepted catalog is never opened for writing on any path here, so
     nothing in this class can alter one of its bytes.
 
+    **The page cache is a connection-local execution parameter, and it is opt-in.** SQLite
+    configures no ``cache_size`` unless one is asked for, which leaves a writer on the
+    two-mebibyte default however large the database grows -- and a random-write working set far
+    larger than that is what accepted Decision 118 measured as the primary constraint on real
+    materialization throughput. ``cache_bytes`` sets one, on **this** connection alone: it is
+    applied to the writing handle this class opens on its own run-local copy, after the handle
+    exists, and it reaches no other connection, no other database, and no global default. A
+    caller that asks for nothing gets exactly the behaviour it got before, which is why the
+    parameter defaults to ``None`` rather than to a value.
+
+    A cache budget changes how much memory the write is allowed to use, and nothing else. It
+    moves no row, no identity, no digest, and no commit boundary.
+
     Args:
         source_path: The accepted operational catalog to derive from. Read-only.
         directory: The run-local directory to build in. Must not already hold a working
             catalog; a silent reuse would make a second attempt's progress indistinguishable
             from the first's.
+        cache_bytes: An explicit page-cache budget for the writing connection, in bytes, or
+            ``None`` for SQLite's own default. See :func:`cache_size_pragma`.
     """
 
-    def __init__(self, source_path: Path, directory: Path) -> None:
+    def __init__(
+        self, source_path: Path, directory: Path, *, cache_bytes: int | None = None
+    ) -> None:
         self._source_path = source_path
         self._directory = directory
         self._path = directory / WORKING_CATALOG_FILENAME
@@ -338,6 +394,10 @@ class WorkingCatalog:
         self._ledger: RunProgressLedger | None = None
         self._connection: sqlite3.Connection | None = None
         self._context: object = None
+        #: Validated at construction rather than at ``__enter__``, so an unrepresentable
+        #: budget is refused before a copy of the accepted catalog has been taken.
+        self._cache_bytes = cache_bytes
+        self._cache_pragma = None if cache_bytes is None else cache_size_pragma(cache_bytes)
 
     # -- lifecycle --------------------------------------------------------- #
     def __enter__(self) -> WorkingCatalog:
@@ -347,6 +407,11 @@ class WorkingCatalog:
         context = connect(self._path, writer=True)
         self._context = context
         self._connection = context.__enter__()
+        if self._cache_pragma is not None:
+            # Connection-local, and deliberately set here rather than inside ``connect``:
+            # every other caller of that function -- the operational catalog included -- must
+            # keep the durability and cache behaviour it already has.
+            self._connection.execute(f"PRAGMA cache_size = {self._cache_pragma}")
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -379,6 +444,25 @@ class WorkingCatalog:
             message = "working catalog is not open; use it as a context manager"
             raise WorkingCatalogError(message)
         return self._ledger
+
+    @property
+    def requested_cache_bytes(self) -> int | None:
+        """The page-cache budget this working catalog was asked for, or ``None``."""
+        return self._cache_bytes
+
+    @property
+    def requested_cache_size_pragma(self) -> int | None:
+        """The ``PRAGMA cache_size`` value the budget resolves to, or ``None``."""
+        return self._cache_pragma
+
+    @property
+    def effective_cache_size_pragma(self) -> int:
+        """What the writing connection **reports** its ``cache_size`` to be.
+
+        Read back from SQLite rather than echoed from the request, so a caller verifying the
+        budget is verifying the connection rather than its own argument.
+        """
+        return int(self.connection.execute("PRAGMA cache_size").fetchone()[0])
 
     @property
     def identity(self) -> WorkingCatalogIdentity:

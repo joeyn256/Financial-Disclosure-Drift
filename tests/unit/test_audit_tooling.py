@@ -10,15 +10,19 @@ that a reader would otherwise have to take on trust:
 * **The mutation runner is not part of the package.** Asserted by searching `src/` for any
   reference to it, so the boundary Decision 076 §9 draws is enforced rather than intended.
 * **It refuses the authoritative repository.** Asserted directly against this repository.
-* **All 38 definitions recover, and every live anchor but the superseded M19 resolves** against
-  the live target. This is the §14 validation invariant kept standing: if M3.3 source drifts away
-  from the durable campaign record, that record has stopped describing the executable target and
-  this test says so. The one exception is ruled on by Decision 097 R87 rather than tolerated:
-  Decision 094 §6.5 deleted the candidate-layer full-index observation query M19 mutates, and
-  Decision 096 R83 moved that invariant to the pre-association E0 projection proved in
-  `tests/unit/test_m3_e0.py`. M19's historical definition and its two KILLED results stand
-  untouched; only its applicability to the *current* target is superseded, and the partition is
-  asserted exactly, so a second missing anchor is a new failure rather than one M19 absorbs.
+* **All 38 definitions recover, and every live anchor but the two superseded ones resolves**
+  against the live target. This is the §14 validation invariant kept standing: if M3.3 source
+  drifts away from the durable campaign record, that record has stopped describing the executable
+  target and this test says so. Both exceptions are ruled on rather than tolerated. Decision 097
+  R87 disposes M19: Decision 094 §6.5 deleted the candidate-layer full-index observation query it
+  mutates, and Decision 096 R83 moved that invariant to the pre-association E0 projection proved
+  in `tests/unit/test_m3_e0.py`. Decision 114 R2 disposes M21: Decision 113 §9 replaced the
+  preloaded whole-catalog accession set its anchor is written against with the per-accession
+  primary-key lookup accepted Decision 110 §8 requires, which leaves the **R23** §5.1 predicate
+  itself unchanged and still proved by `tests/unit/test_m3_offline_parse.py`. Both historical
+  definitions and all four KILLED results stand untouched; only applicability to the *current*
+  target is superseded, and the partition is asserted exactly, so a third missing anchor is a new
+  failure rather than one the two absorb.
 
 Both tools are additionally held to what they must *not* do -- no fetch, no pull, no mutation --
 by parsing their source and collecting the subcommand of every Git call they make, rather than by
@@ -207,19 +211,46 @@ def test_every_definition_is_recovered_from_the_durable_record() -> None:
         assert all(selection.startswith("tests/") for selection in mutation.expected_test)
 
 
-#: The one M1-M38 anchor whose applicability to the *live* target Decision 097 R87 supersedes.
-#: Its historical definition and both KILLED results remain valid for the frozen targets they
-#: describe; what moved is the code, not the evidence.
-_SUPERSEDED_LIVE_ANCHOR = "M19"
+#: The M1-M38 anchors whose applicability to the *live* target an owner ruling supersedes, in the
+#: order ``verify_anchors`` reports them. Every historical definition and every KILLED result
+#: remains valid for the frozen target it describes; what moved is the code, not the evidence.
+#:
+#: * **M19** -- Decision 097 R87. Decision 094 §6.5 deleted the candidate-layer full-index
+#:   observation query it mutates, and Decision 096 R83 re-proved that invariant at the
+#:   pre-association E0 projection.
+#: * **M21** -- Decision 114 R2. Decision 113 §9 replaced the preloaded whole-catalog accession
+#:   set its anchor is written against with the per-accession primary-key lookup accepted
+#:   Decision 110 §8 requires for memory boundedness. The **R23** §5.1 predicate is unchanged.
+#:
+#: These are two exact dispositions, not a general exception: each is pinned below by file,
+#: locus, and exact anchor text, and the partition is asserted as exact equality.
+_SUPERSEDED_LIVE_ANCHORS = ["M19", "M21"]
 
-#: A second anchor in the same file, used below to show the exact-equality assertion discriminates
-#: by anchor identity rather than merely by count.
+#: A third anchor, used below to show the exact-equality assertion discriminates by anchor
+#: identity rather than merely by count.
 _CONTROL_ANCHOR = "M20"
 
 #: The exact query M19 mutates, deleted from the candidate layer by Decision 094 §6.5. Spelled out
 #: here rather than read back from the record, so a future edit to *either* one is visible.
-_SUPERSEDED_ANCHOR_QUERY = (
-    "\"WHERE o.field_name = 'cik_padded' AND s.source_id = 'sec_full_index_company' \""
+_M19_ANCHOR = "\"WHERE o.field_name = 'cik_padded' AND s.source_id = 'sec_full_index_company' \""
+
+#: The exact preloaded-set membership test M21 mutates, replaced by Decision 113 §9 and spelled
+#: out for the same reason. ``known`` held one string per catalog accession -- roughly 21.5
+#: million strings and about 2.9 GB on E0's first planned source -- which is the whole-catalog
+#: preload accepted Decision 110 §8 required removed.
+_M21_ANCHOR = (
+    "            if plain not in known:\n"
+    "                unbound.add(plain)\n"
+    "                continue"
+)
+
+#: The live form of that same predicate. The canonical row is fetched by primary key instead, and
+#: an accession the authoritative layer does not carry is still reported and skipped -- never
+#: created. This is the **R23** §5.1 behaviour M21 covers, asserted against the shipped parser.
+_M21_LIVE_PREDICATE = (
+    "            if canonical is None:\n"
+    "                unbound.add(plain)\n"
+    "                continue"
 )
 
 
@@ -239,7 +270,7 @@ def _mirrored_target(root: Path, relatives: set[str]) -> Path:
     return root
 
 
-def test_every_live_anchor_but_the_superseded_m19_resolves_against_the_live_target(
+def test_every_live_anchor_but_the_two_superseded_ones_resolves_against_the_live_target(
     tmp_path: Path,
 ) -> None:
     """Decision 076 §9's recovered definitions, held against the target they describe.
@@ -248,46 +279,71 @@ def test_every_live_anchor_but_the_superseded_m19_resolves_against_the_live_targ
     stopped describing the executable target -- which is exactly the fact a reviewer needs before
     trusting any inherited campaign result.
 
-    Decision 097 R87 rules that exactly one anchor has legitimately stopped describing it. M19
-    mutates a candidate-layer full-index observation query that Decision 094 §6.5 deleted in favour
-    of the canonical ``census_accession_registrants`` relation plus
-    ``registrant_set_completeness``; Decision 096 R83 re-proved the same invariant at the
-    pre-association E0 projection. So the truthful live partition is 38 definitions recovered, 37
-    anchors resolved, ``['M19']`` superseded, and nothing else missing -- and that is asserted as
-    exact equality, not as a tolerated exception.
+    Exactly two anchors have legitimately stopped describing it, each disposed by its own owner
+    ruling. Decision 097 R87 disposes M19, which mutates a candidate-layer full-index observation
+    query that Decision 094 §6.5 deleted in favour of the canonical ``census_accession_registrants``
+    relation plus ``registrant_set_completeness``, and whose invariant Decision 096 R83 re-proved at
+    the pre-association E0 projection. Decision 114 R2 disposes M21, which mutates the preloaded
+    whole-catalog accession set that Decision 113 §9 replaced with the per-accession primary-key
+    lookup accepted Decision 110 §8 requires; its **R23** §5.1 predicate -- an index-only accession
+    is *reported*, never manufactured -- is unchanged, and is asserted below against both the
+    shipped parser and the killing test the definition itself names.
+
+    So the truthful live partition is 38 definitions recovered, 36 anchors resolved,
+    ``['M19', 'M21']`` superseded, and nothing else missing -- and that is asserted as exact
+    equality, not as a tolerated exception.
     """
     mutations = _campaign.recover_definitions(_ARTIFACT.read_text(encoding="utf-8"))
     definitions = {mutation.mutation_id: mutation for mutation in mutations}
 
-    # Every historical definition still recovers, in order: the supersession below is a statement
-    # about one anchor's target, and says nothing about the record's completeness.
+    # Every historical definition still recovers, in order: the supersessions below are statements
+    # about two anchors' targets, and say nothing about the record's completeness.
     assert [mutation.mutation_id for mutation in mutations] == [f"M{n}" for n in range(1, 39)]
 
     # The live partition itself.
-    assert _campaign.verify_anchors(_REPO_ROOT, mutations) == [_SUPERSEDED_LIVE_ANCHOR]
+    assert _campaign.verify_anchors(_REPO_ROOT, mutations) == _SUPERSEDED_LIVE_ANCHORS
 
-    # Pinned by file, locus, and the exact query -- so a renamed, relocated, or rewritten anchor
-    # cannot quietly inherit M19's disposition.
-    superseded = definitions[_SUPERSEDED_LIVE_ANCHOR]
-    assert superseded.source_path == "src/disclosure_drift/m3/candidate_snapshot.py"
-    assert "_read_full_index_registrants" in superseded.semantic_locus
-    assert superseded.old_anchor == _SUPERSEDED_ANCHOR_QUERY
+    # Both are pinned by file, locus, and the exact anchor text -- so a renamed, relocated, or
+    # rewritten anchor cannot quietly inherit either disposition.
+    m19 = definitions["M19"]
+    assert m19.source_path == "src/disclosure_drift/m3/candidate_snapshot.py"
+    assert "_read_full_index_registrants" in m19.semantic_locus
+    assert m19.old_anchor == _M19_ANCHOR
 
-    # The reason it no longer resolves is Decision 094 §6.5's deletion, not drift: the removed
-    # fallback is gone from the live candidate builder, and the canonical consumer source it was
-    # replaced by is present.
-    builder = (_REPO_ROOT / superseded.source_path).read_text(encoding="utf-8")
+    m21 = definitions["M21"]
+    assert m21.source_path == "src/disclosure_drift/m3/offline_parse.py"
+    assert "_materialize_full_index_registrants" in m21.semantic_locus
+    assert m21.old_anchor == _M21_ANCHOR
+    assert m21.expected_test == ("tests/unit/test_m3_offline_parse.py",)
+
+    # M19's reason is Decision 094 §6.5's deletion, not drift: the removed fallback is gone from
+    # the live candidate builder, and the canonical consumer source it was replaced by is present.
+    builder = (_REPO_ROOT / m19.source_path).read_text(encoding="utf-8")
     assert "_read_full_index_registrants" not in builder
-    assert _SUPERSEDED_ANCHOR_QUERY not in builder
+    assert _M19_ANCHOR not in builder
     assert "sec_full_index_company" not in builder
     assert "census_accession_registrants" in builder
     assert "registrant_set_completeness" in builder
 
-    # Decision 097 R87 creates no generic missing-anchor exception, so the equality above must
-    # reject any *other* or *additional* missing anchor. Exercised against a disposable mirror,
-    # which first reproduces the live partition and is then deliberately drifted by one anchor.
+    # M21's reason is Decision 113 §9's memory-bounded rewrite, not drift. The whole-catalog
+    # preload is gone, the per-accession primary-key lookup that replaced it is present, and the
+    # **R23** §5.1 predicate M21 covers is still written in the live parser.
+    parser = (_REPO_ROOT / m21.source_path).read_text(encoding="utf-8")
+    assert _M21_ANCHOR not in parser
+    assert "not in known" not in parser
+    assert "FROM census_accessions WHERE accession_plain = ?" in parser
+    assert _M21_LIVE_PREDICATE in parser
+
+    # ...and the killing test M21's own definition names still holds that predicate directly, so
+    # the invariant is covered by a live proof rather than only by a superseded anchor.
+    proof = (_REPO_ROOT / m21.expected_test[0]).read_text(encoding="utf-8")
+    assert "def test_an_index_only_accession_is_reported_and_never_created" in proof
+
+    # Neither ruling creates a generic missing-anchor exception, so the equality above must reject
+    # any *other* or *additional* missing anchor. Exercised against a disposable mirror, which
+    # first reproduces the live partition and is then deliberately drifted by one anchor.
     mirror = _mirrored_target(tmp_path / "mirror", {m.source_path for m in mutations})
-    assert _campaign.verify_anchors(mirror, mutations) == [_SUPERSEDED_LIVE_ANCHOR]
+    assert _campaign.verify_anchors(mirror, mutations) == _SUPERSEDED_LIVE_ANCHORS
 
     control = definitions[_CONTROL_ANCHOR]
     drifted = mirror / control.source_path
@@ -295,18 +351,17 @@ def test_every_live_anchor_but_the_superseded_m19_resolves_against_the_live_targ
         drifted.read_text(encoding="utf-8").replace(control.old_anchor, "", 1), encoding="utf-8"
     )
 
-    # One anchor missing *in addition* to M19.
+    # One anchor missing *in addition* to the two superseded ones.
     additional = _campaign.verify_anchors(mirror, mutations)
-    assert additional == [_SUPERSEDED_LIVE_ANCHOR, _CONTROL_ANCHOR]
-    assert additional != [_SUPERSEDED_LIVE_ANCHOR]
+    assert additional == ["M19", _CONTROL_ANCHOR, "M21"]
+    assert additional != _SUPERSEDED_LIVE_ANCHORS
 
-    # A single missing anchor that is not M19: same shape, so this proves the assertion
-    # discriminates by identity and not by length.
-    different = _campaign.verify_anchors(
-        mirror, [m for m in mutations if m.mutation_id != _SUPERSEDED_LIVE_ANCHOR]
-    )
-    assert different == [_CONTROL_ANCHOR]
-    assert different != [_SUPERSEDED_LIVE_ANCHOR]
+    # Dropping one superseded definition leaves the other plus the control: the same length as the
+    # live partition and different identities, so this proves the assertion discriminates by
+    # identity and not by length.
+    different = _campaign.verify_anchors(mirror, [m for m in mutations if m.mutation_id != "M19"])
+    assert different == [_CONTROL_ANCHOR, "M21"]
+    assert different != _SUPERSEDED_LIVE_ANCHORS
 
 
 def test_a_block_missing_a_field_is_not_durably_recoverable() -> None:

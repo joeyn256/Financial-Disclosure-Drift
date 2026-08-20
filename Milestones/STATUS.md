@@ -1,10 +1,109 @@
 # Milestones/STATUS.md — concrete-state ledger
 
-CURRENT_STAGE: M3.3 PRE-E0 — D116 IS OWNER-ACCEPTED AND PUBLISHED, THE FIRST REAL SINGLE-SOURCE CANARY (D117) RAN AND FAILED AT A THROUGHPUT GATE, THE D118 READ-ONLY DIAGNOSIS OF THAT FAILURE IS OWNER-ACCEPTED, AND THE CURRENT WORK IS THE D119 BOUNDED CACHE-BOUND PERSISTENCE CORRECTION. D116: accepted (M3_3_D116_DISPOSABLE_SINGLE_SOURCE_EXECUTION_PATH) and published to origin/main; the disposable single-source compact canary path is the accepted execution path. D117: the first REAL canary ran over the accepted sec_bulk_submissions first planned source and was STOPPED AT A THROUGHPUT GATE (M3_3_D117_THROUGHPUT_FAILURE_OWNER_ACCEPTED) — no source terminal, none of the five complete-source identities, NO SUCCESS TOKEN. What held: the accepted operational catalog stayed byte-identical and was never opened for writing, every write landed in the run-local D111 working catalog, memory stayed bounded, and committed batches were durable under a parser run that claimed nothing. The world it left, about 25.65 GiB, is PRESERVED DIAGNOSTIC EVIDENCE and must not be resumed, modified, promoted, vacuumed, reindexed, or deleted. D118: the cause is accepted (M3_3_D118_READ_ONLY_PERFORMANCE_DIAGNOSIS_OWNER_ACCEPTED, rulings R21–R26) as SQLite random-write amplification against a working set far larger than effective cache residency — an 8 GiB host, a 25.65 GiB working catalog, and NO cache_size ever configured so about 2 MiB of page cache carried the whole write, with a >= 169.61 GiB WAL lower bound, a >= 13.22x physical-write amplification lower bound, cold access about 45-85x warm, throughput decaying with database size, and CPU parsing NOT dominant. R21 supersedes the D113 §14 performance samples AS A PREDICTIVE ASSUMPTION ONLY, and with them the former 8-hour first-source gate, WITHOUT authorizing a longer run; R23 records projection/resolution/association/final evidence as UNMEASURED at real scale; R24 records the capacity density as STRAINED BUT NOT INVALIDATED at about +28.2% above the accepted submissions density with NO capacity constant or model change; R25 and R26 defer the sidecar autocommit cadence and every schema and index change. D119 (current): C1 ONLY — an explicit 512 MiB page cache, PRAGMA cache_size = -524288, on the run-local WRITABLE D111 working catalog alone, opt-in through a cache_bytes parameter defaulting to None and requested explicitly by the D116 canary path — plus a diagnostic-only m3 canary-source --mode profile-prefix --member-limit N surface that runs the exact accepted path over the first N governed members and stops before any source-level finalization, classified INCOMPLETE_DIAGNOSTIC_PREFIX. C1 is the ONLY performance behaviour that moved. MIGRATION HEAD REMAINS 0015 and 0016 is absent. E0-v3 REMAINS UNAUTHORIZED. NO THREE-SOURCE CANARY IS AUTHORIZED.
-ACTIVE_BLOCKER: THE D119 CACHE CORRECTION AND PREFIX DIAGNOSTIC SURFACE ARE IMPLEMENTED AND NOT OWNER-ACCEPTED, AND NO REAL EXECUTION AUTHORIZATION OF ANY KIND EXISTS. Nothing in this repository — not this file, not a passing gate, not a local commit, not the D119 completion token — is that acceptance. The D117 retry, the three-source canary, and the real replay proof remain NOT RUN and NOT AUTHORIZED, and D118 R23 states that no full-source retry follows from improved materialization throughput alone: a later bounded finalization measurement is required first. All three execution authorities are None, migration 0016 is unapplied and the operational catalog stays at head 0015, no E0-v3 namespace exists, both tracked network switches stay false at request ceiling 0, and the preserved D117 world stays unopened.
-IMPLEMENTATION_AUTHORIZATION: EXERCISED — THE D119 OWNER IMPLEMENTATION INSTRUMENT (RULINGS R21–R28) AUTHORIZED THE 512 MiB WORKING-CATALOG CACHE CORRECTION, THE BOUNDED DIAGNOSTIC PREFIX SURFACE, THEIR TESTS, THE D117/D118/D119 GOVERNANCE RECORDS, THE NAVIGATION ENTRIES, THE TWO NAMED DOCUMENTATION CORRECTIONS, AND ONE LOCAL COMMIT. The touched source paths are src/disclosure_drift/m3/working_catalog.py, src/disclosure_drift/m3/offline_parse.py, src/disclosure_drift/m3/single_source_canary.py, src/disclosure_drift/cli.py, and tests/unit/test_d119_cache_and_prefix.py (new), with Docs/Decisions/decision_117_*.md, decision_118_*.md, and decision_119_*.md (all new), the three registry lines, the Docs/decision_index.md and Docs/change_impact_map.md navigation entries, and the two corrections that instrument expressly named — R28 (this file) and R27 (the CompactSourceEvidence._seen docstring, documentation only, the structure unchanged). NO real SEC source was parsed, no real prefix world was created, the preserved D117 world was not opened, no migration was applied, nothing was promoted, and the commit is local and unpushed with no tag.
-NEXT_AUTHORIZED_ACTION: RETURN THE D119 IMPLEMENTATION TO THE PROJECT OWNER (GPT-5.6 Sol) FOR REVIEW AND STOP. The completion token M3_3_D119_CACHE_PREFIX_IMPLEMENTATION_READY_FOR_OWNER_REVIEW states that the bounded implementation is finished; it is NOT owner acceptance, NOT D120 authorization, NOT D117 retry authorization, NOT three-source authorization, and NOT E0-v3 authorization. Do not push, do not tag, and do not run D120: a new owner instrument is required before any real source is parsed, and neither a cleared cache nor a green gate supplies one.
+CURRENT_STAGE: M3.3 PRE-E0 — GOVERNANCE IS RECONCILED THROUGH D122. THREE RETROSPECTIVE PUBLICATION RECORDS NOW CARRY OWNER-ACCEPTED WORK THAT COMPLETED BEFORE THEY EXISTED, PUBLISHED SO DURABLE GOVERNANCE REFLECTS ACCEPTED HISTORY TRUTHFULLY; THE AUTHORITY AT EXECUTION TIME WAS THE GPT-5.6 SOL OWNER INSTRUMENT IN EVERY CASE, NEVER THIS REPOSITORY. D120 ACCEPTED (M3_3_D120_REAL_120K_CACHE_PROFILE_OWNER_ACCEPTED): run m3_3_d120_cache_120k_prefix_v1, the first REAL use of the D119 prefix surface — the first 120,000 governed deterministic members of the accepted sec_bulk_submissions first source, local Apple M1 with 8 GiB RAM, published baseline ac4636cb..., 512 MiB WorkingCatalog cache, batch 250, WAL, synchronous FULL, checkpoint every batch. Elapsed 16,006.98 s = 4.446 h; peak RSS about 2.271 GiB; working DB 19,922,350,080 B = about 18.554 GiB; compact sidecar 33,366,016 B; final WAL 0; 9,157,697 parsed accessions; 8,258,521 durable canonical accessions. Classification INCOMPLETE_DIAGNOSTIC_PREFIX — no source terminal, no parser_state transition, none of the five complete-source identities. Owner conclusions: C1 512 MiB IS RETAINED and is a MODEST REAL IMPROVEMENT, it DOES NOT REMOVE the DB-size-dependent throughput collapse, and NO COMPLETE-SOURCE RETRY follows from D120 alone. C3 CLOSED AS IMMATERIAL: M3_3_PERF_C3_LOCAL_40K_V1 was a NON-GOVERNED EXPLORATORY experiment, NOT a decision and carrying NO DECISION NUMBER — 40,000 members, sidecar commits 40,000 -> 160, BYTE-IDENTICAL sidecar evidence against the D120 first 40k, about 8.1% SLOWER than the D120 control with single-run host-drift ambiguity acknowledged. Owner conclusion: batching is IMMATERIAL FOR THROUGHPUT, DO NOT INTEGRATE C3, NO PAIRED RERUN (M3_3_PERF_C3_LOCAL_40K_OWNER_ACCEPTED). It is recorded as chronology in D121 section 3. D121 ACCEPTED (M3_3_D121_FINALIZATION_FEASIBILITY_PREFLIGHT_OWNER_ACCEPTED): a READ-ONLY preflight that wrote, created, modified, parsed, and deleted nothing. Its structural core is the F1/F2 SPLIT — F1 (count_persisted_accession_resolutions) is batched at 250 with checkpoint(TRUNCATE) at each boundary and is NOT one giant transaction, so an interruption loses at most the open batch; F2 (materialize_census_associations) writes AND checks in ONE TRANSACTION across both association traversals and the totality check, SQLite CANNOT CHECKPOINT AN UNCOMMITTED WAL, and an interruption LOSES THE ENTIRE F2 TRANSACTION — a Decision 094 all-or-nothing CORRECTNESS PROPERTY, not a defect to batch away. D120 is performance-representative of the FIRST-SOURCE CANARY finalization shape BECAUSE FULL-INDEX EVIDENCE IS ABSENT IN BOTH, and is NOT representative of full 76-source E0 finalization. Storage: the D120 world is about 18.554 GiB, APFS clonefile/cp -c is confirmed available, and copy-on-write must still be budgeted as POTENTIALLY FULL DIVERGENCE. Owner rulings: D120 IMMUTABLE; F1 and F2 separately measured and separately authorized; FINALIZATION CHARACTERIZATION IS THE HIGHEST-PRIORITY UNKNOWN; the complete-source local canary conservative free-space PLANNING FLOOR IS >= 85 GiB, a planning floor and not a capacity model, changing no Decision 113 constant; and NO COMPLETE-SOURCE AND NO E0 AUTHORITY. D122 ACCEPTED (M3_3_D122_D120_F1_FINALIZATION_OWNER_ACCEPTED): SHA-256 identities captured BEFORE any deletion — D117 1d124577..., D120 8356a2cc..., C3 de0fc98b... — then EXACTLY ONE authorized deletion, the C3 WORKING CATALOG, with its compact evidence, result, and progress artifacts RETAINED; NO D117 OR D120 DELETION WAS AUTHORIZED OR OCCURRED. The D120 world was APFS COPY-ON-WRITE CLONED into m3_3_d122_d120_f1_finalization_v1 and every write landed in the clone, the original never opened for writing. Exactly one F1 resolution pass over 8,258,521 accessions: elapsed 1,842.195 s = 0.5117 h; peak RSS 0.666 GiB; 5,104,568 field-resolution rows; 638,071 cohort-resolution rows; DB growth 3.360 GiB; WAL peak 1.12 MiB; final WAL 0; about 13.60 GiB of disk consumed including APFS CoW divergence, which MEASURES the D121 budgeting rule rather than relaxing it. NO F2 RAN AND NO COMPLETION ARTIFACT EXISTS. Accepted interpretation: F1 is characterized FOR THE FIRST-SOURCE-CANARY PATH ONLY; memory and WAL are BOUNDED; NO RESUME CURSOR EXISTS; the good F1 behaviour is NOT ATTRIBUTED TO C1 because NO CACHE A/B OCCURRED; and F2 REMAINS UNMEASURED AND IS NEXT. THE D122 F1 WORKING CATALOG IS PRESERVED as the input a later F2 characterization would take — preservation of an input, NOT authorization to consume it. MIGRATION HEAD REMAINS 0015 and 0016 is absent. E0-v3 REMAINS UNAUTHORIZED. NO COMPLETE-SOURCE RUN IS AUTHORIZED. NO THREE-SOURCE CANARY IS AUTHORIZED.
+ACTIVE_BLOCKER: F2 IS UNMEASURED, AND NO REAL EXECUTION AUTHORIZATION OF ANY KIND EXISTS IN THIS REPOSITORY. Finalization characterization is the highest-priority unknown (D121 section 7) and only its F1 half has been measured (D122 sections 5-6); the F2 association projection — one transaction across both traversals and the totality check, uncheckpointable, all-or-nothing on interruption — has never been run at real scale, and D122 explicitly does not authorize running it. Nothing in this repository is an execution authorization: not this file, not a passing gate, not a commit, not a push, and not the three retrospective records published here — a record of accepted history is not a grant. Publishing D120, D121, and D122 changes NO authority state whatsoever. D118 R23 still binds: no full-source retry follows from improved materialization throughput alone. The D117 retry, the complete-source canary, the three-source canary, and the real replay proof remain NOT RUN and NOT AUTHORIZED. All three execution authorities are None, migration 0016 is unapplied and the operational catalog stays at head 0015, no E0-v3 namespace exists, both tracked network switches stay false at request ceiling 0, and the preserved D117, D120, and D122 F1 worlds stay unopened and undeleted.
+IMPLEMENTATION_AUTHORIZATION: EXERCISED FOR GOVERNANCE PUBLICATION ONLY — THE OWNER'S 2026-08-20 M3.3 D120-D122 GOVERNANCE RECONCILIATION INSTRUCTION AUTHORIZED THIS DOCUMENTATION-ONLY RECONCILIATION AND ITS PUBLICATION, AND NOTHING ELSE. The touched paths are Docs/Decisions/decision_120_m3_3_real_120k_cache_profile_prefix.md, decision_121_m3_3_finalization_feasibility_preflight.md, and decision_122_m3_3_d120_f1_finalization_characterization.md (all new), the three Docs/Decisions/decision_registry.md index rows, seven Docs/decision_index.md navigation rows, and this file. NO SOURCE-CODE CHANGE, no test change, no schema or migration change, and no Docs/change_impact_map.md change were authorized or made — that map records code-surface impact, and D120, D121, and D122 change no code surface, which is the same treatment D117 and D118 received. NOTHING WAS EXECUTED: no D123, no F2, no canary, no complete-source run, no E0, no network, no migration 0016, no database access, and no world was created, opened, modified, or deleted. The three records published here are RETROSPECTIVE: they did not exist when the work they describe ran, they rewrite no timestamp and amend no earlier record, and they do not claim the repository authorized that work in advance.
+NEXT_AUTHORIZED_ACTION: NEXT TECHNICAL STAGE IS D123 — THE D120/D122-DERIVED F2 ASSOCIATION CHARACTERIZATION — AND IT IS NOT EXECUTED, NOT STARTED, AND NOT AUTHORIZED BY ANYTHING WRITTEN HERE. This entry records OWNER SEQUENCING ONLY. The separate existing owner D123 F2 instrument governs that execution; this governance publication is not it, and no F2 run may begin on the strength of this line. THE NEXT AUTHORIZED TECHNICAL ACTION IS NOT E0 AND NOT A COMPLETE-SOURCE RUN. Both remain unauthorized, as do the D117 retry, the three-source canary, the real replay proof, migration 0016, network, and acquisition. Do not delete any world: the D117, D120, and D122 F1 worlds are all preserved, and the single C3 working-catalog deletion is spent. Do not emit an owner-acceptance token — this session may publish accepted history and may not accept anything.
 
+
+> **CONTROLLING CURRENT POSITION, 2026-08-20 (LATEST) — governance reconciled through
+> [Decision 122](../Docs/Decisions/decision_122_m3_3_d120_f1_finalization_characterization.md),
+> over accepted
+> [Decision 120](../Docs/Decisions/decision_120_m3_3_real_120k_cache_profile_prefix.md) and
+> [Decision 121](../Docs/Decisions/decision_121_m3_3_finalization_feasibility_preflight.md).**
+> **All three are retrospective publications.** They did not exist when the work they record ran.
+> The authority at execution time was the **GPT-5.6 Sol owner instrument** in every case — never
+> this file, never another committed record, and never the repository itself. Nothing here rewrites
+> a timestamp, amends an earlier record, or claims the repository authorized that work in advance.
+> Their purpose is narrow and entirely sufficient: durable governance had stopped at D119 while
+> owner-governed work continued past it, and it now reflects accepted history truthfully.
+> **Publishing them grants no authority.** All three activation constants are `None`, migration
+> `0016` is unapplied, the operational catalog stays at head `0015`, no E0-v3 namespace exists,
+> both tracked network switches stay `false` at request ceiling `0`, and nothing below reopens any
+> of them.
+>
+> **D120: the cache correction met real data, and improved it without fixing it.**
+> `M3_3_D120_REAL_120K_CACHE_PROFILE_OWNER_ACCEPTED`. Run `m3_3_d120_cache_120k_prefix_v1` was the
+> **first real** use of the Decision 119 §§6–8 prefix surface: the first **120,000** governed
+> deterministic members of the accepted `sec_bulk_submissions` first planned source, on a local
+> Apple M1 with `8 GiB` of RAM, against published baseline
+> `ac4636cb2d770ae9822e4e0216a480b05a423729`, under the Decision 119 §4 **C1** `512 MiB`
+> `WorkingCatalog` cache at batch `250`, WAL, `synchronous = FULL`, and a checkpoint every batch.
+> Measured: elapsed `16,006.98 s` = **`4.446 h`**; peak resident set about `2.271 GiB`; working
+> database `19,922,350,080 B` = about `18.554 GiB`; compact sidecar `33,366,016 B`; final
+> write-ahead log `0`; `9,157,697` parsed accessions; `8,258,521` durable canonical accessions —
+> processed and durable reported separately, as Decision 119 §8 requires. Classification
+> **`INCOMPLETE_DIAGNOSTIC_PREFIX`**: no source terminal, no `parser_state` transition, and none
+> of the five complete-source identities. **The owner conclusions are the point of the record.**
+> **C1 is retained** and is a **modest real improvement**; it **does not remove** the
+> database-size-dependent throughput collapse Decision 118 §1 diagnosed; and **no complete-source
+> retry follows from D120 alone**.
+>
+> **C3 is closed as immaterial, and it is not a decision.** `M3_3_PERF_C3_LOCAL_40K_V1` was a
+> **non-governed exploratory** performance experiment accepted as research evidence. Over `40,000`
+> members it cut sidecar commits `40,000` → `160` — the Decision 118 §6 (R25) candidate — produced
+> **byte-identical** sidecar evidence against the D120 first 40k, and measured about **`8.1%`
+> slower** than the D120 control, with the single-run host-drift ambiguity **acknowledged rather
+> than resolved**. Owner conclusion: the batching is **immaterial for throughput**, **C3 is not
+> integrated**, and **no paired rerun is authorized** —
+> `M3_3_PERF_C3_LOCAL_40K_OWNER_ACCEPTED`. It carries **no decision number**, because repository
+> convention numbers an owner ruling and not an experiment; it is recorded as chronology in
+> Decision 121 §3.
+>
+> **D121: finalization is two shapes, and only one of them is safe to interrupt.**
+> `M3_3_D121_FINALIZATION_FEASIBILITY_PREFLIGHT_OWNER_ACCEPTED`, a **read-only** preflight that
+> wrote nothing, created nothing, modified nothing, parsed nothing, and deleted nothing. **F1** —
+> `count_persisted_accession_resolutions` — is batched at `250` with a `checkpoint(TRUNCATE)` at
+> each boundary and is **not** a single giant transaction, so an interruption loses at most the
+> open batch. **F2** — `materialize_census_associations` — writes **and checks** in **one
+> transaction** spanning both association traversals and the §9.5 totality check; SQLite **cannot
+> checkpoint an uncommitted write-ahead log**; and an interruption **loses the entire F2
+> transaction**. That single transaction is the Decision 094 §§6.2–6.4 all-or-nothing
+> **correctness property**, not a defect to be batched away — the finding is that F2's cost and
+> its log high-water mark are **unmeasured**. **D120's validity is bounded**: it is
+> performance-representative of the **first-source canary** finalization shape **because
+> full-index evidence is absent in both**, and it is **not** representative of full 76-source E0
+> finalization. **Storage**: the D120 world is about `18.554 GiB`, APFS `clonefile` / `cp -c` is
+> confirmed available on this host, and copy-on-write must still be budgeted as **potentially full
+> divergence**. **Owner rulings**: D120 is **immutable**; F1 and F2 are separately measured and
+> separately authorized; **finalization characterization is the highest-priority unknown**; the
+> complete-source local canary conservative free-space **planning floor is `>= 85 GiB`** — a
+> planning floor, not a capacity model, changing no Decision 113 capacity constant; and **no
+> complete-source and no E0 authority** is granted.
+>
+> **D122: F1 is characterized, one artifact was reclaimed, and everything else was kept.**
+> `M3_3_D122_D120_F1_FINALIZATION_OWNER_ACCEPTED`. **SHA-256 identities were captured before
+> anything was deleted** — D117 `1d124577…`, D120 `8356a2cc…`, C3 `de0fc98b…` — and then
+> **exactly one deletion was authorized and exactly one occurred: the C3 working catalog**, with
+> its compact evidence, result, and progress artifacts **retained**, so the C3 findings survive
+> their database. **No D117 or D120 deletion was authorized, and none occurred.** The D120 world
+> was **APFS copy-on-write cloned** into `m3_3_d122_d120_f1_finalization_v1`, every write landed
+> in the clone, and the original was never opened for writing. **Exactly one F1 resolution pass**
+> ran over `8,258,521` accessions: elapsed `1,842.195 s` = **`0.5117 h`**; peak resident set
+> `0.666 GiB`; `5,104,568` field-resolution rows; `638,071` cohort-resolution rows; database
+> growth `3.360 GiB`; write-ahead-log peak `1.12 MiB` finishing at `0`; and about **`13.60 GiB`**
+> of disk consumed including copy-on-write divergence — which **measures** the Decision 121 §6
+> budgeting rule rather than relaxing it. **No F2 ran, and no completion artifact exists**, so
+> nothing in that world claims a completed source. **Accepted interpretation**: F1 is characterized
+> **for the first-source-canary path only**; memory and the write-ahead log are **bounded**;
+> **no resume cursor exists**; the good F1 behaviour is **not** attributed to the C1 cache, because
+> **no cache A/B occurred**; and **F2 remains unmeasured and is next**.
+>
+> **What is preserved.** The D117, D120, and D122 F1 worlds are all preserved and immutable. The
+> D122 F1 working catalog is the input a later F2 characterization would take — and preserving an
+> input is a statement about the input, **not** authorization to consume it.
+>
+> **The next technical stage is D123 — the D120/D122-derived F2 association characterization — and
+> it is not executed and not authorized here.** This position records **owner sequencing only**.
+> The separate existing owner D123 F2 instrument governs that execution; this publication is not
+> it. **The next authorized technical action is not E0 and not a complete-source run**, and both
+> remain unauthorized along with the D117 retry, the three-source canary, the real replay proof,
+> migration `0016`, network, and acquisition.
+>
+> **Real state is untouched by this publication.** This was a documentation-only governance
+> reconciliation: no source code, no test, no schema, and no migration changed; no database was
+> opened; no world was created, opened, modified, or deleted; and no owner-acceptance token was
+> emitted. Publishing accepted history is not accepting anything.
 
 > **CONTROLLING CURRENT POSITION, 2026-08-19 (LATEST) — accepted
 > [Decision 119](../Docs/Decisions/decision_119_m3_3_cache_bound_persistence_and_prefix_diagnostic.md),

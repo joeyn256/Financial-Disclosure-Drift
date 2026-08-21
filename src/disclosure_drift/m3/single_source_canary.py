@@ -91,6 +91,7 @@ __all__ = [
     "CANARY_RESULT_FILENAME",
     "CANARY_RESOLUTION_SCOPE",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
+    "PRE_F2_MINIMUM_FREE_BYTES",
     "WORKING_CATALOG_CACHE_BYTES",
     "WORKING_CATALOG_CACHE_SIZE_PRAGMA",
     "CanaryPrefixResult",
@@ -161,6 +162,26 @@ CANARY_BATCH_SIZE: Final = 250
 #: The scope one resolution pass is recorded under in the sidecar. A canary resolves the whole
 #: working catalog exactly once, which is the same scope the accepted D113 §11 evidence uses.
 CANARY_RESOLUTION_SCOPE: Final = "catalog"
+
+#: The free-space floor that must hold on the run volume **immediately before F2 opens its
+#: single transaction**: 30 GiB, ``32,212,254,720`` bytes.
+#:
+#: Accepted **Decision 124 §9** (D124-R5) states the gate, and states it as a *boundary*
+#: measurement: it is taken immediately before opening F2 and is explicitly **not** inherited
+#: from the run's starting free-space gate.
+#:
+#: Accepted **Decision 126 §7** (D126-R6) records why it has to live here rather than in a
+#: launch wrapper or an external sampler. F1 returns and F2 begins in consecutive statements, so
+#: there is no window an outside process can occupy; nothing durable changes at the boundary, so
+#: an observer cannot tell "F1 finished" from "F2 is about to open" by reading state; a signal
+#: from outside is advisory where admission has to be dispositive; and free space sampled at any
+#: instant before the call describes a different instant than the one that matters. Tightening a
+#: sampler's cadence shrinks that race and never closes it. Only the path that is about to open
+#: the transaction can decline to open it.
+#:
+#: It is an **admission predicate**, not a budget. It moves no row, no ordering, no digest, and
+#: no identity, and F2's behaviour at or above the floor is exactly what it was before.
+PRE_F2_MINIMUM_FREE_BYTES: Final = 30 * 1024**3
 
 #: A run identity is a short, lowercase, filesystem-safe slug. It names one disposable world and
 #: is never reused: an identity that already has a world is refused rather than resumed.
@@ -845,6 +866,38 @@ class _Materialized:
     resolution: ResolutionEvidence
 
 
+def _require_pre_f2_free_space(directory: Path) -> int:
+    """Refuse F2 unless the run volume holds :data:`PRE_F2_MINIMUM_FREE_BYTES` free.
+
+    Free space is measured on ``directory``'s volume, which is the disposable world the working
+    catalog and its write-ahead log live on -- the volume F2's transaction actually consumes.
+
+    **Raising here is the whole mechanism.** The caller is the statement that would otherwise
+    call :func:`~disclosure_drift.m3.offline_parse.materialize_census_associations` next, so a
+    refusal lands **before** F2's single transaction opens rather than during it. Accepted
+    Decision 116 §5 keeps the surrounding rule intact: a refused run leaves the accepted catalog
+    unchanged, and a failed gate is reported rather than worked around or retried in place.
+
+    No path is named in the refusal, in keeping with the rest of this module.
+
+    Returns:
+        The measured free bytes, when they meet the floor.
+
+    Raises:
+        SingleSourceCanaryError: less than :data:`PRE_F2_MINIMUM_FREE_BYTES` is free.
+    """
+    free = shutil.disk_usage(directory).free
+    if free < PRE_F2_MINIMUM_FREE_BYTES:
+        message = (
+            f"pre-F2 free-space admission failed: {free} bytes free on the run volume, below "
+            f"the required minimum of {PRE_F2_MINIMUM_FREE_BYTES} bytes "
+            f"({PRE_F2_MINIMUM_FREE_BYTES // 1024**3} GiB); F2 was refused before its single "
+            "transaction opened, so the association projection never began"
+        )
+        raise SingleSourceCanaryError(message)
+    return free
+
+
 def _materialize(
     *,
     working: WorkingCatalog,
@@ -890,6 +943,10 @@ def _materialize(
         catalog.count_persisted_accession_resolutions(
             batch_size=batch_size, checkpoint_batches=True
         )
+        # Accepted Decision 126 §7 (D126-R6) places the Decision 124 §9 (D124-R5) >= 30 GiB
+        # gate exactly here, between F1's return and F2's call: this is the only point at which
+        # the measurement and the transaction it admits cannot be separated by a race.
+        _require_pre_f2_free_space(working.path.parent)
         totality = materialize_census_associations(connection, compact_evidence=True)
         counts = _counts(connection)
     working.ledger.mark_disposed(

@@ -1002,6 +1002,57 @@ preserved D117 world for parsing, creating a real prefix world, the three-source
 replay proof, enabling any activation constant, an E0-v3 namespace, migration `0016`, the
 persistence bridge, E1, E2, M3.4, network, SEC, HTTP, a push, or a tag.
 
+## Decision 127 — the pre-F2 free-space admission guard (real impact)
+
+[Decision 127](Decisions/decision_127_m3_3_pre_f2_admission_guard.md) implements the one thing
+[Decision 126](Decisions/decision_126_m3_3_complete_first_source_final_preflight.md) §7 (D126-R6)
+authorized: the [Decision 124](Decisions/decision_124_m3_3_capacity_reconciliation.md) §9 (D124-R5)
+`>= 30 GiB` free-space predicate, taken **immediately before F2 opens its single transaction**. The
+complete-source path had no such predicate — F1 returned and F2 was the next statement — and
+Decision 126 recorded that as the sole blocker on an otherwise passing live preflight.
+
+**It has to be in-path, and that is the whole design.** Decision 126 §7 rules that no external
+sampler can satisfy the predicate: no enforceable pause exists at the boundary, ledger state does not
+distinguish F1 from impending F2, an external process can signal but cannot decline admission
+atomically, and a sampling race survives any cadence. **Only the code about to open the transaction
+can decline to open it.**
+
+**What it deliberately does not add.** No `105 GiB` launch gate and no continuous `10 GiB` monitor in
+production code — Decision 126 §8 (D126-R5) makes both wrapper/monitor-enforced. No change to
+`create_world`, temporary-directory handling, the F1 or F2 algorithms, write-ahead log, checkpoint,
+cache, or `synchronous` settings, schemas, migrations, E0, any activation constant, or the network
+switches.
+
+| Surface touched | Change | Nearest tests |
+|---|---|---|
+| `src/disclosure_drift/m3/single_source_canary.py` | three additions, `57` lines, nothing removed or modified: the frozen `PRE_F2_MINIMUM_FREE_BYTES = 30 * 1024**3` = `32,212,254,720` bytes, exported in `__all__`; the `_require_pre_f2_free_space()` guard measuring `shutil.disk_usage(...).free` on the disposable world's own volume, comparing with a **strict `<`** so the floor itself admits, and raising `SingleSourceCanaryError` naming the actual free bytes, the required minimum, and that F2 was refused before its single transaction opened; and the call site placed **between** F1 and F2 inside `_materialize`. The [Decision 094](Decisions/decision_094_m3_3_pre_e0_executability_redesign.md) §6.4 resolution-before-projection ordering is unchanged | `tests/unit/test_d127_pre_f2_admission_guard.py`, `tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py` |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d127_pre_f2_admission_guard.py`. The canary
+path it guards, in both its complete-source and prefix shapes:
+`tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py`. The
+traversal and evidence contracts on either side of the boundary:
+`tests/unit/test_m3_offline_parse.py`, `tests/unit/test_d112_compact_evidence.py`. Operator surface
+and boundaries: `tests/integration/test_m3_cli.py`, `tests/unit/test_m3_3_boundaries.py`.
+
+**Expected identity movement: none.** The guard is an admission predicate, not a budget. It moves no
+row, no ordering, no digest, and no identity, and F2's behaviour at or above the floor is exactly what
+it was before. A run that clears the floor produces byte-identical evidence to one taken before the
+change.
+
+**One consequence is recorded rather than smoothed** (Decision 127 §5). The guard applies to every
+run of the path, including the Decision 116 and Decision 119 three-member synthetic worlds, so on a
+machine with less than `30 GiB` free those suites would refuse at the admission gate rather than fail
+at anything they test. Making the floor injectable or test-overridable is scope expansion, and a
+test-overridable safety floor is weaker than what D124-R5 asked for. The new proofs pin free space
+explicitly so that they never depend on the measuring machine.
+
+**What it does not authorize.** Running any real source, the complete-source run, the D117 retry, the
+three-source canary, the real replay proof, creating any disposable world, enabling any activation
+constant, an E0-v3 namespace, migration `0016`, the persistence bridge, E1, E2, M3.4, network, SEC,
+HTTP, or a tag. **Closing the Decision 126 §7 gap does not open the run**: Decision 127 is ready for
+independent review and is not owner-accepted, and Decision 126 §10 (D126-R8) still requires a
+regenerated run identity and a new final live preflight before any execution.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

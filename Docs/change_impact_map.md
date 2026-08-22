@@ -1113,6 +1113,16 @@ is not proving the repair**: D131-R7 rules that an ordinary `--member-limit` pre
 deferred shards, so the semantic proof requires a separately authorized fixture or mode and is the
 next stage.
 
+**That proof has since been performed, and it changed no code.**
+[Decision 132](Decisions/decision_132_m3_3_bounded_real_semantic_proof.md) records the bounded real
+semantic proof of the repair described in this section, over seven byte-exact real SEC members drawn
+from the accepted bulk archive: `0` historical shards reached the primary parser and `4` of `4`
+reached the historical one; explicit parent binding held across three distinct registrants; archive
+order changed no semantic output; and an orphaned-shard fixture was refused fail-closed. **It has no
+impact entry of its own because no source changed for it** — no production code, test, script,
+configuration, or migration moved — so every path and test named above stands exactly as written.
+The proof makes **no source-wide claim** and **certifies no D128 count**.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

@@ -15,6 +15,7 @@ from disclosure_drift.sec.archive import (
     canonical_member_name,
     extract_members,
     iter_members,
+    iter_named_members,
     safe_member_name,
 )
 
@@ -354,3 +355,126 @@ def test_new_collision_check_matches_removed_quadratic_scan(
         yielded = [item.name for item in iter_members(archive)]
         # Ordered lineage is preserved exactly: canonical names in archive (insertion) order.
         assert yielded == [canonical_member_name(name) for name in names]
+
+
+# --------------------------------------------------------------------------- #
+# Targeted named-member reads
+# --------------------------------------------------------------------------- #
+# ``iter_named_members`` exists for a caller that traversed the whole archive once, dropped
+# every payload on purpose, and must now read one member again by name. Its defences are the
+# per-member defences of the full traversal, reached through one implementation rather than
+# restated by the caller.
+MEMBER_THREE = b'{"cik":"0000000003"}'
+
+
+def named_archive(path: Path) -> Path:
+    return build(
+        path,
+        [
+            ("CIK0000000001.json", MEMBER_ONE),
+            ("CIK0000000002.json", MEMBER_TWO),
+            ("CIK0000000003.json", MEMBER_THREE),
+        ],
+    )
+
+
+def test_named_members_are_yielded_in_the_order_requested(tmp_path: Path) -> None:
+    """The requested sequence is the contract, not the archive's own order."""
+    archive = named_archive(tmp_path / "named.zip")
+
+    read = list(iter_named_members(archive, ["CIK0000000003.json", "CIK0000000001.json"]))
+
+    assert read == [("CIK0000000003.json", MEMBER_THREE), ("CIK0000000001.json", MEMBER_ONE)]
+
+
+def test_a_named_read_touches_only_the_members_it_was_asked_for(tmp_path: Path) -> None:
+    archive = named_archive(tmp_path / "subset.zip")
+
+    read = list(iter_named_members(archive, ["CIK0000000002.json"]))
+
+    assert [name for name, _ in read] == ["CIK0000000002.json"]
+
+
+def test_an_absent_named_member_is_refused_rather_than_skipped(tmp_path: Path) -> None:
+    """Silently yielding fewer members than were asked for would misreport the archive."""
+    archive = named_archive(tmp_path / "absent.zip")
+
+    with pytest.raises(ArchiveDefenceError, match="does not"):
+        list(iter_named_members(archive, ["CIK0000000001.json", "CIK0000009999.json"]))
+
+
+def test_a_named_member_that_resolves_to_two_entries_is_refused(tmp_path: Path) -> None:
+    """Two entries canonicalizing alike make the requested name ambiguous."""
+    archive = build(
+        tmp_path / "ambiguous.zip",
+        [("CIK0000000001.json", MEMBER_ONE), ("./CIK0000000001.json", MEMBER_TWO)],
+    )
+
+    with pytest.raises(ArchiveDefenceError, match="more than"):
+        list(iter_named_members(archive, ["CIK0000000001.json"]))
+
+
+def test_asking_for_the_same_member_twice_is_refused(tmp_path: Path) -> None:
+    archive = named_archive(tmp_path / "repeat.zip")
+
+    with pytest.raises(ArchiveDefenceError, match="more than once"):
+        list(iter_named_members(archive, ["CIK0000000001.json", "CIK0000000001.json"]))
+
+
+def test_a_named_read_refuses_a_traversal_name(tmp_path: Path) -> None:
+    """Canonicalization is applied before anything else, exactly as in the full traversal."""
+    archive = named_archive(tmp_path / "traversal.zip")
+
+    with pytest.raises(ArchiveDefenceError):
+        list(iter_named_members(archive, ["../CIK0000000001.json"]))
+
+
+def test_a_named_read_refuses_a_directory_entry(tmp_path: Path) -> None:
+    """A directory is never a readable member, however it is named."""
+    with zipfile.ZipFile(tmp_path / "dir.zip", "w") as archive:
+        archive.writestr("nested/", b"")
+        archive.writestr("nested/CIK0000000001.json", MEMBER_ONE)
+
+    with pytest.raises(ArchiveDefenceError, match="does not"):
+        list(iter_named_members(tmp_path / "dir.zip", ["nested"]))
+
+
+def test_a_named_read_refuses_an_oversized_member(tmp_path: Path) -> None:
+    """The declared-size defence is the traversal's own, not a second copy of it."""
+    archive = named_archive(tmp_path / "oversized.zip")
+
+    with pytest.raises(ArchiveDefenceError, match="exceeds the limit"):
+        list(iter_named_members(archive, ["CIK0000000001.json"], max_member_bytes=4))
+
+
+def test_a_named_read_refuses_an_implausible_expansion_ratio(tmp_path: Path) -> None:
+    archive = build(tmp_path / "bomb.zip", [("CIK0000000001.json", b"0" * 200_000)])
+
+    with pytest.raises(ArchiveDefenceError, match="expansion ratio"):
+        list(iter_named_members(archive, ["CIK0000000001.json"], max_ratio=1.5))
+
+
+def test_a_corrupt_archive_is_never_reported_as_holding_no_named_members(tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.zip"
+    corrupt.write_bytes(b"not a zip archive at all")
+
+    with pytest.raises(ArchiveDefenceError, match="corrupt"):
+        list(iter_named_members(corrupt, ["CIK0000000001.json"]))
+
+
+def test_a_named_read_holds_one_payload_at_a_time(tmp_path: Path) -> None:
+    """Boundedness: the reader is a generator and buffers no wider than one member.
+
+    Proved by consuming it lazily — the second member's bytes are not read until the first has
+    been handed over and dropped, which a reader that materialized the whole request would make
+    impossible to observe.
+    """
+    archive = named_archive(tmp_path / "lazy.zip")
+
+    stream = iter_named_members(archive, ["CIK0000000001.json", "CIK0000000002.json"])
+    first = next(stream)
+    assert first == ("CIK0000000001.json", MEMBER_ONE)
+    second = next(stream)
+    assert second == ("CIK0000000002.json", MEMBER_TWO)
+    with pytest.raises(StopIteration):
+        next(stream)

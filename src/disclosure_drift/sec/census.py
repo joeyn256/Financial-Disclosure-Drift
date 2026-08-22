@@ -591,9 +591,12 @@ class CensusCatalog:
           that has not been read yet. Each record is therefore inserted with its own part's
           verdict and one bounded ``UPDATE`` afterwards raises the flag for every identity any
           part reported. The flag is not part of any identity preimage, so no row's id moves.
-        * **Historical references are applied at the end.** :meth:`_insert_historical_references`
-          resolves its CIK from the lowest-``parsed_record_id`` registrant record of the whole
-          observation, so it must not run until every part's records exist.
+        * **Historical references are applied at the end.** They are accumulated per part and
+          written once, so a reference row's ``INSERT OR IGNORE`` cannot race a sibling part.
+          They no longer *need* to run last: each reference now carries its own declaring
+          registrant (accepted Decision 129 §6, D129-R4), so nothing here reads a parsed
+          record to resolve a CIK. The position is retained because it is the accepted write
+          order and moving it would change nothing except which rows land in which batch.
         * **Interleaving is safe.** Quarantine and structural rows go to tables that record
           normalization neither reads nor writes, so writing them per part rather than in three
           passes cannot change what normalization sees.
@@ -1855,30 +1858,38 @@ class CensusCatalog:
         that table's primary key requires a usable file name, so it is preserved in
         ``census_malformed_historical_references`` with its raw entry intact. Nothing
         is discarded, and a valid sibling is still recorded as retrievable.
+
+        **Each reference is written with its own parent registrant.** The CIK was formerly
+        resolved once per observation, from the lowest-``parsed_record_id`` registrant
+        record of the whole source, and stamped on every reference. That is correct only
+        where a source describes one registrant, and the bulk archive describes hundreds of
+        thousands: accepted Decision 129 §6 (D129-R4) records the result, ``5,337`` of
+        ``5,337`` rows carrying one CIK where ``4,144`` distinct registrants were
+        represented. The value now comes from
+        :attr:`~disclosure_drift.sec.parsers.submissions.HistoricalFileReference.registrant_cik_padded`,
+        set by the document that actually declared the entry, so no lookup, ordering, or
+        per-reference scan is involved and the D111 cost this method was tuned for does not
+        return. The persisted schema is unchanged: ``registrant_cik_padded`` already exists
+        on both tables and is already part of the primary key, so no migration is implied.
         """
         references = list(references)
         if not references:
             return
-        # The registrant CIK is a property of the *observation*, not of the reference, so
-        # it is resolved once. It used to be resolved inside the loop, which repeated an
-        # identical sort of every parsed record of the source per reference -- on E0's
-        # first planned source that is 4,675 sorts of tens of millions of rows for one
-        # answer (the accepted D111 remediation instrument). The value is unchanged.
-        row = connection.execute(
-            "SELECT payload_json FROM census_parsed_records "
-            "WHERE source_observation_id = ? AND native_identity LIKE 'registrant:%' "
-            "ORDER BY parsed_record_id LIMIT 1",
-            (observation_id,),
-        ).fetchone()
-        cik: str | None = None
-        if row is not None:
-            payload = json.loads(str(row["payload_json"]))
-            try:
-                cik = normalize_cik(str(payload.get("cik")))[1]
-            except IdentifierError:
-                cik = None
-
         for reference in references:
+            try:
+                cik = normalize_cik(reference.registrant_cik_padded)[1]
+            except IdentifierError as exc:
+                # Unreachable from the parser, which admits no reference until the
+                # declaring document's own CIK has normalized. Stated rather than assumed
+                # because the alternative to failing here is writing a reference under
+                # somebody else's registrant, which is the defect being repaired.
+                message = (
+                    f"historical reference {reference.name!r} at "
+                    f"{reference.location.describe()} carries an unusable parent registrant "
+                    f"CIK {reference.registrant_cik_padded!r}: {exc}. No registrant is "
+                    "inferred and no observation-wide value is substituted."
+                )
+                raise ValueError(message) from exc
             if not reference.is_retrievable or reference.name is None:
                 connection.execute(
                     "INSERT OR IGNORE INTO census_malformed_historical_references "
@@ -1904,8 +1915,6 @@ class CensusCatalog:
                         utc_now(),
                     ),
                 )
-                continue
-            if cik is None:
                 continue
             connection.execute(
                 "INSERT OR IGNORE INTO census_historical_references "

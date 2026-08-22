@@ -13,12 +13,29 @@ from disclosure_drift.sec.parsers.base import (
     RecordLocation,
     count_duplicates,
 )
-from disclosure_drift.sec.parsers.submissions import ACCESSION_ARRAY_FIELDS
+from disclosure_drift.sec.parsers.submissions import RECOGNIZED_RECENT_FIELDS
 
 __all__ = ["PARSER_ID", "PARSER_VERSION", "parse_historical_submissions"]
 
 PARSER_ID: Final = "submissions-historical"
-PARSER_VERSION: Final = "submissions-historical/1.0"
+PARSER_VERSION: Final = "submissions-historical/1.1"
+"""Moved from ``1.0`` by Decision 131 Repair C.
+
+This parser's unknown-field set is now
+:data:`~disclosure_drift.sec.parsers.submissions.RECOGNIZED_RECENT_FIELDS` rather than the
+shape-contracted array registry, so a shard carrying ``core_type`` or ``isXBRLNumeric`` no
+longer reports either as drift. That is a change in what every emitted record's
+``unknown_fields`` holds, in what ``census_parsed_records.unknown_fields_json`` persists,
+and in the ``schema_drift`` census metric derived from it — so the version has to say so.
+Leaving it at ``1.0`` would let :func:`~disclosure_drift.sec.parsers.versions.versions_agree`
+call a pre-D131 artifact compatible with an implementation that no longer produces it, which
+is exactly the fail-open that table exists to prevent.
+
+Nothing else about this parser moves: the required arrays, the row expansion, the quarantine
+rules, and the registrant binding are untouched, and the persisted schema is unchanged, so no
+migration is implied.
+"""
+
 _REQUIRED: Final[tuple[str, ...]] = ("accessionNumber", "filingDate", "form")
 
 
@@ -51,7 +68,7 @@ def parse_historical_submissions(
             required_field_failures=tuple(
                 (name, "required historical accession array is absent") for name in missing
             ),
-            unknown_fields=tuple(sorted(set(payload) - set(ACCESSION_ARRAY_FIELDS))),
+            unknown_fields=tuple(sorted(set(payload) - set(RECOGNIZED_RECENT_FIELDS))),
         )
 
     lengths = {name: len(values) for name, values in columns.items()}
@@ -63,7 +80,7 @@ def parse_historical_submissions(
             native_identity=f"registrant:{cik_padded}",
         )
 
-    unknown = tuple(sorted(set(payload) - set(ACCESSION_ARRAY_FIELDS)))
+    unknown = tuple(sorted(set(payload) - set(RECOGNIZED_RECENT_FIELDS)))
     records: list[ParsedRecord] = []
     quarantined: list[QuarantinedRecord] = []
     total = next(iter(lengths.values()), 0)

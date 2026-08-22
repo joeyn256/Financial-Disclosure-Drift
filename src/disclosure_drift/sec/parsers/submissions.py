@@ -62,8 +62,10 @@ from disclosure_drift.sec.schema_drift import DriftReport, inspect_payload
 __all__ = [
     "ACCESSION_ARRAY_FIELDS",
     "HISTORICAL_FILE_NAME_PATTERN",
+    "KNOWN_OPTIONAL_RECENT_FIELDS",
     "PARSER_ID",
     "PARSER_VERSION",
+    "RECOGNIZED_RECENT_FIELDS",
     "REGION_FILES",
     "REGION_FILINGS",
     "REGION_RECENT",
@@ -72,7 +74,7 @@ __all__ = [
 ]
 
 PARSER_ID: Final = "submissions-json"
-PARSER_VERSION: Final = "submissions-json/1.1"
+PARSER_VERSION: Final = "submissions-json/1.2"
 
 REGION_FILINGS: Final = "filings"
 REGION_RECENT: Final = "filings.recent"
@@ -117,6 +119,11 @@ _OPTIONAL_TOP_LEVEL: Final[tuple[str, ...]] = (
     "sic",
     "sicDescription",
     "ein",
+    # An optional, non-semantic SEC identifier the source began emitting after this parser
+    # was written (accepted Decision 129 §8, D129-R7). It is registered as *known* so that
+    # its mere presence is no longer reported as schema drift; it is not required, it takes
+    # part in no identity, and the registrant record still carries its raw value verbatim.
+    "lei",
     "description",
     "website",
     "investorWebsite",
@@ -149,10 +156,54 @@ ACCESSION_ARRAY_FIELDS: Final[tuple[str, ...]] = (
     "primaryDocument",
     "primaryDocDescription",
 )
-"""Parallel arrays expected inside ``filings.recent``.
+"""Parallel arrays whose **list shape is part of this parser's contract**.
+
+A member of this tuple that is present but is not a list is a blocking
+``malformed_nested_array`` event, which quarantines the whole ``filings.recent`` block. That
+is a deliberate strictness about the columns the accession expansion actually reads, and it
+is why a field is added here only when its shape is genuinely load-bearing. A merely
+*recognized* field belongs in :data:`KNOWN_OPTIONAL_RECENT_FIELDS` instead.
 
 ``primaryDocument`` is retained as metadata. It is never turned into a URL: Stage
 M2.2 retrieves no primary document.
+"""
+
+KNOWN_OPTIONAL_RECENT_FIELDS: Final[tuple[str, ...]] = (
+    "core_type",
+    "isXBRLNumeric",
+)
+"""Optional, non-semantic ``filings.recent`` fields that are **recognized, not contracted**.
+
+The source began emitting these after the registry above was written, and accepted
+Decision 129 §8 (D129-R7) asks only that their mere presence stop being reported as schema
+drift. Recognition is exactly that and nothing more:
+
+* neither field is required, so a document without them parses as it always did;
+* neither enters an accession or registrant identity, a cohort, or a research definition;
+* **neither acquires a shape contract it did not previously have.** Registering them in
+  :data:`ACCESSION_ARRAY_FIELDS` would have made a present scalar a blocking
+  ``malformed_nested_array`` event and quarantined the entire ``filings.recent`` block --
+  a *new* refusal invented by the act of recognizing a field, which is a strictly worse
+  outcome than the drift report it was meant to silence. A scalar here is treated exactly as
+  any other non-list key in ``filings.recent`` already is: retained, reported as a
+  normalization warning, and non-blocking.
+
+A list-valued member of this tuple still becomes a parallel column like any other list in
+``filings.recent`` -- that is pre-existing behaviour of the column collection, not a contract
+this registry imposes.
+"""
+
+RECOGNIZED_RECENT_FIELDS: Final[tuple[str, ...]] = (
+    *ACCESSION_ARRAY_FIELDS,
+    *KNOWN_OPTIONAL_RECENT_FIELDS,
+)
+"""Every ``filings.recent`` key this parser knows, contracted or merely recognized.
+
+This is the union the *unknown-field* walkers read: the drift report's known set, the
+per-accession-record unknown-field paths, the nested-unknown walker, and the historical shard
+parser. Shape enforcement reads :data:`ACCESSION_ARRAY_FIELDS` alone. Splitting the two
+questions -- "do we know this key?" and "is its list shape part of the contract?" -- is the
+whole point of the separation.
 """
 
 _REQUIRED_ACCESSION_FIELDS: Final[tuple[str, ...]] = (
@@ -170,6 +221,15 @@ class HistoricalFileReference:
     evidence. ``is_retrievable`` is the only gate the orchestrator may use: an entry
     with an unusable name or unusable metadata is never queued for retrieval, and
     ``problems`` explains why.
+
+    **The reference carries its own parent.** ``registrant_cik_padded`` is the normalized
+    CIK of the document that declared this entry, captured where that document is in hand.
+    A bulk archive holds one document per registrant, so "the registrant of the source" is
+    not a property a reference may be given later: accepted Decision 129 §6 (D129-R4)
+    records the defect of stamping one observation-wide CIK onto every reference of a
+    multi-registrant archive, and this field is what makes the correct value available
+    without a reverse lookup. It is a required field with no default, so a construction
+    site cannot omit it and silently inherit somebody else's registrant.
     """
 
     name: str | None
@@ -177,6 +237,7 @@ class HistoricalFileReference:
     filing_from: str | None
     filing_to: str | None
     location: RecordLocation
+    registrant_cik_padded: str
     problems: tuple[str, ...] = ()
     raw_entry: Mapping[str, Any] | None = None
     unknown_fields: tuple[str, ...] = ()
@@ -190,6 +251,7 @@ class HistoricalFileReference:
         """Deterministic mapping for persistence."""
         return {
             "name": self.name,
+            "registrant_cik_padded": self.registrant_cik_padded,
             "filing_count": self.filing_count,
             "filing_from": self.filing_from,
             "filing_to": self.filing_to,
@@ -328,7 +390,9 @@ def parse_submissions_document(
     all_unknown = tuple(sorted({*drift.retained_unknown_fields, *nested_unknown}))
     registrant = _registrant_record(payload, location, cik_padded, all_unknown, warnings)
     block = _accession_records(payload, location, cik_padded)
-    references, reference_rejects, files_structural = _historical_references(payload, location)
+    references, reference_rejects, files_structural = _historical_references(
+        payload, location, cik_padded
+    )
 
     identities = [registrant.native_identity, *[item.native_identity for item in block.records]]
     outcome = ParseOutcome(
@@ -510,6 +574,11 @@ def _accession_records(
         recent,
         source_class="sec_submissions_recent",
         required_fields=dict.fromkeys(_REQUIRED_ACCESSION_FIELDS, list),
+        # Recognized-but-not-contracted fields are declared as *optional*, which places them
+        # in the known set without placing them under ``array_fields``' list-shape check.
+        # That is the whole separation: ``inspect_payload`` asks the two questions from two
+        # arguments, so recognizing a field cannot smuggle in a shape refusal.
+        optional_fields=KNOWN_OPTIONAL_RECENT_FIELDS,
         array_fields=ACCESSION_ARRAY_FIELDS,
     )
     if drift.blocking_events:
@@ -619,7 +688,7 @@ def _accession_records(
                 parser_version=PARSER_VERSION,
                 unknown_fields=tuple(
                     f"filings.recent.{name}"
-                    for name in sorted(set(columns) - set(ACCESSION_ARRAY_FIELDS))
+                    for name in sorted(set(columns) - set(RECOGNIZED_RECENT_FIELDS))
                 ),
                 normalization_warnings=(
                     (f"non-array keys in filings.recent retained: {non_list}",) if non_list else ()
@@ -648,6 +717,7 @@ def _accession_records(
 def _historical_references(
     payload: Mapping[str, Any],
     location: RecordLocation,
+    registrant_cik_padded: str,
 ) -> tuple[
     tuple[HistoricalFileReference, ...],
     tuple[QuarantinedRecord, ...],
@@ -658,6 +728,11 @@ def _historical_references(
     Every entry becomes a reference, valid or not. A malformed entry is additionally
     quarantined so it is visible as source evidence, and a valid sibling is still
     returned and still retrievable.
+
+    ``registrant_cik_padded`` is this document's own normalized CIK, already proved usable
+    by the caller's identity guard. It is stamped on every entry this document declares --
+    valid or malformed -- because the declaring document is the authoritative binding
+    between a child overflow file and its registrant (accepted Decision 129 §7, D129-R5).
     """
     filings = payload.get("filings")
     if not isinstance(filings, dict):
@@ -707,6 +782,7 @@ def _historical_references(
                     filing_from=None,
                     filing_to=None,
                     location=entry_location,
+                    registrant_cik_padded=registrant_cik_padded,
                     problems=(f"entry is a {type(entry).__name__}, not an object",),
                     raw_entry=None,
                 )
@@ -745,6 +821,7 @@ def _historical_references(
                 filing_from=_as_text(entry.get("filingFrom")),
                 filing_to=_as_text(entry.get("filingTo")),
                 location=entry_location,
+                registrant_cik_padded=registrant_cik_padded,
                 problems=tuple(problems),
                 raw_entry=dict(entry),
                 unknown_fields=unknown,
@@ -847,7 +924,7 @@ def _nested_unknown_paths(payload: Mapping[str, Any]) -> tuple[str, ...]:
 
     recent = filings.get("recent") if isinstance(filings, dict) else None
     if isinstance(recent, dict):
-        found.update(f"filings.recent.{key}" for key in set(recent) - set(ACCESSION_ARRAY_FIELDS))
+        found.update(f"filings.recent.{key}" for key in set(recent) - set(RECOGNIZED_RECENT_FIELDS))
 
     return tuple(sorted(found))
 

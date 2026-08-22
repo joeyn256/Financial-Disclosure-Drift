@@ -1053,6 +1053,66 @@ HTTP, or a tag. **Closing the Decision 126 §7 gap does not open the run**: Deci
 independent review and is not owner-accepted, and Decision 126 §10 (D126-R8) still requires a
 regenerated run identity and a new final live preflight before any execution.
 
+## Decision 131 — the D128 semantic and operational repair (real impact)
+
+[Decision 131](Decisions/decision_131_m3_3_d128_semantic_and_operational_repair.md) repairs the two
+blocking `PARSER_IMPLEMENTATION_DEFECT` findings
+[Decision 129](Decisions/decision_129_m3_3_d128_semantic_adjudication.md) recorded — historical
+shards dispatched to the primary parser (§5, D129-R3) and historical references stamped with one
+observation-wide registrant CIK (§6, D129-R4) — together with the recognized optional fields
+(D129-R7), watchdog `SIGINT` delivery (D129-R10), and post-traversal monitoring (D129-R11) that
+record required alongside them.
+
+**It is published with its code, in the same commit.** The record, the implementation, and the tests
+are verifiable against each other by inspection rather than by trusting a later narrative.
+
+**What it deliberately does not change.** No performance tuning of any kind — SQLite cache, batching,
+checkpoint cadence, WAL mode, `synchronous` durability, index architecture, multiprocessing or writer
+topology, and the [Decision 127](Decisions/decision_127_m3_3_pre_f2_admission_guard.md) pre-F2 gate
+are all untouched. No schema, no migration (`registrant_cik_padded` already existed on both reference
+tables and is already part of the primary key), no activation constant, and neither network switch.
+**`CensusOrchestrator._parse_bulk` is deliberately NOT repaired** and is recorded as an explicit
+pre-network blocker (D131-R4).
+
+| Surface touched | Change | Nearest tests |
+|---|---|---|
+| `src/disclosure_drift/m3/offline_parse.py` | the corrected bulk dispatch: `_DeferredHistoricalShard` (name and ordinal, **no payload**), `_shard_filename_cik`, `_is_historical_shard_member`, `_historical_shard_member_names`, `_declare_shard_parents`, `_resolve_shard_parent`, and `_stream_deferred_historical_shards`. A shard never reaches `parse_submissions_document(...)`; parents come from the explicit `filings.files[].name` declaration; deferred shards are reopened by exact member name in original archive ordinal order after the traversal ends; **every parent is resolved before any member is reopened**; and a missing, ambiguous, or contradicted binding **fails closed**. Under a diagnostic cap the deferred phase does not run (D131-R7) | `tests/unit/test_d131_historical_shard_dispatch.py`, `tests/unit/test_m3_offline_parse.py`, `tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_d110_bounded_parse_memory.py` |
+| `src/disclosure_drift/sec/parsers/submissions.py` | `HistoricalFileReference.registrant_cik_padded` — **required, no default** — set by the declaring document and carried into `as_mapping()`; `KNOWN_OPTIONAL_RECENT_FIELDS` and the `RECOGNIZED_RECENT_FIELDS` union, with shape enforcement still reading `ACCESSION_ARRAY_FIELDS` alone; `lei` registered as a known optional top-level field; `PARSER_VERSION` `submissions-json/1.1` → **`1.2`** | `tests/unit/test_r2_submissions_structure.py`, `tests/unit/test_sec_parsers_and_census.py`, `tests/unit/test_parser_version_authority.py`, `tests/unit/test_d131_historical_shard_dispatch.py` |
+| `src/disclosure_drift/sec/parsers/historical.py` | the unknown-field basis moves from `ACCESSION_ARRAY_FIELDS` to `RECOGNIZED_RECENT_FIELDS`, so a shard carrying `core_type` or `isXBRLNumeric` no longer reports either as drift; `PARSER_VERSION` `submissions-historical/1.0` → **`1.1`**, because that changes every emitted record's `unknown_fields` and the persisted `unknown_fields_json` | `tests/unit/test_parser_version_authority.py`, `tests/unit/test_d131_historical_shard_dispatch.py`, `tests/unit/test_sec_parsers_and_census.py` |
+| `src/disclosure_drift/sec/census.py` | `CensusCatalog._insert_historical_references` normalizes **each reference's own** `registrant_cik_padded` instead of resolving one value per observation from the lowest-`parsed_record_id` registrant record; valid and malformed persistence both preserve parent identity; an unusable parent CIK raises rather than substituting a value. The per-part write-ordering comment is corrected: references no longer *need* to run last, and the position is retained only because it is the accepted write order | `tests/unit/test_sec_parsers_and_census.py`, `tests/unit/test_d131_historical_shard_dispatch.py`, `tests/unit/test_m3_offline_parse.py` |
+| `src/disclosure_drift/sec/archive.py` | `iter_named_members(...)` added to `__all__` — a bounded, targeted read of exactly the requested canonical member names, in the requested order, applying the same per-member type, size, ratio, and traversal defences as `iter_members` and holding one payload at a time. Absent, ambiguous, and repeated names are refused. The archive-level *cumulative* expansion cap is deliberately not re-applied to a subset | `tests/unit/test_sec_archive.py`, `tests/unit/test_d131_historical_shard_dispatch.py` |
+| `scripts/m3/canary_launch.py` (new) | the corrected governed launch surface: foreground, `exec`-based, **refuses** an inherited `SIGINT = SIG_IGN`, and records the `exec`-preserved PID in `--pid-file`. It holds no authority constant, reads no catalog, takes no lease, and enables no network | `tests/unit/test_d131_signal_and_monitor.py` |
+| `scripts/m3/canary_watchdog.py` (new) | the corrected stop, probe, and monitor: exact PID and command authentication with an empty expectation refused; `SIGINT` only; verified termination with **no `SIGTERM`/`SIGKILL` escalation**; `ProcessLookupError` → already gone and `PermissionError` → failure; `lsof -nP -a -p PID -i` **intersection**; the strict `pid > 0` domain stated once in `non_targetable_pid_detail(...)` and refused before inspection, `lsof` construction, or signalling; and the three member-count relations with `MEMBER_COUNT_INCONSISTENT` at exit `5` | `tests/unit/test_d131_signal_and_monitor.py` |
+| `Docs/m3/operator_runbook.md` | §28b the corrected launch/stop/probe/monitor contract with its full exit-code table including both non-positive-PID refusals (D131-R11), and §28c what a bounded prefix does **not** prove about historical shards plus the `CensusOrchestrator._parse_bulk` pre-network blocker | operator surface — no direct test file; the behaviours it documents are pinned by `tests/unit/test_d131_signal_and_monitor.py` |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d131_historical_shard_dispatch.py` (`46`),
+`tests/unit/test_d131_signal_and_monitor.py` (`42`),
+`tests/unit/test_parser_version_authority.py` (`35`), `tests/unit/test_sec_archive.py` (`66`). The
+parser and persistence contracts either side of the change:
+`tests/unit/test_sec_parsers_and_census.py`, `tests/unit/test_r2_submissions_structure.py`,
+`tests/unit/test_m3_offline_parse.py`. The traversal residency and prefix surfaces the deferral must
+not disturb: `tests/unit/test_d110_bounded_parse_memory.py`,
+`tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_d112_compact_evidence.py`. Operator
+surface and boundaries: `tests/integration/test_m3_cli.py`, `tests/unit/test_m3_3_boundaries.py`.
+
+**Expected identity movement: yes, and it is the point.** A corrected run parses members D128 never
+parsed and writes reference rows under registrants D128 never wrote, so a future run's counts and
+evidence will not match D128's. **That is the repair, not a regression** — and it is also why both
+parser versions move: a version that stayed put while its parser's output changed would let a
+pre-D131 artifact be judged compatible with an implementation that no longer produces it.
+
+**Provenance already recorded under prior parser versions is never rewritten.** No `UPDATE` of any
+`parser_version` exists anywhere in `src/`. What changes is reuse: `versions_agree(...)`,
+`require_parser_version(...)`, and `evaluate_reuse(...)` all fail closed on a version mismatch, in
+**both** directions.
+
+**What it does not authorize.** A bounded real semantic proof against the real source, the corrected
+complete-source canary, any canary, any disposable world, creating any world, enabling any activation
+constant, an E0-v3 namespace, migration `0016`, network, SEC, HTTP, or a tag. **Repairing the defect
+is not proving the repair**: D131-R7 rules that an ordinary `--member-limit` prefix parses **zero**
+deferred shards, so the semantic proof requires a separately authorized fixture or mode and is the
+next stage.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

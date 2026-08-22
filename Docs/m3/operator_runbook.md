@@ -1187,6 +1187,191 @@ when usable and category B when accepted unavailable, and never category C.)*
 **nonauthoritative**, **blocks**, and returns to the owner — it is never automatically resumed,
 completed, repaired, or promoted, and it **never silently authorizes M3.3-E1**.
 
+## 28b. Launching and stopping a long canary — the corrected contract
+
+**`IMPLEMENTATION WIP — NOT YET GOVERNED BY AN ACCEPTED DECISION`** · **`SEPARATE OWNER GATE`**
+
+> **Why this section exists.** The D128 complete-source canary ran for `33 h 18 m 43 s` and
+> **could not be stopped**. The watchdog reported that it had stopped it. Accepted
+> [Decision 129](../Decisions/decision_129_m3_3_d128_semantic_adjudication.md) §9 (**D129-R10**)
+> records the forensic result `WATCHDOG_FALSE_ALERT_SIGNAL_NOT_DELIVERED_TO_CANARY`, and the cause
+> was the **launch shape**, not the parser: a non-interactive `zsh` backgrounded the run with `&`,
+> POSIX requires such a shell to start a background job with `SIGINT` set to `SIG_IGN`, and CPython
+> leaves an inherited `SIG_IGN` in place. Every later signal reached a process that had been told
+> to ignore it before it ever ran. `kill` kept succeeding, because `kill` reports that a signal was
+> **sent**.
+
+**Nothing about signal handling inside the parser changes.** The repair is the process chain and
+the stop procedure.
+
+### The launch shape
+
+Run the canary as the **foreground** command of its tmux pane. Never background it with `&`.
+
+```bash
+# From the repository root, with the virtual environment present.
+# Every path is single-quoted: the repository path contains spaces, and an unquoted
+# command string produces a pane that dies silently.
+tmux new-session -d -s "$SESSION" \
+  "'$PWD/.venv/bin/python' '$PWD/scripts/m3/canary_launch.py' \
+     --pid-file '$WORK_ROOT/canary.pid' -- \
+     '$PWD/.venv/bin/disclosure-drift' m3 canary-source \
+       --config configs/project.yaml --mode run \
+       --source-instance-id '<SOURCE_INSTANCE_ID>' \
+       --run-id '<RUN_ID>' --work-root '$WORK_ROOT'"
+```
+
+[`scripts/m3/canary_launch.py`](../../scripts/m3/canary_launch.py) does three things and stops:
+
+1. it **refuses to launch at all** — exit `3`, `LAUNCH_REFUSED_SIGINT_IGNORED` — if it finds
+   `SIGINT` already ignored, so a chain that reintroduces the D128 shape fails in the first second
+   rather than after thirty-three hours;
+2. it records its own PID in `--pid-file`;
+3. it `exec`s the canary, so the process that does the work **keeps that PID** and the pane's
+   process chain stays one process deep.
+
+`exec` matters twice: it keeps the chain short, and it resets a *handled* signal to its default
+disposition in the new image while preserving an *ignored* one. Passing the check and then
+`exec`ing is therefore a proof that carries into the run.
+
+**The launcher holds no authority constant, reads no catalog, takes no lease, and enables no
+network. It never starts anything by itself.**
+
+### Stopping, and proving the stop happened
+
+```bash
+./.venv/bin/python scripts/m3/canary_watchdog.py stop \
+    --pid "$(cat "$WORK_ROOT/canary.pid")" \
+    --expect-command 'm3 canary-source' \
+    --timeout-seconds 120
+```
+
+[`scripts/m3/canary_watchdog.py`](../../scripts/m3/canary_watchdog.py) sends **one** `SIGINT` and
+then watches the target actually go away.
+
+| Exit | Outcome | Meaning |
+| --- | --- | --- |
+| `0` | `STOP_CONFIRMED` | the signal was delivered **and the process terminated** |
+| `0` | `STOP_TARGET_ALREADY_GONE` | nothing was signalled; the process did not exist, or it exited in the gap between the liveness check and the signal |
+| `3` | `STOP_REFUSED_NON_POSITIVE_PID` | `--pid` was `0` or negative; **nothing was inspected and no signal was sent** |
+| `3` | `STOP_REFUSED_TARGET_MISMATCH` | the PID's command line did not match `--expect-command`; **no signal was sent** |
+| `3` | `STOP_REFUSED_EMPTY_EXPECT_COMMAND` | `--expect-command` was empty or whitespace-only; **no signal was sent** |
+| `4` | `STOP_FAILED` | the signal was sent and **the process is still alive** |
+| `4` | `STOP_FAILED_SIGNAL_NOT_PERMITTED` | the signal was **not permitted**, so none was delivered and the process is still there |
+
+**Never pass `--expect-command ''`.** Every command line contains the empty string, so an empty
+expectation authenticates nothing while reporting that it did. It is refused outright. Omit the
+option entirely to state *no* expectation — that is a different and honest thing.
+
+**Never pass a non-positive `--pid`.** `os.kill` reads `0` as the caller's own process group —
+from the canary's pane that is the canary and the watchdog together — and `-1` as every process
+this user may signal. Both are refused on the argument, before any `ps` read and before any
+signal, so a mistyped id costs a refusal rather than a broadcast. Pass the id
+`canary_launch.py` recorded in its `--pid-file`.
+
+**`STOP_FAILED` is never reported as a stop, and the watchdog never escalates to `SIGTERM` or
+`SIGKILL`.** Escalation would end a governed run mid-write on the watchdog's own authority; that
+decision belongs to the operator. On either exit `4`, treat the run as still going and return to
+the project owner. `STOP_FAILED_SIGNAL_NOT_PERMITTED` in particular is **not** a stop: the process
+is alive and belongs to another user, so nothing was delivered.
+
+### Checking whether the canary holds a network file
+
+```bash
+./.venv/bin/python scripts/m3/canary_watchdog.py network-probe --pid "$PID"
+```
+
+This runs `lsof -nP -a -p "$PID" -i`. **The `-a` is the point.** Without it `lsof` treats its
+selectors as a union and reports every internet file on the host *or* every file of that PID,
+which is the form watchdog v1 used and the reason its network evidence was unusable.
+
+A non-positive `--pid` is refused here too, and **before the `lsof` argument vector is built**, so
+no command naming one can exist to be run by accident: exit `3`, `PROBE_REFUSED_NON_POSITIVE_PID`,
+and **no `lsof` is executed**. `lsof -p 0` and `lsof -p -1` are the union mistake in the reading
+direction — an answer about a set is not an answer about a target.
+
+### Member-count stall monitoring stops at traversal completion
+
+```bash
+./.venv/bin/python scripts/m3/canary_watchdog.py stall \
+    --observed-members "$OBSERVED" --governed-members "$GOVERNED" \
+    --seconds-since-member-change "$SECONDS_SINCE_CHANGE" [--phase F2]
+```
+
+Accepted [Decision 129](../Decisions/decision_129_m3_3_d128_semantic_adjudication.md) §9
+(**D129-R11**): a frozen member count is a stall **only while traversal is incomplete**.
+
+- `observed < governed` — traversal is running; no movement for the threshold is a real stall
+  (exit `2`, `MEMBER_TRAVERSAL_STALLED`).
+- `observed == governed` — traversal is finished. F1, F2, finalization, and checkpointing all run
+  with the count correctly frozen, so member-count alerting is **disabled**
+  (`MEMBER_TRAVERSAL_COMPLETE_STALL_MONITORING_DISABLED`, exit `0`). D128 raised a false alert here.
+- `observed > governed` — the two counts **disagree**. A traversal cannot pass its own governed
+  bound, so one of the numbers is not describing what it is believed to describe: a stale governed
+  count, a count read from the wrong run, or an observation that is not the member count at all.
+  This is its own verdict (`MEMBER_COUNT_INCONSISTENT_STALL_MONITORING_DISABLED`, exit `5`), not a
+  completed traversal. Member-stall timing is disabled with it. **Establish which count is wrong
+  before acting on either** — the watchdog will not adjudicate that, and must not be asked to.
+
+**No wall-clock kill rule replaces any of this**, and `--phase` is a label that improves the
+message and decides nothing. The counts are **inputs**: this watchdog issues no query against the
+live working catalog.
+
+## 28c. What a bounded prefix run does **not** prove about historical shards
+
+**`IMPLEMENTATION WIP — NOT YET GOVERNED BY AN ACCEPTED DECISION`** · **`SEPARATE OWNER GATE`**
+
+> **Why this section exists.** The bulk submissions archive holds two legitimate JSON member
+> shapes: primary submissions documents named `CIK##########.json`, and historical overflow
+> shards named `CIK##########-submissions-NNN.json`. D128 routed all `5,337` shards through the
+> primary parser, which refused them — correctly, since its contract is *one document describes
+> one CIK* — and `3,037,614` accessions went unrecorded. The corrected offline traversal defers
+> each shard it meets, keeping only its name and its archive ordinal, and parses the whole
+> deferred population **after** the traversal ends, against the parent map the traversal built.
+
+### An ordinary `--member-limit` run parses **zero** historical shards
+
+```bash
+disclosure-drift m3 canary-source --mode profile-prefix --member-limit N ...
+```
+
+A bounded diagnostic prefix stops mid-archive. Its parent map is therefore **incomplete by
+construction**, and resolving a shard against an incomplete map would refuse a perfectly
+well-formed archive. So the deferred phase does not run at all under a bound:
+
+- a shard met inside the prefix **counts against `--member-limit`** as a member the traversal
+  handled, which is what the bound names — it is simply never parsed;
+- a prefix finalizes nothing and can never report success, so it makes **no claim** about the
+  shard population in either direction;
+- this holds even when `N` happens to equal or exceed the whole archive. The bound's *value* is
+  not the hinge; **having** a bound is.
+
+**Therefore a `--member-limit` run is not semantic validation of shard dispatch.** It cannot show
+that a shard reached the historical parser, that a parent was bound correctly, or that the
+deferred population parsed at all. Do not read a clean prefix run as evidence for any of those.
+
+**The future bounded real-semantic validation must use a separately authorized semantic fixture
+or mode**, not an ordinary `--member-limit` prefix. That authorization does not exist yet; asking
+for one is the correct next step, and stretching the prefix surface to stand in for it is not.
+
+### PRE-NETWORK BLOCKER — `CensusOrchestrator._parse_bulk`
+
+`src/disclosure_drift/sec/census_orchestrator.py` carries the **same** shard-dispatch defect,
+unrepaired: `CensusOrchestrator._parse_bulk` routes every `.json` member — historical shards
+included — through `parse_submissions_document`.
+
+It is deliberately left alone. The only way to reach it is `CensusOrchestrator.run`, which calls
+`require_network()` before anything else, and network is disabled. The corrected offline canary
+does not use that path, and E0 does not use it.
+
+> **No future network or live-retrieval authorization may reach
+> `CensusOrchestrator._parse_bulk` until historical shard dispatch is repaired there.**
+
+That is a blocker on *enabling network*, not on the offline work. Before any step that enables
+network, re-retrieves a source live, or runs the orchestrator against a real endpoint, this
+repair must be completed and reviewed first. `require_network()` is what makes the deferral safe
+and **must not be weakened, bypassed, or worked around** in the meantime.
+
 ## 29. Freeze the real snapshot only after Gate H and E0
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.3)`**

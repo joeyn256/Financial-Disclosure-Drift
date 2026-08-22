@@ -39,11 +39,13 @@ import hashlib
 import heapq
 import json
 import sqlite3
+import zipfile
 from collections import defaultdict
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from dataclasses import field as dataclass_field
+from pathlib import Path
 from typing import Any, ClassVar, Final, Literal
 
 from disclosure_drift.errors import DisclosureDriftError
@@ -58,7 +60,12 @@ from disclosure_drift.m3.compact_evidence import (
 )
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.accession_resolution import AUTHORITY_LEVEL, authority_for_source
-from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
+from disclosure_drift.sec.archive import (
+    ArchiveDefenceError,
+    canonical_member_name,
+    iter_members,
+    iter_named_members,
+)
 
 # ``_stable_id`` is the accepted census identifier convention. It is imported rather
 # than reimplemented so exactly one derivation of an accession-observation identity
@@ -78,6 +85,7 @@ from disclosure_drift.sec.parsers.full_index import INDEX_ROW_PREFIX, parse_comp
 from disclosure_drift.sec.parsers.historical import parse_historical_submissions
 from disclosure_drift.sec.parsers.sic import parse_sic_reference
 from disclosure_drift.sec.parsers.submissions import (
+    HISTORICAL_FILE_NAME_PATTERN,
     HistoricalFileReference,
     parse_submissions_document,
 )
@@ -620,12 +628,23 @@ def _historical_registrant_cik(
 ) -> str:
     """Resolve the registrant a historical submissions object belongs to.
 
-    Read from the accepted ``census_historical_references`` evidence, matched on the
+    Read from the accepted ``census_historical_references`` evidence, matched on the exact
     file the bound observation actually requested. A missing or ambiguous match fails
     closed: the CIK is never guessed, and the document is never re-retrieved to find
     out (contract §8.1 correction 4).
+
+    **Uniqueness alone is not enough, and accepted Decision 129 §6 (D129-R4) says why.** The
+    ``len(rows) != 1`` guard refuses zero candidates and refuses two, so it looks
+    conservative -- but a single *consistently wrong* candidate satisfies it and is then
+    returned as authority. That is exactly what the observation-wide stamping defect
+    produced: 5,337 rows carrying one CIK, every lookup unique, every answer wrong. The
+    shard's own canonical filename is therefore required to corroborate the persisted
+    parent (accepted Decision 129 §7, D129-R5). Corroboration cannot *supply* a registrant
+    -- a shard with no persisted reference still fails closed -- but it can and does refuse
+    one that the name contradicts.
     """
     historical_file = observation.requested_url.rsplit("/", 1)[-1]
+    filename_cik = _shard_filename_cik(historical_file)
     rows = connection.execute(
         "SELECT DISTINCT registrant_cik_padded FROM census_historical_references "
         "WHERE historical_file = ? ORDER BY registrant_cik_padded",
@@ -639,10 +658,19 @@ def _historical_registrant_cik(
         )
         raise OfflineParseError(message)
     try:
-        return normalize_cik(str(rows[0]["registrant_cik_padded"]))[1]
+        persisted = normalize_cik(str(rows[0]["registrant_cik_padded"]))[1]
     except IdentifierError as exc:
         message = f"accepted historical reference carries an invalid registrant CIK: {exc}"
         raise OfflineParseError(message) from exc
+    if persisted != filename_cik:
+        message = (
+            f"historical submissions object {historical_file!r} is persisted against "
+            f"registrant {persisted} but its canonical filename encodes {filename_cik}; a "
+            "uniquely persisted reference that its own file name contradicts is refused "
+            "rather than trusted for being unique"
+        )
+        raise OfflineParseError(message)
+    return persisted
 
 
 #: What a bounded diagnostic member prefix is, stated as a token rather than as prose.
@@ -801,6 +829,253 @@ class CompactSourceEvidence:
         return completeness
 
 
+# --------------------------------------------------------------------------- #
+# Bulk historical-shard dispatch (accepted Decision 129 §5, D129-R3)
+# --------------------------------------------------------------------------- #
+#: How many characters precede the ten CIK digits in a canonical historical shard name.
+#:
+#: The shape itself is owned by one matcher --
+#: :data:`~disclosure_drift.sec.parsers.submissions.HISTORICAL_FILE_NAME_PATTERN`, whose
+#: pattern is ``^CIK[0-9]{10}-submissions-[0-9]{3}\.json$``. This offset is only ever applied
+#: to a name that matcher has already accepted, which is what makes a fixed slice exact
+#: rather than a second, drifting copy of the shape.
+_SHARD_CIK_OFFSET: Final = len("CIK")
+_SHARD_CIK_DIGITS: Final = 10
+
+
+@dataclass(frozen=True, slots=True)
+class _DeferredHistoricalShard:
+    """One bulk member deferred for the historical-submissions contract.
+
+    Deliberately holds **no payload**. The whole point of deferring is that the shard's
+    bytes are dropped with every other member's and re-read once its parent is known; a
+    field for the payload here would reintroduce exactly the residency accepted
+    Decision 110 §8 removed, multiplied by the 5,337 shards accepted Decision 129 §5
+    counted in the first planned source.
+    """
+
+    member_ordinal: int
+    member_name: str
+
+
+def _shard_filename_cik(member_name: str) -> str:
+    """Return the CIK a canonical historical shard name encodes.
+
+    **Corroboration only** (accepted Decision 129 §7, D129-R5). The value this returns may
+    confirm an explicit parent declaration and may refuse one that contradicts it. It is
+    never the source of a binding: a shard whose parent no document declared is refused
+    here rather than adopted from its own filename.
+
+    Raises:
+        OfflineParseError: the name is not a canonical historical shard name, or its digits
+            do not normalize to a usable CIK.
+    """
+    if not HISTORICAL_FILE_NAME_PATTERN.match(member_name):
+        message = (
+            f"bulk member {member_name!r} was deferred as a historical shard but does not "
+            f"match the canonical pattern {HISTORICAL_FILE_NAME_PATTERN.pattern}; no "
+            "registrant is inferred from a name this parser cannot read"
+        )
+        raise OfflineParseError(message)
+    digits = member_name[_SHARD_CIK_OFFSET : _SHARD_CIK_OFFSET + _SHARD_CIK_DIGITS]
+    try:
+        return normalize_cik(digits)[1]
+    except IdentifierError as exc:  # pragma: no cover - the pattern already fixes ten digits
+        message = f"historical shard {member_name!r} encodes an unusable CIK: {exc}"
+        raise OfflineParseError(message) from exc
+
+
+def _is_historical_shard_member(member_name: str) -> bool:
+    """Whether one bulk archive member is a historical submissions shard.
+
+    The canonical matcher is applied to the **whole** canonical member name, not to its
+    basename: a shard is bound to its parent by an exact name, so a name that is only
+    shard-shaped after a directory prefix is dropped could not be resolved safely. Such a
+    member is refused rather than quietly routed to the primary parser, which is the D128
+    behaviour accepted Decision 129 §5 rejected.
+
+    Raises:
+        OfflineParseError: the member's basename is shard-shaped but its full name is not.
+    """
+    if HISTORICAL_FILE_NAME_PATTERN.match(member_name):
+        return True
+    basename = member_name.rsplit("/", 1)[-1]
+    if basename != member_name and HISTORICAL_FILE_NAME_PATTERN.match(basename):
+        message = (
+            f"bulk member {member_name!r} carries a historical shard basename beneath a "
+            "directory prefix; the explicit parent declaration names a bare file, so this "
+            "member cannot be bound to a registrant and is refused rather than parsed as a "
+            "primary submissions document"
+        )
+        raise OfflineParseError(message)
+    return False
+
+
+def _historical_shard_member_names(archive_path: Path) -> frozenset[str]:
+    """Every canonical historical-shard member name the archive actually holds.
+
+    Read from the archive's central directory alone: **no member is decompressed and no
+    payload is read**, so this is not the extra pass over ~985k JSON documents that building
+    the parent map from the documents themselves would require. It is the same index
+    :func:`~disclosure_drift.sec.archive.iter_members` builds before it yields anything, read
+    for one question.
+
+    It exists to keep the parent map bounded by the *shard* population rather than by the
+    *declaration* population. Those are the same size in a healthy archive, but they are not
+    the same thing: a document may declare an overflow file the archive does not carry, and
+    retaining that declaration would make the traversal's residency grow with members while
+    answering a question nothing will ever ask. Accepted Decision 110 §8 boundedness is a
+    property of the traversal, not an approximation of one.
+
+    Raises:
+        ArchiveDefenceError: the archive is corrupt, or a member name is hostile.
+    """
+    names: set[str] = set()
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                canonical = canonical_member_name(info.filename)
+                if HISTORICAL_FILE_NAME_PATTERN.match(canonical):
+                    names.add(canonical)
+    except zipfile.BadZipFile as exc:
+        message = (
+            f"archive {archive_path.name} is corrupt and is refused rather than read as "
+            f"holding no historical shards: {exc}"
+        )
+        raise ArchiveDefenceError(message) from exc
+    return frozenset(names)
+
+
+def _declare_shard_parents(
+    declared: dict[str, set[str]],
+    references: Sequence[HistoricalFileReference],
+    shard_members: frozenset[str],
+) -> None:
+    """Fold one primary document's ``filings.files`` declarations into the parent map.
+
+    The declaring document is the authority (accepted Decision 129 §7, D129-R5), so the key
+    is the exact name it declared and the value is its own registrant.
+
+    A declaration is retained **only when the archive carries a member of exactly that
+    name**. That is what keeps this map bounded by the shard population rather than growing
+    with every member the traversal reads, and it drops nothing that could ever be consulted:
+    a declaration naming a file the archive does not hold binds no member. Retention is not a
+    judgement about the declaration -- the reference row itself is persisted either way.
+    """
+    if not shard_members:
+        return
+    for reference in references:
+        name = reference.name
+        if name is None or name not in shard_members:
+            continue
+        declared.setdefault(name, set()).add(reference.registrant_cik_padded)
+
+
+def _resolve_shard_parent(member_name: str, declared: Mapping[str, set[str]]) -> str:
+    """Resolve one deferred shard's registrant, or fail closed.
+
+    Every refusal here is accepted Decision 129 §7 (D129-R5) read literally: a missing,
+    ambiguous, or contradicted binding produces no registrant at all rather than a
+    plausible one. A declaration naming a different member simply never keys this shard, so
+    "the parent declared some other file" arrives as the missing-declaration refusal.
+
+    Raises:
+        OfflineParseError: no parent declared this shard, more than one distinct parent did,
+            or the name's own CIK contradicts the declared parent.
+    """
+    filename_cik = _shard_filename_cik(member_name)
+    parents = declared.get(member_name)
+    if not parents:
+        message = (
+            f"historical shard {member_name!r} is present in the bulk archive but no "
+            "primary submissions document declares it under filings.files; the shard's own "
+            "filename is corroboration and never a binding, so the traversal refuses rather "
+            "than adopting the registrant its name encodes"
+        )
+        raise OfflineParseError(message)
+    if len(parents) > 1:
+        message = (
+            f"historical shard {member_name!r} is declared by {len(parents)} distinct "
+            f"registrants ({sorted(parents)}); exactly one authoritative parent is required "
+            "and no tie is broken"
+        )
+        raise OfflineParseError(message)
+    parent = next(iter(parents))
+    if parent != filename_cik:
+        message = (
+            f"historical shard {member_name!r} is declared by registrant {parent} but its "
+            f"canonical filename encodes {filename_cik}; the corroboration disagrees with "
+            "the explicit parent and the traversal refuses rather than choosing one"
+        )
+        raise OfflineParseError(message)
+    return parent
+
+
+def _stream_deferred_historical_shards(
+    archive_path: Path,
+    observation: SourceObservation,
+    deferred: Sequence[_DeferredHistoricalShard],
+    declared: Mapping[str, set[str]],
+    *,
+    evidence: CompactSourceEvidence | None = None,
+) -> Iterator[tuple[ParseOutcome, tuple[HistoricalFileReference, ...]]]:
+    """Parse every deferred historical shard, after the parent map is complete.
+
+    This is the second half of the order-independent dispatch. The first half met each shard
+    during the primary traversal and kept only its name and ordinal; by the time this runs,
+    every primary document in the archive has declared whatever it declares, so a shard's
+    parent is resolvable no matter where the two sat relative to each other (accepted
+    Decision 129 §7, D129-R6).
+
+    **Every parent is resolved before any member is reopened.** A refusal therefore costs no
+    decompression and, more importantly, cannot leave half the deferred population parsed and
+    the other half refused.
+
+    Shards are processed in their original archive ordinal order, so the correction itself
+    introduces no ordering of its own. A shard yields no historical references: an overflow
+    document declares no ``filings.files`` of its own.
+    """
+    if not deferred:
+        return
+    ordered = sorted(deferred, key=lambda item: item.member_ordinal)
+    resolved = [
+        (item.member_name, _resolve_shard_parent(item.member_name, declared)) for item in ordered
+    ]
+    try:
+        # The reopen is the archive layer's own public named-member read, so the per-member
+        # size, type, and traversal defences applied here are exactly the ones the primary
+        # traversal applied -- one implementation, reached through one public surface, rather
+        # than a second expression of the same answers in this module.
+        members = iter_named_members(archive_path, [name for name, _ in resolved])
+        for (member_name, parent_cik), (read_name, payload) in zip(resolved, members, strict=True):
+            if read_name != member_name:  # pragma: no cover - the reader yields in order
+                message = (
+                    f"historical shard reopen returned member {read_name!r} where "
+                    f"{member_name!r} was requested; the parse is refused rather than bound "
+                    "to a registrant resolved for a different member"
+                )
+                raise OfflineParseError(message)
+            location = RecordLocation(
+                observation.observation_id,
+                observation.source_id,
+                member_name=member_name,
+            )
+            decoded = _json_document(payload, f"bulk historical shard {member_name!r}")
+            outcome = parse_historical_submissions(decoded, location, registrant_cik=parent_cik)
+            if evidence is not None:
+                # The shard's one and only governed member record, written here because this
+                # is the first point at which its bytes and its real parse both exist. It was
+                # deliberately not recorded during the primary traversal: a member recorded
+                # as parsed before its parse would be a false witness in the manifest.
+                evidence.absorb(member_name, payload, outcome)
+            yield outcome, ()
+    except ArchiveDefenceError as exc:
+        message = f"accepted bulk archive refused on historical-shard reopen: {exc}"
+        raise OfflineParseError(message) from exc
+
+
 def _stream_bulk_submissions(
     store: SnapshotStore,
     observation: SourceObservation,
@@ -831,21 +1106,61 @@ def _stream_bulk_submissions(
     normal exhaustion path finalizes a parser run, and a bounded prefix must never reach it, not
     even when its bound happens to be the whole archive.
 
+    **Two member shapes, two parsers** (accepted Decision 129 §5, D129-R3). The archive holds
+    primary documents named ``CIK##########.json`` and historical overflow shards named
+    ``CIK##########-submissions-NNN.json``. A shard is not one document describing one CIK,
+    which is the primary parser's whole contract, and D128 routed 5,337 of them through it
+    anyway: they were refused -- correctly -- and 3,037,614 accessions went unrecorded. A shard
+    now reaches :func:`~disclosure_drift.sec.parsers.historical.parse_historical_submissions`
+    instead, under the registrant its parent explicitly declared.
+
+    **Shards are deferred, and the deferral is what makes archive order irrelevant.** A shard's
+    parent is whichever primary document names it under ``filings.files``, and that document
+    may sit anywhere in the archive -- before the shard, after it, or nowhere. Meeting a shard
+    therefore records only its name and its ordinal, never its bytes, and every shard is parsed
+    after the traversal ends, in original archive ordinal order, against a parent map that is
+    by then complete. Correctness does not depend on which of the two came first (D129-R6),
+    and no shard is recorded as parsed before its parse actually happens.
+
+    **Under a diagnostic cap the deferred phase does not run.** A prefix stops mid-archive, so
+    its parent map is incomplete by construction and resolving a shard against it would refuse
+    a well-formed archive. A shard met inside the prefix counts against the bound as a member
+    the traversal handled, which is what ``--member-limit`` names; it is simply never parsed.
+    A prefix finalizes nothing and can never report success, so it carries no claim about the
+    shard population either way.
+
     Raises:
-        OfflineParseError: the archive is refused by the archive defences, or a member's
-            payload is not a decodable JSON object.
+        OfflineParseError: the archive is refused by the archive defences, a member's payload
+            is not a decodable JSON object, or a deferred shard cannot be bound to exactly one
+            explicitly declared parent registrant.
         _DiagnosticPrefixLimit: ``max_members`` was set and the traversal has stopped.
     """
     store.verify_payload(observation)
     path = store.payload_path(observation)
     processed = 0
+    deferred: list[_DeferredHistoricalShard] = []
+    declared: dict[str, set[str]] = {}
     try:
+        shard_members = _historical_shard_member_names(path)
         for member in iter_members(
             path,
             name_suffix=".json",
             archive_relative_path=observation.relative_storage_path,
             archive_sha256=observation.logical_sha256,
         ):
+            if _is_historical_shard_member(member.name):
+                # Bounded metadata only. The payload in hand is dropped with the member, and
+                # the shard is reopened by this exact name once the parent map is complete.
+                deferred.append(
+                    _DeferredHistoricalShard(
+                        member_ordinal=member.member_index,
+                        member_name=member.name,
+                    )
+                )
+                processed += 1
+                if max_members is not None and processed >= max_members:
+                    raise _DiagnosticPrefixLimit(processed)
+                continue
             location = RecordLocation(
                 observation.observation_id,
                 observation.source_id,
@@ -853,6 +1168,7 @@ def _stream_bulk_submissions(
             )
             decoded = _json_document(member.payload, f"bulk member {member.name!r}")
             parsed = parse_submissions_document(decoded, location)
+            _declare_shard_parents(declared, parsed[1], shard_members)
             if evidence is not None:
                 # Recorded here because this is the only point at which the member's bytes and
                 # its parse both exist, and recording it anywhere else would mean either a
@@ -861,7 +1177,8 @@ def _stream_bulk_submissions(
                 evidence.absorb(member.name, member.payload, parsed[0])
             yield parsed
             # After the yield, so the count is of members the consumer has finished writing
-            # rather than of members handed to it.
+            # rather than of members handed to it. A deferred shard increments it above
+            # instead, at the point this traversal has finished with it.
             processed += 1
             if max_members is not None and processed >= max_members:
                 raise _DiagnosticPrefixLimit(processed)
@@ -870,6 +1187,13 @@ def _stream_bulk_submissions(
         raise OfflineParseError(message) from exc
     if max_members is not None:
         raise _DiagnosticPrefixLimit(processed)
+    yield from _stream_deferred_historical_shards(
+        path,
+        observation,
+        deferred,
+        declared,
+        evidence=evidence,
+    )
 
 
 def _parse_bulk_submissions(

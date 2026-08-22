@@ -32,7 +32,7 @@ import os
 import stat
 import unicodedata
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -51,6 +51,7 @@ __all__ = [
     "canonical_member_name",
     "extract_members",
     "iter_members",
+    "iter_named_members",
     "safe_member_name",
 ]
 
@@ -347,6 +348,89 @@ def iter_members(
         message = (
             f"archive {archive_path.name} is corrupt and is quarantined rather than "
             f"treated as empty: {exc}"
+        )
+        raise ArchiveDefenceError(message, _REASON_INVALID) from exc
+
+
+def iter_named_members(
+    archive_path: Path,
+    names: Sequence[str],
+    *,
+    max_member_bytes: int = MAX_MEMBER_BYTES,
+    max_ratio: float = MAX_EXPANSION_RATIO,
+) -> Iterator[tuple[str, bytes]]:
+    """Yield exactly the named members of an archive, in the order requested.
+
+    A **targeted** read rather than a second traversal: the central directory is scanned once
+    to locate the requested canonical names, and only those members are decompressed. It exists
+    for a caller that met a member during a full :func:`iter_members` pass, deliberately dropped
+    its payload, and must now read that one member again by name — the bounded-residency shape
+    accepted Decision 110 §8 requires of anything traversing the bulk archive.
+
+    Everything is refused that :func:`iter_members` refuses about an individual member: names
+    are canonicalized before anything else, non-regular members are refused, and declared size
+    and expansion ratio are checked before a byte is read. What is deliberately **not**
+    re-applied is the archive-level *cumulative* expansion cap: these bytes were already
+    admitted under it during the full traversal, and re-counting a subset from zero would
+    compare part of an archive against a whole-archive limit.
+
+    Payload buffering is per member and no wider than :func:`iter_members`': one member is read,
+    yielded, and dropped before the next is opened. Nothing is written to disk and nothing
+    reaches the network.
+
+    Args:
+        archive_path: Local path to the preserved archive. It is never modified.
+        names: The exact canonical member names to read. Order is the yield order, so the
+            caller's sequence is the contract; a repeated name is refused rather than read
+            twice.
+        max_member_bytes: Refuse any requested member larger than this when expanded.
+        max_ratio: Refuse a requested member whose expansion ratio is implausible.
+
+    Raises:
+        ArchiveDefenceError: the archive is corrupt; a name is hostile; a requested name is
+            absent from the archive or resolves to more than one entry; a requested name is
+            asked for twice; or a requested member violates a defensive rule.
+    """
+    wanted = set(names)
+    if len(wanted) != len(names):
+        repeated = sorted({name for name in names if list(names).count(name) > 1})
+        message = (
+            f"refusing a named-member read that asks for {repeated} more than once: the "
+            "requested sequence is the yield order, so a repeated name has no unambiguous "
+            "meaning and would decompress the same member twice"
+        )
+        raise ArchiveDefenceError(message)
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            located: dict[str, zipfile.ZipInfo] = {}
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                _refuse_special_member(info)
+                canonical = canonical_member_name(info.filename)
+                if canonical not in wanted:
+                    continue
+                if canonical in located:
+                    message = (
+                        f"refusing archive member {canonical!r}: it resolves to more than "
+                        "one entry, so the member the requested name refers to is ambiguous"
+                    )
+                    raise ArchiveDefenceError(message)
+                located[canonical] = info
+            for name in names:
+                requested = located.get(name)
+                if requested is None:
+                    message = (
+                        f"refusing to read archive member {name!r}: the archive does not "
+                        "hold a member of exactly that canonical name"
+                    )
+                    raise ArchiveDefenceError(message)
+                _refuse_implausible(name, requested, max_member_bytes, max_ratio)
+                yield name, _read_member(archive, requested, name, max_member_bytes)
+    except zipfile.BadZipFile as exc:
+        message = (
+            f"archive {archive_path.name} is corrupt and is refused rather than treated as "
+            f"holding none of the requested members: {exc}"
         )
         raise ArchiveDefenceError(message, _REASON_INVALID) from exc
 

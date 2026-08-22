@@ -862,3 +862,41 @@ def test_one_definition_states_the_pid_domain_for_both_operations() -> None:
     assert source.count("pid > 0") == 1
     assert "non_targetable_pid_detail(pid)" in inspect.getsource(_watchdog.stop)
     assert "non_targetable_pid_detail(pid)" in inspect.getsource(_watchdog.network_probe_command)
+
+
+# ==========================================================================
+# 27. Command authentication reads the whole command line, on every platform
+# ==========================================================================
+def test_the_command_probe_asks_ps_for_unlimited_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The argv is the claim, because the behaviour it protects is invisible here.
+
+    ``ps`` on Linux truncates ``-o command=`` to 80 columns when its stdout is a pipe — which
+    is what ``capture_output`` makes it — so a canary's command line lost everything past the
+    interpreter path and every legitimate long-command target authenticated as
+    ``STOP_REFUSED_TARGET_MISMATCH`` without being signalled. macOS ``ps`` returns the whole
+    line regardless, so no end-to-end test on the developer platform can fail when the option
+    is missing; only the request itself distinguishes the two. Asserting the argv is therefore
+    the one check that fails on either platform the moment ``-ww`` is dropped.
+    """
+    seen: list[list[str]] = []
+    # Longer than 80 columns on purpose, and padded, so the strip is proved on a string that
+    # the unrepaired probe could not have returned whole.
+    stdout = (
+        "  /tmp/venv/bin/python"
+        " /tmp/pytest-of-runner/pytest-0/test_the_watchdog_stop_actuall0/probe_target.py\n"
+    )
+    assert len(stdout.strip()) > 80
+
+    def record(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(_watchdog.subprocess, "run", record)
+    observed = _watchdog.process_command(4242)
+
+    (command,) = seen
+    assert "-ww" in command, "ps must be asked for unlimited width; Linux truncates at 80 columns"
+    assert command == ["/bin/ps", "-ww", "-o", "command=", "-p", "4242"]
+    assert observed == stdout.strip()

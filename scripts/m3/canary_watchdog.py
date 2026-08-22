@@ -306,10 +306,19 @@ def process_is_alive(pid: int) -> bool:
 
 
 def process_command(pid: int) -> str:
-    """The target's command line, or an empty string when it cannot be read."""
+    """The target's command line, or an empty string when it cannot be read.
+
+    ``-ww`` is not cosmetic. ``ps`` on Linux truncates ``-o command=`` to 80 columns when its
+    stdout is not a terminal, which is exactly what ``capture_output`` gives it, and a canary's
+    command line is a virtualenv interpreter followed by an absolute path — comfortably past
+    that. The expected substring fell off the end, so every legitimate long-command target
+    authenticated as :data:`STOP_REFUSED` and was never signalled. macOS ``ps`` returns the
+    whole line either way, so the developer platform could not observe it. Both accept ``-ww``
+    as unlimited width, and D131-R6/R9 require the *exact* command line, not a prefix of it.
+    """
     try:
         completed = subprocess.run(  # noqa: S603
-            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            ["/bin/ps", "-ww", "-o", "command=", "-p", str(pid)],
             capture_output=True,
             text=True,
             check=False,

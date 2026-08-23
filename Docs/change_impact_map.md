@@ -1175,6 +1175,38 @@ members drawn from a source holding `985,835` — under `0.7%` — and authorize
 performance claim**. The mmap benefit **declined** as the catalog grew (`12.84%` → `9.775%`, map
 coverage `80.64%` → `45.33%`), which trends the wrong way for a larger run.
 
+**The capacity model that followed it changed no source either — but it carries one live finding
+about a constant in this map.**
+[Decision 135](Decisions/decision_135_m3_3_corrected_run_capacity_reconciliation.md) constructs the
+corrected-run capacity reconciliation that
+[Decision 129](Decisions/decision_129_m3_3_d128_semantic_adjudication.md) §12 (D129-R12) required,
+and accepts a **`185` GiB start floor** and a **`50` GiB pre-F2 floor**. **It has no impact entry of
+its own because no source changed for it**: its executable change set is **empty**, the accepted
+[Decision 131](Decisions/decision_131_m3_3_d128_semantic_and_operational_repair.md) runtime
+configuration is byte-unchanged, and no path or test selection anywhere in this map changes.
+
+**The finding that belongs here: the `>= 30` GiB pre-F2 admission gate is now known to be
+inadequate, and it is deliberately still in code.**
+`PRE_F2_MINIMUM_FREE_BYTES = 30 * 1024**3` in `src/disclosure_drift/m3/single_source_canary.py`
+([Decision 127](Decisions/decision_127_m3_3_pre_f2_admission_guard.md)) is **unchanged and must stay
+unchanged until separately authorized** — D135 §8 (D135-R3) rules the constant insufficient but
+**explicitly does not authorize editing it**. The corrected projection consumes **`27.5539` GiB of
+that `30` GiB gate outright**, leaving `2.4461` GiB with **zero safety reserve**. **A future session
+that edits this constant as an obvious follow-up would be acting outside D135**, and a session that
+reads the `30` and assumes it is a validated threshold would be reading a superseded planning value.
+Both readings are wrong; the constant is live, known-low, and frozen pending its own instrument.
+Deferring the edit is safe **because no run is authorized** — a gate never reached cannot be reached
+at the wrong value. Its **nearest tests are unchanged**, since neither the guard nor its constant
+moved.
+
+**One further D135 finding forecloses a plausible future change, in the same shape as the D134 WAL
+finding above.** The `10` GiB continuous floor, the no-`VACUUM` rule, and explicit `SQLITE_TMPDIR`
+placement ([Decision 124](Decisions/decision_124_m3_3_capacity_reconciliation.md) §9, D124-R5) are
+**untouched by D135** and remain exactly as written. **Only the `105` GiB start gate and the `30` GiB
+pre-F2 gate are superseded, and only for planning purposes** — no gate is relaxed, in code or on
+paper, and D135 relaxes nothing anywhere.
+
+
 
 ## Notes on reading this table
 

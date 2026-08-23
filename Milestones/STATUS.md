@@ -1,12 +1,99 @@
 # Milestones/STATUS.md — concrete-state ledger
 
-CURRENT_STAGE: M3.3 — DECISION 142 ACCEPTS DECISION 141 FOR CONTINUATION, SELECTS USB_VIA_THUNDERBOLT_DOCK AS THE ONE TOPOLOGY FOR THE FIRST COMPLETE-SOURCE CANARY, DEFERS GOVERNED PAUSE/RESUME BEYOND THAT CANARY, FREEZES THE PRE-CANARY ARCHITECTURE, AND CORRECTS THE FALSE RUNBOOK §28d STATEMENT THAT --require-volume-uuid IS OPTIONAL. IT IS A GOVERNANCE AND DOCUMENTATION PUBLICATION ONLY — NO FILE UNDER src/ OR tests/ IS TOUCHED, AND EVERY GUARD BEHAVES EXACTLY AS BEFORE. NEITHER D137, D138 NOR D140 IS OWNER ACCEPTED, AND D142 AUTHORIZES NO CANARY — CANARY_AUTHORIZED = NO. Accepted predecessor M3_3_D141_OWNER_ACCEPTED_FOR_CONTINUATION; authorization M3_3_D142_PRECANARY_ARCHITECTURE_FREEZE_AND_RUNBOOK_CORRECTION_AUTHORIZED, spent by this publication; completion token M3_3_D142_PRECANARY_ARCHITECTURE_FREEZE_COMPLETE_READY_FOR_OWNER.
-ACTIVE_BLOCKER: THE COMPLETE-SOURCE CANARY REMAINS UNAUTHORIZED, AND THE PRIOR AUTHORIZATION REMAINS WITHDRAWN. Decision 141 is now OWNER ACCEPTED FOR CONTINUATION as a BOUNDED qualification only, but D137, D138 and D140 were never owner accepted, and the D136-R8 narrow one-canary exception takes effect ONLY AFTER IMPLEMENTATION AND ACCEPTANCE. A passing preflight still prints canary_authorized: false. THE ONE SELECTED FIRST-CANARY TOPOLOGY IS USB_VIA_THUNDERBOLT_DOCK ON VOLUME UUID 397A4D4A-9508-391E-814E-3B533C7BD049, USB 0x090C:0x2320 SERIAL SSKPSSD0000000000071, ORDERED DOCK CASCADE 0x8087:0x0B40 -> 0x17EF:0x30B6 -> 0x17EF:0x30B8, ON THE D141-QUALIFIED PHYSICAL DOCK PORT AND PROFILE; USB_DIRECT REMAINS QUALIFIED AND IS NOT REVOKED BUT IS NOT SELECTED, AND THERE IS NO AUTOMATIC AND NO OPERATOR FALLBACK BETWEEN THEM — A REFUSING DOCK PREFLIGHT MEANS STOP AND RETURN TO THE OWNER, NEVER A SWITCH TO DIRECT STORAGE. GOVERNED PAUSE/RESUME IS DEFERRED BEYOND THE FIRST CANARY (GOVERNED_PAUSE_RESUME = NOT_IMPLEMENTED, Decision 140 §17 STILL OPEN OWNER WORK): THERE IS NO SAFE_TO_EJECT STATE, kill -STOP IS NOT A GOVERNED PAUSE, CLOSING THE LID IS NOT A GOVERNED PAUSE, QUALIFYING THE DOCK DID NOT CREATE PERMISSION TO DETACH IT, AND A NEED TO DETACH OR RECONFIGURE MEANS THE RUN IS INTERRUPTED AND LOST, NOT PAUSED. THE NINE D140 §18 RESIDUAL LIMITATIONS AND THE NINE DECISION 141 §12 LIMITATIONS ARE CARRIED FORWARD UNCHANGED AND ARE NOT UPGRADED INTO GENERAL RELIABILITY CLAIMS: F_FULLFSYNC SUCCESS IS OS-VISIBLE ONLY; NO PHYSICAL DISCONNECT OR POWER-LOSS QUALIFICATION OCCURRED, ONLY SIGKILL PROCESS-CRASH RECOVERY; ExFAT REMAINS NON-JOURNALED; THE DOCK QUALIFICATION IS PORT- AND PROFILE-SPECIFIC; macOS-SPECIFIC MECHANISMS REMAIN; NO COMPLETE-SOURCE RUNTIME HAS YET BEEN MEASURED; AND HOST BATTERY HEALTH IS DEGRADED AT 73% MAXIMUM CAPACITY / 859 CYCLES / macOS REPORTING 'Check Battery', WHICH MAKES THE AC REQUIREMENT MORE IMPORTANT AND IS NOT A MITIGATION. SEPARATELY AND INDEPENDENTLY, census_orchestrator.py::_parse_bulk REMAINS AN OPEN PRE-NETWORK BLOCKER whose repair MUST NOT be performed as a side effect of unrelated work.
-IMPLEMENTATION_AUTHORIZATION: SPENT — M3_3_D142_PRECANARY_ARCHITECTURE_FREEZE_AND_RUNBOOK_CORRECTION_AUTHORIZED was issued outside this repository and is now consumed by the publication of Decision 142. NO FURTHER IMPLEMENTATION AUTHORITY ARISES FROM THAT PUBLICATION. It does NOT authorize a canary, canary-world construction, an execution namespace, a launch receipt, complete-source execution, E0, migration 0016, network acquisition, pause/resume implementation, or any further architecture change. It accepts NEITHER Decision 137, 138 NOR 140. All three activation constants remain None, both tracked network switches remain false, migration head remains 0015 with 0016 absent, and no file under src/ or tests/ was touched.
-NEXT_AUTHORIZED_ACTION: STOP AND RETURN THE DECISION 142 PUBLICATION REPORT TO THE OWNER — AND NOTHING ELSE. The pre-canary architecture is FROZEN (D142-R5): no further pre-canary architecture change is planned. The intended next phase is ONE FINAL INDEPENDENT PRE-CANARY REVIEW, which is NOT authorized by Decision 142, MUST NOT be performed in the session that published it, and MUST later be performed from a genuinely fresh session context against the exact published Decision 142 commit. That review does not itself authorize a canary; a canary authority remains a separate owner instrument that has not been issued. DO NOT START THE CANARY.
+CURRENT_STAGE: M3.3 — DECISION 143 IS THE FINAL INDEPENDENT PRE-CANARY REVIEW DECISION 142 §10 CALLED FOR, PERFORMED FROM A GENUINELY FRESH SESSION CONTEXT AGAINST THE EXACT FROZEN DECISION 142 TREE. REVIEWED_HEAD a41468203e69c71c9741f3e4fab2d73cf2f7aef1, REVIEWED_TREE 8614cfc8421bbb93375066631e0616e72d074fd3 — THE VERDICT APPLIES TO THAT TREE AND NOT TO THE LATER DOCUMENTATION-ONLY COMMIT THAT PUBLISHES THE RECORD. VERDICT D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_FAIL — 0 BLOCKER / 2 MAJOR / 3 MINOR / 2 OBSERVATION. IT IS A REVIEW PUBLICATION ONLY: NO FILE UNDER src/ OR tests/ IS TOUCHED, NO FINDING IS REPAIRED, AND NO PREDECESSOR RECORD IS ACCEPTED — A FAIL VERDICT IS NOT A LICENCE TO FIX THE FINDINGS, BECAUSE DECISION 142 §10 FROZE THE PRE-CANARY ARCHITECTURE. CANARY_AUTHORIZED = NO. Accepted predecessor M3_3_D142_OWNER_ACCEPTED_FOR_FINAL_INDEPENDENT_PRECANARY_REVIEW; authorization M3_3_D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_AUTHORIZED, spent by this publication; completion token M3_3_D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_FAILED_READY_FOR_OWNER.
+ACTIVE_BLOCKER: THE COMPLETE-SOURCE CANARY REMAINS UNAUTHORIZED, AND THE FINAL INDEPENDENT REVIEW FAILED ON TWO MAJOR FINDINGS THAT ARE RECORDED AND DELIBERATELY UNREPAIRED. MAJOR-1 — THE DECISION 142 §4 SELECTED TOPOLOGY USB_VIA_THUNDERBOLT_DOCK IS NOT MECHANICALLY ENFORCED: NO PRODUCTION CALLER SUPPLIES required_transport, so all three entry points (single_source_canary.py:1049, :1778, :1950) leave the narrowing at its None default, which ADMITS EITHER QUALIFIED TOPOLOGY; there is NO CLI flag, configuration key or environment variable that supplies it, and the launcher script has no transport awareness, so A DIRECTLY ATTACHED QUALIFIED SSD PASSES THE WHOLE ENVELOPE AND WOULD START THE FIRST CANARY ON AN UNSELECTED TOPOLOGY — INCLUDING AS THE ANSWER TO A DOCK REFUSAL, WHICH DECISION 142 §6 FORBIDS. MAJOR-2 — RUNBOOK §28f.C STATES TWO CONDITIONS AS APPLICATION-CHECKED THAT ARE NOT: under the header "each is checked by the application rather than by reading this page", the Transport row demands transport_class = USB_VIA_THUNDERBOLT_DOCK (the application checks MEMBERSHIP in the two-element qualified set) and the Co-tenancy row demands no heavy competing SSD workload (the application checks nothing, as §28f.E of the same section says). BETWEEN THEM, NOTHING VERIFIES THAT THE FIRST CANARY RUNS ON THE SELECTED TOPOLOGY. THREE MINOR FINDINGS STAND: the cli.py --require-volume-uuid help still carries the pre-D140 optionality framing D142 §9 corrected in the runbook; runbook §28d's D137-era condition table is stale after D141-R9 and unmarked; and the decision registry's own D141 row still reads PENDING OWNER ACCEPTANCE / no acceptance token after D142 §3 accepted it. WHAT DOES HOLD IS RECORDED TOO: ZERO BLOCKERS; the first-canary call graph determined end to end; EVERY SAFETY GUARD PRODUCTION-REACHABLE including the AC-power and lid guard D141 found unreachable; the mandatory UUID enforced in code and stated correctly in the runbook; NO AUTHORITY BYPASS AND NO NETWORK BYPASS; D130 isolation effective with the substring decoy correctly NOT refused; SQLITE_TMPDIR validated against the environment SQLite actually consumes; the host flock excluding a second complete-source canary; and PAUSE/RESUME CORRECTLY NON-IMPLEMENTED WITH NO SAFE_TO_EJECT STATE ANYWHERE IN src/ OR tests/. census_orchestrator.py::_parse_bulk IS PROVEN CANARY-UNREACHABLE (case B) AND REMAINS AN OPEN PRE-NETWORK BLOCKER, DELIBERATELY UNREPAIRED. NEITHER D137, D138 NOR D140 IS OWNER ACCEPTED; D141 IS ACCEPTED FOR CONTINUATION ONLY; AND D143 ACCEPTS NONE OF THEM. A passing preflight still prints canary_authorized: false.
+IMPLEMENTATION_AUTHORIZATION: SPENT — M3_3_D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_AUTHORIZED was issued outside this repository and is now consumed by the publication of Decision 143. NO FURTHER IMPLEMENTATION AUTHORITY ARISES FROM THAT PUBLICATION, AND A FAIL VERDICT CONFERS NO REPAIR AUTHORITY. It does NOT authorize source repair, test repair, runbook correction, architecture redesign, a canary, canary-world construction, canary execution, an execution namespace, a launch receipt, E0, migration 0016, network acquisition, SEC traffic, pause/resume implementation, physical disconnect testing, or any modification or opening of the D130 archive. It accepts NEITHER Decision 137, 138, 140, 141 NOR 142. All three activation constants remain None, both tracked network switches remain false, migration head remains 0015 with 0016 absent, and no file under src/ or tests/ was touched.
+NEXT_AUTHORIZED_ACTION: STOP AND RETURN THE DECISION 143 INDEPENDENT REVIEW TO GPT-5.6 SOL — AND NOTHING ELSE. DO NOT START THE CANARY. DO NOT REPAIR THE REVIEW FINDINGS IN THE SESSION THAT PUBLISHED THEM. The two MAJOR findings and the three MINOR findings are the owner's to adjudicate: whether to wire the required_transport pin, whether to correct runbook §28f.C, and whether either is a source change the architecture freeze must be lifted for. A canary authority remains a separate owner instrument that has not been issued, and a review — passing or failing — never supplies one.
 
 
 > **CONTROLLING CURRENT POSITION, 2026-08-23 (LATEST) — published
+> [Decision 143](../Docs/Decisions/decision_143_m3_3_final_independent_precanary_review.md), the
+> FINAL INDEPENDENT PRE-CANARY REVIEW, performed from a genuinely fresh session context against
+> the exact frozen Decision 142 tree. Accepted predecessor
+> `M3_3_D142_OWNER_ACCEPTED_FOR_FINAL_INDEPENDENT_PRECANARY_REVIEW`, authorization
+> `M3_3_D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_AUTHORIZED` (issued outside this repository and
+> spent by this publication), completion token
+> `M3_3_D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_FAILED_READY_FOR_OWNER`.
+> **`CANARY_AUTHORIZED = NO`, unchanged.**
+>
+> **Read this first: this block now carries the current position, and every block below it does
+> not.** The Decision 142 block that follows carried the `(LATEST)` marker until this record; that
+> marker is corrected here — **Decisions 137, 138, 139, 140, 141 and 142 state their position as at
+> their own dates and are otherwise left byte-unchanged**, as every superseded block in this file
+> is.
+>
+> **THE REVIEWED STATE.** `REVIEWED_HEAD a41468203e69c71c9741f3e4fab2d73cf2f7aef1`,
+> `REVIEWED_TREE 8614cfc8421bbb93375066631e0616e72d074fd3`. **The verdict applies to that tree**,
+> not to the later documentation-only commit that publishes this record.
+>
+> **THE VERDICT.** `D143_FINAL_INDEPENDENT_PRECANARY_REVIEW_FAIL` — **0 BLOCKER / 2 MAJOR / 3
+> MINOR / 2 OBSERVATION**. `PASS` was not available: two of its stated conditions are false on this
+> tree — the **selected dock topology is not mechanically enforced**, and **direct attachment is
+> not refused**.
+>
+> **MAJOR-1 — the Decision 142 §4 selected topology is not mechanically enforced.** The mechanism
+> exists and is correct: `required_transport` narrows, and demanding the dock while direct is
+> attached refuses. **No production caller supplies it.** All three entry points into the envelope
+> pass only `asserted_uuid`, `environ` and `observed_at`, leaving the narrowing at its `None`
+> default, which admits **either** qualified topology; no CLI flag, configuration key or
+> environment variable supplies it, and the launcher script has no transport awareness. **A
+> directly attached qualified SSD passes the whole envelope**, including as the answer to a dock
+> refusal — exactly the operator fallback Decision 142 §6 forbids. It is the **same shape** as the
+> defect Decision 141 §3 found, one level down. It is MAJOR rather than BLOCKER because **no safety
+> guard is bypassed** and `USB_DIRECT` remains genuinely qualified.
+>
+> **MAJOR-2 — runbook §28f.C states two conditions as application-checked that are not.** Under
+> *"each is checked by the application rather than by reading this page"*, the **Transport** row
+> demands `transport_class` = `USB_VIA_THUNDERBOLT_DOCK` (the application checks **membership** in
+> the two-element qualified set) and the **Co-tenancy** row demands no heavy competing SSD workload
+> (the application checks nothing, as §28f.E of the same section says). **Between MAJOR-1 and
+> MAJOR-2, nothing verifies that the first canary runs on the selected topology.**
+>
+> **MINOR-1** the `cli.py` help for `--require-volume-uuid` still carries the pre-D140 optionality
+> framing Decision 142 §9 corrected in the runbook and could not reach in `src/`; **MINOR-2**
+> runbook §28d's Decision 137-era condition table is stale after D141-R9 and carries no
+> supersession marker; **MINOR-3** the decision registry's own Decision 141 row still reads
+> `PENDING ... OWNER ACCEPTANCE` and `no acceptance token` after Decision 142 §3 accepted it for
+> continuation.
+>
+> **`CensusOrchestrator._parse_bulk` IS PROVEN CANARY-UNREACHABLE (case B)** — one caller, one
+> caller above that, one **function-local** construction site behind `network.enabled`, a second
+> `require_network()` gate inside `run`, a canary module graph that never imports the orchestrator
+> at all (proved live through `sys.modules`), a **different and repaired** twin
+> `offline_parse._parse_bulk_submissions`, and a standing pinning test. **It remains an open
+> PRE-NETWORK blocker and was not repaired.**
+>
+> **WHAT DOES HOLD, stated rather than buried under the failure**: zero BLOCKERs; the first-canary
+> call graph determined end to end; **every safety guard production-reachable**, including the
+> AC-power and lid guard Decision 141 found unreachable; the mandatory UUID enforced in code and
+> stated correctly in the runbook; **no authority bypass and no network bypass** — `canary_authorized`
+> is a literal `False` with no assignment path, `httpx` never enters the canary import graph, and no
+> shadow authorization constant exists; D130 isolation effective on `realpath`-resolved case-folded
+> components with the substring decoy correctly **not** refused; `SQLITE_TMPDIR` validated against
+> the environment SQLite actually consumes; the host `flock` excluding a second complete-source
+> canary; and pause/resume correctly non-implemented with **no `SAFE_TO_EJECT` state anywhere** in
+> `src/` or `tests/`.
+>
+> **VALIDATION.** 285 focused safety/reachability tests passed; `ruff check`, `ruff format --check`
+> and `mypy src` clean; secrets, hygiene, Markdown links, decision references, config validation and
+> cohort print all green; **`make check-fast` exit 0 — 5140 passed / 1 skipped / 0 failed**.
+> **Recorded rather than tidied away:** `check-fast` was invoked **twice**, because the first
+> invocation's exit status was masked by a shell pipeline — both green, read-only, idempotent, no
+> source modified between them, and not a retry after a failure. The reviewed tree was
+> byte-identical `8614cfc` before the first read and after the last gate.
+>
+> **A REVIEW RECORDS; IT DOES NOT REPAIR.** Decision 142 §10 froze the pre-canary architecture, and
+> **finding a defect does not grant permission to fix it**. No file under `src/` or `tests/` was
+> touched, no runbook sentence was corrected, and **this record accepts no predecessor decision**.
+>
+> **No canary, no canary world, no execution namespace, no launch receipt, no complete-source
+> execution, no E0, no migration `0016` (head remains `0015`, `0016` absent), no network activity,
+> no SEC acquisition, no D130 modification, no real canary `SQLITE_TMPDIR`, no pause/resume
+> implementation, and no physical disconnect testing.** All three activation constants remain
+> `None`; both tracked network switches remain `false`. **A FAIL review does not authorize a repair,
+> and a PASS review would not have authorized a canary.**
+
+> **SUPERSEDED POSITION, 2026-08-23 — published
 > [Decision 142](../Docs/Decisions/decision_142_m3_3_precanary_architecture_freeze.md), the
 > owner acceptance of Decision 141 for continuation, the selection of ONE topology for the first
 > complete-source canary, the deferral of governed pause/resume beyond it, the pre-canary

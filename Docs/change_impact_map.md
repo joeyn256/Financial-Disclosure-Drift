@@ -1123,6 +1123,30 @@ impact entry of its own because no source changed for it** — no production cod
 configuration, or migration moved — so every path and test named above stands exactly as written.
 The proof makes **no source-wide claim** and **certifies no D128 count**.
 
+**One line of that watchdog row has since been repaired, and the row otherwise stands.**
+[Decision 133](Decisions/decision_133_m3_3_watchdog_linux_portability_repair.md) records a
+cross-platform conformance defect in `scripts/m3/canary_watchdog.py`'s command probe: `/bin/ps -o
+command= -p PID` is truncated by Ubuntu/`procps` at `80` columns when its stdout is a pipe, so the
+expected target substring fell off the end and every legitimate long-command target on Linux
+authenticated as `STOP_REFUSED_TARGET_MISMATCH` and was **never signalled**. macOS BSD `ps` does not
+truncate in that condition, so the local gate could not observe it. The repair is `/bin/ps -ww -o
+command= -p PID` — one argv for both platforms, **no platform branch and no `/proc` fallback** — and
+**every other contract in the watchdog row above is unchanged**: the `pid > 0` domain, the `-o
+state=` liveness probe, exact-target authentication, `SIGINT` only, `STOP_FAILED`,
+`ProcessLookupError`, `PermissionError`, the `lsof` intersection, and `MEMBER_COUNT_INCONSISTENT` at
+exit `5`.
+
+| Surface touched | Change | Nearest tests |
+|---|---|---|
+| `scripts/m3/canary_watchdog.py` | `process_command(...)` asks `ps` for **unlimited width** (`-ww`). Nothing else in the stop, probe, or monitor contract moves | `tests/unit/test_d131_signal_and_monitor.py` |
+| `tests/unit/test_d131_signal_and_monitor.py` | one additive test, `test_the_command_probe_asks_ps_for_unlimited_width`, asserting the **actual `ps` argv** rather than the observed behaviour — the four originally Linux-failing tests still pass on macOS without `-ww`, so only the request distinguishes the two implementations. Removing `-ww` is killed by this test | itself |
+
+**Which tests to run for it.** `tests/unit/test_d131_signal_and_monitor.py`, and nothing else is
+implicated — **no production package code, configuration, schema, or migration changed**, so no
+research-pipeline surface in this map is affected and no test selection elsewhere in it changes.
+Proven on Linux by CI run `32605572777` at `977a811b…`: `4899` passed, `1` skipped, `0` failed, with
+all four previously failing nodes green under `ubuntu-latest`/`procps`.
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

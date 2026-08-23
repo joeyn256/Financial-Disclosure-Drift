@@ -435,6 +435,20 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         ),
     )
     canary.add_argument(
+        "--require-volume-uuid",
+        default=None,
+        metavar="VOLUME_UUID",
+        help=(
+            "Require the work root to be on the external volume with exactly this Volume UUID, "
+            "and apply every Decision 137 launch guard: isolation from the immutable D130 "
+            "archive, the bounded archive precheck, the 185 GiB launch floor, and an explicit "
+            "external SQLITE_TMPDIR. A wrong UUID, an absent volume, and a lookup that fails "
+            "are all refusals; there is no fallback to internal storage. Omitted, the run has "
+            "no external-volume requirement and behaves exactly as before. Supplying it is not "
+            "an authorization to launch a corrected complete-source canary."
+        ),
+    )
+    canary.add_argument(
         "--member-limit",
         type=int,
         default=None,
@@ -1795,6 +1809,9 @@ def _m3_canary_source_command(args: argparse.Namespace, logger: Logger) -> int:
             work_root=str(args.work_root),
             repository_root=_repository_root(),
             member_limit=None if args.member_limit is None else int(args.member_limit),
+            require_volume_uuid=(
+                None if args.require_volume_uuid is None else str(args.require_volume_uuid)
+            ),
         )
     except (DisclosureDriftError, sqlite3.Error) as exc:
         print(f"m3 {_M3_3_CANARY_COMMAND} failed: {exc}", file=sys.stderr)

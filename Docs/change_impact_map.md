@@ -1247,6 +1247,46 @@ paper, and D135 relaxes nothing anywhere.
 
 
 
+## Decision 137 — the external working-root guards and the capacity-safety implementation (real impact)
+
+[Decision 137](Decisions/decision_137_m3_3_external_working_root_and_capacity_safety.md) implements
+the nine items [Decision 136](Decisions/decision_136_m3_3_external_ssd_active_volume_qualification.md)
+§11 (D136-R11) assigned to it. **It adopts nothing and starts nothing**, and it creates **no second
+root-selection mechanism**: the existing operator-supplied `--work-root` is reused unchanged, and
+the new work is *authentication* rather than *naming*.
+
+| Path | What changed | Direct test files |
+|---|---|---|
+| `src/disclosure_drift/m3/external_working_root.py` | **new** — the whole D137 guard surface: the frozen Volume UUID `397A4D4A-9508-391E-814E-3B533C7BD049`; the `185`/`20`/`10` GiB constants; `mount_point_of` (an `st_dev` walk, because `diskutil` will not answer for a subdirectory) and `macos_volume_identity` (a **property list**, never the human-oriented table); `require_qualified_volume`, `require_outside_d130_archive`, `require_launch_free_space`, `f2_capacity_state`, `CapacityObservation`/`observe_capacity`, `require_external_sqlite_tmpdir`, the D130 §6 compact proofs with `verify_d130_archive`, and the composed `external_canary_preflight`. Every guard resolves its identity provider from module globals **at call time**, which is the test seam | `tests/unit/test_d137_external_working_root.py` |
+| `src/disclosure_drift/m3/single_source_canary.py` | `PRE_F2_MINIMUM_FREE_BYTES` `30 * 1024**3` → `50 * 1024**3` (D137-R5) — **the constant only**; the strict `<`, the call site between F1 and F2, and the Decision 094 §6.4 ordering are byte-unchanged. One optional `require_volume_uuid` (with `environ`) on `run_single_source_canary`, `run_single_source_prefix_profile`, and `run_canary_source_command`; the `_PhaseObserver` seam and five in-process phase observations; `CanaryResult.capacity_observations`, **rendered only when non-empty** so an internal run's result document is byte-unchanged | `tests/unit/test_d137_external_working_root.py`, `tests/unit/test_d127_pre_f2_admission_guard.py`, `tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py` |
+| `src/disclosure_drift/cli.py` | one optional flag, `m3 canary-source --require-volume-uuid`. Omitted, the command behaves exactly as before | `tests/integration/test_m3_cli.py` |
+| `scripts/m3/canary_watchdog.py` | the `capacity` subcommand and exit `6`; thresholds **imported** from the package rather than restated, so a monitor cannot drift from the gate it monitors. **No signal, no deletion, no cleanup**, and the accepted D131 no-escalation invariant is untouched | `tests/unit/test_d137_external_working_root.py`, `tests/unit/test_d131_signal_and_monitor.py` |
+| `Docs/m3/operator_runbook.md` | §28d — the external-volume preflight, the twelve operator conditions with **four mechanically verified and eight not**, the monitoring table, the D130 archive postcheck, and the launch command marked **not authorized** | — |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d137_external_working_root.py`. The pre-F2
+constant change reaches `tests/unit/test_d127_pre_f2_admission_guard.py`, which is **updated in
+place rather than deleted or skipped** — every Decision 127 claim is re-proved at the floor that now
+controls, and the superseded `30` GiB amount is retained as a named constant so its refusal can be
+tested against the exact number that used to admit. The canary threading reaches
+`tests/unit/test_d116_single_source_canary.py` and `tests/unit/test_d119_cache_and_prefix.py`, whose
+byte-level evidence-equivalence is preserved by rendering `capacity_observations` **only when
+non-empty**. The watchdog addition reaches `tests/unit/test_d131_signal_and_monitor.py`, and the CLI
+flag reaches `tests/integration/test_m3_cli.py`.
+
+**No migration, no schema change, and no parser or runtime-semantics change.** Migration head stays
+`0015`; `0016` is absent and unauthorized. `mmap` and the relaxed checkpoint cadence remain rejected
+(D134). `CensusOrchestrator._parse_bulk` remains an open PRE-NETWORK blocker and was **not** touched.
+
+**What the D137 guards do not cover, so a reader does not infer more.** `DURING_F2` cannot be
+sampled in-process — F2 is one blocking call inside one transaction — so it belongs to the
+watchdog's `capacity` subcommand and depends on the operator running it. The external requirement is
+**opt-in**: omitting `--require-volume-uuid` restores the pre-D137 behaviour exactly, which is what
+keeps every existing internal-volume canary path working. `macos_volume_identity` is macOS-only and
+**fails closed** elsewhere. And nothing here claims journaled filesystem semantics, power-loss
+safety, surprise-removal safety, or USB-bridge cache-flush correctness — Decision 136 §9 (D136-R6)
+established **process-crash recovery only**, and that boundary is preserved exactly.
+
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

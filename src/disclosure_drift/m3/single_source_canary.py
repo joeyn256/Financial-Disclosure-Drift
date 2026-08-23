@@ -47,7 +47,7 @@ import os
 import re
 import shutil
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -62,6 +62,12 @@ from disclosure_drift.m3.compact_evidence import (
     CompactEvidenceSidecar,
 )
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
+from disclosure_drift.m3.external_working_root import (
+    CapacityObservation,
+    ExternalCanaryPreflight,
+    external_canary_preflight,
+    observe_capacity,
+)
 from disclosure_drift.m3.offline_parse import (
     DIAGNOSTIC_PREFIX_CLASSIFICATION,
     AssociationTotality,
@@ -164,11 +170,26 @@ CANARY_BATCH_SIZE: Final = 250
 CANARY_RESOLUTION_SCOPE: Final = "catalog"
 
 #: The free-space floor that must hold on the run volume **immediately before F2 opens its
-#: single transaction**: 30 GiB, ``32,212,254,720`` bytes.
+#: single transaction**: 50 GiB, ``53,687,091,200`` bytes.
 #:
-#: Accepted **Decision 124 §9** (D124-R5) states the gate, and states it as a *boundary*
-#: measurement: it is taken immediately before opening F2 and is explicitly **not** inherited
-#: from the run's starting free-space gate.
+#: **The value is Decision 137's (D137-R5); the mechanism is Decision 127's, unchanged.** The
+#: guard was introduced at 30 GiB, ``32,212,254,720`` bytes -- the figure accepted **Decision
+#: 124 §9** (D124-R5) carried at the time. Accepted **Decision 135** §8 (D135-R3) then
+#: reconciled the corrected complete-source run's capacity and found 30 GiB **inadequate** for
+#: it, and accepted **Decision 136** §11 (D136-R11 item 6) made replacing that behaviour the
+#: next stage's work rather than its own. This is that replacement: the constant moves, the
+#: strict ``<`` comparison, the call site, and the refusal shape do not.
+#:
+#: The old 30 GiB behaviour has **no reachable path**. It was one constant read from one
+#: comparison, so raising the constant retires it entirely rather than leaving a second branch
+#: a caller could still select.
+#:
+#: It remains a *boundary* measurement: taken immediately before opening F2, and explicitly
+#: **not** inherited from the run's starting free-space gate -- which is a different, larger
+#: number for a different question (`185` GiB at ``PRE_LAUNCH``; see
+#: :data:`~disclosure_drift.m3.external_working_root.LAUNCH_MINIMUM_FREE_BYTES`). The
+#: **continuous** emergency floor *during* F2 is a third number and stays where D124-R5 put it,
+#: at `10` GiB (:data:`~disclosure_drift.m3.external_working_root.F2_HARD_FLOOR_FREE_BYTES`).
 #:
 #: Accepted **Decision 126 §7** (D126-R6) records why it has to live here rather than in a
 #: launch wrapper or an external sampler. F1 returns and F2 begins in consecutive statements, so
@@ -181,7 +202,7 @@ CANARY_RESOLUTION_SCOPE: Final = "catalog"
 #:
 #: It is an **admission predicate**, not a budget. It moves no row, no ordering, no digest, and
 #: no identity, and F2's behaviour at or above the floor is exactly what it was before.
-PRE_F2_MINIMUM_FREE_BYTES: Final = 30 * 1024**3
+PRE_F2_MINIMUM_FREE_BYTES: Final = 50 * 1024**3
 
 #: A run identity is a short, lowercase, filesystem-safe slug. It names one disposable world and
 #: is never reused: an identity that already has a world is refused rather than resumed.
@@ -193,6 +214,13 @@ _FILE_MODE: Final = 0o600
 #: Exit codes, matching the repository's operator convention.
 _EXIT_OK: Final = 0
 _EXIT_GATE_FAILURE: Final = 4
+
+#: How a run reports reaching one accepted capacity phase boundary (D137-R7).
+#:
+#: A callback rather than a field, because the boundaries live inside ``_materialize`` where the
+#: result object does not exist yet, and because an internal-volume run passes ``None`` and is
+#: then byte-for-byte the run it was before Decision 137.
+_PhaseObserver = Callable[[str], None]
 
 
 # --------------------------------------------------------------------------- #
@@ -685,6 +713,12 @@ class CanaryResult:
     work_root_free_bytes_before: int
     work_root_free_bytes_after: int
 
+    # -- the D137-R7 phase-boundary capacity evidence --------------------- #
+    #: One record per accepted phase boundary the run reached, in order, for a run held to the
+    #: Decision 137 external-volume requirement. Empty for every other run, which has no
+    #: external volume to observe and no qualified temporary root to size.
+    capacity_observations: tuple[Mapping[str, object], ...] = ()
+
     @property
     def operational_catalog_unchanged(self) -> bool:
         """Whether the accepted catalog is byte-identical to what the run started from."""
@@ -705,9 +739,17 @@ class CanaryResult:
 
         The two world artifacts are named **relative to the disposable world**, so a result
         document can be read, quoted, or moved without disclosing where the world was built.
+
+        ``capacity_observations`` is emitted only when the run actually took some. A run without
+        an external-volume requirement takes none, and rendering an empty list for it would
+        change the result document every previous canary produced -- including the byte-level
+        evidence-equivalence the accepted Decision 119 cache-budget proof rests on. An absent
+        key and an empty list say the same thing here, and only one of them is free.
         """
         record: dict[str, object] = {}
         for name in self.__slots__:
+            if name == "capacity_observations" and not self.capacity_observations:
+                continue
             record[name] = getattr(self, name)
         record["operational_catalog_unchanged"] = self.operational_catalog_unchanged
         return record
@@ -748,6 +790,8 @@ def run_single_source_canary(
     source_instance_id: str,
     batch_size: int = CANARY_BATCH_SIZE,
     cache_bytes: int | None = WORKING_CATALOG_CACHE_BYTES,
+    require_volume_uuid: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> CanaryResult:
     """Run **exactly one** governed planned source into a disposable world, and stop.
 
@@ -784,8 +828,17 @@ def run_single_source_canary(
             SQLite's own default and is what the equivalence proof runs against: the budget is
             an execution parameter, so two runs that differ only in it must reach byte-identical
             evidence. It reaches no other connection and no other database.
+        require_volume_uuid: The Volume UUID the working root must be proved to be on, or
+            ``None`` for a run with no external-volume requirement. **Opt-in, and fail-closed
+            once opted in** (Decision 137): supplying it makes every D137 launch guard a
+            precondition of the run rather than of whoever launched it, so a direct library
+            caller cannot reach a volume the operator surface would have refused. ``None``
+            leaves this path exactly as accepted Decision 116 left it.
+        environ: The environment ``SQLITE_TMPDIR`` is read from when an external volume is
+            required. Defaults to the process's own.
 
     Raises:
+        ExternalWorkingRootError: an external volume was required and a D137 guard did not hold.
         SingleSourceCanaryError: a canary precondition failed.
         OfflineParseError: any accepted fail-closed parse condition, unchanged.
         WorkingCatalogError: the disposable working catalog could not be built safely.
@@ -794,6 +847,18 @@ def run_single_source_canary(
     #    Accepted Decision 116 §7 is the run's own invariant, so an unlawful work root fails
     #    closed here rather than at whichever caller happened to check.
     resolved_work_root = require_canary_work_root(work_root, tree=tree)
+    #    Decision 137, when an external volume is required: identity by Volume UUID, isolation
+    #    from the immutable D130 archive, the bounded archive precheck, the 185 GiB launch
+    #    floor, and an explicit external SQLITE_TMPDIR -- all established here, before a world
+    #    exists to place, and all refusing rather than falling back to internal storage.
+    external: ExternalCanaryPreflight | None = None
+    if require_volume_uuid is not None:
+        external = external_canary_preflight(
+            working_root=resolved_work_root,
+            observed_at=utc_now(),
+            environ=environ,
+            expected_uuid=require_volume_uuid,
+        )
     started = utc_now()
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
@@ -810,6 +875,29 @@ def run_single_source_canary(
     # 2. The disposable world. Create-once, and never under the private evidence root.
     world = create_world(resolved_work_root, run_id)
 
+    observations: list[CapacityObservation] = []
+
+    def record_phase(phase: str) -> None:
+        """Record one accepted D137-R7 phase boundary. Bound only for an external run."""
+        if external is None:  # pragma: no cover - never bound without an external requirement
+            return
+        observations.append(
+            observe_capacity(
+                phase,
+                working_root=world.directory,
+                database=world.working_catalog,
+                wal=world.working_catalog.with_name(f"{WORKING_CATALOG_FILENAME}-wal"),
+                temp_directory=external.temp_directory,
+                volume=external.volume,
+                observed_at=utc_now(),
+            )
+        )
+
+    observer: _PhaseObserver | None = None
+    if external is not None:
+        observations.append(external.observation)
+        observer = record_phase
+
     # 3-7. Everything writable, inside the world.
     with WorkingCatalog(operational_catalog, world.directory, cache_bytes=cache_bytes) as working:
         sidecar = CompactEvidenceSidecar(world.sidecar)
@@ -820,6 +908,7 @@ def run_single_source_canary(
                 selected=selected,
                 sidecar=sidecar,
                 batch_size=batch_size,
+                observe=observer,
             )
             identities = _record_evidence(sidecar=sidecar, materialized=materialized)
             working.checkpoint()
@@ -849,6 +938,7 @@ def run_single_source_canary(
         catalog_after=catalog_after,
         free_before=free_before,
         free_after=shutil.disk_usage(world.directory).free,
+        capacity_observations=tuple(observations),
     )
     # 8. Create-once. A second run that somehow reached this world would fail here rather
     #    than replace the evidence the first one wrote.
@@ -905,6 +995,7 @@ def _materialize(
     selected: SelectedPlannedSource,
     sidecar: CompactEvidenceSidecar,
     batch_size: int,
+    observe: _PhaseObserver | None = None,
 ) -> _Materialized:
     """Parse one source, resolve, and project -- all inside the accepted write containment.
 
@@ -937,17 +1028,28 @@ def _materialize(
             parts=outcome.members,
             batches=outcome.outcome.parsed_records,
         )
+        if observe is not None:
+            # F0 has produced every durable row the source implies; F1 has not begun. The two
+            # labels are recorded separately rather than folded, because the gap between them
+            # is where a projection-sized allocation would first become visible.
+            observe("POST_F0")
+            observe("PRE_F1")
         # Decision 094 §6.4 order, unchanged: every persisted accession is resolved first,
         # because §6.2 item 5 reads the resolver's own output, and only then is the canonical
         # association relation projected.
         catalog.count_persisted_accession_resolutions(
             batch_size=batch_size, checkpoint_batches=True
         )
-        # Accepted Decision 126 §7 (D126-R6) places the Decision 124 §9 (D124-R5) >= 30 GiB
-        # gate exactly here, between F1's return and F2's call: this is the only point at which
-        # the measurement and the transaction it admits cannot be separated by a race.
+        # Accepted Decision 126 §7 (D126-R6) places the admission gate exactly here, between
+        # F1's return and F2's call: this is the only point at which the measurement and the
+        # transaction it admits cannot be separated by a race. Decision 137 (D137-R5) raised the
+        # floor the gate compares against; it did not move the gate.
+        if observe is not None:
+            observe("POST_F1_PRE_F2")
         _require_pre_f2_free_space(working.path.parent)
         totality = materialize_census_associations(connection, compact_evidence=True)
+        if observe is not None:
+            observe("POST_F2")
         counts = _counts(connection)
     working.ledger.mark_disposed(
         source.source_instance_id,
@@ -1030,6 +1132,7 @@ def _result(
     catalog_after: str,
     free_before: int,
     free_after: int,
+    capacity_observations: tuple[CapacityObservation, ...] = (),
 ) -> CanaryResult:
     """Assemble the accepted Decision 116 §9 result surface from measured values only."""
     outcome = materialized.outcome
@@ -1101,6 +1204,9 @@ def _result(
         operational_catalog_sha256_after=catalog_after,
         work_root_free_bytes_before=free_before,
         work_root_free_bytes_after=free_after,
+        capacity_observations=tuple(
+            observation.as_record() for observation in capacity_observations
+        ),
     )
 
 
@@ -1287,6 +1393,8 @@ def run_single_source_prefix_profile(
     member_limit: int,
     batch_size: int = CANARY_BATCH_SIZE,
     cache_bytes: int | None = WORKING_CATALOG_CACHE_BYTES,
+    require_volume_uuid: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> CanaryPrefixResult:
     """Materialize the **first ``member_limit`` members** of one source, and stop. Diagnostic.
 
@@ -1313,9 +1421,17 @@ def run_single_source_prefix_profile(
         member_limit: How many governed members to traverse. Must be positive.
         batch_size: Parts per real transaction, defaulting to the accepted D113 §14 value.
         cache_bytes: The page-cache budget for the run-local writable working catalog.
+        require_volume_uuid: The Volume UUID the working root must be proved to be on, or
+            ``None``. The same opt-in, fail-closed Decision 137 requirement the complete-source
+            path takes, stated here too so a diagnostic prefix cannot reach a volume the
+            complete-source run would have refused. It records **no** phase-boundary capacity
+            evidence: D137-R7 scopes that to a complete-source run, and this one finalizes
+            nothing.
+        environ: The environment ``SQLITE_TMPDIR`` is read from. Defaults to the process's own.
 
     Raises:
         SingleSourceCanaryError: a canary precondition failed, or the bound is not positive.
+        ExternalWorkingRootError: an external volume was required and a D137 guard did not hold.
         OfflineParseError: any accepted fail-closed parse condition, unchanged.
         WorkingCatalogError: the disposable working catalog could not be built safely.
     """
@@ -1326,6 +1442,13 @@ def run_single_source_prefix_profile(
         )
         raise SingleSourceCanaryError(message)
     resolved_work_root = require_canary_work_root(work_root, tree=tree)
+    if require_volume_uuid is not None:
+        external_canary_preflight(
+            working_root=resolved_work_root,
+            observed_at=utc_now(),
+            environ=environ,
+            expected_uuid=require_volume_uuid,
+        )
     started = utc_now()
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
@@ -1454,6 +1577,7 @@ def run_canary_source_command(
     repository_root: Path,
     environ: Mapping[str, str] | None = None,
     member_limit: int | None = None,
+    require_volume_uuid: str | None = None,
 ) -> CanaryOperatorResult:
     """Run one ``m3 canary-source`` invocation and render it.
 
@@ -1474,11 +1598,27 @@ def run_canary_source_command(
     is the point of accepted **Decision 119 §6**: ``run`` is the only mode that may establish a
     complete source, so it must not be reachable with a bound attached, not even a bound that
     would have been harmless.
+
+    **The external-volume requirement is opt-in and, once opted in, dispositive.** Supplying
+    ``require_volume_uuid`` runs every Decision 137 launch guard here so the operator learns
+    immediately, and passes the requirement down so the run establishes it again for itself --
+    the same deliberate redundancy through one primitive that the work root already uses. In
+    ``preflight`` the guards are the whole point: the mode creates nothing, and its record
+    carries what they established. **Passing a preflight is not an authorization to launch**
+    (D137-R12); the corrected canary needs its own owner instrument.
     """
     limit = _validated_member_limit(mode, member_limit)
     private_root = resolve_private_root(repository_root, environ=environ)
     operational_catalog = private_root / OPERATIONAL_CATALOG_RELATIVE_PATH
     resolved_work_root = require_disposable_work_root(work_root, repository_root, private_root)
+    external: ExternalCanaryPreflight | None = None
+    if require_volume_uuid is not None:
+        external = external_canary_preflight(
+            working_root=resolved_work_root,
+            observed_at=utc_now(),
+            environ=environ,
+            expected_uuid=require_volume_uuid,
+        )
     if limit is not None:
         # ``profile-prefix`` is the only mode a bound can survive validation under, so this
         # branch is entered by the bound itself rather than by a second reading of the mode.
@@ -1489,6 +1629,8 @@ def run_canary_source_command(
             run_id=run_id,
             source_instance_id=source_instance_id,
             member_limit=limit,
+            require_volume_uuid=require_volume_uuid,
+            environ=environ,
         )
         return CanaryOperatorResult(
             exit_code=_EXIT_OK if prefix.operational_catalog_unchanged else _EXIT_GATE_FAILURE,
@@ -1501,9 +1643,12 @@ def run_canary_source_command(
             run_id=run_id,
             source_instance_id=source_instance_id,
         )
+        record = dict(report.as_record())
+        if external is not None:
+            record["external_volume"] = dict(external.as_record())
         return CanaryOperatorResult(
             exit_code=_EXIT_OK if report.world_absent else _EXIT_GATE_FAILURE,
-            lines=_render(report.as_record(), title="canary-source preflight"),
+            lines=_render(record, title="canary-source preflight"),
         )
     if mode != "run":
         message = (
@@ -1516,6 +1661,8 @@ def run_canary_source_command(
         work_root=resolved_work_root,
         run_id=run_id,
         source_instance_id=source_instance_id,
+        require_volume_uuid=require_volume_uuid,
+        environ=environ,
     )
     return CanaryOperatorResult(
         exit_code=_EXIT_OK if result.operational_catalog_unchanged else _EXIT_GATE_FAILURE,

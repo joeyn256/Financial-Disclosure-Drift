@@ -56,6 +56,22 @@ one mistyped ``--pid`` was enough to reach either. The domain is now stated once
 :func:`non_targetable_pid_detail`, and both PID-taking operations refuse it before any
 inspection: nothing is read about the process, and nothing is sent to it.
 
+**8. There was no continuous capacity monitor at all.** Accepted Decision 124 §9 (D124-R5) has
+required a continuous `10` GiB floor during F2 since it was written, and accepted Decision 135
+§11 (D135-R7) added a `20` GiB planning alert above it, but nothing sampled either. Decision 137
+(D137-R6) adds the ``capacity`` subcommand, which **reports and never acts**: it sends no signal,
+deletes nothing, and cleans nothing. Acting on a hard stop stays the operator's decision through
+the existing ``stop`` subcommand, exactly as escalation does -- and the operator is told the
+consequence plainly, because **F2 is a single transaction and stopping inside it rolls the
+in-flight projection back** rather than truncating it. Raising the pre-F2 admission gate to `50`
+GiB moved what must be true *before* the transaction opens and left this floor where D124-R5 put
+it.
+
+The three thresholds are **imported** from
+:mod:`disclosure_drift.m3.external_working_root` rather than restated here. A watchdog carrying
+its own copy of a frozen floor is a second definition that can drift from the one the run
+enforces, and a monitor that disagrees with the gate it monitors is worse than none.
+
 Nothing in this file reads a catalog, holds an authority constant, enables network, or
 touches evidence. It signals one process id and reports what happened.
 
@@ -67,22 +83,35 @@ Exit codes:
     ``4``  the stop did not happen: :data:`STOP_FAILED`, or :data:`STOP_FAILED_PERMISSION`.
     ``5``  :data:`TRAVERSAL_INCONSISTENT` -- observed and governed member counts disagree in
            a way no stall or completion verdict can describe.
+    ``6``  the continuous F2 capacity hard floor is breached (``capacity``). Nothing was
+           signalled, deleted, or cleaned; the operator is told what a stop would cost.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
+
+from disclosure_drift.m3.external_working_root import (
+    F2_ALERT_FREE_BYTES,
+    F2_ALERT_STATE,
+    F2_HARD_FLOOR_FREE_BYTES,
+    F2_HARD_STOP_STATE,
+    f2_capacity_state,
+)
 
 ALERT_EXIT: Final = 2
 REFUSED_EXIT: Final = 3
 STOP_FAILED_EXIT: Final = 4
 INCONSISTENT_EXIT: Final = 5
+CAPACITY_HARD_STOP_EXIT: Final = 6
 
 STOP_CONFIRMED: Final = "STOP_CONFIRMED"
 STOP_FAILED: Final = "STOP_FAILED"
@@ -93,6 +122,8 @@ STOP_REFUSED_NON_POSITIVE_PID: Final = "STOP_REFUSED_NON_POSITIVE_PID"
 STOP_ALREADY_GONE: Final = "STOP_TARGET_ALREADY_GONE"
 
 PROBE_REFUSED_NON_POSITIVE_PID: Final = "PROBE_REFUSED_NON_POSITIVE_PID"
+
+REFUSED_UNMEASURABLE: Final = "CAPACITY_REFUSED_UNMEASURABLE"
 
 TRAVERSAL_INCOMPLETE: Final = "TRAVERSAL_INCOMPLETE"
 TRAVERSAL_STALLED: Final = "MEMBER_TRAVERSAL_STALLED"
@@ -482,6 +513,67 @@ def stop(
 # --------------------------------------------------------------------------- #
 # Operator surface
 # --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CapacityVerdict:
+    """One continuous free-space reading during F2, classified. It acts on nothing."""
+
+    state: str
+    free_bytes: int
+    message: str
+
+    @property
+    def alert(self) -> bool:
+        """At or below the `20` GiB planning threshold, and above the hard floor."""
+        return self.state == F2_ALERT_STATE
+
+    @property
+    def hard_stop(self) -> bool:
+        """At or below the `10` GiB emergency floor (D124-R5, unchanged by D137-R6)."""
+        return self.state == F2_HARD_STOP_STATE
+
+
+def capacity_verdict(path: str) -> CapacityVerdict:
+    """Classify free space on the volume hosting ``path`` -- D137-R6.
+
+    ``path`` is the **active working world**, so the reading describes the volume F2's single
+    transaction is actually consuming rather than whichever volume the watchdog happens to run
+    from. Both thresholds are inclusive, matching accepted Decision 135 §11.
+
+    An unmeasurable path is its own outcome rather than a silent pass: the caller is told the
+    reading could not be taken, and no threshold is treated as satisfied.
+
+    Nothing here deletes, moves, cleans, or signals. The hard-stop message states the cost of
+    acting, and the operator decides.
+    """
+    try:
+        free = shutil.disk_usage(Path(path)).free
+    except OSError as exc:
+        message = (
+            f"free space on the working world's volume could not be measured "
+            f"({type(exc).__name__}); no threshold is treated as satisfied"
+        )
+        return CapacityVerdict(state=REFUSED_UNMEASURABLE, free_bytes=-1, message=message)
+    state = f2_capacity_state(free)
+    if state == F2_HARD_STOP_STATE:
+        message = (
+            f"{free} bytes free, at or below the continuous F2 hard floor of "
+            f"{F2_HARD_FLOOR_FREE_BYTES} bytes ({F2_HARD_FLOOR_FREE_BYTES // 1024**3} GiB). "
+            "STOP AND REPORT. F2 is a single transaction, so stopping inside it ROLLS THE "
+            "IN-FLIGHT PROJECTION BACK -- the work is discarded, not truncated. Nothing was "
+            "signalled, deleted, or cleaned here; use the 'stop' subcommand to act"
+        )
+        return CapacityVerdict(state=state, free_bytes=free, message=message)
+    if state == F2_ALERT_STATE:
+        message = (
+            f"{free} bytes free, at or below the {F2_ALERT_FREE_BYTES} byte "
+            f"({F2_ALERT_FREE_BYTES // 1024**3} GiB) planning alert and above the "
+            f"{F2_HARD_FLOOR_FREE_BYTES} byte hard floor. Report and watch; this is not a stop"
+        )
+        return CapacityVerdict(state=state, free_bytes=free, message=message)
+    message = f"{free} bytes free, above the {F2_ALERT_FREE_BYTES} byte planning alert threshold"
+    return CapacityVerdict(state=state, free_bytes=free, message=message)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="canary_watchdog.py",
@@ -523,6 +615,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stopper.add_argument("--timeout-seconds", type=float, default=DEFAULT_STOP_TIMEOUT_SECONDS)
     stopper.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+
+    capacity = sub.add_parser(
+        "capacity",
+        help="Report continuous free space on the working world's volume. Acts on nothing.",
+    )
+    capacity.add_argument(
+        "--path",
+        required=True,
+        help=(
+            "The active working world. Free space is read on the volume hosting it, which is "
+            "the volume F2's single transaction consumes."
+        ),
+    )
     return parser
 
 
@@ -552,6 +657,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         completed = subprocess.run(command, check=False)  # noqa: S603
         return completed.returncode
+    if args.command == "capacity":
+        capacity = capacity_verdict(args.path)
+        print(f"{capacity.state}: {capacity.message}")
+        if capacity.hard_stop:
+            return CAPACITY_HARD_STOP_EXIT
+        if capacity.state == REFUSED_UNMEASURABLE:
+            return REFUSED_EXIT
+        return ALERT_EXIT if capacity.alert else 0
     result = stop(
         args.pid,
         expect_command=args.expect_command,

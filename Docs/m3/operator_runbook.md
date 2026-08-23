@@ -1587,17 +1587,24 @@ Check these **before** anything below. `caffeinate` holds power assertions; **it
 a MacBook lid-close from sleeping the machine**, and no software does. That is why these are
 conditions rather than mechanisms.
 
-| # | Condition | Why |
-|---|---|---|
-| 1 | The Mac is on **AC power** for the whole run | Thirty hours is not a battery-length run. Checked at launch by `pmset -g ps`; battery is a refusal. |
-| 2 | The **lid stays open** for the whole run | `caffeinate -dims` cannot defeat lid-close sleep. Checked at launch by `ioreg -k AppleClamshellState`; a closed lid is a refusal. |
-| 3 | The SSD is **directly connected** — no hub | D136 established process-crash recovery only. |
-| 4 | The machine and the SSD stay **stationary** | ExFAT has no metadata journal; a surprise removal is not covered. |
-| 5 | Nothing **ejects or unplugs** the volume | Same. |
-| 6 | No other **heavy SSD activity** | The capacity model assumes the canary is the only writer. |
+| # | Condition | Why | Enforced |
+|---|---|---|---|
+| 1 | The Mac is on **AC power** for the whole run | Thirty hours is not a battery-length run. | **Mechanically**, at launch (D141-R9) |
+| 2 | The **lid stays open** for the whole run | `caffeinate -dims` cannot defeat lid-close sleep. | **Mechanically**, at launch (D141-R9) |
+| 3 | The SSD is attached over a **qualified transport** — see §28f | Decision 136 assumed a direct connection and this row asserted one. **Decision 141 measured the operator's actual topology and found that false**: the SSD reaches the host three USB hub tiers deep inside a ThinkPad Thunderbolt 4 Dock. | **Mechanically**, at launch (D141-R5) |
+| 4 | The machine and the SSD stay **stationary** | ExFAT has no metadata journal; a surprise removal is not covered. | Operator |
+| 5 | Nothing **ejects or unplugs** the volume or the dock | Same. | Operator |
+| 6 | No other **heavy SSD activity** — see the co-tenancy rules in §28f | The capacity model assumes the canary is the only writer. | Operator |
 
-An unreadable power or lid state is **refused**, not assumed — see
-`require_launch_power_conditions`. Both readings are normally available on this host.
+Conditions 1–3 are **checked by the application**, inside the same composed preflight that
+authenticates the volume, so they hold on every route into a canary — `preflight`, `run`, and
+`profile-prefix` alike. Until Decision 141 they were not: `require_launch_power_conditions` was
+written, unit-tested, and named by this table, and **no production path called it**. Conditions
+4–6 remain the operator's, because nothing in software can hold them.
+
+An unreadable power or lid state is **refused**, not assumed. Both readings are normally
+available on this host, and the explicit operator assertion excuses an *unreadable* reading
+only — never a host actually reporting battery power or a closed lid.
 
 ### The internal runtime directory — D140-R10
 
@@ -1705,6 +1712,129 @@ consequences are:
   required. Worlds are create-once and are never resumed (D129-R8).
 * Keep the Mac on AC power and the lid open for the whole run — conditions 1 and 2 above. There is
   no pause to fall back on.
+
+
+## 28f. The qualified transport, and the conditions around it — Decision 141
+
+**`NOT AUTHORIZED. NOTHING IN THIS SECTION AUTHORIZES A CANARY.`**
+
+Accepted [Decision 141](../Decisions/decision_141_m3_3_thunderbolt_dock_qualification.md)
+qualified how the volume is **attached**. Decision 136 qualified *which* volume; Decisions 137,
+138 and 140 built the envelope around it. None of them asked what sits on the wire, and §28e
+condition 3 asserted a direct connection that was not true.
+
+### A. The qualified topology, as measured — not as named
+
+The dock's product name is `ThinkPad Thunderbolt 4 Dock` and it is a genuine Thunderbolt 4
+device. **That does not make the SSD Thunderbolt storage, and this section does not call it
+that.** What macOS actually reports:
+
+| Fact | Reading |
+|---|---|
+| Transport class | **`USB_VIA_THUNDERBOLT_DOCK`** |
+| Dock | `ThinkPad Thunderbolt 4 Dock`, Lenovo `0x17EF:0x30B3`, firmware `38.6` |
+| Dock link | Thunderbolt/USB4 Bus 1, upstream **connected at `40` Gb/s**, mode **`usb_four`** |
+| Dock's downstream Thunderbolt port | **empty** — `receptacle_no_devices_connected` |
+| Volume's own bus protocol | `diskutil` reports **`BusProtocol = USB`** |
+| Attachment | USB mass storage, **three hub tiers** inside the dock |
+
+The cascade, host-side first, walked from the mounted volume's own media rather than assumed:
+
+```
+AppleT8103USBXHCI            the Mac's own USB host controller
+└── USB3.0 Hub   0x8087:0x0B40   Intel — the dock's USB4-side hub
+    └── USB3.1 Hub 0x17EF:0x30B6  Lenovo
+        └── USB3.1 Hub 0x17EF:0x30B8  Lenovo
+            └── SSK SSD  0x090C:0x2320   the qualified volume's enclosure
+```
+
+**The Volume UUID `397A4D4A-9508-391E-814E-3B533C7BD049` is unchanged and remains the primary
+identity.** The transport is a second, narrower condition, and it never substitutes for the UUID.
+
+**No BSD disk identifier is part of the profile.** `disk4`/`disk4s2` change across reboots and
+re-plugs; the current one is used only as a momentary lookup key into the IORegistry. **A changed
+disk number does not refuse**, and that non-refusal has its own test.
+
+### B. Physical setup
+
+Reproduce the qualified topology exactly:
+
+* the **same** ThinkPad Thunderbolt 4 Dock;
+* the **same** Mac-facing dock cable, in the **same** Mac port;
+* the **same** SSD cable, in the **same dock port** — a different dock port produces a different
+  hub cascade, which is a topology Decision 141 did not qualify and which **refuses**;
+* **AC power through the dock** — the qualification measured a `92` W supply, connected before,
+  during and after sustained I/O;
+* **lid open**;
+* Mac, dock and SSD **stationary**, with nothing resting on any cable.
+
+If the transport check refuses, **restore the qualified attachment**. Do not relax the profile,
+and do not work around the refusal.
+
+### C. Launch precheck
+
+Run the read-only preflight and read every line. It creates nothing:
+
+```bash
+./.venv/bin/disclosure-drift m3 canary-source \
+    --config configs/project.yaml --mode preflight \
+    --source-instance-id '<SOURCE_INSTANCE_ID>' \
+    --run-id '<RUN_ID>' \
+    --work-root "$WORK_ROOT" \
+    --require-volume-uuid '397A4D4A-9508-391E-814E-3B533C7BD049'
+```
+
+All of these must hold, and each is checked by the application rather than by reading this page:
+
+| Gate | Requirement |
+|---|---|
+| Transport | `transport_class` is `USB_VIA_THUNDERBOLT_DOCK` |
+| Identity | the volume reports **exactly** the qualified UUID, mounted **now**, at a real mount point |
+| Power | `on_ac_power` true, `clamshell_closed` false |
+| Isolation | the work root is outside the D130 archive |
+| Archive | the bounded D130 compact precheck matches; the `~104` GB tar is **stat-ed, never opened** |
+| Capacity | `>= 185` GiB free **on that volume** |
+| Temporary root | `SQLITE_TMPDIR` set, absolute, existing, external, outside D130, same volume |
+| Co-tenancy | no heavy competing SSD workload — see E |
+
+`canary_authorized` prints **`false`**. That is correct and is not a gate to be worked around:
+**passing every check is not an authorization to launch.**
+
+### D. Normal operation
+
+With the dock qualified, the whole point of the topology is that both hold at once:
+
+* **keep the Mac charging through the dock**, and
+* **keep the SSD attached to the dock**, and
+* **do not unplug the dock, the SSD, or either cable while a canary runs.**
+
+Decision 141 proved that charging and sustained SSD I/O coexist — AC power, mount, device
+identity and adapter wattage were sampled *during* a sustained multi-gibibyte write and never
+varied. It did **not** prove the dock cannot fail, and no test performed or authorized a
+surprise removal.
+
+### E. Co-tenancy while a canary runs — Decision 140-A3, published here
+
+The machine stays usable. The volume does not.
+
+**Allowed** — browser, ChatGPT, light productivity, light terminal activity.
+
+**Avoid** — games; VM workloads; large local ML or Python jobs; big downloads or copies; backup
+jobs that use the SSD; media export; other database workloads on the SSD.
+
+**Strictly forbidden** — another FDD writer; another canary; any modification of the D130
+archive; ejecting the SSD; disconnecting the dock; any heavy competing SSK SSD workload.
+
+A second complete-source canary is refused mechanically by the host execution lock (D140-R16),
+whatever run identity it is given. The rest of this list is the operator's to hold: **nothing
+here kills a user application**, and nothing should be added that does.
+
+### F. Pause and resume — still NOT IMPLEMENTED
+
+Decision 141 changes nothing about this. `GOVERNED_PAUSE_RESUME = NOT_IMPLEMENTED`, there is no
+`SAFE_TO_EJECT` state, `kill -STOP` is not a governed pause, and **the SSD and the dock must not
+be disconnected while a canary runs**. See §28e and Decision 140 §17. Qualifying the dock does
+**not** create a way to detach it.
 
 
 ## 29. Freeze the real snapshot only after Gate H and E0

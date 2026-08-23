@@ -30,6 +30,7 @@ import test_d116_single_source_canary as d116  # noqa: E402
 import test_d138_safety_envelope_correction as d138  # noqa: E402
 
 from disclosure_drift.m3 import canary_runtime as runtime  # noqa: E402
+from disclosure_drift.m3 import dock_transport as dt  # noqa: E402
 from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
 from disclosure_drift.m3 import offline_parse as parse  # noqa: E402
 from disclosure_drift.m3 import single_source_canary as canary  # noqa: E402
@@ -65,6 +66,41 @@ def _provider(mapping: dict[Path, str]) -> Any:
         raise ewr.ExternalWorkingRootError(message)
 
     return _resolve
+
+
+# --------------------------------------------------------------------------- #
+# Decision 141 added two guards to the composed preflight: the volume must be attached over a
+# qualified transport, and the host must be on AC with the lid open. Neither can be read on a
+# synthetic `tmp_path` "volume", and no test in this repository may depend on the operator's SSD
+# — let alone on a ThinkPad dock — being plugged into the machine running it. This completes the
+# synthetic fixture rather than excusing the guards: that they are genuinely reached from the
+# production path is proved by its own dedicated tests in
+# `test_d141_dock_transport_qualification.py`, which substitute failing values here instead.
+# --------------------------------------------------------------------------- #
+_D141_DOCK = dt.TransportObservation(
+    device_identifier="diskN sN",
+    storage=dt.UsbDevice(
+        vendor_id=dt.QUALIFIED_STORAGE_VENDOR_ID,
+        product_id=dt.QUALIFIED_STORAGE_PRODUCT_ID,
+        serial=dt.QUALIFIED_STORAGE_SERIAL,
+        name="SSK SSD",
+    ),
+    upstream=tuple(
+        dt.UsbDevice(vendor_id=v, product_id=p, serial=None, name="Hub")
+        for v, p in dt.QUALIFIED_DOCK_UPSTREAM_CHAIN
+    ),
+)
+
+
+@pytest.fixture(autouse=True)
+def _d141_qualified_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand the synthetic volume up on a qualified transport and a healthy host."""
+    monkeypatch.setattr(ewr, "transport_of", lambda _identifier: _D141_DOCK)
+    monkeypatch.setattr(
+        ewr,
+        "host_power_state",
+        lambda: runtime.PowerState(on_ac_power=True, clamshell_closed=False),
+    )
 
 
 # ==========================================================================

@@ -1385,3 +1385,30 @@ during a phase is satisfied by the readings that bracket the phase, and survives
 per-unit sampling entirely — assert that the count **scales with the work**. And an assertion made
 on a name bound by a statement that **raises** re-asserts its own initial value; hand the counter
 in from outside so it survives the exception.
+
+
+## The Decision 141 transport-qualification surface
+
+**Touch any of these and run `tests/unit/test_d141_dock_transport_qualification.py` first.** The
+[Decision 141](Decisions/decision_141_m3_3_thunderbolt_dock_qualification.md) §14 falsification
+run records 11 reversible mutations and the named test that killed each one.
+
+| Change | Nearest tests |
+|---|---|
+| `dock_transport.py` — the `ioreg` plist walk, the `IOUSBHostDevice`-only filter, the frozen profile, `classify_transport`, `require_qualified_transport` | `test_d141_dock_transport_qualification.py` |
+| `external_working_root.py` — the `transport_of` and `host_power_state` seams and the two calls in `external_canary_preflight`; the `required_transport` and `operator_asserts_power_conditions` pass-through on `require_external_envelope` | `test_d141_dock_transport_qualification.py`, `test_d140_total_pre_canary_hardening.py`, `test_d138_safety_envelope_correction.py`, `test_d137_external_working_root.py` |
+| `canary_runtime.py` — `require_launch_power_conditions` is now **on the production launch path**; it was previously reachable only from its own unit tests | `test_d141_dock_transport_qualification.py`, `test_d140_total_pre_canary_hardening.py` |
+| The `_d141_qualified_attachment` autouse fixtures in the D137/D138/D140 suites | all three suites — a synthetic external volume now needs a synthetic **attachment** too |
+
+**Three cautions that cost real time to learn.** The composed preflight is the one point all
+three canary modes flow through, so a guard added there reaches production by construction — and
+a guard added *anywhere else* may reach nothing at all: `require_launch_power_conditions` was
+fully implemented, fully unit-tested, named by the runbook as *"checked at launch"*, and **called
+by no production path**. Prove reachability with a mutation that leaves the guard correct and
+merely stops the preflight calling it. Second: the interface and mass-storage nubs beneath a USB
+device **inherit its vendor and product ids**, so a chain walk that does not filter on
+`IOObjectClass == IOUSBHostDevice` counts one physical device three times and the cascade
+comparison can never match. Third: a live refusal control must assert the **reason** it refused —
+an early D141 harness refused for a `SQLITE_TMPDIR` disagreement of its own making while
+appearing to prove archive isolation, and a control that refuses for the wrong reason proves
+nothing.

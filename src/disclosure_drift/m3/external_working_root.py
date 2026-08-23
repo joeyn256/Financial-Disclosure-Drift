@@ -65,6 +65,16 @@ from pathlib import Path
 from typing import Final
 
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.m3.canary_runtime import (
+    PowerState,
+    power_state,
+    require_launch_power_conditions,
+)
+from disclosure_drift.m3.dock_transport import (
+    TransportObservation,
+    read_usb_attachment,
+    require_qualified_transport,
+)
 from disclosure_drift.storage.sqlite import utc_now
 
 __all__ = [
@@ -98,6 +108,8 @@ __all__ = [
     "VolumeIdentity",
     "VolumeIdentityProvider",
     "d130_archive_directory",
+    "host_power_state",
+    "transport_of",
     "external_canary_preflight",
     "external_volume_candidate",
     "external_volume_intent",
@@ -1139,6 +1151,29 @@ def verify_d130_archive(
 # --------------------------------------------------------------------------- #
 # The composed preflight
 # --------------------------------------------------------------------------- #
+def transport_of(device_identifier: str) -> TransportObservation:
+    """How the authenticated volume is attached -- the seam the docked path is tested through.
+
+    A thin indirection onto
+    :func:`~disclosure_drift.m3.dock_transport.read_usb_attachment`, resolved from module
+    globals at call time for exactly the reason :data:`VolumeIdentityProvider` exists: no test in
+    this repository may depend on the operator's SSD being attached, and none may depend on a
+    ThinkPad dock being plugged into the machine running it.
+    """
+    return read_usb_attachment(device_identifier)
+
+
+def host_power_state() -> PowerState:
+    """The host's power source and lid state -- the seam launch conditions are tested through.
+
+    Reading is separated from deciding here as it is in
+    :mod:`~disclosure_drift.m3.canary_runtime`: this returns facts, and
+    :func:`~disclosure_drift.m3.canary_runtime.require_launch_power_conditions` owns the policy
+    about what an unknown reading means.
+    """
+    return power_state()
+
+
 @dataclass(frozen=True, slots=True)
 class ExternalCanaryPreflight:
     """What the external launch preflight established. It creates nothing.
@@ -1163,6 +1198,11 @@ class ExternalCanaryPreflight:
     #: ``diskutil`` subprocess, and deliberately **absent from** :meth:`as_record`: it carries
     #: absolute paths, and :attr:`AdmittedVolume.identity` is already rendered under ``volume``.
     admitted: AdmittedVolume
+    #: How the volume proved to be attached -- D141-R5. Carried so the launch record states the
+    #: transport it ran over rather than leaving it to a runbook sentence.
+    transport: TransportObservation
+    #: The host power and lid readings the launch conditions were satisfied by -- D141-R9.
+    power: PowerState
 
     @property
     def archive_intact(self) -> bool:
@@ -1179,6 +1219,8 @@ class ExternalCanaryPreflight:
             "archive_differences": list(self.archive_differences),
             "sqlite_tmpdir_verified": self.sqlite_tmpdir_verified,
             "observation": dict(self.observation.as_record()),
+            "transport": dict(self.transport.as_record()),
+            "power": dict(self.power.as_record()),
             "canary_authorized": False,
         }
 
@@ -1191,17 +1233,27 @@ def external_canary_preflight(
     expected_uuid: str = QUALIFIED_EXTERNAL_VOLUME_UUID,
     provider: VolumeIdentityProvider | None = None,
     require_archive: bool = True,
+    required_transport: str | None = None,
+    operator_asserts_power_conditions: bool = False,
 ) -> ExternalCanaryPreflight:
     """Run every D137 launch guard against ``working_root``, read-only, and create nothing.
 
     In order, because each later guard depends on the earlier one having held:
 
     1. **identity** (D137-R1) -- authenticate the volume by its stable UUID;
-    2. **isolation** (D137-R3) -- refuse a root that is, is inside, or contains the D130 archive;
-    3. **archive integrity** (D137-R10) -- the bounded compact precheck, tar never opened;
-    4. **capacity** (D137-R4) -- `>= 185` GiB free, measured on that volume;
-    5. **temporary placement** (D137-R8) -- an explicit external ``SQLITE_TMPDIR``;
-    6. **observation** (D137-R7) -- one ``PRE_LAUNCH`` record.
+    2. **transport** (D141-R5) -- the volume is attached the way Decision 141 qualified it. It
+       runs second because it is the only guard that needs the authenticated volume's own BSD
+       identifier as a lookup key, and because an unqualified attachment should be refused
+       before ~104 GB of archive is stat-ed;
+    3. **host launch conditions** (D141-R9) -- AC power and an open lid. Accepted Decision 140
+       (D140-R20) wrote this guard and the runbook stated it as checked at launch, but **no
+       production path called it**: the checks existed and were unreachable. Decision 141 §3
+       records that finding, and this is where the guard is actually applied;
+    4. **isolation** (D137-R3) -- refuse a root that is, is inside, or contains the D130 archive;
+    5. **archive integrity** (D137-R10) -- the bounded compact precheck, tar never opened;
+    6. **capacity** (D137-R4) -- `>= 185` GiB free, measured on that volume;
+    7. **temporary placement** (D137-R8) -- an explicit external ``SQLITE_TMPDIR``;
+    8. **observation** (D137-R7) -- one ``PRE_LAUNCH`` record.
 
     Args:
         working_root: The root a future world would be created under. It need not exist.
@@ -1212,11 +1264,29 @@ def external_canary_preflight(
         provider: How volume identity is obtained. Substituted in tests.
         require_archive: Whether the D130 archive must be present and intact. ``True`` on the
             qualified volume, where the archive lives; a synthetic fixture volume has none.
+        required_transport: The one qualified transport to demand, or ``None`` for either the
+            Decision 141 dock topology or the Decision 136 direct one. An assertion that can
+            only narrow -- it never admits a transport that would otherwise be refused.
+        operator_asserts_power_conditions: Whether the operator has explicitly stated the power
+            and lid conditions. It excuses an **unreadable** reading only; a host reporting
+            battery power or a closed lid is refused whatever is asserted.
 
     Raises:
         ExternalWorkingRootError: any guard did not hold. Nothing is created either way.
     """
     volume = require_qualified_volume(working_root, expected_uuid=expected_uuid, provider=provider)
+    #    D141-R5: the volume is authenticated; now prove it is attached the way it was
+    #    qualified. The BSD identifier is used purely as a lookup key into the IORegistry and is
+    #    never compared against anything -- it comes from the volume that has *already* proved
+    #    its UUID, so a changed disk number cannot make this refuse.
+    transport = require_qualified_transport(
+        volume.device_identifier, required=required_transport, provider=transport_of
+    )
+    #    D141-R9: and that the host can actually sustain a thirty-hour run.
+    power = require_launch_power_conditions(
+        state=host_power_state(),
+        operator_asserts_power_conditions=operator_asserts_power_conditions,
+    )
     archive = d130_archive_directory(volume.mount_point)
     require_outside_d130_archive(working_root, archive=archive)
     differences = verify_d130_archive(archive) if require_archive else ()
@@ -1250,6 +1320,8 @@ def external_canary_preflight(
         observation=observation,
         temp_directory=temp_directory,
         admitted=_pin(volume, working_root),
+        transport=transport,
+        power=power,
     )
 
 
@@ -1310,6 +1382,8 @@ def require_external_envelope(
     observed_at: str,
     environ: Mapping[str, str] | None = None,
     asserted_uuid: str | None = None,
+    required_transport: str | None = None,
+    operator_asserts_power_conditions: bool = False,
 ) -> ExternalCanaryPreflight | None:
     """Apply the complete external envelope when one is owed, and refuse when it cannot hold.
 
@@ -1348,6 +1422,10 @@ def require_external_envelope(
             :func:`require_external_sqlite_tmpdir`; ``None`` reads the process environment alone.
         asserted_uuid: The operator's statement of which volume the root is on. **Mandatory**
             whenever an external requirement exists, and it must be the one qualified volume.
+        required_transport: The one qualified transport to demand, or ``None`` for either
+            (D141-R6). Like ``asserted_uuid`` it can only ever narrow.
+        operator_asserts_power_conditions: Whether the operator states the power and lid
+            conditions explicitly, which excuses an unreadable reading and nothing else.
 
     Raises:
         ExternalWorkingRootError: an external requirement exists and the assertion was omitted
@@ -1391,6 +1469,8 @@ def require_external_envelope(
         observed_at=observed_at,
         environ=environ,
         expected_uuid=QUALIFIED_EXTERNAL_VOLUME_UUID,
+        required_transport=required_transport,
+        operator_asserts_power_conditions=operator_asserts_power_conditions,
     )
 
 

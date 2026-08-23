@@ -34,6 +34,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import test_d116_single_source_canary as d116  # noqa: E402
 import test_d131_signal_and_monitor as d131  # noqa: E402
 
+from disclosure_drift.m3 import canary_runtime as runtime  # noqa: E402
+from disclosure_drift.m3 import dock_transport as dt  # noqa: E402
 from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
 from disclosure_drift.m3 import single_source_canary as canary  # noqa: E402
 from disclosure_drift.m3.working_catalog import file_digest  # noqa: E402
@@ -51,6 +53,41 @@ _OTHER = "0BADCAFE-0000-0000-0000-000000000000"
 #: `185` GiB and `50` GiB, in bytes, both stated as literals for the same reason.
 _LAUNCH_FLOOR = 198_642_237_440
 _PRE_F2_FLOOR = 53_687_091_200
+
+
+# --------------------------------------------------------------------------- #
+# Decision 141 added two guards to the composed preflight: the volume must be attached over a
+# qualified transport, and the host must be on AC with the lid open. Neither can be read on a
+# synthetic `tmp_path` "volume", and no test in this repository may depend on the operator's SSD
+# — let alone on a ThinkPad dock — being plugged into the machine running it. This completes the
+# synthetic fixture rather than excusing the guards: that they are genuinely reached from the
+# production path is proved by its own dedicated tests in
+# `test_d141_dock_transport_qualification.py`, which substitute failing values here instead.
+# --------------------------------------------------------------------------- #
+_D141_DOCK = dt.TransportObservation(
+    device_identifier="diskN sN",
+    storage=dt.UsbDevice(
+        vendor_id=dt.QUALIFIED_STORAGE_VENDOR_ID,
+        product_id=dt.QUALIFIED_STORAGE_PRODUCT_ID,
+        serial=dt.QUALIFIED_STORAGE_SERIAL,
+        name="SSK SSD",
+    ),
+    upstream=tuple(
+        dt.UsbDevice(vendor_id=v, product_id=p, serial=None, name="Hub")
+        for v, p in dt.QUALIFIED_DOCK_UPSTREAM_CHAIN
+    ),
+)
+
+
+@pytest.fixture(autouse=True)
+def _d141_qualified_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand the synthetic volume up on a qualified transport and a healthy host."""
+    monkeypatch.setattr(ewr, "transport_of", lambda _identifier: _D141_DOCK)
+    monkeypatch.setattr(
+        ewr,
+        "host_power_state",
+        lambda: runtime.PowerState(on_ac_power=True, clamshell_closed=False),
+    )
 
 
 # ==========================================================================

@@ -890,6 +890,36 @@ def test_i_ten_the_preflight_writes_nothing_and_opens_no_database(tmp_path: Path
 _TMUX = shutil.which("tmux")
 
 
+def _bsd_time_supported() -> bool:
+    """Whether this host's ``/usr/bin/time`` understands BSD ``-l``.
+
+    A **capability** probe rather than a platform check. ``time -l`` is a BSD flag: GNU
+    ``time``, which is what a Linux CI runner has, rejects it. Decision 133 is the precedent --
+    a macOS-only assumption baked into a test is a portability defect in the test, and the
+    repair is to guard on the capability rather than to delete the coverage or to hard-code
+    ``sys.platform``.
+
+    The canonical launch command this test covers is macOS-operator-only anyway: it also uses
+    ``caffeinate``, ``diskutil``, ``pmset`` and ``ioreg``.
+    """
+    binary = Path("/usr/bin/time")
+    if not binary.exists():
+        return False
+    try:
+        probe = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [str(binary), "-l", "/bin/echo", "probe"],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+_BSD_TIME = _bsd_time_supported()
+
+
 @pytest.mark.skipif(_TMUX is None, reason="tmux is not installed on this host")
 def test_m2_an_existing_tmux_server_still_receives_the_governed_tmpdir(tmp_path: Path) -> None:
     """**D140-R6.** The exact failure: a pane on an already-running server.
@@ -1020,6 +1050,7 @@ def test_m2_the_pid_record_names_the_exec_ed_process(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(not _BSD_TIME, reason="/usr/bin/time does not support the BSD -l flag here")
 def test_m2_the_resource_report_is_captured_durably(tmp_path: Path) -> None:
     """**D140-R6 and INFO-4.** Peak RSS is measured, and it outlives the pane."""
     report = tmp_path / "internal" / "resource.log"

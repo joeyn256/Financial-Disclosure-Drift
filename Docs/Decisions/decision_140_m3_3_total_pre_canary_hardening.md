@@ -274,6 +274,25 @@ remains corroboration and never a binding.** It populates no SQLite, creates no 
   **scales with the number of parts**, and it dies.
 * Ruff and `ruff format --check` clean; mypy strict clean over `src`.
 
+**A CI failure on the first push, recorded rather than tidied away.** `make check-fast` is green on
+macOS, and the first push of this record was nevertheless **red**: CI run `32658404416` failed its
+required SEC-enabled job with `1 failed, 5105 passed, 2 skipped`. The single failure was
+`test_m2_the_resource_report_is_captured_durably`, which invoked `/usr/bin/time -l` — a **BSD**
+flag that GNU `time` on a Linux runner rejects with exit `125`. **The defect was in the test, not
+in production code**: nothing under `src/` invokes `/usr/bin/time`, and the flag lives in the
+runbook's canonical command, which is macOS-operator-only in every other respect too
+(`caffeinate`, `diskutil`, `pmset`, `ioreg`).
+
+The repair follows the [Decision 133](decision_133_m3_3_watchdog_linux_portability_repair.md)
+precedent exactly: **guard on the capability, never delete the coverage and never hard-code
+`sys.platform`.** A probe runs `/usr/bin/time -l` once at import and the test skips where the flag
+is unsupported. The guard is itself proved — forcing the capability off makes the test **skip**
+rather than pass vacuously or fail. The tmux and `caffeinate` tests already carried such guards,
+which is why they skipped cleanly on the runner and account for the second of the two skips.
+
+**This is recorded because a green local gate is not a green CI, and a record that implied
+otherwise would be false.** The corrected state is the second commit on this record.
+
 ## 16. The live read-only preflight and the real structural census
 
 Run against the genuinely mounted qualified volume. **Nothing was created, written, deleted or

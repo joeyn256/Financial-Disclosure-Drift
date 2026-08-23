@@ -92,6 +92,7 @@ __all__ = [
     "CapacityObservation",
     "ExternalCanaryPreflight",
     "ExternalWorkingRootError",
+    "AdmittedVolume",
     "F2CapacityGuard",
     "F2CapacityHardStopError",
     "VolumeIdentity",
@@ -99,6 +100,8 @@ __all__ = [
     "d130_archive_directory",
     "external_canary_preflight",
     "external_volume_candidate",
+    "external_volume_intent",
+    "intended_volume_directory",
     "f2_capacity_state",
     "macos_volume_identity",
     "mount_point_of",
@@ -107,6 +110,8 @@ __all__ = [
     "require_launch_free_space",
     "require_outside_d130_archive",
     "require_phase_free_space",
+    "require_mounted_qualified_volume",
+    "require_mounted_volume_directory",
     "require_qualified_volume",
     "verify_d130_archive",
 ]
@@ -228,6 +233,17 @@ F2_HARD_FLOOR_FREE_BYTES: Final = 10 * 1024**3
 #: ``DISCLOSURE_DRIFT_*`` variable: it belongs to SQLite, is read here rather than honoured as a
 #: package override, and is never printed.
 SQLITE_TMPDIR_ENV: Final = "SQLITE_TMPDIR"
+
+#: What a directory walk of ``SQLITE_TMPDIR`` can honestly claim -- D140-R7.
+#:
+#: SQLite creates its temporary and sort files as ``etilqs_*`` and **unlinks them immediately**,
+#: keeping only the open descriptor. The bytes are allocated and the directory entry is gone, so
+#: a traversal of that directory returns zero **while a spill is in progress**. Decision 137
+#: recorded that zero as ``temp_bytes``, which the D139 review raised as **MINOR-1**: it is
+#: indistinguishable from a genuinely idle temporary root, and it is the more dangerous of the
+#: two readings to be wrong about.
+UNMEASURED_UNLINKED_SQLITE_TEMP: Final = "UNMEASURED_UNLINKED_SQLITE_TEMP"
+
 
 F2_NORMAL_STATE: Final = "F2_CAPACITY_NORMAL"
 F2_ALERT_STATE: Final = "F2_CAPACITY_ALERT"
@@ -417,6 +433,269 @@ def require_qualified_volume(
 
 
 # --------------------------------------------------------------------------- #
+# Intended external location -- D140-R1 (MAJOR-1)
+# --------------------------------------------------------------------------- #
+#: The directory macOS mounts external volumes under. It is **not** a volume itself: it lives on
+#: the system root filesystem, which is precisely why an intent expressed through it cannot be
+#: authenticated by asking which device the path currently resolves onto.
+EXTERNAL_VOLUME_INTENT_DIRECTORY: Final = "Volumes"
+
+
+def _intent_parts(path: Path) -> tuple[str, ...]:
+    """``path``'s components after normalization, **without** requiring any of them to exist.
+
+    ``realpath`` collapses ``..`` and follows the symlinks that do exist, and leaves components
+    that do not exist exactly as written. That is the property this needs: the question is what
+    location the operator *named*, and a location does not stop having been named because the
+    volume that would host it is unplugged.
+
+    ``/Volumes/Macintosh HD`` is a symlink to ``/`` on macOS, so a path beneath it normalizes to
+    an internal path and is classified internal -- which is the truth about where it would land.
+    """
+    return Path(os.path.realpath(path)).parts
+
+
+def external_volume_intent(path: Path) -> bool:
+    """Whether ``path`` **names** a location on a mounted external volume -- D140-R1.
+
+    The D139 review's **MAJOR-1** was that intent and residence had been conflated.
+    :func:`external_volume_candidate` asks which device the path resolves onto *now*, on its
+    nearest existing ancestor -- so with the SSD unplugged, ``/Volumes/SSK SSD/world`` has
+    nearest existing ancestor ``/Volumes``, which is on the system root filesystem, and the
+    intended external world classified **internal** and ran with no guard at all. A directory
+    left behind at the mount point produced the same answer while also being writable.
+
+    This asks the other question, and asks it of the name rather than of the disk: a path under
+    ``/Volumes/<name>/`` is an **external-volume intent**, whether or not anything is mounted
+    there. An intent is never satisfied by classification; it must be positively authenticated
+    by :func:`require_mounted_qualified_volume`, and it can never degrade to internal.
+    """
+    parts = _intent_parts(path)
+    return len(parts) >= 3 and parts[0] == os.sep and parts[1] == EXTERNAL_VOLUME_INTENT_DIRECTORY
+
+
+def intended_volume_directory(path: Path) -> Path:
+    """The ``/Volumes/<name>`` directory ``path`` is intended to sit beneath.
+
+    Raises:
+        ExternalWorkingRootError: ``path`` carries no external-volume intent.
+    """
+    parts = _intent_parts(path)
+    if not external_volume_intent(path):  # pragma: no cover - guarded at every call site
+        message = (
+            "the selected working root names no external volume, so no mounted volume "
+            "directory can be derived for it"
+        )
+        raise ExternalWorkingRootError(message)
+    return Path(parts[0], parts[1], parts[2])
+
+
+def _is_mount_point(path: Path) -> bool:
+    """Whether ``path`` is currently a mount point, fail-closed on any error."""
+    try:
+        return path.is_mount()
+    except OSError:  # pragma: no cover - is_mount already swallows the ordinary failures
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedVolume:
+    """One authenticated volume, pinned so that its continued identity can be re-checked cheaply.
+
+    Authentication is a **moment**, not a state: ``diskutil`` answered once, about a volume that
+    may be unplugged a second later. Decision 140 (D140-R6, D140-R15) requires that every later
+    reading first establish that it is still reading the same filesystem, so the two facts that
+    make a cheap re-check possible are captured here at admission -- the mount point, and the
+    **device number** of the filesystem the work root sits on.
+
+    A ``stat`` costs nothing beside a traversal writing tens of millions of rows, so the cheap
+    check can run at the same cadence as the capacity sample. The expensive one -- re-reading the
+    Volume UUID from ``diskutil`` -- runs at phase boundaries and on a bounded interval.
+    """
+
+    identity: VolumeIdentity
+    mount_point: Path
+    device: int
+    work_root: Path
+
+    def require_present(self) -> None:
+        """Re-establish that the work root is still on the admitted filesystem -- D140-R15.
+
+        Two cheap facts, and between them they cover every way the ground can move:
+
+        * the work root's nearest existing ancestor has **escaped the mount point**. When the
+          volume is unplugged, ``/Volumes/SSK SSD/world`` has nearest existing ancestor
+          ``/Volumes`` -- outside the admitted tree, and the reading taken there would describe
+          internal storage;
+        * the **device number** changed. That is the case containment cannot see: a directory
+          recreated at the same path, or a different volume mounted over it, keeps the shape and
+          changes the filesystem. Pinning ``st_dev`` at admission is what makes it visible.
+
+        Deliberately **no** ``diskutil`` call: this runs at the per-sample cadence, where a
+        subprocess would cost more than the traversal it guards. :meth:`reauthenticate` is the
+        expensive half, and it runs at boundaries.
+
+        Raises:
+            ExternalWorkingRootError: the admitted filesystem is not the one now present.
+        """
+        try:
+            anchor = _nearest_existing(self.work_root)
+            device = anchor.stat().st_dev
+        except OSError as exc:
+            message = (
+                f"the active working root could not be stat-ed ({type(exc).__name__}); a root "
+                "that cannot be located is not a root that passed, so the run fails closed"
+            )
+            raise ExternalWorkingRootError(message) from exc
+        if not _within(_comparable(self.mount_point), _comparable(anchor)) and _comparable(
+            anchor
+        ) != _comparable(self.mount_point):
+            message = (
+                "the active working root no longer resolves beneath the authenticated external "
+                "volume; free space read here would describe internal storage, so the run "
+                "fails closed rather than accepting it"
+            )
+            raise ExternalWorkingRootError(message)
+        if device != self.device:
+            message = (
+                "the filesystem hosting the active working root has a different device "
+                "identity from the one admitted; a replaced volume is refused rather than "
+                "written to"
+            )
+            raise ExternalWorkingRootError(message)
+
+    def reauthenticate(self, *, provider: VolumeIdentityProvider | None = None) -> None:
+        """Re-prove presence **and** the exact Volume UUID -- D140-R4, D140-R15.
+
+        The expensive half. Run immediately before the world directory is created, at phase
+        boundaries, and on a bounded interval during F2 -- never at the per-accession cadence,
+        where a ``diskutil`` subprocess would cost more than the traversal it guards.
+
+        Raises:
+            ExternalWorkingRootError: the volume is absent, replaced, or reports a different
+                Volume UUID.
+        """
+        self.require_present()
+        resolve = macos_volume_identity if provider is None else provider
+        identity = resolve(self.mount_point)
+        if identity.volume_uuid.strip().casefold() != self.identity.volume_uuid.strip().casefold():
+            message = (
+                f"the volume mounted at the admitted location now reports "
+                f"{identity.volume_uuid}, not the admitted {self.identity.volume_uuid}; a "
+                "volume swapped mid-run is refused and nothing falls back to internal storage"
+            )
+            raise ExternalWorkingRootError(message)
+
+
+def require_mounted_volume_directory(
+    volume_directory: Path,
+    *,
+    expected_uuid: str = QUALIFIED_EXTERNAL_VOLUME_UUID,
+    provider: VolumeIdentityProvider | None = None,
+) -> VolumeIdentity:
+    """Prove that ``volume_directory`` is the qualified volume, mounted **now** -- D140-R3.
+
+    Three facts about the present, in the order that makes each one meaningful:
+
+    1. the directory **exists**. An unplugged volume leaves nothing, and nothing is not a
+       volume;
+    2. it is **currently a mount point**. This is the one that kills the stale directory: after
+       an unclean removal macOS can leave an ordinary directory at ``/Volumes/<name>`` which
+       exists, is a directory, and is writable -- so every predicate that asks *can I create a
+       world here?* says yes, and a complete run lands on the internal disk;
+    3. the volume mounted there reports **exactly** ``expected_uuid``.
+
+    Separated from :func:`require_mounted_qualified_volume` so that the mount-state predicate can
+    be exercised against an ordinary directory in a test, rather than only against a real volume:
+    no test in this repository may depend on the operator's SSD being attached.
+
+    Raises:
+        ExternalWorkingRootError: the volume is absent, is not mounted there, or is not the
+            accepted qualified volume.
+    """
+    if not volume_directory.exists():
+        message = (
+            "the selected working root names a location on an external volume that is not "
+            "mounted; an external-volume intent is never satisfied by internal storage, so "
+            "the run is refused rather than redirected to the system disk"
+        )
+        raise ExternalWorkingRootError(message)
+    if not _is_mount_point(volume_directory):
+        message = (
+            "the selected working root names a location beneath a directory that is not a "
+            "mount point; a directory left behind at a mount point is on internal storage and "
+            "is refused rather than mistaken for the volume that once occupied it"
+        )
+        raise ExternalWorkingRootError(message)
+    resolve = macos_volume_identity if provider is None else provider
+    identity = resolve(volume_directory)
+    if identity.volume_uuid.strip().casefold() != expected_uuid.strip().casefold():
+        message = (
+            f"the volume mounted at the selected working root's location reports "
+            f"{identity.volume_uuid}, which is not the accepted qualified volume "
+            f"{expected_uuid}; the corrected canary runs on that volume alone"
+        )
+        raise ExternalWorkingRootError(message)
+    return identity
+
+
+def require_mounted_qualified_volume(
+    working_root: Path,
+    *,
+    expected_uuid: str = QUALIFIED_EXTERNAL_VOLUME_UUID,
+    provider: VolumeIdentityProvider | None = None,
+) -> AdmittedVolume:
+    """Authenticate an **external-volume intent** positively, or refuse it -- D140-R1, D140-R3.
+
+    Applied to a working root that *names* a location under ``/Volumes``. Everything it requires
+    is a fact about what is mounted **now**, so an absent volume and a stale directory left at
+    the mount point both refuse here rather than being classified into an internal run:
+
+    1. the ``/Volumes/<name>`` directory **exists**;
+    2. it is **currently a mount point** -- this is the one that kills the writable stale
+       directory, which exists and is a directory and is on the system root filesystem;
+    3. the volume mounted there reports **exactly** ``expected_uuid``;
+    4. the selected working root resolves onto **that** volume, so a path that merely begins
+       with the right mount point but escapes it cannot be admitted.
+
+    Returns:
+        The pinned :class:`AdmittedVolume`, so later checks need no second ``diskutil`` call.
+
+    Raises:
+        ExternalWorkingRootError: any of the four does not hold.
+    """
+    volume_directory = intended_volume_directory(working_root)
+    identity = require_mounted_volume_directory(
+        volume_directory, expected_uuid=expected_uuid, provider=provider
+    )
+    try:
+        mount_device = volume_directory.stat().st_dev
+        anchor = _nearest_existing(working_root)
+        anchor_device = anchor.stat().st_dev
+    except OSError as exc:
+        message = (
+            f"the selected working root could not be located on the authenticated volume "
+            f"({type(exc).__name__}); an unverifiable placement is refused"
+        )
+        raise ExternalWorkingRootError(message) from exc
+    if anchor_device != mount_device or not (
+        _comparable(anchor) == _comparable(volume_directory)
+        or _within(_comparable(volume_directory), _comparable(anchor))
+    ):
+        message = (
+            "the selected working root does not resolve onto the authenticated external "
+            "volume; a root that only appears to name it is refused"
+        )
+        raise ExternalWorkingRootError(message)
+    return AdmittedVolume(
+        identity=identity,
+        mount_point=volume_directory,
+        device=mount_device,
+        work_root=working_root,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Archive isolation
 # --------------------------------------------------------------------------- #
 def _comparable(path: Path) -> tuple[str, ...]:
@@ -557,8 +836,18 @@ class CapacityObservation:
     volume: VolumeIdentity | None
     database_bytes: int | None
     wal_bytes: int | None
+    #: SQLite's temporary and spill allocation. **Always** ``None`` -- D140-R7. It is not
+    #: measurable from outside the spilling process, because SQLite unlinks the files it is
+    #: still writing, and an unknown that is serialized as ``0`` is a false measurement rather
+    #: than a conservative one. :attr:`temp_measurement_status` says why.
     temp_bytes: int | None
     observed_at: str
+    #: Why :attr:`temp_bytes` is unknown. Defaulted because there is exactly one true answer:
+    #: SQLite's spill is not observable from outside the process holding it.
+    temp_measurement_status: str = UNMEASURED_UNLINKED_SQLITE_TEMP
+    #: Bytes in the **linked** files under the temporary root. A different question with a
+    #: different name; see :func:`_visible_directory_allocation`.
+    temp_visible_bytes: int | None = None
 
     def as_record(self) -> Mapping[str, object]:
         """A deterministic, path-free rendering."""
@@ -569,6 +858,8 @@ class CapacityObservation:
             "database_bytes": self.database_bytes,
             "wal_bytes": self.wal_bytes,
             "temp_bytes": self.temp_bytes,
+            "temp_measurement_status": self.temp_measurement_status,
+            "temp_visible_bytes": self.temp_visible_bytes,
             "f2_capacity_state": f2_capacity_state(self.free_bytes),
             "observed_at": self.observed_at,
         }
@@ -576,12 +867,18 @@ class CapacityObservation:
         return record
 
 
-def _directory_allocation(directory: Path | None) -> int | None:
-    """Bytes allocated beneath ``directory``, or ``None`` when it cannot be measured.
+def _visible_directory_allocation(directory: Path | None) -> int | None:
+    """Bytes in the **linked** files beneath ``directory``, or ``None`` when unmeasurable.
 
-    Used for the ``SQLITE_TMPDIR`` allocation Decision 136 §8 (D136-R5) left unmeasured. It walks
-    the temporary directory only -- never the archive, and never the working world's large objects
-    -- so the cost is bounded by how many spill files SQLite currently holds.
+    Truthfully named (D140-R7). This is *not* SQLite's temporary allocation and must never be
+    reported as it: an unlinked spill file is invisible to any traversal, so this number is a
+    lower bound of unknown tightness and is zero during a large sort. It is retained because a
+    non-zero reading still means something -- a file left behind by something other than an
+    in-flight SQLite spill -- and because dropping the measurement entirely would replace a
+    misnamed fact with no fact.
+
+    **Free space is the authoritative capacity signal**, here and everywhere in this module: a
+    ``statvfs`` counts allocated unlinked blocks, which is exactly what a spill consumes.
     """
     if directory is None:
         return None
@@ -644,7 +941,9 @@ def observe_capacity(
         volume=volume,
         database_bytes=_byte_length(database),
         wal_bytes=_byte_length(wal),
-        temp_bytes=_directory_allocation(temp_directory),
+        temp_bytes=None,
+        temp_measurement_status=UNMEASURED_UNLINKED_SQLITE_TEMP,
+        temp_visible_bytes=_visible_directory_allocation(temp_directory),
         observed_at=observed_at,
     )
 
@@ -723,7 +1022,22 @@ def require_external_sqlite_tmpdir(
         )
         raise ExternalWorkingRootError(message)
     resolved = require_outside_d130_archive(candidate, archive=archive)
-    temp_volume = require_qualified_volume(resolved, expected_uuid=expected_uuid, provider=provider)
+    try:
+        temp_volume = require_qualified_volume(
+            resolved, expected_uuid=expected_uuid, provider=provider
+        )
+    except ExternalWorkingRootError as exc:
+        # D140-R11: the guard that failed was about the **temporary root**, so the refusal has
+        # to say so. `require_qualified_volume` phrases every refusal in terms of "the selected
+        # working root", which is the truth at its other call site and a misdirection here --
+        # the D139 review's MINOR-5. The offending path is deliberately not printed.
+        message = (
+            f"{SQLITE_TMPDIR_ENV} names a temporary root that is not on the accepted qualified "
+            f"external volume ({exc}). The temporary root is rejected here, not the selected "
+            "working root; SQLite would spill to a volume the corrected canary's capacity "
+            "model does not cover"
+        )
+        raise ExternalWorkingRootError(message) from exc
     working_volume = require_qualified_volume(
         working_root, expected_uuid=expected_uuid, provider=provider
     )
@@ -844,6 +1158,11 @@ class ExternalCanaryPreflight:
     #: :meth:`as_record`: it is an absolute operator-chosen path, and no operator surface in this
     #: repository prints one.
     temp_directory: Path
+    #: The pinned identity every later reading re-establishes itself against -- D140-R15. Held
+    #: rather than re-derived so that a mid-run check costs one ``stat`` instead of one
+    #: ``diskutil`` subprocess, and deliberately **absent from** :meth:`as_record`: it carries
+    #: absolute paths, and :attr:`AdmittedVolume.identity` is already rendered under ``volume``.
+    admitted: AdmittedVolume
 
     @property
     def archive_intact(self) -> bool:
@@ -930,6 +1249,30 @@ def external_canary_preflight(
         sqlite_tmpdir_verified=True,
         observation=observation,
         temp_directory=temp_directory,
+        admitted=_pin(volume, working_root),
+    )
+
+
+def _pin(volume: VolumeIdentity, working_root: Path) -> AdmittedVolume:
+    """Capture the cheap identity of the filesystem ``working_root`` was admitted on -- D140-R15.
+
+    Raises:
+        ExternalWorkingRootError: the admitted filesystem could not be identified at all, which
+            is refused rather than pinned as unknown.
+    """
+    try:
+        device = _nearest_existing(working_root).stat().st_dev
+    except OSError as exc:  # pragma: no cover - every earlier guard already stat-ed this tree
+        message = (
+            f"the admitted working root could not be pinned to a filesystem "
+            f"({type(exc).__name__}); an unpinnable root is refused rather than admitted"
+        )
+        raise ExternalWorkingRootError(message) from exc
+    return AdmittedVolume(
+        identity=volume,
+        mount_point=volume.mount_point,
+        device=device,
+        work_root=working_root,
     )
 
 
@@ -970,39 +1313,67 @@ def require_external_envelope(
 ) -> ExternalCanaryPreflight | None:
     """Apply the complete external envelope when one is owed, and refuse when it cannot hold.
 
-    The single decision point for **D138-R1**. Three outcomes:
+    The single decision point, corrected by **Decision 140** (D140-R1 through D140-R4) after the
+    D139 review's **MAJOR-1**. Decision 138 decided *external or internal* by asking which device
+    the root resolves onto now. That question has a wrong answer whenever the volume is not
+    there: with the SSD unplugged, or with an ordinary directory left at its mount point, the
+    intended external root resolved onto the system disk, classified **internal**, and ran the
+    accepted Decision 116 path with **no guard running at all**.
 
-    * the root is **internal** and no external assertion was made -> ``None``, and the caller's
-      path is exactly what accepted Decision 116 left it. Historical internal behaviour is
-      preserved byte for byte (D138-R1), because nothing here runs;
-    * the root is **external**, by :func:`external_volume_candidate` or because the operator
-      asserted a volume -> the **complete** D137 envelope runs, and every one of its guards must
-      hold. Omitting the assertion cannot disable a single one of them;
-    * any guard does not hold -> :class:`ExternalWorkingRootError`, with **no world created**.
+    Four outcomes now:
 
-    ``asserted_uuid`` is an **assertion, never a switch** (D138-R1). Supplying it can only ever
-    *add* a requirement: it forces the envelope on a root that would otherwise be classified
-    internal -- so asserting the qualified volume for an internal root refuses at the identity
-    guard, which is the truth -- and it must itself be the one qualified volume. There is no
-    generic external-volume authorization here (**D138-R12**): the single accepted external
-    identity is :data:`QUALIFIED_EXTERNAL_VOLUME_UUID`, an arbitrary caller-supplied UUID is
-    refused before anything is measured, and D125-R4 remains the general rule everywhere outside
-    that one-canary exception.
+    * the root carries **no external intent**, resolves **internally**, and no volume was
+      asserted -> ``None``. Byte for byte the accepted Decision 116 path, because nothing here
+      runs. This is the only admission that happens without proof, and it is the only one that
+      does not need any;
+    * an external requirement exists -- by intent, by residence, or by assertion -- and
+      ``asserted_uuid`` was **omitted** -> **refused**. The assertion is mandatory on this path
+      (D140-R2): it is the operator's statement of *which* volume, and Decision 140 will not
+      infer it from a mount point that is exactly what an absent volume forges;
+    * an external requirement exists and the asserted identity is not the one qualified volume
+      -> **refused**, before anything is measured (D138-R12, unchanged);
+    * an external requirement exists and the qualified volume is asserted -> the **complete**
+      envelope runs, preceded for a ``/Volumes`` intent by positive authentication that the
+      volume is mounted **there, now, with that exact UUID** (D140-R3). Every guard must hold,
+      and none of them can be reached by an internal fallback.
+
+    **An external-volume intent never degrades.** A path under ``/Volumes/<name>/`` is held to
+    the external envelope whether or not anything is mounted at ``<name>``; absence is a refusal,
+    not a reclassification.
 
     Args:
         working_root: The root a world would be created under. It need not exist.
         observed_at: The timestamp the ``PRE_LAUNCH`` observation carries.
         environ: The environment to cross-check ``SQLITE_TMPDIR`` against. See
             :func:`require_external_sqlite_tmpdir`; ``None`` reads the process environment alone.
-        asserted_uuid: An operator assertion that the root is on a named volume, or ``None``.
+        asserted_uuid: The operator's statement of which volume the root is on. **Mandatory**
+            whenever an external requirement exists, and it must be the one qualified volume.
 
     Raises:
-        ExternalWorkingRootError: an arbitrary UUID was asserted, the root could not be
-            classified, or any guard in the envelope did not hold.
+        ExternalWorkingRootError: an external requirement exists and the assertion was omitted
+            or wrong, the named volume is absent or is not the qualified one, or any guard in
+            the envelope did not hold. No world is created on any of those paths.
     """
-    if asserted_uuid is not None and (
-        asserted_uuid.strip().casefold() != QUALIFIED_EXTERNAL_VOLUME_UUID.strip().casefold()
-    ):
+    intent = external_volume_intent(working_root)
+    # Residence is still asked, but only as a *second* way to owe the envelope -- never as the
+    # way to be excused from it. `external_volume_candidate` raises for an unclassifiable root,
+    # and an intent that is already established does not need to ask at all: the answer for an
+    # absent volume is exactly the misclassification D140-R1 exists to remove.
+    external_required = (
+        intent or asserted_uuid is not None or external_volume_candidate(working_root)
+    )
+    if not external_required:
+        return None
+    if asserted_uuid is None:
+        message = (
+            "--require-volume-uuid is required for a working root on an external volume, and "
+            f"it must be {QUALIFIED_EXTERNAL_VOLUME_UUID}. Decision 140 (D140-R2) makes the "
+            "assertion mandatory rather than optional: an omitted identity was the one input "
+            "that let an absent volume, or a directory left at its mount point, be read as "
+            "internal storage and run with no envelope at all. The run is refused"
+        )
+        raise ExternalWorkingRootError(message)
+    if asserted_uuid.strip().casefold() != QUALIFIED_EXTERNAL_VOLUME_UUID.strip().casefold():
         message = (
             f"{asserted_uuid} is not the one qualified external volume "
             f"{QUALIFIED_EXTERNAL_VOLUME_UUID}; Decision 136 §11 (D136-R8) created a narrow "
@@ -1010,8 +1381,11 @@ def require_external_envelope(
             "generic external-volume authorization, so an arbitrary identity is refused"
         )
         raise ExternalWorkingRootError(message)
-    if asserted_uuid is None and not external_volume_candidate(working_root):
-        return None
+    if intent:
+        # D140-R3: the exact mount must already exist, be a mount point, and report the exact
+        # accepted UUID -- established before a single later guard is consulted, so that no
+        # nearest-ancestor answer of `/Volumes` can reach them.
+        require_mounted_qualified_volume(working_root, expected_uuid=QUALIFIED_EXTERNAL_VOLUME_UUID)
     return external_canary_preflight(
         working_root=working_root,
         observed_at=observed_at,
@@ -1075,6 +1449,38 @@ F2_HARD_STOP_REASON: Final = "F2_CAPACITY_HARD_STOP"
 #: The reason recorded when free space could not be measured at all during F2.
 F2_MEASUREMENT_FAILED_REASON: Final = "F2_CAPACITY_MEASUREMENT_FAILED"
 
+#: The reason recorded when the volume the run was admitted on is no longer the volume present.
+#:
+#: **D140-R15.** Free space measured after the external volume has gone is a reading of the
+#: internal disk, and the internal disk has hundreds of gigabytes free -- so the guard would
+#: report ``F2_CAPACITY_NORMAL`` and F2 would keep writing into a world that is no longer there.
+#: A lost identity is therefore a hard stop in its own right, taken **before** any free-space
+#: number is trusted.
+F2_VOLUME_IDENTITY_LOST_REASON: Final = "F2_VOLUME_IDENTITY_LOST"
+
+#: The longest interval between two **recorded** ``DURING_F2`` alert observations -- D140-R17.
+#:
+#: Safety sampling stays at :data:`F2_CAPACITY_SAMPLE_SECONDS`; only the *evidence* is thinned.
+#: A run that sits in the alert band for twenty hours would otherwise append an observation
+#: every five seconds -- fourteen thousand of them, all saying the same thing.
+F2_ALERT_EVIDENCE_INTERVAL_SECONDS: Final = 60.0
+
+#: The hard ceiling on **retained** alert observations -- D140-R17.
+#:
+#: A one-per-minute rule is bounded by wall clock rather than by memory, which is only half the
+#: property that was asked for. Past this many retained alerts the guard keeps counting exactly
+#: and keeps the latest reading, and stops growing: evidence size becomes independent of how
+#: long the run lasts.
+F2_ALERT_EVIDENCE_MAX_RECORDS: Final = 240
+
+#: How often the **exact** Volume UUID is re-read from ``diskutil`` during F2 -- D140-R15.
+#:
+#: The cheap identity check runs at every sample; this one spawns a subprocess, so it runs on a
+#: bounded interval instead. A device or path change is caught immediately by the cheap check
+#: either way -- this closes the narrower case of a volume replaced by another volume that has
+#: somehow taken the same device number.
+F2_REAUTHENTICATION_SECONDS: Final = 300.0
+
 
 def _free_and_total(path: Path) -> tuple[int, int]:
     """Free and total bytes on the filesystem hosting ``path``. The guard's default provider."""
@@ -1118,15 +1524,24 @@ class F2CapacityGuard:
     """
 
     __slots__ = (
+        "_admitted",
+        "_alert_last_recorded",
+        "_alert_provider",
         "_clock",
         "_free_space",
         "_interval",
         "_last",
+        "_last_reauthenticated",
         "_now",
+        "_retained_alerts",
         "_root",
         "_volume",
+        "alert_count",
+        "first_alert",
         "hard_stop_record",
+        "latest_alert",
         "observations",
+        "reauthentications",
         "samples",
     )
 
@@ -1140,6 +1555,8 @@ class F2CapacityGuard:
         clock: Callable[[], float] | None = None,
         now: Callable[[], str] | None = None,
         record_into: list[CapacityObservation] | None = None,
+        admitted: AdmittedVolume | None = None,
+        identity_provider: VolumeIdentityProvider | None = None,
     ) -> None:
         if interval_seconds > F2_CAPACITY_MAX_SAMPLE_SECONDS:
             message = (
@@ -1155,6 +1572,20 @@ class F2CapacityGuard:
         self._clock = time.monotonic if clock is None else clock
         self._now = utc_now if now is None else now
         self._last: float | None = None
+        #: The pinned identity every reading is taken against -- D140-R15. ``None`` only on a
+        #: path with no external envelope, where there is no external identity to lose.
+        self._admitted = admitted
+        self._alert_provider = identity_provider
+        self._last_reauthenticated: float | None = None
+        self._alert_last_recorded: float | None = None
+        self._retained_alerts = 0
+        #: Exactly how many alert samples were observed, whether or not each was retained.
+        self.alert_count = 0
+        #: The first and most recent alert readings, always kept -- D140-R17.
+        self.first_alert: CapacityObservation | None = None
+        self.latest_alert: CapacityObservation | None = None
+        #: How many exact-UUID re-authentications were performed. Proves the bounded one ran.
+        self.reauthentications = 0
         #: Every ``DURING_F2`` alert observed, in order. Shared with the run's own list when one
         #: is supplied, so the alerts land chronologically among the phase boundaries.
         self.observations: list[CapacityObservation] = [] if record_into is None else record_into
@@ -1180,6 +1611,11 @@ class F2CapacityGuard:
     def _sample(self) -> None:
         observed_at = self._now()
         self.samples += 1
+        # D140-R15, and **before** any free-space number is read: a reading taken after the
+        # volume has gone describes the internal disk, which has plenty of room. Establishing
+        # that the ground has not moved is what makes the number that follows mean anything.
+        if self._admitted is not None:
+            self._require_identity(observed_at)
         try:
             free, total = self._free_space(self._root)
         except (OSError, ExternalWorkingRootError) as exc:
@@ -1207,18 +1643,78 @@ class F2CapacityGuard:
                 ),
             )
         if state == F2_ALERT_STATE:
-            self.observations.append(
-                CapacityObservation(
-                    phase="DURING_F2",
-                    free_bytes=free,
-                    total_bytes=total,
-                    volume=self._volume,
-                    database_bytes=None,
-                    wal_bytes=None,
-                    temp_bytes=None,
-                    observed_at=observed_at,
-                )
-            )
+            self._record_alert(free=free, total=total, observed_at=observed_at)
+
+    def _require_identity(self, observed_at: str) -> None:
+        """Re-establish the admitted filesystem, and hard-stop F2 if it has moved -- D140-R15.
+
+        The cheap check runs on every sample. The exact ``diskutil`` re-read runs on the bounded
+        :data:`F2_REAUTHENTICATION_SECONDS` interval, because it spawns a subprocess and the
+        cheap check already catches every disappearance and every replacement that changes the
+        device number.
+        """
+        admitted = self._admitted
+        if admitted is None:  # pragma: no cover - callers check before calling
+            return
+        tick = self._clock()
+        due = (
+            self._last_reauthenticated is None
+            or (tick - self._last_reauthenticated) >= F2_REAUTHENTICATION_SECONDS
+        )
+        try:
+            if due:
+                admitted.reauthenticate(provider=self._alert_provider)
+                self._last_reauthenticated = tick
+                self.reauthentications += 1
+            else:
+                admitted.require_present()
+        except ExternalWorkingRootError as exc:
+            raise self._hard_stop(
+                reason=F2_VOLUME_IDENTITY_LOST_REASON,
+                free_bytes=None,
+                measurement_error=type(exc).__name__,
+                observed_at=observed_at,
+                detail=(
+                    f"the external volume the run was admitted on is no longer the volume "
+                    f"present ({exc}); free space measured now would describe internal "
+                    "storage, so F2 is aborted rather than allowed to trust it"
+                ),
+            ) from exc
+
+    def _record_alert(self, *, free: int, total: int, observed_at: str) -> None:
+        """Retain bounded alert evidence -- D140-R17.
+
+        The **first** entry into the alert band is always recorded, transitions to hard stop are
+        always recorded (by the raise, which carries its own evidence), and in between at most
+        one observation per :data:`F2_ALERT_EVIDENCE_INTERVAL_SECONDS` is retained, up to
+        :data:`F2_ALERT_EVIDENCE_MAX_RECORDS`. :attr:`alert_count` stays exact throughout, and
+        :attr:`latest_alert` always holds the most recent reading whether or not it was retained,
+        so nothing about the run's safety history is lost by not storing it twice.
+        """
+        observation = CapacityObservation(
+            phase="DURING_F2",
+            free_bytes=free,
+            total_bytes=total,
+            volume=self._volume,
+            database_bytes=None,
+            wal_bytes=None,
+            temp_bytes=None,
+            temp_measurement_status=UNMEASURED_UNLINKED_SQLITE_TEMP,
+            temp_visible_bytes=None,
+            observed_at=observed_at,
+        )
+        self.alert_count += 1
+        self.latest_alert = observation
+        if self.first_alert is None:
+            self.first_alert = observation
+        tick = self._clock()
+        last = self._alert_last_recorded
+        due = last is None or (tick - last) >= F2_ALERT_EVIDENCE_INTERVAL_SECONDS
+        if not due or self._retained_alerts >= F2_ALERT_EVIDENCE_MAX_RECORDS:
+            return
+        self._alert_last_recorded = tick
+        self._retained_alerts += 1
+        self.observations.append(observation)
 
     def _hard_stop(
         self,

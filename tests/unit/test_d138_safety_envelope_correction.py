@@ -118,16 +118,27 @@ def _run_external(
     tmp_path: Path,
     *,
     run_id: str,
-    asserted: str | None,
+    asserted: str | None = _QUALIFIED,
     work_root: Path | None = None,
     private: Path | None = None,
 ) -> Any:
-    """Run the complete-source canary on the protected external path."""
+    """Run the complete-source canary on the protected external path.
+
+    ``asserted`` now defaults to the qualified volume because **Decision 140 (D140-R2) makes the
+    assertion mandatory** on any external root. The default work root is created here for the
+    same reason the operator creates one during preflight: D140-R5 forbids ``create_world`` from
+    making a work root on the external path, because doing so would recreate a mount point that
+    had gone away. An explicitly supplied work root is left alone, so a test can still prove
+    that a refusal happened before anything was created.
+    """
     root = private if private is not None else d116._private_root(tmp_path)
+    if work_root is None:
+        work_root = tmp_path / "work"
+        work_root.mkdir(exist_ok=True)
     return canary.run_single_source_canary(
         operational_catalog=d116._catalog(root),
         tree=DataTree.from_root(root),
-        work_root=(tmp_path / "work") if work_root is None else work_root,
+        work_root=work_root,
         run_id=run_id,
         source_instance_id=d116._BULK_INSTANCE,
         require_volume_uuid=asserted,
@@ -197,9 +208,24 @@ def test_c1_case_1_qualified_external_root_with_the_correct_uuid_passes(
 def test_c1_case_2_the_uuid_argument_omitted_still_protects_the_external_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**MAJOR-1, closed.** No flag, full envelope, and the guards actually ran."""
+    """**MAJOR-1, closed twice over.**
+
+    Decision 138 answered the omitted flag by running the full envelope anyway. The **D139**
+    review showed that was not enough: the envelope's own classifier asks which device the root
+    resolves onto *now*, and with the volume absent the answer is the internal disk. Decision 140
+    (D140-R2) therefore makes the assertion **mandatory** -- omission is the refusal, and the
+    protection cannot be reached around at all.
+
+    The supplied-flag path still reaches every guard, which is what the second half proves: the
+    refusal below is a stricter entry condition, not a lost capability.
+    """
     _external_volume(monkeypatch, tmp_path)
-    preflight = ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+    with pytest.raises(ewr.ExternalWorkingRootError, match="--require-volume-uuid is required"):
+        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+
+    preflight = ewr.require_external_envelope(
+        tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+    )
     assert preflight is not None
     assert preflight.volume.volume_uuid == _QUALIFIED
     assert preflight.sqlite_tmpdir_verified is True
@@ -223,22 +249,39 @@ def test_c1_case_5_an_unqualified_external_volume_refuses_with_no_flag(
 ) -> None:
     """The case the baseline admitted silently: an external disk that is not the D136 one."""
     _external_volume(monkeypatch, tmp_path, uuid=_OTHER)
-    with pytest.raises(ewr.ExternalWorkingRootError, match="not the accepted qualified volume"):
+    with pytest.raises(ewr.ExternalWorkingRootError, match="--require-volume-uuid is required"):
         ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+    # And with the mandatory assertion supplied, the original D138 predicate still fires: the
+    # disk itself is not the qualified one. D140 added an entry condition; it removed no guard.
+    with pytest.raises(ewr.ExternalWorkingRootError, match="not the accepted qualified volume"):
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
 
 
-@pytest.mark.parametrize("asserted", [None, _QUALIFIED])
+@pytest.mark.parametrize(
+    ("asserted", "expected"),
+    [
+        # **D140-R2**: with the assertion omitted the run never reaches the archive predicate,
+        # because it never reaches any predicate. The outcome the case exists to prove -- a
+        # world is not built inside the only surviving copy of the D128 evidence -- holds
+        # either way, and now holds one guard earlier.
+        (None, "--require-volume-uuid is required"),
+        (_QUALIFIED, "D130 archive"),
+    ],
+)
 def test_c1_cases_6_and_7_a_root_inside_the_d130_archive_refuses_either_way(
-    asserted: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    asserted: str | None, expected: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**D138-R2**: archive exclusion is unconditional on the qualified SSD."""
     archive = tmp_path / ewr.D130_ARCHIVE_DIRECTORY_NAME
     archive.mkdir()
     _external_volume(monkeypatch, tmp_path)
-    with pytest.raises(ewr.ExternalWorkingRootError, match="D130 archive"):
+    with pytest.raises(ewr.ExternalWorkingRootError, match=expected):
         ewr.require_external_envelope(
             archive / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=asserted
         )
+    assert not (archive / "work").exists()
 
 
 def test_c1_case_8_a_symlinked_or_normalized_alias_into_the_archive_refuses(
@@ -253,7 +296,9 @@ def test_c1_case_8_a_symlinked_or_normalized_alias_into_the_archive_refuses(
 
     for candidate in (link / "work", tmp_path / "sibling" / ".." / archive.name / "work"):
         with pytest.raises(ewr.ExternalWorkingRootError, match="D130 archive"):
-            ewr.require_external_envelope(candidate, observed_at="2026-08-23T00:00:00Z")
+            ewr.require_external_envelope(
+                candidate, observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+            )
 
 
 def test_a_benign_similarly_prefixed_sibling_is_still_not_falsely_refused(
@@ -264,7 +309,12 @@ def test_a_benign_similarly_prefixed_sibling_is_still_not_falsely_refused(
     sibling = tmp_path / f"{ewr.D130_ARCHIVE_DIRECTORY_NAME}_WORKING"
     sibling.mkdir()
     _external_volume(monkeypatch, tmp_path)
-    assert ewr.require_external_envelope(sibling, observed_at="2026-08-23T00:00:00Z") is not None
+    assert (
+        ewr.require_external_envelope(
+            sibling, observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
+        is not None
+    )
 
 
 def test_c1_case_9_an_internal_root_with_no_assertion_keeps_its_historical_behaviour(
@@ -295,7 +345,9 @@ def test_c1_case_11_a_lookup_failure_on_an_external_candidate_refuses(
 ) -> None:
     _external_volume(monkeypatch, tmp_path, lookup_fails=True)
     with pytest.raises(ewr.ExternalWorkingRootError, match="lookup failed"):
-        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
 
 
 def test_c1_case_12_a_missing_external_candidate_refuses(
@@ -304,7 +356,9 @@ def test_c1_case_12_a_missing_external_candidate_refuses(
     """Nothing mounted where the root points is a refusal, never a fallback to internal storage."""
     _external_volume(monkeypatch, tmp_path, mounted=False)
     with pytest.raises(ewr.ExternalWorkingRootError, match="no volume is mounted"):
-        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
 
 
 def test_the_launch_floor_still_refuses_one_byte_below_in_automatic_mode(
@@ -313,7 +367,9 @@ def test_the_launch_floor_still_refuses_one_byte_below_in_automatic_mode(
     """**D138-R4**: `185` GiB is unchanged, and reaches the no-flag path too."""
     _external_volume(monkeypatch, tmp_path, free=_LAUNCH_FLOOR - 1)
     with pytest.raises(ewr.ExternalWorkingRootError, match="launch free-space floor not met"):
-        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
 
 
 def test_the_launch_floor_admits_at_exactly_the_floor(
@@ -321,7 +377,9 @@ def test_the_launch_floor_admits_at_exactly_the_floor(
 ) -> None:
     _external_volume(monkeypatch, tmp_path, free=_LAUNCH_FLOOR)
     assert (
-        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
         is not None
     )
 
@@ -338,7 +396,7 @@ def test_the_library_boundary_refuses_an_unqualified_volume_with_no_flag(
     _external_volume(monkeypatch, tmp_path, uuid=_OTHER)
 
     with pytest.raises(ewr.ExternalWorkingRootError, match="not the accepted qualified volume"):
-        _run_external(tmp_path, run_id="d138-lib", asserted=None, private=private)
+        _run_external(tmp_path, run_id="d138-lib", private=private)
 
     assert not (tmp_path / "work" / "d138-lib").exists()
     assert file_digest(d116._catalog(private))[0] == before
@@ -357,7 +415,6 @@ def test_the_library_boundary_refuses_the_archive_with_no_flag(
         _run_external(
             tmp_path,
             run_id="d138-archive",
-            asserted=None,
             work_root=archive / "work",
             private=private,
         )
@@ -383,6 +440,7 @@ def test_the_operator_surface_refuses_an_unqualified_volume_with_no_flag(
             source_instance_id=d116._BULK_INSTANCE,
             work_root=str(work),
             repository_root=checkout,
+            require_volume_uuid=_QUALIFIED,
             environ={EVIDENCE_ROOT_ENV: str(private)},
         )
 
@@ -404,6 +462,7 @@ def test_the_prefix_profile_is_protected_with_no_flag(
             run_id="d138-prefix",
             source_instance_id=d116._BULK_INSTANCE,
             member_limit=1,
+            require_volume_uuid=_QUALIFIED,
         )
 
     assert not (tmp_path / "work" / "d138-prefix").exists()
@@ -467,7 +526,9 @@ def test_c1_case_13_an_internal_temporary_root_refuses_in_automatic_mode(
         ewr, "macos_volume_identity", d137._provider({tmp_path: _QUALIFIED, internal: _OTHER})
     )
     with pytest.raises(ewr.ExternalWorkingRootError, match="not the accepted qualified volume"):
-        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
 
 
 def test_an_unset_temporary_root_refuses_in_automatic_mode(
@@ -476,14 +537,18 @@ def test_an_unset_temporary_root_refuses_in_automatic_mode(
     _external_volume(monkeypatch, tmp_path)
     monkeypatch.delenv(ewr.SQLITE_TMPDIR_ENV, raising=False)
     with pytest.raises(ewr.ExternalWorkingRootError, match="is not set"):
-        ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+        ewr.require_external_envelope(
+            tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+        )
 
 
 def test_c1_case_14_a_same_volume_temporary_root_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     temp = _external_volume(monkeypatch, tmp_path)
-    preflight = ewr.require_external_envelope(tmp_path / "work", observed_at="2026-08-23T00:00:00Z")
+    preflight = ewr.require_external_envelope(
+        tmp_path / "work", observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED
+    )
     assert preflight is not None
     assert preflight.temp_directory == Path(os.path.realpath(temp))
 
@@ -556,6 +621,8 @@ def _gated_run(
     run_id: str,
     fail_measurement: bool = False,
     drop_after_phase: str | None = None,
+    f1_calls: list[str] | None = None,
+    f2_calls: list[str] | None = None,
 ) -> tuple[list[str], Any]:
     """Run the protected external path, dropping free space at one chosen point.
 
@@ -592,14 +659,26 @@ def _gated_run(
 
         monkeypatch.setattr(canary, "observe_capacity", _dropping_observe)
 
-    f1_calls: list[str] = []
+    # **D140-R13**: owned by the caller when one is supplied, so an assertion made *after* the
+    # exception is made on the object the spy actually wrote to. A list created inside this
+    # function and returned only on the success path cannot witness a refusal.
+    observed_f1: list[str] = [] if f1_calls is None else f1_calls
+    observed_f2: list[str] = [] if f2_calls is None else f2_calls
     real_f1 = canary.CensusCatalog.count_persisted_accession_resolutions
 
-    def _counting_f1(self: Any, **kwargs: Any) -> Any:  # pragma: no cover - must not be reached
-        f1_calls.append("F1")
+    def _counting_f1(self: Any, **kwargs: Any) -> Any:
+        observed_f1.append("F1")
         return real_f1(self, **kwargs)
 
     monkeypatch.setattr(canary.CensusCatalog, "count_persisted_accession_resolutions", _counting_f1)
+
+    real_f2 = canary.materialize_census_associations
+
+    def _counting_f2(*args: Any, **kwargs: Any) -> Any:
+        observed_f2.append("F2")
+        return real_f2(*args, **kwargs)
+
+    monkeypatch.setattr(canary, "materialize_census_associations", _counting_f2)
 
     real_f0 = canary.materialize_one_planned_source
 
@@ -612,7 +691,7 @@ def _gated_run(
         return outcome
 
     monkeypatch.setattr(canary, "materialize_one_planned_source", _dropping_f0)
-    return f1_calls, _run_external(tmp_path, run_id=run_id, asserted=None, private=private)
+    return observed_f1, _run_external(tmp_path, run_id=run_id, private=private)
 
 
 @pytest.mark.parametrize(
@@ -647,10 +726,24 @@ def test_a_breach_at_either_gate_stops_the_run_before_f1_begins(
 def test_f1_is_never_called_when_the_post_f0_gate_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """**D140-R13, MINOR-3.** The assertion is now made on a counter that survives the raise.
+
+    As accepted at Decision 138 this test proved nothing at all. ``calls`` was bound to a fresh
+    empty list, ``_gated_run`` raised, so the tuple assignment ``calls, _ = ...`` **never
+    executed**, and ``assert calls == []`` re-asserted the literal written two lines above it.
+    It passed identically whether F1 ran once, never, or a thousand times.
+
+    The spy list is now created here and handed **into** the harness, so it is the same object
+    the counting wrapper appends to and it carries the truth out through the exception.
+    """
     calls: list[str] = []
     with pytest.raises(ewr.ExternalWorkingRootError, match="POST_F0"):
-        calls, _ = _gated_run(
-            tmp_path, monkeypatch, after_f0_free=_POST_F0_FLOOR - 1, run_id="d138-f1-zero"
+        _gated_run(
+            tmp_path,
+            monkeypatch,
+            after_f0_free=_POST_F0_FLOOR - 1,
+            run_id="d138-f1-zero",
+            f1_calls=calls,
         )
     assert calls == []
 
@@ -1062,7 +1155,13 @@ def test_the_guard_deletes_nothing_and_signals_nothing(tmp_path: Path) -> None:
 
     source = Path(ewr.__file__).read_text(encoding="utf-8")
     body = source.split("class F2CapacityGuard")[1]
-    for forbidden in ("os.kill", "SIGKILL", "SIGTERM", "unlink", "rmtree", "subprocess"):
+    # ``subprocess`` left this list at **Decision 140** (D140-R15) and nothing else did. The
+    # guard now re-reads the exact Volume UUID on a bounded interval, which is a ``diskutil``
+    # call, because the D139 review showed that free space measured after the volume has gone
+    # describes the internal disk -- and the internal disk always looks healthy. The prohibition
+    # that mattered is unchanged and is asserted here: the guard still kills nothing, signals
+    # nothing, and deletes nothing.
+    for forbidden in ("os.kill", "SIGKILL", "SIGTERM", "unlink", "rmtree", "shutil.rmtree"):
         assert forbidden not in body, f"the guard must never reach for {forbidden}"
 
 
@@ -1083,7 +1182,7 @@ def test_the_protected_external_run_binds_an_in_process_guard(
         return real_f2(*args, **kwargs)
 
     monkeypatch.setattr(canary, "materialize_census_associations", _capturing)
-    _run_external(tmp_path, run_id="d138-bound", asserted=None, private=private)
+    _run_external(tmp_path, run_id="d138-bound", private=private)
     assert len(seen) == 1
     assert isinstance(seen[0], ewr.F2CapacityGuard)
 
@@ -1122,7 +1221,7 @@ def test_a_hard_stop_during_a_real_run_leaves_no_result_document(
     monkeypatch.setattr(canary, "F2CapacityGuard", _starved)
 
     with pytest.raises(ewr.F2CapacityHardStopError, match="ROLLS BACK"):
-        _run_external(tmp_path, run_id="d138-starved", asserted=None, private=private)
+        _run_external(tmp_path, run_id="d138-starved", private=private)
 
     world = tmp_path / "work" / "d138-starved"
     assert not (world / canary.CANARY_RESULT_FILENAME).exists()

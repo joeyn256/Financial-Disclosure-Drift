@@ -416,7 +416,14 @@ def test_a_measured_observation_records_what_it_could_measure(tmp_path: Path) ->
     record = observation.as_record()
     assert record["database_bytes"] == 4096
     assert record["wal_bytes"] == 512
-    assert record["temp_bytes"] == 1024
+    # **D140-R7, MINOR-1.** Decision 137 reported this as ``temp_bytes``, and it was a lie of
+    # the most dangerous available shape: SQLite unlinks its ``etilqs_*`` spill files the
+    # instant it creates them, so a directory walk sees nothing **while a spill is in
+    # progress** and reported an authoritative-looking ``0``. The visible-file measurement is
+    # kept under a name that says what it is, and the unmeasurable quantity stays unmeasured.
+    assert record["temp_bytes"] is None
+    assert record["temp_measurement_status"] == ewr.UNMEASURED_UNLINKED_SQLITE_TEMP
+    assert record["temp_visible_bytes"] == 1024
     assert record["phase"] == "DURING_F2"
     assert record["f2_capacity_state"] in {
         ewr.F2_NORMAL_STATE,
@@ -798,6 +805,10 @@ def test_an_external_run_records_every_phase_boundary(
     # and its actual free space is not what this test is about. (Left unpinned, this run is
     # refused by the 185 GiB launch guard -- which is the guard working, not a test failure.)
     _pin_free(monkeypatch, _LAUNCH_FLOOR + 1)
+    # **D140-R5**: on the external path `create_world` never makes the work root, because doing
+    # so would recreate a mount point that had disappeared. The operator creates it during
+    # preflight, and so does this test.
+    (tmp_path / "work").mkdir()
 
     result = canary.run_single_source_canary(
         operational_catalog=database,

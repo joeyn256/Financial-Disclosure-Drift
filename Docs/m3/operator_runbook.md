@@ -1206,12 +1206,18 @@ the stop procedure.
 
 ### The launch shape
 
+> **SUPERSEDED BY [§28e](#28e-the-one-canonical-launch-command--decision-140).** The shape below
+> is retained because the reasoning under it — foreground, never `&`, `exec`, one process deep —
+> is unchanged and still correct. **Do not copy this command.** Its `--pid-file` is under
+> `$WORK_ROOT`, which Decision 140 (D140-R10) refuses: that writes to the external volume before
+> the application has authenticated it, and puts the failure diagnosis inside the tree a disposal
+> would remove. It also sets no `SQLITE_TMPDIR` on the pane, no durable logs, and no resource
+> report. **§28e is the one canonical command.**
+
 Run the canary as the **foreground** command of its tmux pane. Never background it with `&`.
 
 ```bash
-# From the repository root, with the virtual environment present.
-# Every path is single-quoted: the repository path contains spaces, and an unquoted
-# command string produces a pane that dies silently.
+# SUPERSEDED — retained for its reasoning only. The canonical command is in §28e.
 tmux new-session -d -s "$SESSION" \
   "'$PWD/.venv/bin/python' '$PWD/scripts/m3/canary_launch.py' \
      --pid-file '$WORK_ROOT/canary.pid' -- \
@@ -1540,12 +1546,12 @@ reports stays your decision, through the `stop` subcommand in §28b.
 
 **`NOT AUTHORIZED UNTIL SEPARATE OWNER CANARY AUTHORIZATION`**
 
-The corrected complete-source canary is launched with the §28b shape, with `--mode run` and a
-`caffeinate` wrapper so the machine cannot sleep mid-run. **It must not be run on the strength of
-a passing preflight, of Decision 136, of Decision 137, or of Decision 138.** A separate owner
-instrument authorizes it, and it runs **from scratch, in a new world, under a new run identity** —
-accepted [Decision 129](../Decisions/decision_129_m3_3_d128_semantic_adjudication.md)
-**D129-R8**, unchanged.
+The corrected complete-source canary is launched with the **[§28e](#28e-the-one-canonical-launch-command--decision-140)**
+canonical command and no other. **It must not be run on the strength of a passing preflight, of
+Decision 136, of Decision 137, of Decision 138, or of Decision 140.** A separate owner instrument
+authorizes it, and it runs **from scratch, in a new world, under a new run identity** — accepted
+[Decision 129](../Decisions/decision_129_m3_3_d128_semantic_adjudication.md) **D129-R8**,
+unchanged.
 
 ### After the run — the D130 archive postcheck
 
@@ -1564,6 +1570,142 @@ established **process-crash recovery only**. Nothing here claims journaled files
 D136 could not distinguish a satisfied `F_FULLFSYNC` from a bridge that ignored one, and did not
 try. Conditions 1 and 3–5 above exist precisely because the filesystem does not cover them.
 Decision 138 corrects the safety envelope; it does not change one word of this boundary.
+
+## 28e. The one canonical launch command — Decision 140
+
+**`NOT AUTHORIZED. THE TOKEN BELOW IS A PLACEHOLDER AND IS NOT AN AUTHORIZATION.`**
+
+Accepted [Decision 140](../Decisions/decision_140_m3_3_total_pre_canary_hardening.md) closes the
+D139 independent review's **MAJOR-2**: there was no single launch shape an operator could copy,
+and the three shapes that existed each omitted something that a thirty-hour run cannot recover
+from. This section is the one canonical command. Every other launch snippet in this runbook is
+superseded by it.
+
+### The physical and operator conditions — D140-R20
+
+Check these **before** anything below. `caffeinate` holds power assertions; **it does not prevent
+a MacBook lid-close from sleeping the machine**, and no software does. That is why these are
+conditions rather than mechanisms.
+
+| # | Condition | Why |
+|---|---|---|
+| 1 | The Mac is on **AC power** for the whole run | Thirty hours is not a battery-length run. Checked at launch by `pmset -g ps`; battery is a refusal. |
+| 2 | The **lid stays open** for the whole run | `caffeinate -dims` cannot defeat lid-close sleep. Checked at launch by `ioreg -k AppleClamshellState`; a closed lid is a refusal. |
+| 3 | The SSD is **directly connected** — no hub | D136 established process-crash recovery only. |
+| 4 | The machine and the SSD stay **stationary** | ExFAT has no metadata journal; a surprise removal is not covered. |
+| 5 | Nothing **ejects or unplugs** the volume | Same. |
+| 6 | No other **heavy SSD activity** | The capacity model assumes the canary is the only writer. |
+
+An unreadable power or lid state is **refused**, not assumed — see
+`require_launch_power_conditions`. Both readings are normally available on this host.
+
+### The internal runtime directory — D140-R10
+
+Runtime control lives on **internal** storage, never under `$WORK_ROOT`:
+
+```bash
+RUNTIME="$DISCLOSURE_DRIFT_EVIDENCE_ROOT/runs/m3_3_canary_runtime/<RUN_ID>"
+mkdir -p "$RUNTIME"          # internal; NOT on the SSD, NOT inside the D130 archive
+```
+
+Everything a failure diagnosis needs is there and survives the volume being unplugged: the pid
+record, stdout, stderr, and the resource report. The launcher **refuses** — exit `3`,
+`LAUNCH_REFUSED_RUNTIME_PATH_NOT_INTERNAL` — if any of them would land beneath `$WORK_ROOT`.
+
+### The command
+
+```bash
+# NOT AUTHORIZED. Copying this does not authorize it.
+# <OWNER_CANARY_AUTHORITY_NOT_YET_ISSUED>
+#
+# WORK_ROOT   must already exist on the qualified volume: D140-R5 forbids create_world from
+#             making it, because making it would recreate a mount point that had gone away.
+# SQLITE_TMPDIR must be injected with tmux -e. Exporting it does NOT reach a pane created on
+#             an already-running tmux server, and the failure is silent.
+tmux new-session -d -s "$SESSION" \
+  -e "SQLITE_TMPDIR=$TMPDIR_EXTERNAL" \
+  "/usr/bin/caffeinate -dims \
+   /usr/bin/time -l -o '$RUNTIME/resource.log' \
+   '$PWD/.venv/bin/python' '$PWD/scripts/m3/canary_launch.py' \
+     --pid-file '$RUNTIME/canary.pid' \
+     --stdout '$RUNTIME/stdout.log' \
+     --stderr '$RUNTIME/stderr.log' \
+     --work-root '$WORK_ROOT' \
+     --require-sqlite-tmpdir -- \
+     '$PWD/.venv/bin/disclosure-drift' m3 canary-source \
+       --config configs/project.yaml --mode run \
+       --source-instance-id '<SOURCE_INSTANCE_ID>' \
+       --run-id '<RUN_ID>' \
+       --work-root '$WORK_ROOT' \
+       --require-volume-uuid '397A4D4A-9508-391E-814E-3B533C7BD049'"
+```
+
+There is **no `--member-limit`**: `run` is complete-source only, and a bound is refused outright
+rather than ignored.
+
+Each part earns its place:
+
+| Part | What it fixes |
+|---|---|
+| `-e SQLITE_TMPDIR=…` | An exported value reaches a pane only when tmux starts a **new server**. Attaching to an existing one gives that server's environment, so SQLite spills to the internal volume for thirty hours while the operator's shell shows the right value. |
+| `caffeinate -dims` | Display, disk, idle-system and user-active assertions, held for the child's whole lifetime. **Not** a defence against lid-close. |
+| `time -l -o …` | Peak resident set size, durably, for the real run — closing D139's **INFO-4**. It is not a threshold and kills nothing. |
+| `canary_launch.py` | Refuses if `SIGINT` is already ignored (the D128 condition), refuses a runtime path under `$WORK_ROOT`, refuses a missing `SQLITE_TMPDIR`, records the PID, redirects to durable logs, and `exec`s — so the recorded PID **is** the canary's. |
+| `--require-volume-uuid` | **Mandatory** (D140-R2). Omitting it is a refusal, not a weaker run. |
+
+`caffeinate` and `time` are **ancestors** of the canary rather than things the launcher `exec`s.
+If the launcher `exec`'d `caffeinate`, the pid file would name `caffeinate` and the stop path
+would signal a process that is not the canary — D128's defect by another route.
+
+### Stopping — use the governed path, D140-R18
+
+```bash
+./.venv/bin/python scripts/m3/canary_watchdog.py stop-canary \
+    --pid-file "$RUNTIME/canary.pid" \
+    --run-id '<RUN_ID>'
+```
+
+The legacy `stop --pid … --expect-command 'm3 canary-source'` is **not** the canary stop path.
+`--expect-command` is a **substring** test against a command line, and an operator shell that has
+merely typed the canary's command carries that text in its own — so the decoy authenticates
+perfectly. `stop-canary` reads the exact PID from the pid record, **scans nothing**, and requires
+the target's own `argv[0]` to be a canary executable, the `m3 canary-source` tokens to be
+adjacent, and `--run-id` to be exactly this run. A shell is refused on `argv[0]` whatever the rest
+of its command line says. One `SIGINT`, a bounded wait, and **no escalation**.
+
+### After a failure — reclaim readiness, D140-R19
+
+A late failure can leave a ~120 GiB world behind, and 185 GiB is then not available for a fresh
+attempt without reclaiming it. **That physical fact is not removed by anything in Decision 140.**
+What is removed is the ambiguity about what to do next:
+
+`failed_world_reclaim_readiness()` reports the exact run identity, whether a normal success result
+exists, world/database/WAL sizes, the durable runtime evidence, and `FAILED_WORLD_RECLAIM_READY`.
+It names **only** the exact world directory for that exact run as eligible, never the work root,
+never a sibling world, never the D130 archive, and never the source artifact.
+
+**It deletes nothing, and holding its report authorizes nothing.** Disposal stays owner-gated,
+and a world carrying a normal success result is never reclaim-ready.
+
+### Pause and resume — NOT IMPLEMENTED, and why
+
+**`GOVERNED PAUSE/RESUME IS NOT AVAILABLE. DO NOT ATTEMPT TO PAUSE A RUNNING CANARY.`**
+
+There is no supported way to pause a complete-source canary and resume the same world. The
+architectural finding is recorded in
+[Decision 140](../Decisions/decision_140_m3_3_total_pre_canary_hardening.md) §17; the operator
+consequences are:
+
+* **Do not** use `kill -STOP` / `kill -CONT`. Suspending the process does **not** quiesce SQLite,
+  does not close handles, and does **not** make the volume safe to eject. It looks like a pause
+  and is not one.
+* **Do not** unplug or eject the SSD while a canary is running, for any reason. There is no
+  `SAFE_TO_EJECT` state, because there is no mechanism that could establish one.
+* If the machine must be disconnected from the SSD, the run is **lost** and a new run identity is
+  required. Worlds are create-once and are never resumed (D129-R8).
+* Keep the Mac on AC power and the lid open for the whole run — conditions 1 and 2 above. There is
+  no pause to fall back on.
+
 
 ## 29. Freeze the real snapshot only after Gate H and E0
 

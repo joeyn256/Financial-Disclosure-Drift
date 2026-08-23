@@ -1363,3 +1363,25 @@ decision and stage contract name — for S6, now written and accepted, those wer
 [`m23_s5_4.md`](../Milestones/contracts/m23_s5_4.md), [`m23_s5_2.md`](../Milestones/contracts/m23_s5_2.md),
 and [`m23_s5_1.md`](../Milestones/contracts/m23_s5_1.md) as the accepted precedents for what a stage
 contract must state.
+
+## The Decision 140 pre-canary hardening surface
+
+**Touch any of these and run `tests/unit/test_d140_total_pre_canary_hardening.py` first.** Each
+protection there exists to fail when the corresponding production code is reverted; the
+[Decision 140](Decisions/decision_140_m3_3_total_pre_canary_hardening.md) §15 falsification run
+records 22 reversible mutations and the named test that killed each one.
+
+| Change | Nearest tests |
+|---|---|
+| `external_working_root.py` — intent, mounted-volume authentication, `AdmittedVolume`, temporary measurement, alert bounding | `test_d140_total_pre_canary_hardening.py`, `test_d138_safety_envelope_correction.py`, `test_d137_external_working_root.py` |
+| `canary_runtime.py` — runtime paths, execution lock, PID authentication, power/lid, reclaim readiness | `test_d140_total_pre_canary_hardening.py` |
+| `single_source_canary.py` — `create_world`, the blocking-F0 gate, pre-world source authentication, lock binding | `test_d140_total_pre_canary_hardening.py`, `test_d116_single_source_canary.py` |
+| `offline_parse.py` — the structural source preflight and the F2 tail bracket | `test_d140_total_pre_canary_hardening.py`, `test_d131_historical_shard_dispatch.py` |
+| `sec/census.py` — the F0 and F1 `capacity_guard` call sites | `test_d140_total_pre_canary_hardening.py` |
+| `scripts/m3/canary_launch.py`, `scripts/m3/canary_watchdog.py` | `test_d140_total_pre_canary_hardening.py`, `test_d131_signal_and_monitor.py` |
+
+**Two cautions that cost real time to learn.** A test asserting that *a* capacity reading happened
+during a phase is satisfied by the readings that bracket the phase, and survives deleting the
+per-unit sampling entirely — assert that the count **scales with the work**. And an assertion made
+on a name bound by a statement that **raises** re-asserts its own initial value; hand the counter
+in from outside so it survives the exception.

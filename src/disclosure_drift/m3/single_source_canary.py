@@ -54,6 +54,9 @@ from typing import Final
 
 from disclosure_drift.config import EVIDENCE_ROOT_ENV
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.m3.canary_runtime import (
+    acquire_canary_execution_lock,
+)
 from disclosure_drift.m3.capacity_plan import plan_fingerprint
 from disclosure_drift.m3.compact_evidence import (
     COMPACT_EVIDENCE,
@@ -72,13 +75,18 @@ from disclosure_drift.m3.external_working_root import (
 )
 from disclosure_drift.m3.offline_parse import (
     DIAGNOSTIC_PREFIX_CLASSIFICATION,
+    STREAMED_SOURCE_IDS,
     AssociationTotality,
     SelectedPlannedSource,
     SingleSourceOutcome,
+    StructuralSourcePreflight,
     materialize_census_associations,
     materialize_one_planned_source,
     materialize_planned_source_prefix,
+    planned_source_observation,
+    require_sound_parent_map,
     select_planned_source,
+    structural_source_preflight,
     write_containment,
 )
 from disclosure_drift.m3.working_catalog import (
@@ -89,6 +97,7 @@ from disclosure_drift.m3.working_catalog import (
 )
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.census import CensusCatalog, ResolutionEvidence
+from disclosure_drift.sec.snapshots import SnapshotStore, SourceObservation
 from disclosure_drift.storage.catalog import CatalogWriter, strictly_read_only_connection
 from disclosure_drift.storage.sqlite import applied_versions, utc_now
 
@@ -424,7 +433,9 @@ class CanaryWorld:
         return self.directory / CANARY_PREFIX_RESULT_FILENAME
 
 
-def create_world(work_root: Path, run_id: str) -> CanaryWorld:
+def create_world(
+    work_root: Path, run_id: str, *, require_existing_root: bool = False
+) -> CanaryWorld:
     """Create one disposable world exactly once, at mode ``0700``.
 
     ``mkdir`` without ``exist_ok`` is the create-once primitive: it is atomic, so two callers
@@ -432,12 +443,38 @@ def create_world(work_root: Path, run_id: str) -> CanaryWorld:
     refused rather than resumed, repaired, or overwritten. A symlink at either the work root or
     the world path is refused before anything is created.
 
+    **``require_existing_root`` is the D140-R5 hardening**, and it is set for every run on the
+    external volume. The D139 review's **MAJOR-1** included a race: the envelope authenticates
+    the volume, and the world is created a moment later. If the volume disappears inside that
+    gap, ``mkdir(parents=True)`` does not fail -- it **recreates the mount point** as an ordinary
+    directory on the system root filesystem and builds the world inside it, and the run proceeds
+    on internal storage. Nothing but ``/Volumes`` being root-owned stood in the way.
+
+    With it set, the work root must **already exist**: only the final governed world directory is
+    ever created, no parent is made, and a vanished volume produces a refusal rather than a
+    freshly minted internal directory tree. The operator creates the work root during preflight,
+    which the runbook already requires.
+
+    Args:
+        work_root: The disposable work root the world is created beneath.
+        run_id: This world's identity. Create-once.
+        require_existing_root: Refuse rather than create ``work_root`` and its parents.
+
     Raises:
-        SingleSourceCanaryError: the identity is unlawful, or its world already exists.
+        SingleSourceCanaryError: the identity is unlawful, its world already exists, or
+            ``require_existing_root`` is set and the work root is not already a directory.
     """
     validate_run_id(run_id)
     if work_root.is_symlink():
         message = "the canary work root is a symbolic link and is refused"
+        raise SingleSourceCanaryError(message)
+    if require_existing_root and not work_root.is_dir():
+        message = (
+            "the canary work root does not exist as a directory on the authenticated external "
+            "volume. It is NOT created here: creating it would recreate a mount point that has "
+            "gone away, as an ordinary directory on the internal disk, and build the world "
+            "inside it. The run is refused and nothing was created"
+        )
         raise SingleSourceCanaryError(message)
     if not work_root.exists():
         work_root.mkdir(mode=_DIRECTORY_MODE, parents=True)
@@ -457,6 +494,154 @@ def create_world(work_root: Path, run_id: str) -> CanaryWorld:
     target.mkdir(mode=_DIRECTORY_MODE)
     target.chmod(_DIRECTORY_MODE)
     return CanaryWorld(run_id=run_id, directory=target)
+
+
+# --------------------------------------------------------------------------- #
+# Pre-world source authentication -- D140-R20 (MINOR-7) and D140-R21 (INFO-9/10)
+# --------------------------------------------------------------------------- #
+#: The accepted governed source artifact's SHA-256, from the frozen M3.2 inventory.
+#:
+#: **Identity is keyed on the digest, not on a name.** A source instance key is an operator- and
+#: catalog-level identifier; the digest is the artifact. Keying the frozen expectations here on
+#: the digest means they apply to exactly one file in the world and cannot be triggered by a
+#: fixture that happens to share a naming convention.
+GOVERNED_SOURCE_SHA256: Final = "c85744be921b0dc5be4e3c7dd44552fc0f57d354d61df38cd92a13926982b82f"
+
+#: That artifact's accepted byte length.
+GOVERNED_SOURCE_BYTE_LENGTH: Final = 1_556_847_020
+
+#: The governed JSON member count the accepted structural facts record for it.
+GOVERNED_SOURCE_MEMBERS: Final = 985_834
+
+#: The historical shard member count the accepted structural facts record for it.
+GOVERNED_SOURCE_HISTORICAL_SHARDS: Final = 5_337
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAuthentication:
+    """What the pre-world source check established. It creates nothing."""
+
+    source_instance_id: str
+    byte_length: int
+    sha256: str
+    governed_artifact: bool
+    structural: StructuralSourcePreflight | None
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic, path-free rendering."""
+        record: dict[str, object] = {
+            "source_instance_id": self.source_instance_id,
+            "source_byte_length": self.byte_length,
+            "source_sha256": self.sha256,
+            "governed_artifact": self.governed_artifact,
+        }
+        record["structural"] = (
+            None if self.structural is None else dict(self.structural.as_record())
+        )
+        return record
+
+
+def preauthenticate_source(
+    *,
+    tree: DataTree,
+    selected: SelectedPlannedSource,
+    observation: SourceObservation | None,
+    structural: bool = True,
+) -> SourceAuthentication:
+    """Prove the selected source is the artifact the catalog says it is -- **before** a world.
+
+    The D139 review's **MINOR-7**: source integrity was verified by the parser, *during* F0 --
+    which is after the disposable world exists, after the working catalog has been copied, and
+    after the run has committed a world identity that is create-once and can never be reused. A
+    source mismatch discovered there costs a run identity. Discovered here it costs nothing.
+
+    Three things are established, in increasing strength:
+
+    1. the artifact's **byte length** matches the observation the plan is bound to;
+    2. its **SHA-256** matches that observation's recorded logical digest;
+    3. when the artifact **is** the accepted governed source -- decided by that digest -- its
+       frozen byte length, governed member count and historical shard count must all match, and
+       its shard-to-parent structure must satisfy the accepted Decision 129 rule (D140-R21).
+
+    **The parser's own verification is not weakened by this.** F0 re-reads and re-verifies the
+    artifact through the same integrity-checking reader it always did; nothing here replaces
+    that, and the second check is deliberately not skipped merely because a first one passed.
+
+    Args:
+        tree: The data tree the frozen source artifacts are read from.
+        selected: The one source, from :func:`select_planned_source`.
+        observation: The stored observation that source is bound to, from
+            :func:`~disclosure_drift.m3.offline_parse.planned_source_observation`.
+        structural: Whether to run the read-only structural preflight for a streamed source.
+
+    Raises:
+        SingleSourceCanaryError: the artifact is absent, or is not what the catalog records.
+        OfflineParseError: the governed shard-to-parent structure is not sound.
+    """
+    bound = observation
+    if bound is None or bound.relative_storage_path is None:
+        message = (
+            "the selected planned source is not bound to a stored artifact, so it cannot be "
+            "authenticated before a world is created; the run is refused"
+        )
+        raise SingleSourceCanaryError(message)
+    store = SnapshotStore(tree)
+    store.adopt([bound])
+    try:
+        artifact = store.payload_path(bound)
+        measured = artifact.stat().st_size
+    except (OSError, DisclosureDriftError) as exc:
+        message = (
+            f"the selected source artifact could not be located or measured "
+            f"({type(exc).__name__}); an unverifiable source is refused before a world exists"
+        )
+        raise SingleSourceCanaryError(message) from exc
+    expected_bytes = bound.content_size_bytes
+    if expected_bytes is not None and measured != expected_bytes:
+        message = (
+            f"the selected source artifact is {measured} bytes; the accepted observation "
+            f"records {expected_bytes}. The source is refused BEFORE a world exists, so no "
+            "disposable world and no create-once run identity were consumed"
+        )
+        raise SingleSourceCanaryError(message)
+    digest, _ = file_digest(artifact)
+    expected_digest = bound.logical_sha256
+    if expected_digest is not None and digest != expected_digest:
+        message = (
+            "the selected source artifact's SHA-256 is not the digest the accepted observation "
+            "records. The source is refused BEFORE a world exists; nothing was created, and "
+            "the artifact is reported rather than re-recorded"
+        )
+        raise SingleSourceCanaryError(message)
+    governed = digest == GOVERNED_SOURCE_SHA256
+    if governed and measured != GOVERNED_SOURCE_BYTE_LENGTH:  # pragma: no cover - digest fixes it
+        message = (
+            f"the governed source artifact is {measured} bytes, not the accepted "
+            f"{GOVERNED_SOURCE_BYTE_LENGTH}; the run is refused before a world exists"
+        )
+        raise SingleSourceCanaryError(message)
+    proof: StructuralSourcePreflight | None = None
+    if structural and bound.source_id in STREAMED_SOURCE_IDS:
+        proof = require_sound_parent_map(structural_source_preflight(artifact))
+        if governed and (
+            proof.governed_members != GOVERNED_SOURCE_MEMBERS
+            or proof.shard_members != GOVERNED_SOURCE_HISTORICAL_SHARDS
+        ):
+            message = (
+                f"the governed source holds {proof.governed_members} members and "
+                f"{proof.shard_members} historical shards; the accepted structural facts are "
+                f"{GOVERNED_SOURCE_MEMBERS} and {GOVERNED_SOURCE_HISTORICAL_SHARDS}. The run is "
+                "refused before a world exists rather than proceeding against a source whose "
+                "shape is not the one the plan was built on"
+            )
+            raise SingleSourceCanaryError(message)
+    return SourceAuthentication(
+        source_instance_id=selected.source.source_instance_id,
+        byte_length=measured,
+        sha256=digest,
+        governed_artifact=governed,
+        structural=proof,
+    )
 
 
 def _write_once(path: Path, payload: bytes) -> None:
@@ -871,6 +1056,53 @@ def run_single_source_canary(
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
         raise SingleSourceCanaryError(message)
+    #    Decision 140 (D140-R16): at most ONE complete-source canary runs on this host, whatever
+    #    its run identity. Two concurrent runs would each measure the same volume's free space as
+    #    though they were alone on it, which makes every capacity floor in the envelope wrong in
+    #    the one direction that matters. Taken before anything is measured or created, held for
+    #    the whole run, and released by the operating system if this process dies.
+    lock = acquire_canary_execution_lock(
+        _private_root_of(operational_catalog), detail={"run_id": run_id, "mode": "run"}
+    )
+    try:
+        return _run_locked(
+            operational_catalog=operational_catalog,
+            tree=tree,
+            resolved_work_root=resolved_work_root,
+            run_id=run_id,
+            source_instance_id=source_instance_id,
+            batch_size=batch_size,
+            cache_bytes=cache_bytes,
+            external=external,
+            started=started,
+        )
+    finally:
+        lock.release()
+
+
+def _private_root_of(operational_catalog: Path) -> Path:
+    """The private evidence root the accepted catalog sits under.
+
+    Derived from the one fixed relative path the catalog is always at
+    (:data:`OPERATIONAL_CATALOG_RELATIVE_PATH`), rather than taken as a second argument that a
+    caller could disagree with the catalog about.
+    """
+    return operational_catalog.parent.parent
+
+
+def _run_locked(
+    *,
+    operational_catalog: Path,
+    tree: DataTree,
+    resolved_work_root: Path,
+    run_id: str,
+    source_instance_id: str,
+    batch_size: int,
+    cache_bytes: int | None,
+    external: ExternalCanaryPreflight | None,
+    started: str,
+) -> CanaryResult:
+    """The run itself, with the host execution lock already held. See the caller."""
     catalog_before, _ = file_digest(operational_catalog)
     free_before = shutil.disk_usage(_measurable(resolved_work_root)).free
 
@@ -879,9 +1111,22 @@ def run_single_source_canary(
     with strictly_read_only_connection(operational_catalog) as reader:
         selected = select_planned_source(reader, source_instance_id)
         fingerprint, _ = plan_fingerprint(reader)
+        observation = planned_source_observation(reader, selected)
+
+    #    Decision 140 (D140-R20, D140-R21): the artifact is authenticated and its shard-to-parent
+    #    structure is proved BEFORE a world exists. A source mismatch, or a parent map that F0
+    #    would have refused twenty-seven hours in, costs nothing here -- no world, and no
+    #    create-once run identity spent on a run that could never have finished.
+    preauthenticate_source(tree=tree, selected=selected, observation=observation)
 
     # 2. The disposable world. Create-once, and never under the private evidence root.
-    world = create_world(resolved_work_root, run_id)
+    #    D140-R4: the volume is re-authenticated at the LAST safe point before the directory
+    #    is created, so the gap between "the envelope held" and "the world exists" carries a
+    #    check rather than an assumption. D140-R5: on the external path no parent is created,
+    #    so a volume that vanished inside that gap cannot be silently replaced by a directory.
+    if external is not None:
+        external.admitted.reauthenticate()
+    world = create_world(resolved_work_root, run_id, require_existing_root=external is not None)
 
     observations: list[CapacityObservation] = []
 
@@ -921,6 +1166,7 @@ def run_single_source_canary(
             working_root=world.directory,
             volume=external.volume,
             record_into=observations,
+            admitted=external.admitted,
         )
 
     # 3-7. Everything writable, inside the world.
@@ -1014,6 +1260,56 @@ def _require_pre_f2_free_space(directory: Path) -> int:
     return free
 
 
+#: ``census_plan_sources.parser_state`` values that **block** progression past F0 -- D140-R12.
+#:
+#: These are the existing accepted parser terminals, read rather than redefined: ``failed`` is
+#: the accepted meaning of *no consumer may read this run's counts -- including zero -- as a real
+#: observation*. Decision 140 does not invent a parser verdict; it stops the run at one that
+#: already exists. ``quarantined`` -- the terminal for ``completed_with_quarantine`` -- is
+#: deliberately **absent**: the accepted rules already permit a quarantined parse to proceed, and
+#: D140-R12 widens nothing.
+BLOCKING_PARSER_STATES: Final = frozenset({"failed"})
+
+#: Source dispositions that block progression past F0, for the same reason -- D140-R12.
+#:
+#: ``E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE`` is the accepted classification for a source the
+#: canary was asked to parse and could not. It leaves ``parser_state`` untouched rather than
+#: setting it to ``failed``, so the parser-state gate alone would not catch it.
+BLOCKING_SOURCE_DISPOSITIONS: Final = frozenset({"E0_REQUIRED_BUT_ACCEPTED_UNAVAILABLE"})
+
+
+def require_f0_success(outcome: SingleSourceOutcome) -> SingleSourceOutcome:
+    """Return ``outcome``, or stop the run before F1 begins -- D140-R12.
+
+    The D139 review found that a **blocking F0 failure did not stop the canary**: F0 could
+    finish ``failed``, and F1, F2 and a normal ``canary_result.json`` followed anyway, with the
+    operator exit code reporting success. A run that produced no usable parse would have been
+    indistinguishable from one that worked, which is the single most consequential way this
+    canary could mislead.
+
+    The gate reads the **existing** accepted terminals -- :data:`BLOCKING_PARSER_STATES` and
+    :data:`BLOCKING_SOURCE_DISPOSITIONS` -- and adds no parser methodology of its own. It sits
+    between F0's return and F1's first call, so on a breach **F1 runs zero times, F2 runs zero
+    times, no result document is written, and the operator exit is a gate failure**. The world
+    stays exactly as it is: nothing is cleaned, nothing is deleted, and nothing is retried.
+
+    Raises:
+        SingleSourceCanaryError: F0 reached a blocking terminal.
+    """
+    state = outcome.outcome.parser_state_after
+    disposition = outcome.outcome.disposition
+    if state in BLOCKING_PARSER_STATES or disposition in BLOCKING_SOURCE_DISPOSITIONS:
+        message = (
+            f"F0 reached a blocking terminal (parser_state {state!r}, disposition "
+            f"{disposition!r}) and the run STOPS AND REPORTS here. F1 does not begin, F2 does "
+            "not begin, and no canary result document is written: a failed parse must never be "
+            "reported as a completed canary. Nothing was deleted, cleaned, or retried, and the "
+            "disposable world is left exactly as it is for diagnosis"
+        )
+        raise SingleSourceCanaryError(message)
+    return outcome
+
+
 def _materialize(
     *,
     working: WorkingCatalog,
@@ -1049,7 +1345,11 @@ def _materialize(
             sidecar=sidecar,
             batch_size=batch_size,
             checkpoint_batches=True,
+            capacity_guard=capacity_guard,
         )
+        # D140-R12: between F0's return and anything that reads its output. The ledger is not
+        # marked parsed for a run that did not parse, and F1 is not reached at all.
+        require_f0_success(outcome)
         working.ledger.mark_parsed(
             source.source_instance_id,
             parts=outcome.members,
@@ -1065,7 +1365,7 @@ def _materialize(
         # because §6.2 item 5 reads the resolver's own output, and only then is the canonical
         # association relation projected.
         catalog.count_persisted_accession_resolutions(
-            batch_size=batch_size, checkpoint_batches=True
+            batch_size=batch_size, checkpoint_batches=True, capacity_guard=capacity_guard
         )
         # Accepted Decision 126 §7 (D126-R6) places the admission gate exactly here, between
         # F1's return and F2's call: this is the only point at which the measurement and the

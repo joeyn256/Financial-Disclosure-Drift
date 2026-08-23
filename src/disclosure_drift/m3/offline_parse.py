@@ -1076,6 +1076,251 @@ def _stream_deferred_historical_shards(
         raise OfflineParseError(message) from exc
 
 
+# --------------------------------------------------------------------------- #
+# The read-only structural source preflight -- D140-R21 (INFO-9 / INFO-10)
+# --------------------------------------------------------------------------- #
+#: How many offending member names a structural preflight names in its report.
+#:
+#: The report is evidence, not a log: a source whose parent map is broken in ten thousand places
+#: is not better understood by listing ten thousand names, and the digest below is what makes the
+#: whole result comparable anyway.
+STRUCTURAL_PREFLIGHT_REPORT_LIMIT: Final = 20
+
+#: The structural preflight's own contract identity, folded into its digest.
+STRUCTURAL_PREFLIGHT_CONTRACT: Final = "m3.3-structural-source-preflight/1.0"
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralSourcePreflight:
+    """What one bulk archive's shard-to-parent structure actually is, proved before F0 runs.
+
+    **Why this exists.** The D129 correction bound every historical overflow shard to the
+    registrant its **primary document explicitly declares** under ``filings.files``. That binding
+    is resolved during F0, roughly twenty-seven hours into a complete-source run -- so a source
+    whose parent map is broken in any of the six ways :func:`_resolve_shard_parent` refuses would
+    be discovered at the end of a day and a half of work, with a ~120 GiB world already built.
+
+    This asks the same question first, from the archive alone, in minutes. It **populates
+    nothing**: no SQLite, no world, no catalog, no parser run, no evidence row. It reads.
+    """
+
+    governed_members: int
+    shard_members: int
+    declared_shard_names: int
+    shard_before_parent: bool
+    orphan_shards: tuple[str, ...]
+    duplicate_parent_shards: tuple[str, ...]
+    conflicting_parent_shards: tuple[str, ...]
+    orphan_count: int
+    duplicate_parent_count: int
+    conflicting_parent_count: int
+    digest: str
+
+    @property
+    def parent_map_sound(self) -> bool:
+        """Whether every governed shard has exactly one lawful declaring parent."""
+        return (
+            self.orphan_count == 0
+            and self.duplicate_parent_count == 0
+            and self.conflicting_parent_count == 0
+        )
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic, path-free rendering."""
+        return {
+            "contract": STRUCTURAL_PREFLIGHT_CONTRACT,
+            "governed_members": self.governed_members,
+            "shard_members": self.shard_members,
+            "declared_shard_names": self.declared_shard_names,
+            "shard_before_parent": self.shard_before_parent,
+            "orphan_count": self.orphan_count,
+            "duplicate_parent_count": self.duplicate_parent_count,
+            "conflicting_parent_count": self.conflicting_parent_count,
+            "orphan_shards": list(self.orphan_shards),
+            "duplicate_parent_shards": list(self.duplicate_parent_shards),
+            "conflicting_parent_shards": list(self.conflicting_parent_shards),
+            "parent_map_sound": self.parent_map_sound,
+            "structural_preflight_digest": self.digest,
+        }
+
+
+def _primary_document_declarations(payload: bytes) -> tuple[str | None, tuple[str, ...]]:
+    """One primary document's own registrant and the overflow names it declares.
+
+    Reads the two fields the D129 parent rule depends on and nothing else. It is deliberately
+    **not** the submissions parser: running the full parser over ~985,000 documents is F0's
+    work, and repeating it here would make the preflight cost what the run costs. The *rule* is
+    not restated -- resolution goes through :func:`_resolve_shard_parent` exactly as F0's does;
+    only the extraction is narrowed to the two fields that rule reads.
+    """
+    try:
+        document = json.loads(payload)
+    except (ValueError, UnicodeDecodeError):
+        return None, ()
+    if not isinstance(document, dict):
+        return None, ()
+    raw_cik = document.get("cik")
+    padded: str | None = None
+    if raw_cik is not None:
+        try:
+            padded = normalize_cik(str(raw_cik))[1]
+        except IdentifierError:
+            padded = None
+    filings = document.get("filings")
+    names: list[str] = []
+    if isinstance(filings, dict):
+        files = filings.get("files")
+        if isinstance(files, list):
+            for entry in files:
+                if not isinstance(entry, dict):
+                    continue
+                raw_name = entry.get("name")
+                if raw_name is None:
+                    continue
+                name = str(raw_name).strip()
+                if name:
+                    names.append(name)
+    return padded, tuple(names)
+
+
+def structural_source_preflight(
+    archive_path: Path,
+    *,
+    report_limit: int = STRUCTURAL_PREFLIGHT_REPORT_LIMIT,
+) -> StructuralSourcePreflight:
+    """Prove the shard-to-parent structure of one bulk archive, read-only -- D140-R21.
+
+    One traversal of the archive. For each member it decides, by the accepted
+    :func:`_is_historical_shard_member` predicate, whether the member is a governed historical
+    shard or a primary submissions document; primary documents contribute their explicit
+    ``filings.files`` declarations to the parent map, and shards are remembered in the order they
+    appear so that **shard-before-parent ordering** is observed rather than assumed.
+
+    Resolution is then the accepted rule applied verbatim: every governed shard the archive
+    carries is passed to :func:`_resolve_shard_parent`, which refuses a missing declaration, more
+    than one distinct declaring registrant, and a declared parent that the shard's own filename
+    contradicts. **The filename remains corroboration and never a binding**, and no competing
+    parent algorithm is introduced here.
+
+    **It populates nothing and writes nothing.** No SQLite connection is opened, no world is
+    created, no parser run is seeded, and F0 is not run.
+
+    Args:
+        archive_path: The bulk archive to read.
+        report_limit: How many offending names to name per class.
+
+    Returns:
+        The structural facts, with a deterministic digest over all of them.
+
+    Raises:
+        ArchiveDefenceError: the archive is corrupt or hostile.
+        OfflineParseError: a member's name is shard-shaped only beneath a directory prefix,
+            which the accepted predicate refuses rather than routing to the primary parser.
+    """
+    shard_members = _historical_shard_member_names(archive_path)
+    declared: dict[str, set[str]] = {}
+    #: Shards already met in archive order. A set rather than a list because the ordering
+    #: observation below is a membership test per declaration, and rebuilding a frozenset each
+    #: time would make the preflight quadratic in a source with five thousand shards.
+    seen_shards: set[str] = set()
+    shard_before_parent = False
+    governed_members = 0
+    # ``name_suffix=".json"`` and the raw ``member.name`` are both exactly what
+    # :func:`_stream_bulk_submissions` uses. The preflight must count and classify the same
+    # population F0 will: a governed member count derived under different filters would be a
+    # different number about a different question, and comparing it to the accepted structural
+    # facts would prove nothing.
+    for member in iter_members(archive_path, name_suffix=".json"):
+        governed_members += 1
+        if _is_historical_shard_member(member.name):
+            seen_shards.add(canonical_member_name(member.name))
+            continue
+        padded, declarations = _primary_document_declarations(member.payload)
+        if padded is None:
+            continue
+        for declaration in declarations:
+            if declaration not in shard_members:
+                # Bounded exactly as `_declare_shard_parents` bounds it: a declaration naming a
+                # file the archive does not carry binds no member, and retaining it would grow
+                # the map with declarations instead of with shards.
+                continue
+            if declaration in seen_shards:
+                shard_before_parent = True
+            declared.setdefault(declaration, set()).add(padded)
+    orphans: list[str] = []
+    duplicates: list[str] = []
+    conflicts: list[str] = []
+    for name in sorted(shard_members):
+        parents = declared.get(name)
+        if not parents:
+            orphans.append(name)
+            continue
+        if len(parents) > 1:
+            duplicates.append(name)
+            continue
+        try:
+            _resolve_shard_parent(name, declared)
+        except OfflineParseError:
+            # The remaining refusal the accepted rule makes: the declared parent and the CIK
+            # the filename encodes disagree. Recorded rather than raised, so that one report
+            # describes every governed shard instead of stopping at the first bad one.
+            conflicts.append(name)
+    digest = hashlib.sha256()
+    for part in (
+        STRUCTURAL_PREFLIGHT_CONTRACT,
+        str(governed_members),
+        str(len(shard_members)),
+        str(len(declared)),
+        str(shard_before_parent),
+        *sorted(orphans),
+        "\x1e",
+        *sorted(duplicates),
+        "\x1e",
+        *sorted(conflicts),
+    ):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\x1f")
+    return StructuralSourcePreflight(
+        governed_members=governed_members,
+        shard_members=len(shard_members),
+        declared_shard_names=len(declared),
+        shard_before_parent=shard_before_parent,
+        orphan_shards=tuple(orphans[:report_limit]),
+        duplicate_parent_shards=tuple(duplicates[:report_limit]),
+        conflicting_parent_shards=tuple(conflicts[:report_limit]),
+        orphan_count=len(orphans),
+        duplicate_parent_count=len(duplicates),
+        conflicting_parent_count=len(conflicts),
+        digest=digest.hexdigest(),
+    )
+
+
+def require_sound_parent_map(preflight: StructuralSourcePreflight) -> StructuralSourcePreflight:
+    """Return ``preflight``, or refuse the run before a world exists -- D140-R21.
+
+    Raises:
+        OfflineParseError: a governed shard has no declaring parent, more than one, or a parent
+            its own filename contradicts.
+    """
+    if preflight.parent_map_sound:
+        return preflight
+    message = (
+        "the bulk source's historical shard parent map is not sound: "
+        f"{preflight.orphan_count} shard(s) no primary document declares, "
+        f"{preflight.duplicate_parent_count} declared by more than one distinct registrant, and "
+        f"{preflight.conflicting_parent_count} whose declared parent contradicts the CIK their "
+        "own filename encodes. STOP AND REPORT: this is the condition F0 would otherwise have "
+        "discovered roughly twenty-seven hours into a complete-source run, with the world "
+        "already built. No world was created, nothing was parsed, and the source evidence is "
+        "not repaired -- a source that does not satisfy the accepted Decision 129 parent rule "
+        "is reported, never adjusted to fit it. "
+        f"First offenders: orphan={list(preflight.orphan_shards)}, "
+        f"duplicate={list(preflight.duplicate_parent_shards)}, "
+        f"conflicting={list(preflight.conflicting_parent_shards)}"
+    )
+    raise OfflineParseError(message)
+
+
 def _stream_bulk_submissions(
     store: SnapshotStore,
     observation: SourceObservation,
@@ -2280,6 +2525,13 @@ def materialize_census_associations(
                 (_ESTABLISHED, group.accession_plain),
             )
 
+        # D140-R14: the totality tail is a sequence of aggregate counts over tens of millions
+        # of rows, each a full scan. Nothing can be sampled *inside* one SQL statement, so the
+        # tail is bracketed instead: a reading immediately before it, and one immediately
+        # after, so the longest remaining unsampled stretch in F2 is one aggregate rather than
+        # the whole finalization.
+        if capacity_guard is not None:
+            capacity_guard()
         # §6.4: the projection transaction is all-or-nothing, so the totality is measured
         # and required **inside** it. Measuring after the commit would still detect a
         # violation, but it would detect one that had already been persisted -- an
@@ -2297,6 +2549,8 @@ def materialize_census_associations(
             expected_multi=multi,
             expected_relation_rows=relation_rows,
         )
+        if capacity_guard is not None:
+            capacity_guard()
         totality.require()
     return totality
 
@@ -2668,6 +2922,21 @@ class SelectedPlannedSource:
     plan_source_count: int
 
 
+def planned_source_observation(
+    connection: sqlite3.Connection, selected: SelectedPlannedSource
+) -> SourceObservation | None:
+    """The stored observation one selected planned source is bound to, or ``None``.
+
+    The same lookup :func:`materialize_one_planned_source` performs, exposed so that a caller
+    can authenticate the artifact **before** a world exists (Decision 140, D140-R20) without
+    reaching for a private helper or building a second observation index.
+    """
+    observation_id = selected.source.observation_id
+    if observation_id is None:
+        return None
+    return _observations_by_id(connection).get(observation_id)
+
+
 def select_planned_source(
     connection: sqlite3.Connection, source_instance_id: str
 ) -> SelectedPlannedSource:
@@ -2897,6 +3166,7 @@ def materialize_one_planned_source(
     recorded: str | None = None,
     batch_size: int = SINGLE_TRANSACTION,
     checkpoint_batches: bool = False,
+    capacity_guard: Callable[[], None] | None = None,
 ) -> SingleSourceOutcome:
     """Materialize **exactly one** planned source, and stop.
 
@@ -2980,6 +3250,7 @@ def materialize_one_planned_source(
             source_observation_id=bound.observation_id,
             batch_size=batch_size,
             checkpoint_batches=checkpoint_batches,
+            capacity_guard=capacity_guard,
         )
         after = _STREAMED_PARSER_STATE[result.run_outcome]
     else:

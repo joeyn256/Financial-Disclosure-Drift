@@ -111,6 +111,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from disclosure_drift.m3.canary_runtime import (
+    AuthenticatedCanaryProcess,
+    CanaryRuntimeError,
+    authenticate_canary_process,
+)
 from disclosure_drift.m3.external_working_root import (
     F2_ALERT_FREE_BYTES,
     F2_ALERT_STATE,
@@ -592,6 +597,70 @@ def capacity_verdict(path: str) -> CapacityVerdict:
     return CapacityVerdict(state=state, free_bytes=free, message=message)
 
 
+GOVERNED_STOP_REFUSED_UNAUTHENTICATED: Final = "GOVERNED_STOP_REFUSED_UNAUTHENTICATED"
+"""No process was signalled, because none could be proved to be this canary."""
+
+
+def stop_governed_canary(
+    *,
+    pid_file: Path,
+    run_id: str,
+    timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    now: object = None,
+    argv_provider: object = None,
+) -> StopResult:
+    """Stop **this** canary, identified by its pid record rather than by a substring -- D140-R18.
+
+    The D139 review's **INFO-6**: the accepted stop path authenticated with
+    ``--expect-command "m3 canary-source"``, a substring test against a command line. An operator
+    shell that had merely *typed* the canary's command carries that text in its own command line,
+    so the decoy authenticates perfectly. A substring cannot distinguish a process that **is** the
+    canary from one that merely mentions it, and the accepted ``stop`` path would then deliver
+    ``SIGINT`` to whatever id it was handed.
+
+    This path never searches. The process id comes from the canonical pid record, and
+    :func:`~disclosure_drift.m3.canary_runtime.authenticate_canary_process` then requires the
+    process's own ``argv[0]`` to be a canary executable, the subcommand tokens to be adjacent,
+    and ``--run-id`` to be exactly this run. **A shell is refused on ``argv[0]`` whatever the
+    rest of its command line says.**
+
+    Everything after authentication is the accepted D131 behaviour, unchanged: one ``SIGINT``,
+    a bounded wait, and **no escalation** -- a target that survives is reported, never
+    ``SIGKILL``ed, because ending a governed run mid-write on a watchdog's own authority is a
+    worse outcome than a run that is still going.
+
+    Returns:
+        The stop result. :data:`GOVERNED_STOP_REFUSED_UNAUTHENTICATED` means **nothing was
+        signalled**: no process could be proved to be this canary.
+    """
+    try:
+        authenticated: AuthenticatedCanaryProcess = authenticate_canary_process(
+            pid_file=pid_file, run_id=run_id, argv_provider=argv_provider
+        )
+    except CanaryRuntimeError as exc:
+        return StopResult(
+            outcome=GOVERNED_STOP_REFUSED_UNAUTHENTICATED,
+            pid=0,
+            signal_sent=False,
+            waited_seconds=0.0,
+            detail=(
+                f"no signal was sent: {exc}. A canary is stopped by its own pid record and its "
+                "own authenticated identity, never by searching for a matching command line"
+            ),
+        )
+    # `expect_command` is deliberately None: a substring test would be strictly weaker than the
+    # authentication that has already happened, and stating a weak expectation beside a strong
+    # proof is how the D139 finding arose in the first place.
+    return stop(
+        authenticated.pid,
+        expect_command=None,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        now=now,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="canary_watchdog.py",
@@ -633,6 +702,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stopper.add_argument("--timeout-seconds", type=float, default=DEFAULT_STOP_TIMEOUT_SECONDS)
     stopper.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+
+    governed = sub.add_parser(
+        "stop-canary",
+        help=(
+            "Stop the governed canary named by its pid record, after authenticating the exact "
+            "process. This is the canary stop path; 'stop' is the generic legacy one."
+        ),
+    )
+    governed.add_argument(
+        "--pid-file",
+        type=Path,
+        required=True,
+        help=(
+            "The canonical INTERNAL pid record the launcher wrote. The process id is read from "
+            "here and from nowhere else -- nothing is scanned, so no decoy can be selected."
+        ),
+    )
+    governed.add_argument(
+        "--run-id",
+        required=True,
+        help=(
+            "The run this stop is for. The target process must carry '--run-id <RUN_ID>' in its "
+            "own argument vector, so one canary is never stopped in another's name."
+        ),
+    )
+    governed.add_argument("--timeout-seconds", type=float, default=DEFAULT_STOP_TIMEOUT_SECONDS)
+    governed.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
 
     capacity = sub.add_parser(
         "capacity",
@@ -687,6 +783,19 @@ def main(argv: list[str] | None = None) -> int:
         if capacity.state == REFUSED_UNMEASURABLE:
             return REFUSED_EXIT
         return ALERT_EXIT if capacity.alert else 0
+    if args.command == "stop-canary":
+        governed = stop_governed_canary(
+            pid_file=args.pid_file,
+            run_id=args.run_id,
+            timeout_seconds=args.timeout_seconds,
+            poll_seconds=args.poll_seconds,
+        )
+        print(f"{governed.outcome}: {governed.detail}")
+        if governed.outcome in {STOP_CONFIRMED, STOP_ALREADY_GONE}:
+            # Already gone is the wanted state, not a failure: the run this stop was for is
+            # not running, which is what the operator asked for.
+            return 0
+        return REFUSED_EXIT if not governed.signal_sent else STOP_FAILED_EXIT
     result = stop(
         args.pid,
         expect_command=args.expect_command,

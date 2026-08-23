@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date
@@ -574,6 +574,7 @@ class CensusCatalog:
         source_observation_id: str,
         batch_size: int = SINGLE_TRANSACTION,
         checkpoint_batches: bool = False,
+        capacity_guard: Callable[[], None] | None = None,
     ) -> ParserWriteResult:
         """Persist one logical parser run from a **stream** of per-part outcomes.
 
@@ -627,6 +628,11 @@ class CensusCatalog:
             batch_size: Parts per real transaction, or :data:`SINGLE_TRANSACTION` for one.
             checkpoint_batches: Truncate the write-ahead log at each batch boundary. For a
                 run-local working catalog with one connection; not for the operational catalog.
+            capacity_guard: The in-process continuous capacity check, or ``None``. Called at
+                each durable batch boundary so that a long batched write cannot run unobserved
+                (Decision 140, D140-R14); it decides for itself whether enough wall-clock time
+                has elapsed to take a reading, so calling it per unit stays affordable. It adds
+                a stopping condition and no persistence semantics whatsoever.
         """
         observation_id = self._require_streamed_observation(source_observation_id)
         parser_run_id = _stable_id("parser-run", observation_id, parser_id, parser_version)
@@ -698,11 +704,25 @@ class CensusCatalog:
                 # One part is one unit: the boundary is only ever reached where every row that
                 # part implies has already been written.
                 bounded.unit()
+                # D140-R14: F0 is the longest unsampled window in the whole run -- roughly
+                # 985,000 parts, hours of batched writing, and under Decision 138 not one
+                # capacity reading between PRE_LAUNCH and POST_F0. One call per durable part
+                # boundary closes it, at the cost of a comparison on the calls that do not
+                # sample.
+                if capacity_guard is not None:
+                    capacity_guard()
+            # The finalization block below is itself a materially long stretch of work on a
+            # real source -- a bounded UPDATE over every duplicate identity, the run-level
+            # derivations, and thousands of historical references. It gets its own reading.
+            if capacity_guard is not None:
+                capacity_guard()
             accumulator.apply_duplicate_identities(connection, parser_run_id)
             self._flush_run_level_derivations(connection, observation_id)
             self._insert_historical_references(
                 connection, observation_id, accumulator.historical_references
             )
+            if capacity_guard is not None:
+                capacity_guard()
             if accumulator.blocking_structural:
                 state = "failed"
             elif quarantined:
@@ -1395,6 +1415,7 @@ class CensusCatalog:
         *,
         batch_size: int = SINGLE_TRANSACTION,
         checkpoint_batches: bool = False,
+        capacity_guard: Callable[[], None] | None = None,
     ) -> int:
         """Resolve exactly as :meth:`resolve_persisted_accessions` does, and count the results.
 
@@ -1407,7 +1428,10 @@ class CensusCatalog:
         return sum(
             1
             for _ in self.iter_persisted_accession_resolutions(
-                accessions, batch_size=batch_size, checkpoint_batches=checkpoint_batches
+                accessions,
+                batch_size=batch_size,
+                checkpoint_batches=checkpoint_batches,
+                capacity_guard=capacity_guard,
             )
         )
 
@@ -1417,6 +1441,7 @@ class CensusCatalog:
         *,
         batch_size: int = SINGLE_TRANSACTION,
         checkpoint_batches: bool = False,
+        capacity_guard: Callable[[], None] | None = None,
     ) -> Iterator[tuple[str, AccessionResolution]]:
         """Yield each accession's resolution as it is written, retaining none of them.
 
@@ -1442,6 +1467,11 @@ class CensusCatalog:
             batch_size: Accessions per real transaction, or :data:`SINGLE_TRANSACTION` for one
                 transaction each.
             checkpoint_batches: Truncate the write-ahead log at each batch boundary.
+            capacity_guard: The in-process continuous capacity check, or ``None``. Called at
+                each durable batch boundary so that a long batched write cannot run unobserved
+                (Decision 140, D140-R14); it decides for itself whether enough wall-clock time
+                has elapsed to take a reading, so calling it per unit stays affordable. It adds
+                a stopping condition and no persistence semantics whatsoever.
         """
         connection = self._writer.connection
         with BoundedTransaction(
@@ -1476,6 +1506,9 @@ class CensusCatalog:
                 self._resolution_evidence.record(resolution, implicit=implicit)
                 self._project_canonical(connection, resolution)
                 bounded.unit()
+                # D140-R14: F1 is the second long unsampled window. Same shape as F0's.
+                if capacity_guard is not None:
+                    capacity_guard()
                 yield accession_plain, resolution
 
     def _is_implicit_resolution(

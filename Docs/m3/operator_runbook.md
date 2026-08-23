@@ -1391,21 +1391,33 @@ and **must not be weakened, bypassed, or worked around** in the meantime.
 > Running the preflight proves the guards hold; it **does not** authorize a corrected
 > complete-source canary, and no command below launches one.
 
-### The protection is automatic. There is no flag that turns it off — D138-R1
+### The protection is automatic, and the identity assertion is mandatory — D138-R1, D140-R2
 
 **A work root that resolves onto any volume other than the system one is held to the complete
-external envelope, whether or not you type `--require-volume-uuid`.** That was the D137 review's
-**MAJOR-1**: with the flag omitted, an operator could reach an unqualified disk — or the immutable
-D130 archive itself — without a single guard running. The decision is now taken from the **path**,
-by device number, on the nearest existing ancestor, before anything is created.
+external envelope.** That was the D137 review's **MAJOR-1**: with the flag omitted, an operator
+could reach an unqualified disk — or the immutable D130 archive itself — without a single guard
+running. The decision is now taken from the **path**, by device number, on the nearest existing
+ancestor, before anything is created.
 
-`--require-volume-uuid` is an **assertion**, not a switch:
+**`--require-volume-uuid` is mandatory for the external-SSD canary envelope. Omitting it is a
+refusal. Supplying it does not disable or weaken any other launch guard.** That is accepted
+[Decision 140](../Decisions/decision_140_m3_3_total_pre_canary_hardening.md) §4 (D140-R2), and it
+is restated here by
+[Decision 142](../Decisions/decision_142_m3_3_precanary_architecture_freeze.md) §9 (D142-R4)
+because this section previously said the opposite:
 
-- **omit it on the SSD** → the full envelope still runs, and every guard still refuses;
+- **omit it on any external route** — by `/Volumes/<name>` intent, by residence, or by an
+  assertion → **refused**, before the volume is consulted. An omitted identity was the one input
+  that let an absent volume, or an ordinary directory left at its mount point, be read as internal
+  storage and run with no envelope at all;
 - **supply it** → it must be exactly `397A4D4A-9508-391E-814E-3B533C7BD049`. Any other value is
   refused before anything is measured. **Decision 138 creates no generic external-volume
   authorization** (D138-R12); D125-R4 remains the general rule outside the one-canary exception;
 - **supply it for an internal root** → refused. The assertion can only ever *add* a requirement.
+
+**The check is on the Volume UUID, and never on the mount name.** `/Volumes/SSK SSD` is whatever
+volume happens to be mounted there. **No CLI flag, configuration key, or API parameter makes the
+UUID optional on an external route**, and none may be added to create one.
 
 An internal work root with no assertion behaves exactly as accepted Decision 116 left it. Nothing
 about the historical internal path changed.
@@ -1462,10 +1474,12 @@ environment, and refuses if a caller hands it a different value to check.
     --require-volume-uuid 397A4D4A-9508-391E-814E-3B533C7BD049
 ```
 
-The `--require-volume-uuid` line is an explicit assertion and is **optional**; dropping it changes
-nothing about which guards run. Each of these is a **refusal**, and none falls back to internal
-storage:
+**The `--require-volume-uuid` line is mandatory, not optional. Dropping it is itself a refusal**
+(D140-R2; [Decision 142](../Decisions/decision_142_m3_3_precanary_architecture_freeze.md) §9),
+and supplying it weakens no other guard — every check below still runs. Each of these is a
+**refusal**, and none falls back to internal storage:
 
+- `--require-volume-uuid` is **omitted** on an external route;
 - the volume's **Volume UUID** is not the accepted one;
 - **nothing is mounted** where the working root points;
 - the volume **lookup fails** for any reason;
@@ -1835,6 +1849,103 @@ Decision 141 changes nothing about this. `GOVERNED_PAUSE_RESUME = NOT_IMPLEMENTE
 `SAFE_TO_EJECT` state, `kill -STOP` is not a governed pause, and **the SSD and the dock must not
 be disconnected while a canary runs**. See §28e and Decision 140 §17. Qualifying the dock does
 **not** create a way to detach it.
+
+
+## 28g. The selected first-canary configuration — Decision 142
+
+**`NOTHING IN THIS SECTION AUTHORIZES A CANARY. CANARY_AUTHORIZED = NO.`**
+
+[Decision 142](../Decisions/decision_142_m3_3_precanary_architecture_freeze.md) accepts Decision 141
+for continuation, **selects one topology** for the first complete-source canary, **defers governed
+pause/resume beyond it**, and **freezes the pre-canary architecture**. Decision 141 §16 left the
+selection to the owner; §4 (D142-R2) is that selection. It is a choice between two already-qualified
+configurations, and it authorizes no run on either.
+
+### A. The selected path — D142-R2
+
+Use the **D141-qualified `USB_VIA_THUNDERBOLT_DOCK` topology**. That is the one selected
+configuration for the first canary.
+
+`USB_DIRECT` — the Decision 136 topology — **remains separately qualified and is not revoked**
+(D141-R8, preserved). **It is not selected**, and the first canary does not run on it.
+
+### B. The same physical topology — D142-R2
+
+Use the **qualified storage device** and the **same qualified dock path and port**, exactly as
+§28f.B describes:
+
+| Element | Value |
+|---|---|
+| Volume UUID | `397A4D4A-9508-391E-814E-3B533C7BD049` |
+| USB vendor / product | `0x090C` / `0x2320` |
+| USB serial | `SSKPSSD0000000000071` |
+| Required ordered dock cascade | `0x8087:0x0B40` → `0x17EF:0x30B6` → `0x17EF:0x30B8` |
+
+**A changed BSD disk identifier is not a refusal.** `disk4`, `disk4s2`, or any successor is
+attach-time state; the exact Volume UUID and the frozen transport profile are the identity.
+
+### C. The UUID assertion is mandatory — D140-R2, D142-R4
+
+```text
+--require-volume-uuid 397A4D4A-9508-391E-814E-3B533C7BD049
+```
+
+**Omitting it is a refusal.** Supplying it disables and weakens nothing else — see the corrected
+§28d. It is checked on the Volume UUID and never on the mount name, and there is no other CLI,
+configuration, or API route that makes it optional.
+
+### D. No fallback — D142-R2
+
+**If the dock transport qualification refuses, STOP.**
+
+* **Do not** switch that same canary to direct storage.
+* **Do not** relax the transport profile or work around the refusal.
+* Restore the qualified attachment, or **return to the owner**.
+
+There is no automatic fallback and no operator fallback between the two topologies for the
+authorized first-canary configuration. A refusal states that the physical configuration is not the
+one that was qualified; it is never a prompt to select the other qualified one mid-run.
+
+### E. Continuous attachment — D142-R3
+
+For the whole run, do **not** intentionally:
+
+* eject the SSD;
+* unplug the SSD;
+* unplug or reconfigure the dock storage path;
+* move the SSD to another dock port;
+* substitute the direct path;
+* substitute another volume;
+* treat a sleeping or stopped process as safely detachable.
+
+All existing mechanical launch predicates still apply at launch. None is replaced or relaxed by the
+topology selection.
+
+### F. Pause and resume — NOT IMPLEMENTED, D142-R3
+
+```text
+GOVERNED_PAUSE_RESUME = NOT_IMPLEMENTED
+```
+
+There is **no** `SAFE_TO_EJECT` state, no governed detach, no governed reconnect, no topology
+switch, no storage migration, and no pause-and-move workflow.
+
+* **`kill -STOP` is not a governed pause** and does not make detaching safe.
+* **Closing the lid is not a governed pause.**
+* **Qualifying the dock did not create permission to detach it.**
+
+Decision 142 defers this deliberately and implements no state machine. See
+[Decision 140](../Decisions/decision_140_m3_3_total_pre_canary_hardening.md) §17 for the
+architectural finding, which remains open owner work.
+
+### G. Interruption is not pause — D142-R3
+
+**If continued operation would require any action in E, the run is INTERRUPTED, not PAUSED.**
+
+An interrupted run is lost and requires a new run identity; worlds are create-once and are never
+resumed (D129-R8). **There is no procedure here for recovering from a physical disconnection, and
+none may be written** — a documented recovery that does not exist is worse than an honest statement
+that none does.
 
 
 ## 29. Freeze the real snapshot only after Gate H and E0

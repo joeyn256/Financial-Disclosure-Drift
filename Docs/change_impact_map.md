@@ -1199,6 +1199,45 @@ Deferring the edit is safe **because no run is authorized** — a gate never rea
 at the wrong value. Its **nearest tests are unchanged**, since neither the guard nor its constant
 moved.
 
+**The external-volume qualification that followed changed no source either — and it names the
+constant above as the next thing to change, under its own instrument.**
+[Decision 136](Decisions/decision_136_m3_3_external_ssd_active_volume_qualification.md) qualified one
+exact external volume (`/Volumes/SSK SSD`, **Volume UUID `397A4D4A-9508-391E-814E-3B533C7BD049`**,
+ExFAT via Apple FSKit) against the six requirements
+[Decision 135](Decisions/decision_135_m3_3_corrected_run_capacity_reconciliation.md) §10 (D135-R5)
+set, and returned `D136_EXTERNAL_SSD_PASS_WITH_ARCHIVE_ISOLATION_REQUIRED`. **It has no impact entry
+of its own because no source changed for it**: its executable change set is **empty**, the accepted
+[Decision 131](Decisions/decision_131_m3_3_d128_semantic_and_operational_repair.md) runtime
+configuration is byte-unchanged, and no path or test selection anywhere in this map changes.
+`PRE_F2_MINIMUM_FREE_BYTES` is **still `30 * 1024**3` and still frozen** — D136 §16 repeats that it
+is not edited here and not authorized to be. **Replacing its behaviour is Decision 137 work**
+(D136-R11 item 6), and until that instrument exists the paragraph above still governs the constant.
+
+**What a D137 session will touch, stated here so the surface is known before it is opened.**
+D136-R11 requires external working-root selection **using an existing supported surface if one
+already exists, otherwise the smallest new surface necessary**; a **fail-closed candidate-volume
+identity guard keyed on the stable Volume UUID rather than the attach-time `disk4s2` identifier**;
+**refusal if the selected working root resolves inside the D130 archive tree**; a `>= 185` GiB launch
+floor and a `>= 50` GiB pre-F2 floor; D135-R7-consistent phase-boundary and F2 capacity monitoring;
+operator and runbook requirements for external power and `caffeinate`/no-sleep execution; and
+**targeted tests with independent validation**. The nearest affected paths are
+`src/disclosure_drift/m3/single_source_canary.py` (the pre-F2 admission guard and its constant) and
+whatever working-root surface D137 selects; **its nearest tests are the pre-F2 admission-guard tests
+plus whatever new guard D137 adds**. **None of that is authorized yet** — D136 grants no
+implementation authority, and a session that starts any of it without the D137 packet is acting
+outside D136.
+
+**Two D136 findings foreclose plausible future changes, in the same shape as the D134 and D135
+findings above.** First, **`mmap_size` was deliberately left unset** during qualification and read
+back as `0`; D134's mmap and relaxed-checkpoint candidates **remain rejected** and D136 adopts
+neither. Second, **the `128` KiB ExFAT allocation block makes many-small-file layouts expensive** —
+an `8,192`-byte SQLite database allocated `131,072` bytes — so a future change that scatters many
+small files onto that volume would pay a cost the `185` GiB floor does not model. **`SQLITE_TMPDIR`
+placement stays explicit** ([Decision 124](Decisions/decision_124_m3_3_capacity_reconciliation.md)
+§9, D124-R5, untouched), and its behaviour on ExFAT is **unmeasured** — D136 §8 carries that forward
+to D137 rather than resolving it.
+
+
 **One further D135 finding forecloses a plausible future change, in the same shape as the D134 WAL
 finding above.** The `10` GiB continuous floor, the no-`VACUUM` rule, and explicit `SQLITE_TMPDIR`
 placement ([Decision 124](Decisions/decision_124_m3_3_capacity_reconciliation.md) §9, D124-R5) are

@@ -441,8 +441,11 @@ def _external_world(tmp_path: Path) -> tuple[Path, Path, Path]:
     return volume, work, temp
 
 
-def test_an_explicit_external_temporary_root_is_accepted(tmp_path: Path) -> None:
+def test_an_explicit_external_temporary_root_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     volume, work, temp = _external_world(tmp_path)
+    monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, str(temp))
     resolved = ewr.require_external_sqlite_tmpdir(
         working_root=work,
         archive=volume / ewr.D130_ARCHIVE_DIRECTORY_NAME,
@@ -453,9 +456,12 @@ def test_an_explicit_external_temporary_root_is_accepted(tmp_path: Path) -> None
     assert resolved == Path(os.path.realpath(temp))
 
 
-def test_an_unset_temporary_root_is_refused(tmp_path: Path) -> None:
+def test_an_unset_temporary_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Unset means SQLite spills to the internal volume silently. That is the failure."""
     volume, work, _temp = _external_world(tmp_path)
+    monkeypatch.delenv(ewr.SQLITE_TMPDIR_ENV, raising=False)
     with pytest.raises(ewr.ExternalWorkingRootError, match="is not set"):
         ewr.require_external_sqlite_tmpdir(
             working_root=work,
@@ -466,7 +472,9 @@ def test_an_unset_temporary_root_is_refused(tmp_path: Path) -> None:
         )
 
 
-def test_an_internal_temporary_root_is_refused(tmp_path: Path) -> None:
+def test_an_internal_temporary_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The exact silent-fallback case.
 
     A temporary root on a volume that is not the qualified one is refused, so SQLite cannot spill
@@ -475,6 +483,7 @@ def test_an_internal_temporary_root_is_refused(tmp_path: Path) -> None:
     volume, work, _temp = _external_world(tmp_path)
     internal = tmp_path / "internal"
     internal.mkdir()
+    monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, str(internal))
     with pytest.raises(ewr.ExternalWorkingRootError, match="not the accepted qualified volume"):
         ewr.require_external_sqlite_tmpdir(
             working_root=work,
@@ -485,11 +494,14 @@ def test_an_internal_temporary_root_is_refused(tmp_path: Path) -> None:
         )
 
 
-def test_a_temporary_root_inside_the_archive_is_refused(tmp_path: Path) -> None:
+def test_a_temporary_root_inside_the_archive_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     volume, work, _temp = _external_world(tmp_path)
     archive = volume / ewr.D130_ARCHIVE_DIRECTORY_NAME
     inside = archive / "tmp"
     inside.mkdir()
+    monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, str(inside))
     with pytest.raises(ewr.ExternalWorkingRootError, match="lies inside the immutable D130"):
         ewr.require_external_sqlite_tmpdir(
             working_root=work,
@@ -500,13 +512,16 @@ def test_a_temporary_root_inside_the_archive_is_refused(tmp_path: Path) -> None:
         )
 
 
-def test_a_relative_or_absent_temporary_root_is_refused(tmp_path: Path) -> None:
+def test_a_relative_or_absent_temporary_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     volume, work, _temp = _external_world(tmp_path)
     archive = volume / ewr.D130_ARCHIVE_DIRECTORY_NAME
     for value, expected in (
         ("relative/tmp", "not an absolute path"),
         (str(volume / "never-created"), "does not name an existing directory"),
     ):
+        monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, value)
         with pytest.raises(ewr.ExternalWorkingRootError, match=expected):
             ewr.require_external_sqlite_tmpdir(
                 working_root=work,
@@ -642,6 +657,7 @@ def test_the_composed_preflight_passes_and_authorizes_nothing(
     """Every guard holds, one PRE_LAUNCH observation is recorded, and no authority is implied."""
     volume, work, temp = _external_world(tmp_path)
     _pin_free(monkeypatch, _LAUNCH_FLOOR)
+    monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, str(temp))
     preflight = ewr.external_canary_preflight(
         working_root=work,
         observed_at="2026-08-23T00:00:00Z",
@@ -759,12 +775,14 @@ def test_a_run_with_no_requirement_is_unchanged(tmp_path: Path) -> None:
 def test_an_external_run_records_every_phase_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D137-R7 over a real run: the five in-process boundaries, in order, with DURING_F2 absent.
+    """D137-R7 over a real run: the five phase boundaries, in order.
 
-    ``DURING_F2`` is deliberately not among them. F2 is one blocking call inside one transaction,
-    so nothing inside this process can sample it; that boundary belongs to the watchdog's
-    ``capacity`` subcommand, which samples from outside. Claiming it here would be inventing a
-    measurement that was never taken.
+    ``DURING_F2`` does not appear here, and the reason changed with accepted **Decision 138**.
+    It is no longer that F2 cannot be sampled in-process -- D138-R8 samples it from inside the
+    transaction, and D138-R9 bounds the interval. It is that this run never enters the alert
+    band: a ``DURING_F2`` record is written only when free space falls to `20` GiB or below, so
+    a healthy F2 records none and an invented one would still be a measurement never taken. See
+    ``test_d138_safety_envelope_correction.py`` for the alert and hard-stop behaviour.
     """
     private = d116._private_root(tmp_path)
     database = d116._catalog(private)
@@ -773,6 +791,9 @@ def test_an_external_run_records_every_phase_boundary(
     temp.mkdir()
     monkeypatch.setattr(ewr, "macos_volume_identity", _provider({volume: _QUALIFIED}))
     monkeypatch.setattr(ewr, "verify_d130_archive", lambda _archive: ())
+    # Accepted Decision 138 (D138-R3): the environment a guard validates must be the one SQLite
+    # will actually read, so the process environment carries the same value the mapping does.
+    monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, str(temp))
     # Pinned above both floors, because the machine a test runs on is not the qualified volume
     # and its actual free space is not what this test is about. (Left unpinned, this run is
     # refused by the 185 GiB launch guard -- which is the guard working, not a test failure.)

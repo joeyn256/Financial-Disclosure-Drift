@@ -1261,7 +1261,7 @@ the new work is *authentication* rather than *naming*.
 | `src/disclosure_drift/m3/single_source_canary.py` | `PRE_F2_MINIMUM_FREE_BYTES` `30 * 1024**3` → `50 * 1024**3` (D137-R5) — **the constant only**; the strict `<`, the call site between F1 and F2, and the Decision 094 §6.4 ordering are byte-unchanged. One optional `require_volume_uuid` (with `environ`) on `run_single_source_canary`, `run_single_source_prefix_profile`, and `run_canary_source_command`; the `_PhaseObserver` seam and five in-process phase observations; `CanaryResult.capacity_observations`, **rendered only when non-empty** so an internal run's result document is byte-unchanged | `tests/unit/test_d137_external_working_root.py`, `tests/unit/test_d127_pre_f2_admission_guard.py`, `tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py` |
 | `src/disclosure_drift/cli.py` | one optional flag, `m3 canary-source --require-volume-uuid`. Omitted, the command behaves exactly as before | `tests/integration/test_m3_cli.py` |
 | `scripts/m3/canary_watchdog.py` | the `capacity` subcommand and exit `6`; thresholds **imported** from the package rather than restated, so a monitor cannot drift from the gate it monitors. **No signal, no deletion, no cleanup**, and the accepted D131 no-escalation invariant is untouched | `tests/unit/test_d137_external_working_root.py`, `tests/unit/test_d131_signal_and_monitor.py` |
-| `Docs/m3/operator_runbook.md` | §28d — the external-volume preflight, the twelve operator conditions with **four mechanically verified and eight not**, the monitoring table, the D130 archive postcheck, and the launch command marked **not authorized** | — |
+| `Docs/m3/operator_runbook.md` | §28d — the external-volume preflight, the twelve operator conditions, the monitoring table, the D130 archive postcheck, and the launch command marked **not authorized**. **Rewritten by [Decision 138](Decisions/decision_138_m3_3_d137_safety_envelope_correction.md)**, which also corrects the mechanical-condition count to **five verified and seven not** (D138 §11) | — |
 
 **Which tests to run for it.** Direct: `tests/unit/test_d137_external_working_root.py`. The pre-F2
 constant change reaches `tests/unit/test_d127_pre_f2_admission_guard.py`, which is **updated in
@@ -1277,14 +1277,63 @@ flag reaches `tests/integration/test_m3_cli.py`.
 `0015`; `0016` is absent and unauthorized. `mmap` and the relaxed checkpoint cadence remain rejected
 (D134). `CensusOrchestrator._parse_bulk` remains an open PRE-NETWORK blocker and was **not** touched.
 
-**What the D137 guards do not cover, so a reader does not infer more.** `DURING_F2` cannot be
-sampled in-process — F2 is one blocking call inside one transaction — so it belongs to the
-watchdog's `capacity` subcommand and depends on the operator running it. The external requirement is
-**opt-in**: omitting `--require-volume-uuid` restores the pre-D137 behaviour exactly, which is what
-keeps every existing internal-volume canary path working. `macos_volume_identity` is macOS-only and
-**fails closed** elsewhere. And nothing here claims journaled filesystem semantics, power-loss
+**What the D137 guards did not cover — two of which its independent review then raised as majors,
+and [Decision 138](Decisions/decision_138_m3_3_d137_safety_envelope_correction.md) corrected.** D137
+held that `DURING_F2` could not be sampled in-process because F2 is one blocking call inside one
+transaction, leaving it to the watchdog's `capacity` subcommand and to an operator running it;
+**that is no longer the position** — D138-R8 samples it from inside the process and aborts inside
+the transaction. D137's external requirement was **opt-in**, so omitting `--require-volume-uuid`
+restored the pre-D137 behaviour exactly; **that is no longer the position either** — D138-R1 makes
+the envelope mandatory for any external root while keeping the internal path byte-unchanged. What
+still stands: `macos_volume_identity` is macOS-only and **fails closed** elsewhere. And nothing here claims journaled filesystem semantics, power-loss
 safety, surprise-removal safety, or USB-bridge cache-flush correctness — Decision 136 §9 (D136-R6)
 established **process-crash recovery only**, and that boundary is preserved exactly.
+
+
+## Decision 138 — the D137 safety-envelope correction (real impact)
+
+[Decision 138](Decisions/decision_138_m3_3_d137_safety_envelope_correction.md) corrects the three
+majors the **accepted** D137 independent review raised. It is a **bounded correction, not a
+redesign**, and it is **not an acceptance of Decision 137** — which was never owner accepted and is
+**not rewritten** here. The internal-volume path is byte-for-byte what accepted Decision 116 left
+it, and nothing below adopts the external volume or starts a run.
+
+| Path | What changed | Direct test files |
+|---|---|---|
+| `src/disclosure_drift/m3/external_working_root.py` | `external_volume_candidate` (device-number classification on the nearest existing ancestor, so a root is classified **before** it is created and no `diskutil` call is made for an internal one); `require_external_envelope` (**the single decision point** — external roots get the complete D137 envelope, flag or no flag, with the expected identity pinned to the frozen constant); `require_phase_free_space` with `POST_F0_MINIMUM_FREE_BYTES` `64,424,509,440` and `PRE_F1_MINIMUM_FREE_BYTES` `59,055,800,320` and the `PHASE_MINIMUM_FREE_BYTES` map; `F2CapacityGuard` and `F2CapacityHardStopError` (in-process `DURING_F2` sampling on a **monotonic** clock, `5` s scheduled against a `60` s ceiling, with rollback-surviving evidence); and `require_external_sqlite_tmpdir` now reading the **process environment** and refusing a supplied mapping that disagrees | `tests/unit/test_d138_safety_envelope_correction.py`, `tests/unit/test_d137_external_working_root.py` |
+| `src/disclosure_drift/m3/single_source_canary.py` | all three entry points call `require_external_envelope` instead of branching on `require_volume_uuid is not None`; `record_phase` applies `require_phase_free_space` after recording; the F2 capacity guard is constructed **only** on the protected external path and passed into F2, sharing the run's own observation list | `tests/unit/test_d138_safety_envelope_correction.py`, `tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py` |
+| `src/disclosure_drift/m3/offline_parse.py` | `materialize_census_associations` takes an optional `capacity_guard`, called once before the transaction opens and from **both** membership traversals. **No association semantics change** — the guard adds a stopping condition and nothing else, and `None` leaves the Decision 094 §6.4 path exactly as it was | `tests/unit/test_d138_safety_envelope_correction.py`, `tests/unit/test_m3_offline_parse.py` |
+| `src/disclosure_drift/cli.py` | `--require-volume-uuid` help text: an **assertion**, never a switch, and omitting it disables nothing | `tests/integration/test_m3_cli.py` |
+| `scripts/m3/canary_watchdog.py` | prose, exit-code documentation, and subcommand help demoted to **supplemental observability**. **Exit `6` does not stop F2** — the in-process guard does. No behavioural change | `tests/unit/test_d138_safety_envelope_correction.py`, `tests/unit/test_d131_signal_and_monitor.py` |
+| `Docs/m3/operator_runbook.md` | §28d rewritten for the corrected contract: the automatic envelope, the five floors, the in-process `DURING_F2` rollback, the demoted watchdog, and the corrected five-of-twelve condition count | — |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d138_safety_envelope_correction.py`. The
+environment contract reaches `tests/unit/test_d137_external_working_root.py`, which is **updated in
+place rather than deleted or skipped**. The entry-point rewiring reaches
+`tests/unit/test_d116_single_source_canary.py` and `tests/unit/test_d119_cache_and_prefix.py` —
+whose byte-level evidence-equivalence is preserved because an internal root still records nothing —
+and the F2 seam reaches `tests/unit/test_m3_offline_parse.py`. The watchdog prose reaches
+`tests/unit/test_d131_signal_and_monitor.py`, and the CLI help reaches
+`tests/integration/test_m3_cli.py`.
+
+**A testing consequence worth knowing before writing a case.** The floors **descend** — `185`, then
+`60`, then `55`, then `50` — so **no single free-space value can breach a later gate without having
+breached every earlier one first**. A test that wants to reach one gate in isolation must drop free
+space **between** boundaries, which is also the real shape of the failure being modelled.
+
+**No migration, no schema change, and no parser or runtime-semantics change.** Migration head stays
+`0015`; `0016` is absent and unauthorized. All three activation constants remain `None`. `mmap` and
+the relaxed checkpoint cadence remain rejected (D134). `CensusOrchestrator._parse_bulk` remains an
+open PRE-NETWORK blocker and was **not** touched.
+
+**What D138 still does not cover.** The classifier is a **mount-point test, not a device-class
+test**: a disk image or a network mount classifies as external and must then authenticate as the
+D136 volume, which is fail-closed but a broader net than "USB disk". `DURING_F2` sampling is
+**bounded, not instantaneous** — free space can fall below the floor and be observed up to one
+interval later, which is why `20` GiB of alerting sits above it. The `SQLITE_TMPDIR` guard still
+validates **placement, not peak**. The envelope's **accepting** path is still proved
+**synthetically**, because creating the temporary root would be a write to the volume. And nothing
+here changes one word of the D136-R6 process-crash-recovery-only boundary.
 
 
 ## Notes on reading this table

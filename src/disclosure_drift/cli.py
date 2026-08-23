@@ -439,13 +439,16 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         default=None,
         metavar="VOLUME_UUID",
         help=(
-            "Require the work root to be on the external volume with exactly this Volume UUID, "
-            "and apply every Decision 137 launch guard: isolation from the immutable D130 "
-            "archive, the bounded archive precheck, the 185 GiB launch floor, and an explicit "
-            "external SQLITE_TMPDIR. A wrong UUID, an absent volume, and a lookup that fails "
-            "are all refusals; there is no fallback to internal storage. Omitted, the run has "
-            "no external-volume requirement and behaves exactly as before. Supplying it is not "
-            "an authorization to launch a corrected complete-source canary."
+            "Assert that the work root is on the external volume with exactly this Volume UUID. "
+            "It does NOT switch the protection on: a work root on any external volume is "
+            "ALWAYS held to the full Decision 137 envelope -- exact volume identity, isolation "
+            "from the immutable D130 archive, the bounded archive precheck, the 185 GiB launch "
+            "floor, and an explicit external SQLITE_TMPDIR -- whether or not this is supplied. "
+            "Omitting it cannot disable a single guard. Supplied, it must be the one qualified "
+            "volume and it forces the envelope onto a root that would classify as internal. A "
+            "wrong UUID, an absent volume, and a lookup that fails are all refusals; there is "
+            "no fallback to internal storage. Supplying it is not an authorization to launch a "
+            "corrected complete-source canary."
         ),
     )
     canary.add_argument(

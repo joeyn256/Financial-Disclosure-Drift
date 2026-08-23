@@ -41,7 +41,7 @@ import json
 import sqlite3
 import zipfile
 from collections import defaultdict
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from dataclasses import field as dataclass_field
@@ -2082,6 +2082,7 @@ def materialize_census_associations(
     *,
     eligible_observations: Mapping[str, str] | None = None,
     compact_evidence: bool = False,
+    capacity_guard: Callable[[], None] | None = None,
 ) -> AssociationTotality:
     """Write the canonical **Decision 083 R58** relation and its completeness state.
 
@@ -2105,10 +2106,23 @@ def materialize_census_associations(
     and is left exactly as it is, while an existing row that differs **fails closed**. Nothing
     is ever overwritten, and a second identical parse changes no durable byte.
 
+    **Capacity is enforced from inside this transaction, not beside it** (Decision 138, D138-R8
+    and D138-R9). ``capacity_guard`` is called once before the transaction opens and again from
+    both membership traversals, so a free-space floor reached mid-projection raises **while the
+    transaction is still open** and the rollback above discards the in-flight projection rather
+    than leaving a partial one. It is called on every iteration and decides for itself whether
+    enough wall-clock time has passed to take a reading, which is what keeps a per-accession call
+    affordable; it returns ``None`` and changes nothing on every path that does not breach.
+    Omitted, this function behaves exactly as accepted Decision 094 §6.4 left it — the guard adds
+    a stopping condition and no association semantics whatsoever.
+
     Args:
         connection: The writing connection, already inside the E0 write containment.
         eligible_observations: Plan-bound observation id to source id. Derived from the catalog
             when omitted, which is what a read-only reconstruction needs.
+        capacity_guard: The in-process continuous capacity check, or ``None`` for a run with no
+            external capacity envelope. See
+            :class:`~disclosure_drift.m3.external_working_root.F2CapacityGuard`.
 
     Returns:
         The §9.5 totality, already checked against its own invariants.
@@ -2116,7 +2130,13 @@ def materialize_census_associations(
     Raises:
         OfflineParseError: a §9.5 totality invariant was broken, or a persisted relation row
             disagrees with the projection this evidence produces.
+        ExternalWorkingRootError: ``capacity_guard`` reached its floor or could not measure. The
+            transaction is rolled back on the way out and nothing partial is committed.
     """
+    if capacity_guard is not None:
+        # D138-R9: the reading taken immediately before F2 starts. Refusing here costs nothing,
+        # because the transaction has not opened yet.
+        capacity_guard()
     eligible = (
         membership_observation_sources(connection)
         if eligible_observations is None
@@ -2145,6 +2165,8 @@ def materialize_census_associations(
 
     with transaction(connection) as active:
         for group in _stream_membership_groups(connection, eligible, compact=compact_evidence):
+            if capacity_guard is not None:
+                capacity_guard()
             invalid_renderings += group.invalid_renderings
             if not _accession_is_known(active, group.accession_plain):
                 # A full-index row never creates an accession (**R23** §5.1). Membership
@@ -2235,6 +2257,8 @@ def materialize_census_associations(
         # membership observations, the field resolutions, and the registrant set are all
         # untouched by this projection, so the second pass necessarily reaches the same answer.
         for group in _stream_membership_groups(connection, eligible, compact=compact_evidence):
+            if capacity_guard is not None:
+                capacity_guard()
             if not _accession_is_known(active, group.accession_plain) or not group.union:
                 continue
             projection = _project_membership_group(

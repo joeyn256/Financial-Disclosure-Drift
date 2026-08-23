@@ -58,12 +58,14 @@ import os
 import plistlib
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.storage.sqlite import utc_now
 
 __all__ = [
     "CAPACITY_PHASES",
@@ -73,26 +75,38 @@ __all__ = [
     "D130_COMPACT_PROOFS",
     "F2_ALERT_FREE_BYTES",
     "F2_ALERT_STATE",
+    "F2_CAPACITY_MAX_SAMPLE_SECONDS",
+    "F2_CAPACITY_SAMPLE_SECONDS",
     "F2_HARD_FLOOR_FREE_BYTES",
+    "F2_HARD_STOP_REASON",
     "F2_HARD_STOP_STATE",
+    "F2_MEASUREMENT_FAILED_REASON",
     "F2_NORMAL_STATE",
     "LAUNCH_MINIMUM_FREE_BYTES",
+    "PHASE_MINIMUM_FREE_BYTES",
+    "POST_F0_MINIMUM_FREE_BYTES",
+    "PRE_F1_MINIMUM_FREE_BYTES",
     "QUALIFIED_EXTERNAL_VOLUME_UUID",
     "SQLITE_TMPDIR_ENV",
     "ArchiveProof",
     "CapacityObservation",
     "ExternalCanaryPreflight",
     "ExternalWorkingRootError",
+    "F2CapacityGuard",
+    "F2CapacityHardStopError",
     "VolumeIdentity",
     "VolumeIdentityProvider",
     "d130_archive_directory",
     "external_canary_preflight",
+    "external_volume_candidate",
     "f2_capacity_state",
     "macos_volume_identity",
     "mount_point_of",
     "observe_capacity",
+    "require_external_envelope",
     "require_launch_free_space",
     "require_outside_d130_archive",
+    "require_phase_free_space",
     "require_qualified_volume",
     "verify_d130_archive",
 ]
@@ -105,6 +119,27 @@ class ExternalWorkingRootError(DisclosureDriftError):
     "proceed and watch", and no automatic cleanup: a guard that cannot establish its condition
     refuses, and the operator is told which condition failed.
     """
+
+
+class F2CapacityHardStopError(ExternalWorkingRootError):
+    """The dedicated governed condition that aborts F2 from **inside** its transaction -- D138-R8.
+
+    A distinct type rather than a message, because it is the only refusal in this module raised
+    while a transaction is open, and the only one whose evidence has to outlive a rollback.
+    :attr:`record` carries that evidence: it is built **before** the exception is raised and is
+    held on the exception object, so it survives the ``ROLLBACK``
+    :func:`~disclosure_drift.storage.sqlite.transaction` performs on the way out. Writing the
+    hard-stop evidence into the transaction being rolled back would destroy exactly the record
+    the operator needs (D138-R10).
+
+    It is a subclass of :class:`ExternalWorkingRootError` so that a caller which already refuses
+    on the external envelope cannot accidentally admit this one.
+    """
+
+    def __init__(self, message: str, *, record: Mapping[str, object]) -> None:
+        super().__init__(message)
+        #: The bounded D138-R10 hard-stop evidence. Deterministic and path-free.
+        self.record: Mapping[str, object] = record
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +184,27 @@ D130_ARCHIVE_TAR_BYTE_LENGTH: Final = 103_966_696_960
 #: and none of the intent.
 LAUNCH_MINIMUM_FREE_BYTES: Final = 185 * 1024**3
 
+#: The free-space floor that must hold **after F0 completes and before F1 begins**: `60` GiB,
+#: ``64,424,509,440`` bytes.
+#:
+#: Accepted **Decision 135** §11 (D135-R7) states this row as a *stop-and-report* gate, not as a
+#: planning note. Decision 137 recorded the ``POST_F0`` observation and enforced nothing, which the
+#: D137 independent review raised as **MAJOR-3**; **Decision 138** (D138-R5) makes it executable.
+#:
+#: It is measured on the filesystem hosting the **active** working root. Below it, F1 does not
+#: begin: nothing is deleted, nothing is cleaned, and the run stops and reports.
+POST_F0_MINIMUM_FREE_BYTES: Final = 60 * 1024**3
+
+#: The free-space floor that must hold **immediately before F1 begins**: `55` GiB,
+#: ``59,055,800,320`` bytes.
+#:
+#: Accepted Decision 135 §11 (D135-R7), adopted as executable by **Decision 138** (D138-R6). It
+#: stays a **separate named phase gate** even though ``POST_F0`` and ``PRE_F1`` occur close
+#: together: the two answer different questions -- *did F0 leave enough behind?* and *is there
+#: enough to start F1 with?* -- and folding them would lose the phase-boundary verification that
+#: is the point of having both.
+PRE_F1_MINIMUM_FREE_BYTES: Final = 55 * 1024**3
+
 #: The **continuous** F2 planning-alert threshold: `20` GiB, ``21,474,836,480`` bytes.
 #:
 #: Accepted Decision 135 §11 (D135-R7) puts an alert here and the hard stop below it, so that the
@@ -188,6 +244,19 @@ CAPACITY_PHASES: Final = (
     "DURING_F2",
     "POST_F2",
 )
+
+#: The phase boundaries that are **gates** rather than only observations, and the floor each one
+#: requires -- D138-R5 and D138-R6.
+#:
+#: ``PRE_LAUNCH`` is absent because :func:`require_launch_free_space` already enforces it before
+#: any world exists, and ``POST_F1_PRE_F2`` is absent because accepted Decision 126 §7 (D126-R6)
+#: places its `50` GiB gate at the one point where the measurement and the transaction it admits
+#: cannot be separated by a race; both keep their own accepted call sites and are **not** moved
+#: here. ``POST_F2`` is a report: there is nothing left to refuse.
+PHASE_MINIMUM_FREE_BYTES: Final[Mapping[str, int]] = {
+    "POST_F0": POST_F0_MINIMUM_FREE_BYTES,
+    "PRE_F1": PRE_F1_MINIMUM_FREE_BYTES,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -598,8 +667,17 @@ def require_external_sqlite_tmpdir(
     hide the very setting the operator has to be able to see. So the launcher sets it, the
     runbook says to, and this refuses if it is absent or wrong.
 
-    Four conditions, all fail-closed:
+    **The environment validated is the environment SQLite consumes** (D138-R3). SQLite reads
+    ``SQLITE_TMPDIR`` from the process environment and from nowhere else, so that is where this
+    guard reads it from too. An explicitly supplied ``environ`` is a **test and caller seam, not
+    a substitute source**: when one is given it must carry the identical value, and a
+    disagreement is a refusal rather than a preference. Validating one mapping while SQLite reads
+    another would prove nothing about where the spill actually lands, which was the D137
+    independent review's MINOR on this guard.
 
+    Five conditions, all fail-closed:
+
+    * an explicitly supplied mapping **agrees** with the process environment;
     * the variable is **set** and non-blank -- unset means SQLite spills to the operating
       system's temporary directory on the **internal** volume, silently;
     * it is an **absolute** path to an existing directory;
@@ -607,10 +685,23 @@ def require_external_sqlite_tmpdir(
     * it is on the **same qualified external volume** as the working world.
 
     Raises:
-        ExternalWorkingRootError: the temporary root is absent, unusable, or not external.
+        ExternalWorkingRootError: the temporary root is absent, unusable, or not external, or
+            the supplied mapping is not what SQLite will read.
     """
-    source = os.environ if environ is None else environ
-    raw = source.get(SQLITE_TMPDIR_ENV)
+    # What SQLite will actually consume, always. `os.environ` is not consulted "as a default":
+    # it is the authority, because it is the only environment the spilling process has.
+    consumed = os.environ.get(SQLITE_TMPDIR_ENV)
+    if environ is not None:
+        declared = environ.get(SQLITE_TMPDIR_ENV)
+        if declared != consumed:
+            message = (
+                f"the {SQLITE_TMPDIR_ENV} value supplied for validation is not the one SQLite "
+                "will read from the process environment; validating one environment while "
+                "SQLite consumes another proves nothing about where the spill lands, so the "
+                "disagreement is refused rather than resolved in either direction"
+            )
+            raise ExternalWorkingRootError(message)
+    raw = consumed
     if raw is None or not raw.strip():
         message = (
             f"{SQLITE_TMPDIR_ENV} is not set; SQLite would spill temporary and sort files to the "
@@ -840,3 +931,320 @@ def external_canary_preflight(
         observation=observation,
         temp_directory=temp_directory,
     )
+
+
+# --------------------------------------------------------------------------- #
+# The mandatory external envelope -- D138-R1, D138-R2, D138-R12
+# --------------------------------------------------------------------------- #
+def external_volume_candidate(path: Path) -> bool:
+    """Whether ``path`` would be created on a volume other than the system root's -- D138-R1.
+
+    The D137 independent review's **MAJOR-1** was that the external safety envelope was reached
+    only by *asking* for it: omitting ``--require-volume-uuid`` restored the pre-D137 path, so a
+    working root on an unqualified external disk -- or inside the immutable D130 archive -- was
+    admitted without a single guard running. **Protection may not be opt-in**, so the decision of
+    whether an envelope is required has to be taken from the path itself rather than from an
+    argument the operator can leave out.
+
+    It is decided the same way :func:`mount_point_of` decides everything else: by device number,
+    on the **nearest existing ancestor**, so the requested world is classified before it is
+    created and no ``diskutil`` call is made for an internal root. A root whose derived mount
+    point is the system root's is internal; anything else -- an external disk, a disk image, a
+    network mount -- is external and must be positively authenticated.
+
+    **Internal is the only answer that admits without proof**, so an unclassifiable root is
+    refused rather than assumed internal: :func:`mount_point_of` raises, and that propagates.
+
+    Raises:
+        ExternalWorkingRootError: the filesystem hosting ``path`` could not be identified.
+    """
+    return mount_point_of(path) != mount_point_of(Path(os.sep))
+
+
+def require_external_envelope(
+    working_root: Path,
+    *,
+    observed_at: str,
+    environ: Mapping[str, str] | None = None,
+    asserted_uuid: str | None = None,
+) -> ExternalCanaryPreflight | None:
+    """Apply the complete external envelope when one is owed, and refuse when it cannot hold.
+
+    The single decision point for **D138-R1**. Three outcomes:
+
+    * the root is **internal** and no external assertion was made -> ``None``, and the caller's
+      path is exactly what accepted Decision 116 left it. Historical internal behaviour is
+      preserved byte for byte (D138-R1), because nothing here runs;
+    * the root is **external**, by :func:`external_volume_candidate` or because the operator
+      asserted a volume -> the **complete** D137 envelope runs, and every one of its guards must
+      hold. Omitting the assertion cannot disable a single one of them;
+    * any guard does not hold -> :class:`ExternalWorkingRootError`, with **no world created**.
+
+    ``asserted_uuid`` is an **assertion, never a switch** (D138-R1). Supplying it can only ever
+    *add* a requirement: it forces the envelope on a root that would otherwise be classified
+    internal -- so asserting the qualified volume for an internal root refuses at the identity
+    guard, which is the truth -- and it must itself be the one qualified volume. There is no
+    generic external-volume authorization here (**D138-R12**): the single accepted external
+    identity is :data:`QUALIFIED_EXTERNAL_VOLUME_UUID`, an arbitrary caller-supplied UUID is
+    refused before anything is measured, and D125-R4 remains the general rule everywhere outside
+    that one-canary exception.
+
+    Args:
+        working_root: The root a world would be created under. It need not exist.
+        observed_at: The timestamp the ``PRE_LAUNCH`` observation carries.
+        environ: The environment to cross-check ``SQLITE_TMPDIR`` against. See
+            :func:`require_external_sqlite_tmpdir`; ``None`` reads the process environment alone.
+        asserted_uuid: An operator assertion that the root is on a named volume, or ``None``.
+
+    Raises:
+        ExternalWorkingRootError: an arbitrary UUID was asserted, the root could not be
+            classified, or any guard in the envelope did not hold.
+    """
+    if asserted_uuid is not None and (
+        asserted_uuid.strip().casefold() != QUALIFIED_EXTERNAL_VOLUME_UUID.strip().casefold()
+    ):
+        message = (
+            f"{asserted_uuid} is not the one qualified external volume "
+            f"{QUALIFIED_EXTERNAL_VOLUME_UUID}; Decision 136 §11 (D136-R8) created a narrow "
+            "one-canary exception for that volume alone and Decision 138 (D138-R12) creates no "
+            "generic external-volume authorization, so an arbitrary identity is refused"
+        )
+        raise ExternalWorkingRootError(message)
+    if asserted_uuid is None and not external_volume_candidate(working_root):
+        return None
+    return external_canary_preflight(
+        working_root=working_root,
+        observed_at=observed_at,
+        environ=environ,
+        expected_uuid=QUALIFIED_EXTERNAL_VOLUME_UUID,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The POST_F0 and PRE_F1 phase gates -- D138-R5, D138-R6
+# --------------------------------------------------------------------------- #
+def require_phase_free_space(
+    observation: CapacityObservation,
+    *,
+    floors: Mapping[str, int] = PHASE_MINIMUM_FREE_BYTES,
+) -> CapacityObservation:
+    """Return ``observation``, or refuse the phase it opens -- D138-R5 and D138-R6.
+
+    Accepted Decision 135 §11 (D135-R7) states ``POST_F0`` `>= 60` GiB and ``PRE_F1`` `>= 55` GiB
+    as **stop-and-report** rows. Decision 137 recorded both observations and enforced neither,
+    which the D137 independent review raised as **MAJOR-3**; this is the enforcement.
+
+    ``>=`` is the rule at both floors, so each floor itself admits and one byte below refuses. A
+    phase with no floor is returned untouched, and a measurement that could not be taken never
+    reaches here at all -- :func:`observe_capacity` has already refused it, which is why a
+    measurement failure refuses rather than being compared against anything.
+
+    **Nothing is deleted, moved, or cleaned to clear a floor**, here or anywhere in this module.
+
+    Raises:
+        ExternalWorkingRootError: the phase carries a floor and free space is below it.
+    """
+    floor = floors.get(observation.phase)
+    if floor is None or observation.free_bytes >= floor:
+        return observation
+    message = (
+        f"{observation.phase} free-space gate not met: {observation.free_bytes} bytes free on "
+        f"the active working root's volume, below the required {floor} bytes "
+        f"({floor // 1024**3} GiB). STOP AND REPORT: the next phase does not begin, and nothing "
+        "was deleted or cleaned to reach the floor"
+    )
+    raise ExternalWorkingRootError(message)
+
+
+# --------------------------------------------------------------------------- #
+# The in-process continuous F2 guard -- D138-R8, D138-R9, D138-R10
+# --------------------------------------------------------------------------- #
+#: The longest wall-clock interval **D138-R9** permits between two intended ``DURING_F2``
+#: readings. A long batch must not buy hours of unobserved F2 execution.
+F2_CAPACITY_MAX_SAMPLE_SECONDS: Final = 60.0
+
+#: The interval this implementation actually schedules, well inside that ceiling. One
+#: ``statvfs`` per five seconds is free beside a traversal that writes tens of millions of rows,
+#: and D138-R9 asks for a substantially shorter interval wherever the existing loop makes one
+#: natural. F2's per-accession loop makes it natural.
+F2_CAPACITY_SAMPLE_SECONDS: Final = 5.0
+
+#: The reason recorded when the `10` GiB floor is reached.
+F2_HARD_STOP_REASON: Final = "F2_CAPACITY_HARD_STOP"
+
+#: The reason recorded when free space could not be measured at all during F2.
+F2_MEASUREMENT_FAILED_REASON: Final = "F2_CAPACITY_MEASUREMENT_FAILED"
+
+
+def _free_and_total(path: Path) -> tuple[int, int]:
+    """Free and total bytes on the filesystem hosting ``path``. The guard's default provider."""
+    usage = shutil.disk_usage(_nearest_existing(path))
+    return usage.free, usage.total
+
+
+class F2CapacityGuard:
+    """Sample free space **inside** the running F2 transaction, and abort it -- D138-R8.
+
+    The D137 independent review's **MAJOR-2** was that the `10` GiB ``DURING_F2`` floor existed
+    only as a classification and an optional second process: the watchdog's ``capacity``
+    subcommand could print exit `6` all day and F2 would keep writing. Enforcement that depends
+    on a human starting another process is not enforcement, so this samples from **within** the
+    process executing F2 and raises from **inside** its transaction.
+
+    **Aborting from inside is the whole point.** F2 is one transaction, so the
+    :func:`~disclosure_drift.storage.sqlite.transaction` context rolls it back on the way out:
+    the in-flight association projection is discarded rather than truncated, and no partial F2
+    association state can commit. Nothing is deleted, no signal is sent, and no escalation
+    happens -- D131's no-escalation behaviour is untouched (D138-R8).
+
+    Three states, from the accepted inclusive thresholds:
+
+    * free `> 20` GiB -> normal, and nothing is recorded;
+    * `10` GiB `<` free `<= 20` GiB -> a ``DURING_F2`` **alert** observation is recorded and F2
+      **continues**;
+    * free `<= 10` GiB -> :class:`F2CapacityHardStopError`, carrying its D138-R10 evidence.
+
+    A **measurement failure fails closed through the same path** (D138-R8): a reading that cannot
+    be taken is not a reading that passed.
+
+    Sampling is **bounded by wall clock, not by iteration count** (D138-R9). The first call always
+    samples -- that is the reading taken immediately before F2 starts -- and thereafter a call
+    returns immediately unless :data:`F2_CAPACITY_SAMPLE_SECONDS` have elapsed on a **monotonic**
+    clock, which cannot be walked backwards by a system time adjustment mid-run. Calling it more
+    often is therefore free, which is what lets the call sit in F2's innermost loop.
+
+    Both the clock and the free-space provider are constructor seams, so a test can drive either
+    without a real disk and without waiting.
+    """
+
+    __slots__ = (
+        "_clock",
+        "_free_space",
+        "_interval",
+        "_last",
+        "_now",
+        "_root",
+        "_volume",
+        "hard_stop_record",
+        "observations",
+        "samples",
+    )
+
+    def __init__(
+        self,
+        *,
+        working_root: Path,
+        volume: VolumeIdentity | None = None,
+        interval_seconds: float = F2_CAPACITY_SAMPLE_SECONDS,
+        free_space: Callable[[Path], tuple[int, int]] | None = None,
+        clock: Callable[[], float] | None = None,
+        now: Callable[[], str] | None = None,
+        record_into: list[CapacityObservation] | None = None,
+    ) -> None:
+        if interval_seconds > F2_CAPACITY_MAX_SAMPLE_SECONDS:
+            message = (
+                f"a {interval_seconds}s DURING_F2 sampling interval exceeds the "
+                f"{F2_CAPACITY_MAX_SAMPLE_SECONDS}s ceiling D138-R9 permits between intended "
+                "checks; a longer interval would let a batch run unobserved"
+            )
+            raise ExternalWorkingRootError(message)
+        self._root = working_root
+        self._volume = volume
+        self._interval = interval_seconds
+        self._free_space = _free_and_total if free_space is None else free_space
+        self._clock = time.monotonic if clock is None else clock
+        self._now = utc_now if now is None else now
+        self._last: float | None = None
+        #: Every ``DURING_F2`` alert observed, in order. Shared with the run's own list when one
+        #: is supplied, so the alerts land chronologically among the phase boundaries.
+        self.observations: list[CapacityObservation] = [] if record_into is None else record_into
+        #: The D138-R10 evidence, once a hard stop has fired. Held here as well as on the
+        #: exception so it survives both the rollback and the unwinding.
+        self.hard_stop_record: Mapping[str, object] | None = None
+        #: How many readings were actually taken. Proves the loop is sampled, not merely wrapped.
+        self.samples = 0
+
+    def __call__(self) -> None:
+        """Sample if the interval has elapsed, and abort F2 if the floor is reached.
+
+        Raises:
+            F2CapacityHardStopError: free space is at or below the `10` GiB floor, or could not
+                be measured. Raised while the F2 transaction is still open, so it rolls back.
+        """
+        tick = self._clock()
+        if self._last is not None and (tick - self._last) < self._interval:
+            return
+        self._last = tick
+        self._sample()
+
+    def _sample(self) -> None:
+        observed_at = self._now()
+        self.samples += 1
+        try:
+            free, total = self._free_space(self._root)
+        except (OSError, ExternalWorkingRootError) as exc:
+            raise self._hard_stop(
+                reason=F2_MEASUREMENT_FAILED_REASON,
+                free_bytes=None,
+                measurement_error=type(exc).__name__,
+                observed_at=observed_at,
+                detail=(
+                    f"free space during F2 could not be measured ({type(exc).__name__}); an "
+                    "unmeasurable volume is not a volume that passed, so F2 is aborted"
+                ),
+            ) from exc
+        state = f2_capacity_state(free)
+        if state == F2_HARD_STOP_STATE:
+            raise self._hard_stop(
+                reason=F2_HARD_STOP_REASON,
+                free_bytes=free,
+                measurement_error=None,
+                observed_at=observed_at,
+                detail=(
+                    f"{free} bytes free during F2, at or below the continuous hard floor of "
+                    f"{F2_HARD_FLOOR_FREE_BYTES} bytes "
+                    f"({F2_HARD_FLOOR_FREE_BYTES // 1024**3} GiB)"
+                ),
+            )
+        if state == F2_ALERT_STATE:
+            self.observations.append(
+                CapacityObservation(
+                    phase="DURING_F2",
+                    free_bytes=free,
+                    total_bytes=total,
+                    volume=self._volume,
+                    database_bytes=None,
+                    wal_bytes=None,
+                    temp_bytes=None,
+                    observed_at=observed_at,
+                )
+            )
+
+    def _hard_stop(
+        self,
+        *,
+        reason: str,
+        free_bytes: int | None,
+        measurement_error: str | None,
+        observed_at: str,
+        detail: str,
+    ) -> F2CapacityHardStopError:
+        """Build the D138-R10 evidence and the exception that carries it out of the rollback."""
+        record: dict[str, object] = {
+            "phase": "DURING_F2",
+            "hard_stop_reason": reason,
+            "free_bytes": free_bytes,
+            "measurement_error": measurement_error,
+            "threshold_bytes": F2_HARD_FLOOR_FREE_BYTES,
+            "observed_at": observed_at,
+            "volume": None if self._volume is None else dict(self._volume.as_record()),
+            "f2_transaction_rolled_back": True,
+            "f2_committed": False,
+        }
+        self.hard_stop_record = record
+        message = (
+            f"{detail}. F2 IS ABORTED FROM INSIDE ITS OWN TRANSACTION, WHICH ROLLS BACK: the "
+            "in-flight association projection is DISCARDED, NOT TRUNCATED, and no partial F2 "
+            "association state is committed. Nothing was deleted, signalled, or cleaned"
+        )
+        return F2CapacityHardStopError(message, record=record)

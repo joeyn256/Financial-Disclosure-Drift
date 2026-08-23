@@ -1372,38 +1372,58 @@ network, re-retrieves a source live, or runs the orchestrator against a real end
 repair must be completed and reviewed first. `require_network()` is what makes the deferral safe
 and **must not be weakened, bypassed, or worked around** in the meantime.
 
-## 28d. The external-volume preflight for the corrected canary — Decision 137
+## 28d. The external-volume envelope for the corrected canary — Decisions 137 and 138
 
-**`GUARDS IMPLEMENTED — THE RUN ITSELF IS NOT AUTHORIZED`** · **`SEPARATE OWNER GATE`**
+**`GUARDS IMPLEMENTED AND CORRECTED — THE RUN ITSELF IS NOT AUTHORIZED`** · **`SEPARATE OWNER GATE`**
 
 > **What this section is, and what it is not.** Accepted
 > [Decision 136](../Decisions/decision_136_m3_3_external_ssd_active_volume_qualification.md)
 > qualified one external SSD mechanically and created a **narrow one-canary exception** to the
 > standing D125-R4 cold/archive-only rule (**D136-R8**). **Qualification is not adoption.**
-> Decision 137 implements the fail-closed guards that must hold before that exception can be used.
-> Running this preflight proves the guards hold; it **does not** authorize a corrected
+> Decision 137 implemented the fail-closed guards; its independent review found three majors, and
+> [Decision 138](../Decisions/decision_138_m3_3_d137_safety_envelope_correction.md) corrected them.
+> Running the preflight proves the guards hold; it **does not** authorize a corrected
 > complete-source canary, and no command below launches one.
+
+### The protection is automatic. There is no flag that turns it off — D138-R1
+
+**A work root that resolves onto any volume other than the system one is held to the complete
+external envelope, whether or not you type `--require-volume-uuid`.** That was the D137 review's
+**MAJOR-1**: with the flag omitted, an operator could reach an unqualified disk — or the immutable
+D130 archive itself — without a single guard running. The decision is now taken from the **path**,
+by device number, on the nearest existing ancestor, before anything is created.
+
+`--require-volume-uuid` is an **assertion**, not a switch:
+
+- **omit it on the SSD** → the full envelope still runs, and every guard still refuses;
+- **supply it** → it must be exactly `397A4D4A-9508-391E-814E-3B533C7BD049`. Any other value is
+  refused before anything is measured. **Decision 138 creates no generic external-volume
+  authorization** (D138-R12); D125-R4 remains the general rule outside the one-canary exception;
+- **supply it for an internal root** → refused. The assertion can only ever *add* a requirement.
+
+An internal work root with no assertion behaves exactly as accepted Decision 116 left it. Nothing
+about the historical internal path changed.
 
 ### The physical and operator conditions — D137-R9
 
-Assert each of these **yourself** before running anything. They are stated as operator
-requirements, not as automated proofs, because most of them cannot be mechanically verified and a
-fake automated check is worse than an honest checklist.
+Assert each of these **yourself** before running anything. **Five of the twelve are mechanically
+verified and seven are not**, because most of them cannot be verified from software and a fake
+automated check is worse than an honest checklist.
 
 | # | Condition | Verified by |
 |---|---|---|
 | 1 | The Mac is connected to **external power** | operator |
-| 2 | The **exact qualified SSD** is connected — Volume UUID `397A4D4A-9508-391E-814E-3B533C7BD049` | **preflight** |
+| 2 | The **exact qualified SSD** is connected — Volume UUID `397A4D4A-9508-391E-814E-3B533C7BD049` | **automatic** |
 | 3 | The SSD is **physically stationary** for the whole run | operator |
 | 4 | It is **not ejected or unplugged**, at any point | operator |
 | 5 | It is **not reformatted or repartitioned** | operator |
 | 6 | **No unrelated write-heavy activity** on that SSD | operator |
 | 7 | **System sleep is prevented** | operator + `caffeinate` |
 | 8 | The launcher runs under a **no-sleep** wrapper | launch command |
-| 9 | The **D130 archive precheck** matches its accepted identity | **preflight** |
-| 10 | **`>= 185` GiB / `198,642,237,440` bytes** free on that volume | **preflight** |
-| 11 | The working root is **outside the D130 archive tree** | **preflight** |
-| 12 | `SQLITE_TMPDIR` is **explicit and on that same volume** | **preflight** |
+| 9 | The **D130 archive precheck** matches its accepted identity | **automatic** |
+| 10 | **`>= 185` GiB / `198,642,237,440` bytes** free on that volume | **automatic** |
+| 11 | The working root is **outside the D130 archive tree** | **automatic** |
+| 12 | `SQLITE_TMPDIR` is **explicit and on that same volume** | **automatic** |
 
 Conditions 3–6 are not inferable from software. **Do not treat their absence from the preflight
 output as evidence that they hold** — the preflight cannot see them, and says nothing about them.
@@ -1422,7 +1442,9 @@ mkdir -p "$WORK_ROOT" "$SQLITE_TMPDIR"
 `SQLITE_TMPDIR` must be **exported**, not merely set for one command: SQLite reads it from the
 environment of the process that spills, which is the canary itself. Left unset, SQLite spills to
 the operating system's temporary directory **on the internal volume**, which the capacity model
-does not cover — and the preflight refuses rather than letting that happen silently.
+does not cover — and the guard refuses rather than letting that happen silently. **The environment
+the guard validates is the environment SQLite consumes** (D138-R3): it reads the process
+environment, and refuses if a caller hands it a different value to check.
 
 ### Run the preflight — read-only, creates nothing
 
@@ -1434,8 +1456,9 @@ does not cover — and the preflight refuses rather than letting that happen sil
     --require-volume-uuid 397A4D4A-9508-391E-814E-3B533C7BD049
 ```
 
-`--require-volume-uuid` turns on every Decision 137 guard. Each of these is a **refusal**, and
-none of them falls back to internal storage:
+The `--require-volume-uuid` line is an explicit assertion and is **optional**; dropping it changes
+nothing about which guards run. Each of these is a **refusal**, and none falls back to internal
+storage:
 
 - the volume's **Volume UUID** is not the accepted one;
 - **nothing is mounted** where the working root points;
@@ -1445,7 +1468,8 @@ none of them falls back to internal storage:
   it, and a merely similar name is not falsely refused;
 - free space on **that volume** is below `198,642,237,440` bytes;
 - the **D130 archive precheck** differs from its accepted governance identity;
-- `SQLITE_TMPDIR` is unset, relative, absent, inside the archive, or on another volume.
+- `SQLITE_TMPDIR` is unset, relative, absent, inside the archive, or on another volume;
+- an asserted UUID is anything other than the one qualified volume.
 
 **`BSD identifiers are not identity.`** `disk4` and `disk4s2` are assigned at attach time and will
 differ across reboots and re-plugs. The mount path is not identity either — `/Volumes/SSK SSD` is
@@ -1454,51 +1478,74 @@ whatever volume happens to be mounted there. Only the Volume UUID is checked.
 A passing preflight prints `canary_authorized: false`. That is not a formality: **passing the
 preflight is not authorization to launch** (D137-R12).
 
-### Monitor capacity during the run
+### The five floors, and what each one does on breach
 
-The admission gates say what must be true *before* a phase; this says what is true *during* one.
+Five different numbers answering five different questions. **None replaces another**, and each is
+checked before the phase it admits.
+
+| Where | Floor | Behaviour on breach |
+|---|---|---|
+| `PRE_LAUNCH` | `185` GiB / `198,642,237,440` B | **refuse to launch** — no world is created |
+| `POST_F0` | `60` GiB / `64,424,509,440` B | **stop and report.** F1 does not begin |
+| `PRE_F1` | `55` GiB / `59,055,800,320` B | **stop and report.** F1 does not begin |
+| `POST_F1_PRE_F2` | `50` GiB / `53,687,091,200` B | **refuse F2** before its transaction opens |
+| `DURING_F2` continuous | `10` GiB / `10,737,418,240` B | **abort and roll back**, alerting from `20` GiB |
+
+Every floor admits **at** its own value and refuses one byte below it. **A measurement that cannot
+be taken refuses** — an unmeasurable volume is never treated as one that passed. **Nothing is
+deleted, moved, or cleaned to clear any floor**, at any of the five.
+
+### Capacity during F2 is enforced inside the run — D138-R8, D138-R9
+
+The D137 review's **MAJOR-2** was that the `10` GiB `DURING_F2` floor was a classification and an
+optional second process, and nothing else. It is now enforced **inside the process executing F2**:
+
+| Free space | State | What the run does |
+|---|---|---|
+| `> 20` GiB | `F2_CAPACITY_NORMAL` | nothing; F2 continues |
+| `<= 20` GiB | `F2_CAPACITY_ALERT` | records a `DURING_F2` observation and **continues** |
+| `<= 10` GiB | `F2_CAPACITY_HARD_STOP` | **aborts F2 from inside its transaction** |
+| unmeasurable | `F2_CAPACITY_MEASUREMENT_FAILED` | **aborts F2 the same way** — fail-closed |
+
+Free space is sampled immediately **before** F2 opens its transaction and repeatedly **while** it
+is open, from F2's own per-accession loop, on a **monotonic** clock. The interval is bounded: the
+ceiling is `60` seconds and the scheduled interval is well inside it, so a long batch can never
+buy hours of unobserved execution.
+
+> **A hard stop during F2 is a rollback, not a truncation.** F2 is a **single transaction**.
+> Aborting inside it discards the in-flight association projection entirely — the run does not
+> resume from where it stopped, and there is no partial result to keep. **No partial F2
+> association state is ever committed.** Bounded evidence naming the phase, the reason, the
+> measured free bytes or the measurement failure, the threshold, the observation time, the volume
+> identity, and the fact that F2 rolled back survives the rollback and is reported.
+
+The abort **deletes nothing, sends no signal, and escalates nothing** — the accepted Decision 131
+no-escalation behaviour is untouched. **Never delete anything from the SSD to clear a floor**:
+accepted [Decision 125](../Decisions/decision_125_m3_3_external_archival_and_reclamation.md)
+**D125-R3** bars deleting further evidence for capacity, and the D130 archive is the **only**
+surviving copy of the D128 evidence.
+
+### The watchdog `capacity` subcommand is supplemental only — D138-R11
 
 ```bash
 ./.venv/bin/python scripts/m3/canary_watchdog.py capacity --path "$WORK_ROOT/<RUN_ID>"
 ```
 
-| Free space | State | Exit | What it means |
-|---|---|---|---|
-| `> 20` GiB | `F2_CAPACITY_NORMAL` | `0` | nothing to do |
-| `<= 20` GiB | `F2_CAPACITY_ALERT` | `2` | **report and watch.** Not a stop |
-| `<= 10` GiB | `F2_CAPACITY_HARD_STOP` | `6` | **stop and report** |
-| unmeasurable | `CAPACITY_REFUSED_UNMEASURABLE` | `3` | no threshold is treated as satisfied |
-
-> **A hard stop during F2 is a rollback, not a truncation.** F2 is a **single transaction**. Stopping
-> inside it discards the in-flight association projection entirely — the run does not resume from
-> where it stopped, and there is no partial result to keep. Decide accordingly.
-
-The `capacity` subcommand **reports and never acts**. It sends no signal, deletes nothing, and
-cleans nothing at any threshold; acting stays your decision, through the `stop` subcommand in
-§28b. **Never delete anything from the SSD to clear a floor** — accepted
-[Decision 125](../Decisions/decision_125_m3_3_external_archival_and_reclamation.md) **D125-R3** bars
-deleting further evidence for capacity, and the D130 archive is the **only** surviving copy of the
-D128 evidence.
-
-The three floors are three different numbers answering three different questions, and none of
-them replaces another:
-
-| Where | Floor | Behaviour on breach |
-|---|---|---|
-| `PRE_LAUNCH` | `185` GiB / `198,642,237,440` B | **refuse to launch** |
-| `POST_F1_PRE_F2` | `50` GiB / `53,687,091,200` B | **refuse F2** before its transaction opens |
-| `DURING_F2` continuous | `10` GiB / `10,737,418,240` B | **hard stop**, alerting from `20` GiB |
+This is **observability for a human**, not enforcement. It reports the same three states from
+outside the run and **exit `6` does not stop F2** — the in-process guard is what stops it. It
+sends no signal, deletes nothing, and cleans nothing at any threshold. Acting on anything it
+reports stays your decision, through the `stop` subcommand in §28b.
 
 ### The launch command
 
 **`NOT AUTHORIZED UNTIL SEPARATE OWNER CANARY AUTHORIZATION`**
 
-The corrected complete-source canary is launched with the §28b shape, with `--mode run`, the same
-`--require-volume-uuid`, and a `caffeinate` wrapper so the machine cannot sleep mid-run. **It must
-not be run on the strength of a passing preflight, of Decision 136, or of Decision 137.** A
-separate owner instrument authorizes it, and it runs **from scratch, in a new world, under a new
-run identity** — accepted
-[Decision 129](../Decisions/decision_129_m3_3_d128_semantic_adjudication.md) **D129-R8**, unchanged.
+The corrected complete-source canary is launched with the §28b shape, with `--mode run` and a
+`caffeinate` wrapper so the machine cannot sleep mid-run. **It must not be run on the strength of
+a passing preflight, of Decision 136, of Decision 137, or of Decision 138.** A separate owner
+instrument authorizes it, and it runs **from scratch, in a new world, under a new run identity** —
+accepted [Decision 129](../Decisions/decision_129_m3_3_d128_semantic_adjudication.md)
+**D129-R8**, unchanged.
 
 ### After the run — the D130 archive postcheck
 
@@ -1506,7 +1553,8 @@ Re-run the preflight's bounded archive check after the run and compare. **Any di
 blocker**, not a note: it means the corrected canary disturbed the only surviving copy of the D128
 evidence. The check is bounded on purpose — the four small compact proofs from
 [Decision 130](../Decisions/decision_130_m3_3_d128_archival_and_reclamation.md) §6 are hashed, and
-the `103,966,696,960`-byte tar is **stat**-ed and never opened.
+the `103,966,696,960`-byte tar is **stat**-ed and never opened. **The archive is immutable**:
+nothing is ever written, moved, deleted, or hashed beyond those four proofs inside that tree.
 
 ### What none of this claims — D137-R11
 
@@ -1515,6 +1563,7 @@ established **process-crash recovery only**. Nothing here claims journaled files
 **power-loss safety**, **surprise-removal safety**, or **USB-bridge cache-flush correctness** —
 D136 could not distinguish a satisfied `F_FULLFSYNC` from a bridge that ignored one, and did not
 try. Conditions 1 and 3–5 above exist precisely because the filesystem does not cover them.
+Decision 138 corrects the safety envelope; it does not change one word of this boundary.
 
 ## 29. Freeze the real snapshot only after Gate H and E0
 

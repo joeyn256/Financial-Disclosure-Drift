@@ -65,8 +65,10 @@ from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.external_working_root import (
     CapacityObservation,
     ExternalCanaryPreflight,
-    external_canary_preflight,
+    F2CapacityGuard,
     observe_capacity,
+    require_external_envelope,
+    require_phase_free_space,
 )
 from disclosure_drift.m3.offline_parse import (
     DIAGNOSTIC_PREFIX_CLASSIFICATION,
@@ -798,7 +800,9 @@ def run_single_source_canary(
     The whole path, in order:
 
     0. establish the write boundary: refuse any work root that is not a lawful disposable
-       location, before a directory, a catalog, or a result document exists to refuse it for;
+       location, and — when it resolves onto an external volume — refuse it unless the complete
+       Decision 137 envelope holds, before a directory, a catalog, or a result document exists
+       to refuse it for;
     1. select the one source from the accepted plan, through a strictly read-only handle;
     2. create the disposable world, once, refusing an identity that already has one;
     3. copy the accepted catalog into a D111 run-local working catalog, read-only on the source;
@@ -828,17 +832,21 @@ def run_single_source_canary(
             SQLite's own default and is what the equivalence proof runs against: the budget is
             an execution parameter, so two runs that differ only in it must reach byte-identical
             evidence. It reaches no other connection and no other database.
-        require_volume_uuid: The Volume UUID the working root must be proved to be on, or
-            ``None`` for a run with no external-volume requirement. **Opt-in, and fail-closed
-            once opted in** (Decision 137): supplying it makes every D137 launch guard a
-            precondition of the run rather than of whoever launched it, so a direct library
-            caller cannot reach a volume the operator surface would have refused. ``None``
-            leaves this path exactly as accepted Decision 116 left it.
-        environ: The environment ``SQLITE_TMPDIR`` is read from when an external volume is
-            required. Defaults to the process's own.
+        require_volume_uuid: An **assertion** that the working root is on the named volume, or
+            ``None``. It is not the switch that decides whether the external envelope applies
+            (Decision 138, D138-R1): **the resolved root decides that**, so an external root is
+            protected whether or not this is supplied, and omitting it cannot disable a single
+            guard. Supplying it can only add a requirement — it forces the envelope onto a root
+            that would classify as internal — and it must be the one qualified volume
+            (D138-R12). An internal root with no assertion is exactly what Decision 116 left it.
+        environ: The environment ``SQLITE_TMPDIR`` is cross-checked against when an external
+            volume is required; SQLite's own environment is the authority (D138-R3). Defaults to
+            the process's own.
 
     Raises:
-        ExternalWorkingRootError: an external volume was required and a D137 guard did not hold.
+        ExternalWorkingRootError: the working root is external and a guard did not hold, an
+            arbitrary volume was asserted, or the continuous ``DURING_F2`` floor was reached —
+            in which case F2 rolled back and committed nothing.
         SingleSourceCanaryError: a canary precondition failed.
         OfflineParseError: any accepted fail-closed parse condition, unchanged.
         WorkingCatalogError: the disposable working catalog could not be built safely.
@@ -847,18 +855,18 @@ def run_single_source_canary(
     #    Accepted Decision 116 §7 is the run's own invariant, so an unlawful work root fails
     #    closed here rather than at whichever caller happened to check.
     resolved_work_root = require_canary_work_root(work_root, tree=tree)
-    #    Decision 137, when an external volume is required: identity by Volume UUID, isolation
-    #    from the immutable D130 archive, the bounded archive precheck, the 185 GiB launch
-    #    floor, and an explicit external SQLITE_TMPDIR -- all established here, before a world
-    #    exists to place, and all refusing rather than falling back to internal storage.
-    external: ExternalCanaryPreflight | None = None
-    if require_volume_uuid is not None:
-        external = external_canary_preflight(
-            working_root=resolved_work_root,
-            observed_at=utc_now(),
-            environ=environ,
-            expected_uuid=require_volume_uuid,
-        )
+    #    Decision 138 (D138-R1): whether the external envelope applies is decided by the
+    #    resolved root itself, never by whether an argument was supplied. An external root gets
+    #    identity by Volume UUID, isolation from the immutable D130 archive, the bounded archive
+    #    precheck, the 185 GiB launch floor, and an explicit external SQLITE_TMPDIR -- all
+    #    established here, before a world exists to place, and all refusing rather than falling
+    #    back to internal storage. An internal root gets exactly what Decision 116 left it.
+    external: ExternalCanaryPreflight | None = require_external_envelope(
+        resolved_work_root,
+        observed_at=utc_now(),
+        environ=environ,
+        asserted_uuid=require_volume_uuid,
+    )
     started = utc_now()
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
@@ -878,25 +886,42 @@ def run_single_source_canary(
     observations: list[CapacityObservation] = []
 
     def record_phase(phase: str) -> None:
-        """Record one accepted D137-R7 phase boundary. Bound only for an external run."""
+        """Record one accepted D137-R7 phase boundary, and enforce its floor -- D138-R5, R6.
+
+        The observation is taken first and appended unconditionally, so a refusal still leaves
+        the reading that caused it: `POST_F0` and `PRE_F1` are stop-and-report **gates**, and a
+        gate that discards its own evidence tells the operator nothing. A measurement that could
+        not be taken never reaches the comparison -- :func:`observe_capacity` has already
+        refused it, which is why an unmeasurable boundary refuses rather than being admitted.
+        """
         if external is None:  # pragma: no cover - never bound without an external requirement
             return
-        observations.append(
-            observe_capacity(
-                phase,
-                working_root=world.directory,
-                database=world.working_catalog,
-                wal=world.working_catalog.with_name(f"{WORKING_CATALOG_FILENAME}-wal"),
-                temp_directory=external.temp_directory,
-                volume=external.volume,
-                observed_at=utc_now(),
-            )
+        observation = observe_capacity(
+            phase,
+            working_root=world.directory,
+            database=world.working_catalog,
+            wal=world.working_catalog.with_name(f"{WORKING_CATALOG_FILENAME}-wal"),
+            temp_directory=external.temp_directory,
+            volume=external.volume,
+            observed_at=utc_now(),
         )
+        observations.append(observation)
+        require_phase_free_space(observation)
 
     observer: _PhaseObserver | None = None
+    #    Decision 138 (D138-R8): continuous DURING_F2 enforcement lives INSIDE the process that
+    #    executes F2, never in an optional second one. Bound only on the protected external
+    #    path, and sharing the run's own observation list so its alerts land chronologically
+    #    among the phase boundaries rather than in a parallel record.
+    capacity_guard: F2CapacityGuard | None = None
     if external is not None:
         observations.append(external.observation)
         observer = record_phase
+        capacity_guard = F2CapacityGuard(
+            working_root=world.directory,
+            volume=external.volume,
+            record_into=observations,
+        )
 
     # 3-7. Everything writable, inside the world.
     with WorkingCatalog(operational_catalog, world.directory, cache_bytes=cache_bytes) as working:
@@ -909,6 +934,7 @@ def run_single_source_canary(
                 sidecar=sidecar,
                 batch_size=batch_size,
                 observe=observer,
+                capacity_guard=capacity_guard,
             )
             identities = _record_evidence(sidecar=sidecar, materialized=materialized)
             working.checkpoint()
@@ -996,6 +1022,7 @@ def _materialize(
     sidecar: CompactEvidenceSidecar,
     batch_size: int,
     observe: _PhaseObserver | None = None,
+    capacity_guard: Callable[[], None] | None = None,
 ) -> _Materialized:
     """Parse one source, resolve, and project -- all inside the accepted write containment.
 
@@ -1047,7 +1074,13 @@ def _materialize(
         if observe is not None:
             observe("POST_F1_PRE_F2")
         _require_pre_f2_free_space(working.path.parent)
-        totality = materialize_census_associations(connection, compact_evidence=True)
+        # Decision 138 (D138-R8, D138-R9): the pre-F2 gate says what must be true before the
+        # transaction opens and says nothing about what happens inside it. `capacity_guard` is
+        # sampled from F2's own innermost loop, so a floor reached mid-projection aborts from
+        # within the open transaction and rolls it back. `None` on every unprotected path.
+        totality = materialize_census_associations(
+            connection, compact_evidence=True, capacity_guard=capacity_guard
+        )
         if observe is not None:
             observe("POST_F2")
         counts = _counts(connection)
@@ -1421,12 +1454,12 @@ def run_single_source_prefix_profile(
         member_limit: How many governed members to traverse. Must be positive.
         batch_size: Parts per real transaction, defaulting to the accepted D113 §14 value.
         cache_bytes: The page-cache budget for the run-local writable working catalog.
-        require_volume_uuid: The Volume UUID the working root must be proved to be on, or
-            ``None``. The same opt-in, fail-closed Decision 137 requirement the complete-source
-            path takes, stated here too so a diagnostic prefix cannot reach a volume the
-            complete-source run would have refused. It records **no** phase-boundary capacity
-            evidence: D137-R7 scopes that to a complete-source run, and this one finalizes
-            nothing.
+        require_volume_uuid: An optional assertion, exactly as
+            :func:`run_single_source_canary` takes it. The envelope itself is **mandatory for an
+            external root here too** (D138-R1), so a diagnostic prefix cannot reach a volume the
+            complete-source run would have refused, with or without the assertion. It records
+            **no** phase-boundary capacity evidence: D137-R7 scopes that to a complete-source
+            run, and this one finalizes nothing.
         environ: The environment ``SQLITE_TMPDIR`` is read from. Defaults to the process's own.
 
     Raises:
@@ -1442,13 +1475,12 @@ def run_single_source_prefix_profile(
         )
         raise SingleSourceCanaryError(message)
     resolved_work_root = require_canary_work_root(work_root, tree=tree)
-    if require_volume_uuid is not None:
-        external_canary_preflight(
-            working_root=resolved_work_root,
-            observed_at=utc_now(),
-            environ=environ,
-            expected_uuid=require_volume_uuid,
-        )
+    require_external_envelope(
+        resolved_work_root,
+        observed_at=utc_now(),
+        environ=environ,
+        asserted_uuid=require_volume_uuid,
+    )
     started = utc_now()
     if not operational_catalog.is_file():
         message = "the accepted operational catalog does not exist at its fixed relative path"
@@ -1599,10 +1631,14 @@ def run_canary_source_command(
     complete source, so it must not be reachable with a bound attached, not even a bound that
     would have been harmless.
 
-    **The external-volume requirement is opt-in and, once opted in, dispositive.** Supplying
-    ``require_volume_uuid`` runs every Decision 137 launch guard here so the operator learns
-    immediately, and passes the requirement down so the run establishes it again for itself --
-    the same deliberate redundancy through one primitive that the work root already uses. In
+    **The external-volume requirement is mandatory, not opt-in** (Decision 138, D138-R1). The
+    resolved work root decides whether the envelope applies: a root on any volume other than the
+    system one gets every Decision 137 launch guard whether or not ``--require-volume-uuid`` was
+    typed, and the flag is an assertion that can only add a requirement, never remove one. That
+    is the D137 independent review's MAJOR-1 closed: an operator could previously reach an
+    unqualified disk, or the immutable D130 archive itself, simply by leaving the flag off. The
+    requirement is established here so the operator learns immediately, and again inside the run
+    -- the same deliberate redundancy through one primitive that the work root already uses. In
     ``preflight`` the guards are the whole point: the mode creates nothing, and its record
     carries what they established. **Passing a preflight is not an authorization to launch**
     (D137-R12); the corrected canary needs its own owner instrument.
@@ -1611,14 +1647,12 @@ def run_canary_source_command(
     private_root = resolve_private_root(repository_root, environ=environ)
     operational_catalog = private_root / OPERATIONAL_CATALOG_RELATIVE_PATH
     resolved_work_root = require_disposable_work_root(work_root, repository_root, private_root)
-    external: ExternalCanaryPreflight | None = None
-    if require_volume_uuid is not None:
-        external = external_canary_preflight(
-            working_root=resolved_work_root,
-            observed_at=utc_now(),
-            environ=environ,
-            expected_uuid=require_volume_uuid,
-        )
+    external: ExternalCanaryPreflight | None = require_external_envelope(
+        resolved_work_root,
+        observed_at=utc_now(),
+        environ=environ,
+        asserted_uuid=require_volume_uuid,
+    )
     if limit is not None:
         # ``profile-prefix`` is the only mode a bound can survive validation under, so this
         # branch is entered by the bound itself rather than by a second reading of the mode.

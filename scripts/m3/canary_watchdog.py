@@ -59,13 +59,24 @@ inspection: nothing is read about the process, and nothing is sent to it.
 **8. There was no continuous capacity monitor at all.** Accepted Decision 124 §9 (D124-R5) has
 required a continuous `10` GiB floor during F2 since it was written, and accepted Decision 135
 §11 (D135-R7) added a `20` GiB planning alert above it, but nothing sampled either. Decision 137
-(D137-R6) adds the ``capacity`` subcommand, which **reports and never acts**: it sends no signal,
+(D137-R6) added the ``capacity`` subcommand, which **reports and never acts**: it sends no signal,
 deletes nothing, and cleans nothing. Acting on a hard stop stays the operator's decision through
 the existing ``stop`` subcommand, exactly as escalation does -- and the operator is told the
 consequence plainly, because **F2 is a single transaction and stopping inside it rolls the
 in-flight projection back** rather than truncating it. Raising the pre-F2 admission gate to `50`
 GiB moved what must be true *before* the transaction opens and left this floor where D124-R5 put
 it.
+
+**This subcommand is SUPPLEMENTAL REPORTING, and is not the enforcement mechanism** (accepted
+Decision 138, **D138-R11**). The D137 independent review's **MAJOR-2** was that a `10` GiB floor
+enforced only by an optional second process is not enforced at all: nothing obliges an operator
+to start this command, and its exit codes reach no running transaction. Decision 138 moved
+authority into the run itself --
+:class:`~disclosure_drift.m3.external_working_root.F2CapacityGuard` samples from **inside** the
+process executing F2 and aborts from **inside** its open transaction, so a breach rolls the
+projection back whether or not anyone is watching. **Exit `6` here does not stop F2**; it tells a
+human what the in-process guard is about to do, or has already done. Read it as an
+**observability** tool, and never as the thing that makes the floor real.
 
 The three thresholds are **imported** from
 :mod:`disclosure_drift.m3.external_working_root` rather than restated here. A watchdog carrying
@@ -84,7 +95,8 @@ Exit codes:
     ``5``  :data:`TRAVERSAL_INCONSISTENT` -- observed and governed member counts disagree in
            a way no stall or completion verdict can describe.
     ``6``  the continuous F2 capacity hard floor is breached (``capacity``). Nothing was
-           signalled, deleted, or cleaned; the operator is told what a stop would cost.
+           signalled, deleted, or cleaned, **and F2 was not stopped by this command**: the
+           in-process guard is what stops it (D138-R11). This is a report of the same condition.
 """
 
 from __future__ import annotations
@@ -542,8 +554,12 @@ def capacity_verdict(path: str) -> CapacityVerdict:
     An unmeasurable path is its own outcome rather than a silent pass: the caller is told the
     reading could not be taken, and no threshold is treated as satisfied.
 
-    Nothing here deletes, moves, cleans, or signals. The hard-stop message states the cost of
-    acting, and the operator decides.
+    Nothing here deletes, moves, cleans, or signals, **and nothing here stops F2**. The
+    authoritative continuous enforcement is
+    :class:`~disclosure_drift.m3.external_working_root.F2CapacityGuard`, which runs inside the
+    process executing F2 and rolls its transaction back (D138-R11); this subcommand is
+    supplemental reporting for a human watching alongside. The hard-stop message states the cost
+    of the abort the in-process guard performs.
     """
     try:
         free = shutil.disk_usage(Path(path)).free
@@ -559,8 +575,10 @@ def capacity_verdict(path: str) -> CapacityVerdict:
             f"{free} bytes free, at or below the continuous F2 hard floor of "
             f"{F2_HARD_FLOOR_FREE_BYTES} bytes ({F2_HARD_FLOOR_FREE_BYTES // 1024**3} GiB). "
             "STOP AND REPORT. F2 is a single transaction, so stopping inside it ROLLS THE "
-            "IN-FLIGHT PROJECTION BACK -- the work is discarded, not truncated. Nothing was "
-            "signalled, deleted, or cleaned here; use the 'stop' subcommand to act"
+            "IN-FLIGHT PROJECTION BACK -- the work is discarded, not truncated. This command "
+            "REPORTS ONLY and did not stop the run: the in-process F2 capacity guard is what "
+            "aborts and rolls back at this floor. Nothing was signalled, deleted, or cleaned "
+            "here"
         )
         return CapacityVerdict(state=state, free_bytes=free, message=message)
     if state == F2_ALERT_STATE:
@@ -618,7 +636,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     capacity = sub.add_parser(
         "capacity",
-        help="Report continuous free space on the working world's volume. Acts on nothing.",
+        help=(
+            "Report continuous free space on the working world's volume. Supplemental "
+            "observability: it acts on nothing and stops nothing. The in-process F2 capacity "
+            "guard is the authoritative enforcement (D138-R11)."
+        ),
     )
     capacity.add_argument(
         "--path",

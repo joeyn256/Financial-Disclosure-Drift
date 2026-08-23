@@ -1147,6 +1147,35 @@ research-pipeline surface in this map is affected and no test selection elsewher
 Proven on Linux by CI run `32605572777` at `977a811b…`: `4899` passed, `1` skipped, `0` failed, with
 all four previously failing nodes green under `ubuntu-latest`/`procps`.
 
+**A bounded performance A/B has since been run against that same runtime, and it changed nothing
+here either.** [Decision 134](Decisions/decision_134_m3_3_bounded_performance_ab.md) measured two
+low-risk runtime candidates — `PRAGMA mmap_size` and a relaxed F0/F1 checkpoint cadence — at two
+bounded operating points, and the owner **rejected both for adoption** (D134-R1). **It has no impact
+entry of its own because no source changed for it**: neither candidate was implemented, the accepted
+[Decision 131](Decisions/decision_131_m3_3_d128_semantic_and_operational_repair.md) runtime
+configuration and the accepted
+[Decision 119](Decisions/decision_119_m3_3_cache_bound_persistence_and_prefix_diagnostic.md) pragma
+surface are **byte-unchanged**, and the record's executable change set is **empty** — so every path
+and test named in this map stands exactly as written and **no test selection anywhere in it
+changes**.
+
+**One durable finding from it belongs in this map, because it forecloses a plausible future change.**
+Relaxing the F0/F1 checkpoint cadence by `32×` (`5,120` → `160` checkpoints issued, `4,960`
+suppressed) left the **WAL high-water mark byte-identical at `768,054,552` bytes**
+([Decision 134](Decisions/decision_134_m3_3_bounded_performance_ab.md) §5, D134-R3). Peak WAL is set
+entirely by **F2's single association transaction, which neither arm checkpoints inside** — the
+F0/F1 cadence never governed the peak at all. **A future change proposing to control peak WAL by
+tuning `BoundedTransaction` checkpoint cadence in F0 or F1 is answered in advance: it cannot work**,
+and it would need to target F2 instead. The `>= 30` GiB pre-F2 admission gate
+([Decision 127](Decisions/decision_127_m3_3_pre_f2_admission_guard.md)) is **untouched** by that
+finding and remains in code as written.
+
+**The measurements bound their own reach.** They describe two fixtures of `3,520` and `6,871` archive
+members drawn from a source holding `985,835` — under `0.7%` — and authorize **no complete-source
+performance claim**. The mmap benefit **declined** as the catalog grew (`12.84%` → `9.775%`, map
+coverage `80.64%` → `45.33%`), which trends the wrong way for a larger run.
+
+
 ## Notes on reading this table
 
 - **"Direct test files"** are the tests whose primary subject is the listed module — run these first,

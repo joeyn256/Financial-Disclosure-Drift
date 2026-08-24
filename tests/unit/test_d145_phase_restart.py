@@ -54,6 +54,7 @@ from disclosure_drift.m3 import canary_phases as phases  # noqa: E402
 from disclosure_drift.m3 import canary_runtime as runtime  # noqa: E402
 from disclosure_drift.m3 import dock_transport as dt  # noqa: E402
 from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
+from disclosure_drift.m3 import repository_identity as ri  # noqa: E402
 from disclosure_drift.m3 import single_source_canary as canary  # noqa: E402
 from disclosure_drift.m3.working_catalog import (  # noqa: E402
     PROGRESS_LEDGER_FILENAME,
@@ -68,6 +69,99 @@ _OTHER_UUID = "0BADCAFE-0000-0000-0000-000000000000"
 _DOCK = d144._DOCK
 _DIRECT = d144._DIRECT
 _THIRD_PARTY_HUB = d144._THIRD_PARTY_HUB
+
+
+#: A synthetic repository identity, pinned for every in-process test in this file.
+#:
+#: **Why pinning is legitimate here, and where the real proof lives.** Decision 147 makes a phase
+#: derive its own repository identity from Git and refuse a working tree that is not clean. Every
+#: developer's checkout is dirty while they are working in it, so an in-process test that used the
+#: live derivation would pass or fail on the state of the tree rather than on the property under
+#: test -- which is the opposite of a test that can fail for the right reason.
+#:
+#: This pin is therefore the **downstream** seam accepted Decision 147 §6 permits, and it is
+#: permitted *only* because the mechanism itself is proved against real Git repositories with real
+#: commits in `tests/unit/test_d147_repository_code_identity.py`. Nothing here is evidence that the
+#: derivation works; it is the fixture that lets the phase machinery be tested independently of it.
+_PINNED_REPOSITORY = ri.RepositoryIdentity(
+    contract=ri.REPOSITORY_IDENTITY_CONTRACT,
+    head_sha="a" * 40,
+    tree_sha="b" * 40,
+    dirty_tracked_paths=(),
+    untracked_paths=(),
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _pinned_repository_identity() -> Any:
+    """Pin the repository identity for this module. See `_PINNED_REPOSITORY`."""
+    patch = pytest.MonkeyPatch()
+    patch.setattr(canary, "require_clean_running_repository", lambda: _PINNED_REPOSITORY)
+    yield
+    patch.undo()
+
+
+def _git(root: Path, *arguments: str) -> None:
+    """One Git command against a disposable repository built by a test."""
+    subprocess.run(  # noqa: S603 - fixed argv, no shell, test-owned temporary repository
+        ["git", "-C", str(root), *arguments],  # noqa: S607
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+
+
+def published_checkout(root: Path, *, name: str = "published") -> Path:
+    """A real, clean Git repository holding **this** checkout's live `disclosure_drift` source.
+
+    **Why a copy rather than the developer's own checkout.** Decision 147 refuses a phase whose
+    repository has uncommitted tracked changes or untracked, non-ignored files -- and the checkout
+    a developer is working in has both, every time they are working in it. A child process pointed
+    at it would refuse for a reason that has nothing to do with what the test is proving.
+
+    **Why a copy of the live tree rather than `git archive HEAD`.** The child must run the code
+    under test, including changes that are not committed yet. Copying the working tree and
+    committing it once produces exactly that: the live source, at a real commit, in a real
+    repository with a real tree object.
+
+    The child is pointed at it with `PYTHONPATH`, and every caller asserts that the identity the
+    child reported is this repository's -- so a future packaging change that shadowed the copy
+    would fail the test loudly rather than let it pass while proving nothing.
+    """
+    checkout = root / name
+    source_root = Path(canary.__file__).resolve().parents[3]
+    (checkout / "src").mkdir(parents=True)
+    shutil.copytree(
+        source_root / "src" / "disclosure_drift",
+        checkout / "src" / "disclosure_drift",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    # The operator command resolves its configuration relative to the checkout it runs from, so a
+    # published checkout carries the tracked configuration as well as the tracked source.
+    shutil.copytree(source_root / "configs", checkout / "configs")
+    # And the repository's own tracked ignore policy, which is load-bearing rather than cosmetic:
+    # importing the package writes `__pycache__`, so without it the very act of running would make
+    # the working tree ambiguous and Decision 147 would -- correctly -- refuse. What makes the
+    # clean-tree contract livable is that the repository itself declares those paths irrelevant.
+    shutil.copyfile(source_root / ".gitignore", checkout / ".gitignore")
+    _git(checkout, "init")
+    _git(checkout, "config", "user.email", "d147@example.invalid")
+    _git(checkout, "config", "user.name", "Decision 147 fixture")
+    _git(checkout, "config", "commit.gpgsign", "false")
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "--no-verify", "--no-gpg-sign", "-m", "published")
+    return checkout
+
+
+def head_of(checkout: Path) -> str:
+    """The commit a disposable published checkout is at, read independently of the package."""
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-owned repository
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],  # noqa: S607
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return completed.stdout.decode().strip()
 
 
 # ==========================================================================
@@ -417,7 +511,15 @@ def test_a_successor_refuses_a_changed_governing_configuration(
 def test_a_successor_refuses_a_changed_code_revision(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """**§18.G.** A build whose version moved does not continue another build's checkpoint."""
+    """**§18.G.** A build whose declared version moved does not continue another build's checkpoint.
+
+    **This is no longer the code-continuity proof, and Decision 147 says so.** D146-MAJOR-1 found
+    that this test established the property only for `disclosure_drift.__version__` -- the literal
+    `"0.1.0"`, moved by exactly one commit in the whole history -- so it proved that a *declared*
+    version change is detected and nothing at all about executable code. It is kept because the
+    property it does prove is still wanted; the real proof is the repository identity, in
+    `tests/unit/test_d147_repository_code_identity.py`.
+    """
     import disclosure_drift
 
     private, work = _world(tmp_path)
@@ -429,9 +531,11 @@ def test_a_successor_refuses_a_changed_code_revision(
 
 def test_the_execution_identity_folds_the_values_that_govern_a_phase() -> None:
     """It is a digest of the governing constants, not a constant that happens to be a digest."""
-    identity = canary.phase_execution_identity()
-    assert identity != canary.phase_execution_identity(batch_size=canary.CANARY_BATCH_SIZE + 1)
-    assert identity == canary.phase_execution_identity()
+    identity = canary.phase_execution_identity(repository=_PINNED_REPOSITORY)
+    assert identity != canary.phase_execution_identity(
+        repository=_PINNED_REPOSITORY, batch_size=canary.CANARY_BATCH_SIZE + 1
+    )
+    assert identity == canary.phase_execution_identity(repository=_PINNED_REPOSITORY)
     assert len(identity) == 64
 
 
@@ -745,10 +849,18 @@ def test_peak_resident_bytes_is_measured_and_is_plausible() -> None:
 # ==========================================================================
 # §20. The bounded memory-reclamation demonstration — three real OS processes
 # ==========================================================================
-def _cli_phase(private: Path, work: Path, phase: str, run_id: str) -> Mapping[str, object]:
-    """Run one phase in a genuinely separate OS process, through the operator command."""
+def _cli_phase(
+    private: Path, work: Path, phase: str, run_id: str, *, checkout: Path
+) -> Mapping[str, object]:
+    """Run one phase in a genuinely separate OS process, through the operator command.
+
+    The child runs from `checkout` -- a real, clean Git repository holding this checkout's live
+    source -- because Decision 147 refuses a phase whose repository working tree is ambiguous, and
+    the tree a developer is working in always is. See `published_checkout`.
+    """
     environment = dict(os.environ)
     environment[EVIDENCE_ROOT_ENV] = str(private)
+    environment["PYTHONPATH"] = str(checkout / "src")
     child = subprocess.Popen(  # noqa: S603
         [
             sys.executable,
@@ -767,7 +879,7 @@ def _cli_phase(private: Path, work: Path, phase: str, run_id: str) -> Mapping[st
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        cwd=Path(canary.__file__).resolve().parents[3],
+        cwd=checkout,
         env=environment,
     )
     # `Popen` rather than `run`, so the OPERATING SYSTEM's own process id is observed here and
@@ -793,7 +905,16 @@ def test_the_three_phases_run_in_three_different_processes_and_each_one_ends(
     145: **the next phase runs in a different process, and the previous process is gone**.
     """
     private, work = _world(tmp_path)
-    observed = [_cli_phase(private, work, phase, "demo") for phase in ("f0", "f1", "f2")]
+    checkout = published_checkout(tmp_path)
+    observed = [
+        _cli_phase(private, work, phase, "demo", checkout=checkout) for phase in ("f0", "f1", "f2")
+    ]
+
+    # Every phase ran from the published checkout, at its one real commit -- so the identity the
+    # three processes agreed on is a measured Git identity and not a shared default.
+    published = head_of(checkout)
+    assert [step["repository_head_sha"] for step in observed] == [published] * 3
+    assert len({str(step["repository_tree_sha"]) for step in observed}) == 1
 
     identifiers = [int(step["pid"]) for step in observed]  # type: ignore[call-overload]
     assert len(set(identifiers)) == 3, "each phase must run in its own process"
@@ -831,7 +952,9 @@ def test_no_activation_constant_is_minted_by_this_record() -> None:
 
 
 def _phase_path_modules() -> tuple[Any, ...]:
-    return (canary, phases, runtime)
+    # `repository_identity` joined the phase path at Decision 147, so it is held to exactly the
+    # same rules as the modules it joined rather than being exempt for being new.
+    return (canary, phases, runtime, ri)
 
 
 def test_the_phase_path_consults_no_authority_constant_and_no_network_switch() -> None:

@@ -2076,6 +2076,37 @@ and its successor **refuses**. That is not a failure of the mechanism; it is the
 lost and requires a new run identity. Worlds are create-once and are never resumed, repaired, or
 overwritten.
 
+### F. The repository must not change between phases, and must be clean before any of them
+
+**Added by [Decision 147](../Decisions/decision_147_m3_3_d146_finding_correction.md)**, which
+closes [Decision 146](../Decisions/decision_146_m3_3_final_independent_post_d145_precanary_review.md)
+`MAJOR-1`. Every phase derives, in its own process, the **git `HEAD` commit** and the **git `HEAD`
+tree** of the repository its code was imported from, and records them in its checkpoint. A
+successor that observes different values **refuses**.
+
+**Before starting the sequence**, and for its whole duration:
+
+* the checkout the canary runs from must be at the revision the run is meant to execute — **check
+  it out and commit before phase-f0, never during the sequence**;
+* it must have **no uncommitted tracked changes**;
+* it must have **no untracked files that are not ignored**. Ignored paths — `__pycache__`, a
+  virtual environment, a build directory — are fine and always will be; a stray untracked `.py`
+  file anywhere in the tree is not, because it can join the import path;
+* **do not** `git checkout`, `git pull`, `git stash`, `git rebase`, edit a source file, or install
+  a different build between two phases.
+
+The command reports the refusal with the exact ambiguity named. **It repairs nothing**: it does not
+check out, stash, reset, clean, fetch or pull, and there is no flag that makes it proceed anyway.
+
+**A refusal for a changed or ambiguous repository is NOT a resumable pause.** If the revision moved
+mid-sequence, the run is over: return to the owner. Restoring the old revision afterwards does not
+create a right to continue — that judgement is the owner's, not the operator's, and not the
+application's.
+
+**There is no `--repository-*` option, and there never will be.** The identity is measured by the
+application from its own source location; an operator-supplied revision would make the whole
+mechanism a statement of intent.
+
 
 ## 29. Freeze the real snapshot only after Gate H and E0
 

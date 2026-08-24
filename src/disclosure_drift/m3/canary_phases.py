@@ -69,7 +69,12 @@ class CanaryPhaseError(DisclosureDriftError):
 
 #: This mechanism's own contract identity, written into every checkpoint so that a successor
 #: built from a different shape refuses rather than misreading a record it half understands.
-PHASE_RESTART_CONTRACT: Final = "m3.3-canary-phase-restart/1"
+#:
+#: **Version 2 is Decision 147.** The checkpoint gained the two repository code-identity fields
+#: that D146-MAJOR-1 found missing, so a version-1 checkpoint describes a phase that ran without
+#: recording which revision it ran -- exactly the state a version-2 successor must not continue
+#: from. Bumping the contract makes that refusal mechanical rather than a missing-field accident.
+PHASE_RESTART_CONTRACT: Final = "m3.3-canary-phase-restart/2"
 
 #: The three major execution phases of the first complete-source canary, in the order they run.
 #:
@@ -164,6 +169,13 @@ class PhaseCheckpoint:
     run_id: str
     source_instance_id: str
     execution_identity: str
+    #: The **repository code identity** this phase executed under -- Decision 147, closing
+    #: D146-MAJOR-1. ``execution_identity`` folds both of these, so either one alone would already
+    #: refuse a successor whose revision moved; they are recorded separately as well because a
+    #: digest says only *that* something differs. A refusal has to be able to say expected HEAD
+    #: ``X``, observed ``Y``, and a digest of seventeen inputs cannot.
+    repository_head_sha: str
+    repository_tree_sha: str
     catalog_source_sha256: str
     migration_head: int
     plan_fingerprint: str
@@ -182,6 +194,8 @@ class PhaseCheckpoint:
             "run_id": self.run_id,
             "source_instance_id": self.source_instance_id,
             "execution_identity": self.execution_identity,
+            "repository_head_sha": self.repository_head_sha,
+            "repository_tree_sha": self.repository_tree_sha,
             "catalog_source_sha256": self.catalog_source_sha256,
             "migration_head": self.migration_head,
             "plan_fingerprint": self.plan_fingerprint,
@@ -211,6 +225,8 @@ class PhaseCheckpoint:
                 run_id=str(record["run_id"]),
                 source_instance_id=str(record["source_instance_id"]),
                 execution_identity=str(record["execution_identity"]),
+                repository_head_sha=str(record["repository_head_sha"]),
+                repository_tree_sha=str(record["repository_tree_sha"]),
                 catalog_source_sha256=str(record["catalog_source_sha256"]),
                 migration_head=stored_int(record["migration_head"]),
                 plan_fingerprint=str(record["plan_fingerprint"]),
@@ -343,6 +359,8 @@ def require_phase_admission(
     run_id: str,
     source_instance_id: str,
     execution_identity: str,
+    repository_head_sha: str,
+    repository_tree_sha: str,
     catalog_source_sha256: str,
     migration_head: int,
     plan_fingerprint: str,
@@ -359,10 +377,18 @@ def require_phase_admission(
        :data:`PHASE_STATUS_COMPLETE`. An absent checkpoint is an incomplete or failed
        predecessor, and it refuses -- the existence of a world directory, a working catalog, or
        any number of committed rows is never read as phase completion;
-    3. **is it the same run?** Run identity, source identity, governing-code identity, the
-       accepted catalog's own digest, the migration head, and the plan fingerprint must all be
-       exactly what the predecessor recorded. A successor never continues another run's
-       checkpoint, and it never continues its own run under governing values that have moved.
+    3. **is it the same run, of the same code?** Run identity, source identity, the declared
+       execution-contract identity, **the repository commit and the repository tree the
+       predecessor executed from**, the accepted catalog's own digest, the migration head, and
+       the plan fingerprint must all be exactly what the predecessor recorded. A successor never
+       continues another run's checkpoint, and it never continues its own run under governing
+       values -- or governing *code* -- that have moved.
+
+    **The repository identity is compared twice, deliberately.** It is folded into
+    ``execution_identity``, which is the admission key, and it is also compared field by field so
+    that a refusal can name the expected and observed commit and tree. Decision 147 exists
+    because D146-MAJOR-1 found the earlier digest binding no executable code at all; a mechanism
+    that refuses correctly but cannot say *why* is only half of the correction.
 
     The successor process may not say *"the previous process already checked this"*. This runs
     in the successor, against state the predecessor wrote, every time.
@@ -402,8 +428,17 @@ def require_phase_admission(
     _require_identity(
         predecessor, "source_instance_id", predecessor.source_instance_id, source_instance_id
     )
+    # The named identities first and the aggregate digest LAST, deliberately. Every named field
+    # is also folded into `execution_identity`, so comparing the digest first would make every
+    # refusal say "execution_identity" and nothing else -- which is a correct refusal that cannot
+    # be diagnosed. Checking the specific causes first means a moved revision reports the moved
+    # revision, with both values, and the digest stays as the catch-all for anything a named
+    # comparison would miss.
     _require_identity(
-        predecessor, "execution_identity", predecessor.execution_identity, execution_identity
+        predecessor, "repository_head_sha", predecessor.repository_head_sha, repository_head_sha
+    )
+    _require_identity(
+        predecessor, "repository_tree_sha", predecessor.repository_tree_sha, repository_tree_sha
     )
     _require_identity(
         predecessor,
@@ -417,6 +452,9 @@ def require_phase_admission(
     _require_identity(
         predecessor, "plan_fingerprint", predecessor.plan_fingerprint, plan_fingerprint
     )
+    _require_identity(
+        predecessor, "execution_identity", predecessor.execution_identity, execution_identity
+    )
     return PhaseAdmission(phase=phase, predecessor=predecessor)
 
 
@@ -428,9 +466,11 @@ def _require_identity(
         return
     message = (
         f"the {field} this process would continue under does not match the one phase "
-        f"{predecessor.phase!r} recorded at its terminal. A successor process is a continuation "
-        "of the SAME governed run: it never adopts another run's checkpoint, and it never "
-        "continues its own run under governing values that have changed since the predecessor "
-        "finished. The run is refused and nothing was started"
+        f"{predecessor.phase!r} recorded at its terminal: expected {recorded!r}, observed "
+        f"{observed!r}. A successor process is a continuation of the SAME governed run: it never "
+        "adopts another run's checkpoint, and it never continues its own run under governing "
+        "values -- or governing code -- that have changed since the predecessor finished. The "
+        "run is refused and nothing was started, nothing was checked out or repaired, and this "
+        "is not a resumable pause"
     )
     raise CanaryPhaseError(message)

@@ -86,7 +86,10 @@ from disclosure_drift.m3.compact_evidence import (
 from disclosure_drift.m3.dock_transport import TRANSPORT_DOCK
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.external_working_root import (
+    F2_ALERT_FREE_BYTES,
+    F2_HARD_FLOOR_FREE_BYTES,
     LAUNCH_MINIMUM_FREE_BYTES,
+    POST_F0_MINIMUM_FREE_BYTES,
     PRE_F1_MINIMUM_FREE_BYTES,
     QUALIFIED_EXTERNAL_VOLUME_UUID,
     CapacityObservation,
@@ -112,6 +115,10 @@ from disclosure_drift.m3.offline_parse import (
     select_planned_source,
     structural_source_preflight,
     write_containment,
+)
+from disclosure_drift.m3.repository_identity import (
+    RepositoryIdentity,
+    require_clean_running_repository,
 )
 from disclosure_drift.m3.working_catalog import (
     PROGRESS_LEDGER_FILENAME,
@@ -266,14 +273,30 @@ CANARY_RESOLUTION_SCOPE: Final = "catalog"
 #: **continuous** emergency floor *during* F2 is a third number and stays where D124-R5 put it,
 #: at `10` GiB (:data:`~disclosure_drift.m3.external_working_root.F2_HARD_FLOOR_FREE_BYTES`).
 #:
-#: Accepted **Decision 126 §7** (D126-R6) records why it has to live here rather than in a
-#: launch wrapper or an external sampler. F1 returns and F2 begins in consecutive statements, so
-#: there is no window an outside process can occupy; nothing durable changes at the boundary, so
-#: an observer cannot tell "F1 finished" from "F2 is about to open" by reading state; a signal
-#: from outside is advisory where admission has to be dispositive; and free space sampled at any
-#: instant before the call describes a different instant than the one that matters. Tightening a
-#: sampler's cadence shrinks that race and never closes it. Only the path that is about to open
-#: the transaction can decline to open it.
+#: Accepted **Decision 126 §7** (D126-R6) records why it has to live here rather than in a launch
+#: wrapper or an external sampler, and **two of its four rationale sentences stopped describing
+#: this architecture when Decision 145 split the run into three processes**. They are separated
+#: from the binding invariant below rather than quietly dropped -- D146-MINOR-2 and D146-OBS-5,
+#: corrected by Decision 147. **Decision 126 itself is not rewritten**: it recorded what was true
+#: of the whole-run shape it governed, and its requirement is untouched.
+#:
+#: **HISTORICAL -- true of the pre-Decision-145 whole-run shape, and no longer true.** *"F1
+#: returns and F2 begins in consecutive statements, so there is no window an outside process can
+#: occupy"*: on the phased path there IS a window -- F1's process exits and F2's process starts.
+#: *"Nothing durable changes at the boundary, so an observer cannot tell 'F1 finished' from 'F2
+#: is about to open' by reading state"*: F1 now writes a durable terminal checkpoint, and reading
+#: it is exactly how a successor tells those two states apart. Both sentences remain true of the
+#: surviving whole-run path, where F1 and F2 still occur in consecutive statements.
+#:
+#: **CURRENT AND BINDING -- unchanged by Decision 145, and the reasons that carry D126-R6.** A
+#: signal from outside is advisory where admission has to be dispositive; and free space sampled
+#: at any instant before the call describes a different instant than the one that matters.
+#: Tightening a sampler's cadence shrinks that race and never closes it. **Only the path that is
+#: about to open the transaction can decline to open it** -- so the dispositive gate runs inside
+#: the process that opens F2's transaction, immediately before it opens, on both paths. The
+#: phased path takes it in :func:`_phase_f2_body`, inside F2's own ``write_containment`` and one
+#: statement before ``_f2``; the whole-run path takes it in ``_materialize`` between F1's return
+#: and F2's call. Neither the gate, its placement, nor its `50` GiB value moved.
 #:
 #: It is an **admission predicate**, not a budget. It moves no row, no ordering, no digest, and
 #: no identity, and F2's behaviour at or above the floor is exactly what it was before.
@@ -1306,9 +1329,13 @@ def _require_pre_f2_free_space(directory: Path) -> int:
 
     **Raising here is the whole mechanism.** The caller is the statement that would otherwise
     call :func:`~disclosure_drift.m3.offline_parse.materialize_census_associations` next, so a
-    refusal lands **before** F2's single transaction opens rather than during it. Accepted
-    Decision 116 §5 keeps the surrounding rule intact: a refused run leaves the accepted catalog
-    unchanged, and a failed gate is reported rather than worked around or retried in place.
+    refusal lands **before** F2's single transaction opens rather than during it. That is true on
+    both paths and is what accepted Decision 126 §7 (D126-R6) requires: the phased path calls it
+    from :func:`_phase_f2_body`, **in the F2 process**, one statement before ``_f2``; the
+    whole-run path calls it from ``_materialize`` between F1's return and F2's call. The process
+    boundary Decision 145 introduced sits before this gate, never between it and the transaction.
+    Accepted Decision 116 §5 keeps the surrounding rule intact: a refused run leaves the accepted
+    catalog unchanged, and a failed gate is reported rather than worked around or retried in place.
 
     No path is named in the refusal, in keeping with the rest of this module.
 
@@ -2136,26 +2163,53 @@ CANARY_PHASE_MODES: Final[Mapping[str, str]] = {
 }
 
 
-def phase_execution_identity(*, batch_size: int = CANARY_BATCH_SIZE) -> str:
-    """Digest the frozen values that govern how this build executes a phase -- D145 §12.
+def phase_execution_identity(
+    *, repository: RepositoryIdentity, batch_size: int = CANARY_BATCH_SIZE
+) -> str:
+    """Digest what governs how this build executes a phase -- D145 §12, corrected by Decision 147.
 
     **What it is for.** A successor process is a continuation of the *same* governed run. It must
     refuse to continue a predecessor's checkpoint under code whose governing semantics have
-    moved, and this is the mechanical form of that: every value that decides *what a phase does*
-    is folded into one digest, recorded at each terminal, and re-derived and compared by the
-    process that continues.
+    moved, and this is the mechanical form of that: the declared execution contract *and* the
+    identity of the repository revision the code is running from are folded into one digest,
+    recorded at each terminal, and re-derived and compared by the process that continues.
 
-    **What is in it, and why nothing else is.** The path reads no configuration file -- its
-    configuration *is* these frozen constants -- so this is the configuration identity as well as
-    the code identity, and inventing a second parallel identity system for either would be
-    exactly what Decision 145 §12 forbids. The package version is folded in, so a build whose
-    version moved refuses even where every constant happens to agree.
+    **Why the repository identity is here, stated plainly.** Until Decision 147 this digest bound
+    ten frozen constants plus ``disclosure_drift.__version__``, and the independent review
+    Decision 145 itself demanded found -- **D146-MAJOR-1** -- that this bound no executable
+    governing code at all: the version string is the literal ``"0.1.0"`` and has moved exactly
+    once in the whole history, so an accepted capacity floor could be relaxed ``60 -> 1`` GiB and
+    an admission guard deleted outright while the digest stayed bit-identical. It now folds the
+    **repository commit and the repository tree** the running source was imported from, derived
+    by :mod:`~disclosure_drift.m3.repository_identity` from Git rather than declared by anyone.
+    A governing repository change between phases now refuses, mechanically.
+
+    **Both halves, not one.** The frozen contract inputs are kept, and the code identity is added
+    beside them: the repository identity is the backstop that catches *any* source change, and the
+    declared inputs are what let a reader see which policy values a continuation is actually
+    protected against. Neither replaces the other.
+
+    **The capacity policy inputs, corrected.** Decision 145 §12 said this folded "the four
+    capacity floors" and it folded three -- **D146-MINOR-1**. Every execution-governing capacity
+    value on the F0/F1/F2 path is folded now: the three phase **admission** floors, the ``POST_F0``
+    post-phase **invariant**, and the two **continuous F2** thresholds -- the alert that decides
+    what a capacity observation reports, and the hard floor that rolls F2's single transaction
+    back. Six, named individually rather than counted.
 
     **``cache_bytes`` is deliberately absent.** Accepted Decision 119's equivalence proof
     establishes that the page-cache budget moves no row, no ordering, no digest and no identity;
     folding a provably evidence-neutral execution parameter into a continuity check would refuse
     continuations that are provably fine. ``batch_size`` **is** folded in, because it decides
     when rows become durable and no accepted record blesses changing it mid-run.
+
+    Args:
+        repository: The identity of the repository the running source was imported from. Passed
+            rather than fetched, so this function stays pure and the production path has exactly
+            **one** derivation point -- :func:`run_single_source_canary_phase`, which derives it
+            itself through
+            :func:`~disclosure_drift.m3.repository_identity.require_clean_running_repository` and
+            accepts no operator-supplied revision.
+        batch_size: Parts per real transaction.
     """
     return execution_identity(
         {
@@ -2167,9 +2221,15 @@ def phase_execution_identity(*, batch_size: int = CANARY_BATCH_SIZE) -> str:
             "qualified_volume_uuid": QUALIFIED_EXTERNAL_VOLUME_UUID,
             "batch_size": batch_size,
             "launch_minimum_free_bytes": LAUNCH_MINIMUM_FREE_BYTES,
+            "post_f0_minimum_free_bytes": POST_F0_MINIMUM_FREE_BYTES,
             "pre_f1_minimum_free_bytes": PRE_F1_MINIMUM_FREE_BYTES,
             "pre_f2_minimum_free_bytes": PRE_F2_MINIMUM_FREE_BYTES,
+            "f2_alert_free_bytes": F2_ALERT_FREE_BYTES,
+            "f2_hard_floor_free_bytes": F2_HARD_FLOOR_FREE_BYTES,
             "package_version": disclosure_drift.__version__,
+            "repository_identity_contract": repository.contract,
+            "repository_head_sha": repository.head_sha,
+            "repository_tree_sha": repository.tree_sha,
         }
     )
 
@@ -2244,6 +2304,11 @@ class CanaryPhaseResult:
     started_at_utc: str
     completed_at_utc: str
     execution_identity: str
+    #: The repository commit and tree this phase's process executed from -- Decision 147. Rendered
+    #: so the operator, and the test that drives three real processes, can read the code identity
+    #: a phase actually ran under rather than infer it from a digest of everything else as well.
+    repository_head_sha: str
+    repository_tree_sha: str
 
     # -- the RAM-reclamation evidence -- D145 §9 -------------------------- #
     pid: int
@@ -2312,11 +2377,19 @@ def run_single_source_canary_phase(
     the whole sequence, and ``GOVERNED_PAUSE_RESUME`` remains ``NOT_IMPLEMENTED``.
 
     **The successor trusts nothing the predecessor checked.** Every launch predicate is
-    re-established here, in this process, before any work begins: the work-root boundary, the
-    complete Decision 137 external envelope narrowed to the Decision 142 §4 topology, the exact
-    Volume UUID, AC power and an open lid, D130 isolation, the external ``SQLITE_TMPDIR``, the
-    host execution lock, the accepted catalog's own digest, and the predecessor's durable
-    terminal checkpoint including the proof that its process is gone.
+    re-established here, in this process, before any work begins: **the identity of the Git
+    revision this process's own source was imported from** (Decision 147), the work-root
+    boundary, the complete Decision 137 external envelope narrowed to the Decision 142 §4
+    topology, the exact Volume UUID, AC power and an open lid, D130 isolation, the external
+    ``SQLITE_TMPDIR``, the host execution lock, the accepted catalog's own digest, and the
+    predecessor's durable terminal checkpoint including the proof that its process is gone.
+
+    **The code identity is recomputed here, not inherited.** F0 records the repository commit and
+    tree it ran from; F1 derives them again in its own fresh process and refuses if they moved;
+    F2 does the same. That is the correction Decision 147 makes to D146-MAJOR-1, and it is why a
+    governing repository change between two phases stops the run instead of being invisible to
+    it. Such a refusal is **terminal**: nothing is checked out, stashed, reset, fetched, cleaned
+    or repaired, and it is not a resumable pause.
 
     Args:
         phase: Which major phase to run -- one of the three in
@@ -2345,7 +2418,20 @@ def run_single_source_canary_phase(
         SingleSourceCanaryError: a canary precondition failed.
     """
     validate_phase(phase)
-    # 0. The write boundary and the complete envelope, exactly as the whole-run path establishes
+    # 0a. WHICH CODE IS THIS -- Decision 147, closing D146-MAJOR-1. Derived from Git, in this
+    #     process, from this module's own location: no flag, no environment variable and no
+    #     argument can declare a revision, because a declared identity would make the continuity
+    #     contract a statement of intent rather than a measurement. It runs FIRST, before the
+    #     work root, the volume, the dock or the lock, because a process that cannot say which
+    #     revision it is has no business touching the operator's hardware -- and because a
+    #     refusal here costs nothing and reaches nothing.
+    #
+    #     A repository whose tracked tree is dirty, or which carries untracked non-ignored files,
+    #     is REFUSED: the checkpoint records a committed tree, and that record is only worth
+    #     anything if the committed tree is what ran. The refusal is terminal, not a pause --
+    #     nothing is checked out, stashed, reset, cleaned, fetched or repaired.
+    repository = require_clean_running_repository()
+    # 0b. The write boundary and the complete envelope, exactly as the whole-run path establishes
     #    them, before anything is measured, opened, created, or attached to. D144-R1's narrowing
     #    is passed here too: a restart between phases must NOT be a way to reach a topology the
     #    owner did not select, so there is no seam here that admits a qualified direct attachment.
@@ -2380,6 +2466,7 @@ def run_single_source_canary_phase(
             cache_bytes=cache_bytes,
             external=external,
             started=started,
+            repository=repository,
         )
     finally:
         lock.release()
@@ -2397,6 +2484,7 @@ def _run_phase_locked(  # noqa: PLR0913 - one phase, and every predicate it must
     cache_bytes: int | None,
     external: ExternalCanaryPreflight | None,
     started: str,
+    repository: RepositoryIdentity,
 ) -> CanaryPhaseResult:
     """One phase, with the host execution lock already held. See the caller."""
     rss_at_start = process_peak_resident_bytes()
@@ -2436,7 +2524,11 @@ def _run_phase_locked(  # noqa: PLR0913 - one phase, and every predicate it must
             phase=phase,
             run_id=run_id,
             source_instance_id=source_instance_id,
-            execution_identity=phase_execution_identity(batch_size=batch_size),
+            execution_identity=phase_execution_identity(
+                repository=repository, batch_size=batch_size
+            ),
+            repository_head_sha=repository.head_sha,
+            repository_tree_sha=repository.tree_sha,
             catalog_source_sha256=identity.source_file_sha256,
             migration_head=identity.migration_head,
             plan_fingerprint=fingerprint,
@@ -2548,7 +2640,9 @@ def _run_phase_locked(  # noqa: PLR0913 - one phase, and every predicate it must
         status=PHASE_STATUS_COMPLETE,
         run_id=run_id,
         source_instance_id=source_instance_id,
-        execution_identity=phase_execution_identity(batch_size=batch_size),
+        execution_identity=phase_execution_identity(repository=repository, batch_size=batch_size),
+        repository_head_sha=repository.head_sha,
+        repository_tree_sha=repository.tree_sha,
         catalog_source_sha256=catalog_before,
         migration_head=migration_head,
         plan_fingerprint=fingerprint,
@@ -2568,6 +2662,8 @@ def _run_phase_locked(  # noqa: PLR0913 - one phase, and every predicate it must
         started_at_utc=started,
         completed_at_utc=checkpoint.completed_at_utc,
         execution_identity=checkpoint.execution_identity,
+        repository_head_sha=checkpoint.repository_head_sha,
+        repository_tree_sha=checkpoint.repository_tree_sha,
         pid=checkpoint.pid,
         rss_peak_bytes_at_start=checkpoint.rss_peak_bytes_at_start,
         rss_peak_bytes_at_terminal=checkpoint.rss_peak_bytes_at_terminal,

@@ -1441,3 +1441,38 @@ rather than assumes — so anything run-scoped added to `CanaryResult` must be a
 the test will say so. Third, **the phase-restart tests pin `shutil.disk_usage`**: if the module
 ever measures free space another way, the floor tests would pass while proving nothing, which is
 why one test asserts the seam still exists.
+
+## The Decision 147 repository code-identity surface
+
+[Decision 147](Decisions/decision_147_m3_3_d146_finding_correction.md) closes
+[Decision 146](Decisions/decision_146_m3_3_final_independent_post_d145_precanary_review.md)
+`MAJOR-1` by binding a **genuine repository code identity** into the phase-continuity contract.
+Before it, a successor could continue a predecessor's checkpoint under source that had changed
+arbitrarily; the digest folded only frozen constants and a package version that has moved once in
+the entire history.
+
+| Change | Nearest affected tests |
+|---|---|
+| `src/disclosure_drift/m3/repository_identity.py` | **new** — `RepositoryIdentity`, `repository_root_containing`, `repository_identity_at`, `running_repository_identity`, `require_clean_running_repository`. Derives the git `HEAD` commit and `HEAD` tree of the repository the running source was imported from, authenticates that repository by tracked membership of the governing modules, and refuses an ambiguous working tree. **Read-only: exactly `rev-parse`, `status` and `ls-files`, and a test proves it from the module's own AST** | `tests/unit/test_d147_repository_code_identity.py` |
+| `src/disclosure_drift/m3/canary_phases.py` | `PHASE_RESTART_CONTRACT` `/1 -> /2`; `PhaseCheckpoint.repository_head_sha` and `.repository_tree_sha`; `require_phase_admission` takes and compares both. **The named comparisons run before the aggregate digest**, so a moved revision reports the moved revision with both values rather than an undiagnosable `execution_identity` mismatch | `tests/unit/test_d147_repository_code_identity.py`, `tests/unit/test_d145_phase_restart.py` |
+| `src/disclosure_drift/m3/single_source_canary.py` | `phase_execution_identity(repository=...)` — now a **required** keyword, so the production path has exactly one derivation point; `require_clean_running_repository()` called first in `run_single_source_canary_phase`, before the work root, the volume, the dock or the lock; three capacity constants added to the fold; `CanaryPhaseResult` gained the two identity fields; the `PRE_F2_MINIMUM_FREE_BYTES` docstring separates historical Decision 126 rationale from the current binding invariant | `tests/unit/test_d147_repository_code_identity.py`, `tests/unit/test_d145_phase_restart.py`, `tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_d127_pre_f2_admission_guard.py` |
+| `tests/unit/test_d145_phase_restart.py` | a module-scoped **pinned** identity for the in-process tests, and `published_checkout()` — a real, clean, temporary git repository holding the live source, used by every child-process test | `tests/unit/test_d145_phase_restart.py`, `tests/unit/test_d147_repository_code_identity.py` |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d147_repository_code_identity.py`. Always
+with it: `tests/unit/test_d145_phase_restart.py`, because the two share the published-checkout
+fixture and the phase machinery. Then the canary path it sits on —
+`tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py`,
+`tests/unit/test_d127_pre_f2_admission_guard.py`, `tests/unit/test_d144_first_canary_transport_narrowing.py`
+— and `tests/integration/test_m3_cli.py` for the operator surface.
+
+**Three cautions.** First, **a test that drives a phase in-process must pin the identity**: the
+derivation reads the real checkout, and a developer's checkout is dirty whenever they are working
+in it, so an unpinned test would pass or fail on the state of the tree rather than on the property
+under test. The pin is legitimate *only* because
+`tests/unit/test_d147_repository_code_identity.py` proves the derivation against real git
+repositories with real commits. Second, **`published_checkout()` copies the tracked `.gitignore`
+on purpose**: importing the package writes `__pycache__`, so without the repository's own ignore
+policy the very act of running would make the tree ambiguous and the phase would — correctly —
+refuse. Third, **the capacity inventory test is a tripwire**: adding a `*_FREE_BYTES` or
+`*_CACHE_BYTES` constant to `external_working_root` or `single_source_canary` fails it until the
+constant is classified as folded into the execution contract or explicitly excluded with a reason.

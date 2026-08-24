@@ -1610,8 +1610,27 @@ Decision 138 corrects the safety envelope; it does not change one word of this b
 Accepted [Decision 140](../Decisions/decision_140_m3_3_total_pre_canary_hardening.md) closes the
 D139 independent review's **MAJOR-2**: there was no single launch shape an operator could copy,
 and the three shapes that existed each omitted something that a thirty-hour run cannot recover
-from. This section is the one canonical command. Every other launch snippet in this runbook is
-superseded by it.
+from. This section is the one canonical launch **wrapper**. Every other launch snippet in this
+runbook is superseded by it.
+
+> **`--mode run` IS NO LONGER THE MODE THIS WRAPPER CARRIES — [Decision 149](../Decisions/decision_149_m3_3_final_precanary_limitation_cleanup.md) (`D149-R3`).**
+> Accepted [Decision 145](../Decisions/decision_145_m3_3_governed_major_phase_restart.md) split the
+> governed canary into **three processes**, and
+> [Decision 147](../Decisions/decision_147_m3_3_d146_finding_correction.md) bound each of them to
+> the repository revision it ran under. A single whole-run process provides neither property, so
+> **`--mode run` is now REFUSED by the application on any working root the external envelope
+> governs** — which is every root the real canary can use. This is a production refusal, not a
+> rule of this page: there is no flag, environment variable or configuration key that admits it.
+>
+> **Everything else in this section still stands**, and that is the point of correcting it here
+> rather than deleting it: the physical conditions, the internal runtime directory, `caffeinate`,
+> the tmux `-e SQLITE_TMPDIR` injection and
+> [`scripts/m3/canary_launch.py`](../../scripts/m3/canary_launch.py) are unchanged. **Only the
+> mode changes.** The wrapper is run **once per phase**, in the order
+> [§28h](#28h-the-governed-major-phase-restart--decision-145) sets out, with a clean process exit
+> between each. `--mode run` on an **internal** root is untouched and remains the accepted
+> [Decision 116](../Decisions/decision_116_m3_3_disposable_single_source_canary_path.md) path used by bounded
+> library and development exercises; it is not a route to the governed canary and never was.
 
 ### The physical and operator conditions — D140-R20
 
@@ -1672,14 +1691,19 @@ tmux new-session -d -s "$SESSION" \
      --work-root '$WORK_ROOT' \
      --require-sqlite-tmpdir -- \
      '$PWD/.venv/bin/disclosure-drift' m3 canary-source \
-       --config configs/project.yaml --mode run \
+       --config configs/project.yaml --mode "$PHASE" \
        --source-instance-id '<SOURCE_INSTANCE_ID>' \
        --run-id '<RUN_ID>' \
        --work-root '$WORK_ROOT' \
        --require-volume-uuid '397A4D4A-9508-391E-814E-3B533C7BD049'"
 ```
 
-There is **no `--member-limit`**: `run` is complete-source only, and a bound is refused outright
+`$PHASE` is **`phase-f0`, then `phase-f1`, then `phase-f2`** — the whole wrapper above is run
+three times, once per phase, with the **same** `--run-id`, and the process must have **exited**
+before the next one starts (§28h). `--mode run` here is refused by the application (`D149-R3`);
+it is not an alternative shape and it is not a fallback.
+
+There is **no `--member-limit`**: a phase is complete-source only, and a bound is refused outright
 rather than ignored.
 
 Each part earns its place:
@@ -1851,7 +1875,7 @@ SSD refuses here — including as the answer to a dock refusal, which §28g.D fo
 
 **The "one canary" row is exact, and its scope is worth stating rather than rounding up**
 (D143 OBSERVATION-1, closed by [Decision 144](../Decisions/decision_144_m3_3_d143_finding_correction.md)
-§8): the host execution lock is taken by **`--mode run`**, so it excludes a second
+§8): the host execution lock is taken by **every canary phase**, so it excludes a second
 complete-source canary and **nothing else**. A concurrent `--mode profile-prefix` on the same
 host is **not** mechanically excluded and would consume volume space the running canary's
 capacity model assumes it alone consumes. Do not start one. That is an operator rule, and it is

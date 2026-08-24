@@ -1476,3 +1476,39 @@ policy the very act of running would make the tree ambiguous and the phase would
 refuse. Third, **the capacity inventory test is a tripwire**: adding a `*_FREE_BYTES` or
 `*_CACHE_BYTES` constant to `external_working_root` or `single_source_canary` fails it until the
 constant is classified as folded into the execution contract or explicitly excluded with a reason.
+
+## The Decision 149 pre-canary cleanup surface
+
+[Decision 149](Decisions/decision_149_m3_3_final_precanary_limitation_cleanup.md) closes the three
+actionable items
+[Decision 148](Decisions/decision_148_m3_3_final_independent_d147_rereview.md) recorded and
+deliberately left unrepaired. It is small on purpose: two production edits, one new test module,
+and the runbook section the second edit made untrue.
+
+| Change | Nearest affected tests |
+|---|---|
+| `src/disclosure_drift/m3/repository_identity.py` | **`D149-R1`, docstring only.** The `_git` docstring stated that resolving the executable to an absolute path made `PATH` order irrelevant; `shutil.which` **selects by `PATH` order**, so it now states the property that is true — the resolved executable is what runs, with no second exec-time lookup — and names host trust as the boundary. **No behaviour changed**, and a test re-derives that from the module's own AST | `tests/unit/test_d149_precanary_limitation_cleanup.py`, `tests/unit/test_d147_repository_code_identity.py` |
+| `src/disclosure_drift/m3/single_source_canary.py` | **`D149-R3`.** `run_canary_source_command` refuses `mode == "run"` when the external envelope applies, taken immediately after the envelope is established and **before** the run is entered. Keyed on `external`, because D138-R1 already makes the resolved root the one thing that decides whether a run is governed and external | `tests/unit/test_d149_precanary_limitation_cleanup.py`, `tests/unit/test_d144_first_canary_transport_narrowing.py`, `tests/unit/test_d145_phase_restart.py`, `tests/unit/test_d116_single_source_canary.py` |
+| `tests/unit/test_d149_precanary_limitation_cleanup.py` | **new** — the `PATH` documentation scan, the four deleted/renamed tracked-path states against real git, and the six `D149-R3` proofs including the two AST tripwires | itself |
+| `Docs/m3/operator_runbook.md` §28e | The canonical launch **wrapper** is unchanged; only its mode is. `$PHASE` replaces `--mode run`, and the section now says plainly that `--mode run` is refused by the application on any externally governed root | `make links`, `make decision-refs` |
+
+**Which tests to run for it.** Direct: `tests/unit/test_d149_precanary_limitation_cleanup.py`.
+Always with it: `tests/unit/test_d147_repository_code_identity.py` and
+`tests/unit/test_d145_phase_restart.py`, because D149 reuses their real-git and phase fixtures
+rather than reimplementing them. Then the operator surface the refusal lives on —
+`tests/unit/test_d144_first_canary_transport_narrowing.py`,
+`tests/unit/test_d116_single_source_canary.py` — and
+`tests/unit/test_d138_safety_envelope_correction.py` plus
+`tests/unit/test_d137_external_working_root.py`, which are the ten tests that drive the **library**
+whole-run entry point over a synthetic external volume and are the reason the refusal lives at the
+operator surface rather than inside the run.
+
+**Three cautions.** First, **the `D149-R3` refusal is narrow on purpose, and the positive controls
+are what keep it narrow**: dropping the `mode == "run"` condition so the guard catches every mode
+is killed by nine tests. Never assert the refusal without also asserting that all three phase modes
+still reach admission on the same qualified external configuration. Second, **`--mode run` on an
+internal root is still the accepted Decision 116 path** and is exercised by a positive control;
+it is not dead code and must not be removed as though it were. Third, **the `PATH` documentation
+scan deliberately excludes the decision records**: Decision 148 recorded the false claim as a
+finding and Decision 149 quotes it while correcting it, so widening that scan to `Docs/Decisions/`
+would fail on the records that exist to document the defect.

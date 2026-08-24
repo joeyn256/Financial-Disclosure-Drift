@@ -3064,6 +3064,17 @@ def run_canary_source_command(
     complete source, so it must not be reachable with a bound attached, not even a bound that
     would have been harmless.
 
+    **``run`` is refused where the external envelope governs** (Decision 149, D149-R3). Accepted
+    Decision 145 decomposed the governed complete-source canary into three processes, and Decision
+    147 bound each of them to the repository revision it executed under; a single whole-run process
+    provides neither property. So on a root the external envelope governs -- the one the real
+    canary runs on -- ``run`` refuses here and the phase modes are the only route. On an
+    **internal** root ``run`` is untouched and remains exactly the accepted Decision 116 path,
+    which is what the bounded library and development exercises use; that path cannot be mistaken
+    for the governed one, because the governed one is external by construction. The rule is keyed
+    on the envelope rather than on a second externality test, because D138-R1 already makes the
+    resolved root the one thing that decides that question.
+
     **The external-volume requirement is mandatory, not opt-in** (Decision 138, D138-R1). The
     resolved work root decides whether the envelope applies: a root on any volume other than the
     system one gets every Decision 137 launch guard whether or not ``--require-volume-uuid`` was
@@ -3099,6 +3110,29 @@ def run_canary_source_command(
             LAUNCH_MINIMUM_FREE_BYTES if phase is None else PHASE_ADMISSION_FLOOR[phase]
         ),
     )
+    # D149-R3: the governed external route runs the PHASED contract, and only that. Accepted
+    # Decision 145 decomposed the complete-source canary into three processes precisely so a
+    # finished phase's memory is reclaimed by the only mechanism that reclaims it, and Decision
+    # 147 then bound each phase to the repository revision it executed under. `--mode run` is
+    # neither: it is one process for the whole run, and it derives no repository identity. On an
+    # INTERNAL root it remains exactly the accepted Decision 116 path, which is what the bounded
+    # library and development exercises use. On a root the external envelope governs -- the one
+    # the real canary runs on -- it is refused here, before the run is entered.
+    #
+    # Keyed on `external`, deliberately, because accepted Decision 138 (D138-R1) already makes
+    # THE RESOLVED ROOT the single thing that decides whether this is a governed external run.
+    # A second externality rule here would be a second source of truth for one question.
+    if mode == "run" and external is not None:
+        message = (
+            "canary mode 'run' is refused on a working root the external envelope governs. The "
+            "governed complete-source canary runs the accepted Decision 145 PHASED contract -- "
+            f"{', '.join(sorted(CANARY_PHASE_MODES))} -- each in its own operating-system "
+            "process, so a finished phase's memory is reclaimed by the process ending, and each "
+            "phase records and re-derives the repository revision it executed under. A single "
+            "whole-run process does neither. Nothing was created and no world was touched; there "
+            "is no flag, environment variable or configuration key that admits 'run' here"
+        )
+        raise SingleSourceCanaryError(message)
     if phase is not None:
         outcome = run_single_source_canary_phase(
             phase=phase,

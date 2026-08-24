@@ -137,8 +137,15 @@ class RepositoryIdentity:
 def _git(root: Path, arguments: Sequence[str]) -> str:
     """One read-only Git query against ``root``, or a refusal.
 
-    ``-C`` rather than a working directory, so the caller's process-wide state decides nothing;
-    the executable is resolved to an absolute path, so ``PATH`` order decides nothing either.
+    ``-C`` rather than a working directory, so the caller's process-wide state decides nothing.
+
+    **What resolving the executable does and does not buy, stated exactly.** The name is resolved
+    once through :func:`shutil.which`, and ``which`` **selects by ``PATH`` order** -- so ``PATH``
+    decides *which* ``git`` this is. What the absolute path buys is that the resolved executable is
+    what runs: :mod:`subprocess` performs no second, exec-time lookup that could resolve a
+    different one between this call and the next. Which ``git`` exists on the host is **host
+    trust**, not a property this module establishes, and it never was: an actor who can order
+    ``PATH`` can equally write inside the checkout, which the accepted threat model excludes.
 
     No path and no Git stderr is carried into the refusal, in keeping with the rest of this
     subsystem: a message that quoted stderr would print absolute paths on the one code path whose

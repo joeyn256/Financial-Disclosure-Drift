@@ -1412,3 +1412,32 @@ comparison can never match. Third: a live refusal control must assert the **reas
 an early D141 harness refused for a `SQLITE_TMPDIR` disagreement of its own making while
 appearing to prove archive isolation, and a control that refuses for the wrong reason proves
 nothing.
+
+
+## The Decision 145 phase-restart surface
+
+[Decision 145](Decisions/decision_145_m3_3_governed_major_phase_restart.md) splits the corrected
+complete-source canary into **one operating-system process per major execution phase**. The whole
+canary path is now reachable two ways — `--mode run` in one process, and
+`--mode phase-f0|phase-f1|phase-f2` in three — and **both execute the same `F0`, `F1` and `F2`**,
+because the three phases were extracted into shared primitives rather than duplicated.
+
+| Change | Nearest affected tests |
+|---|---|
+| `src/disclosure_drift/m3/canary_phases.py` | **new** — the phase vocabulary, the durable terminal checkpoint and its create-once write, and the admission that refuses an incomplete predecessor, a re-entered phase, or a moved identity. It lives in the accepted D111 run-local ledger's key/value table, so **no migration** was needed | `tests/unit/test_d145_phase_restart.py` |
+| `src/disclosure_drift/m3/single_source_canary.py` | `run_single_source_canary_phase`, `attach_world`, `CanaryPhaseResult`, `phase_execution_identity`, `PHASE_ADMISSION_FLOOR`, `CANARY_PHASE_MODES`, and the extraction of `_f0`/`_f1`/`_f2` plus `_record_evidence_values`. **A change to any phase primitive now reaches both paths at once** — that is the point, and it is why an equivalence test exists | `tests/unit/test_d145_phase_restart.py`, `tests/unit/test_d116_single_source_canary.py`, `tests/unit/test_d119_cache_and_prefix.py`, `tests/unit/test_d127_pre_f2_admission_guard.py` |
+| `src/disclosure_drift/m3/working_catalog.py` | `RunProgressLedger.record_value`/`recorded_value`, and `WorkingCatalog(attach=True)` — the exact inverse of creation. **Creation refuses a directory that already holds a working catalog; attachment refuses one that does not** | `tests/unit/test_d145_phase_restart.py`, `tests/unit/test_d111_bounded_persistence.py` |
+| `src/disclosure_drift/m3/canary_runtime.py` | `process_is_live_canary` (the D140-R18 argv authentication, reused to prove a predecessor gone) and `process_peak_resident_bytes` | `tests/unit/test_d145_phase_restart.py`, `tests/unit/test_d140_total_pre_canary_hardening.py` |
+| `src/disclosure_drift/m3/external_working_root.py` | `minimum_free_bytes` threaded through `require_external_envelope` and `external_canary_preflight`, **defaulting to the launch floor** so every existing caller is behaviourally unchanged | `tests/unit/test_d137_external_working_root.py`, `tests/unit/test_d138_safety_envelope_correction.py`, `tests/unit/test_d145_phase_restart.py` |
+| `src/disclosure_drift/cli.py` | the three phase modes and their help | `tests/integration/test_m3_cli.py`, `tests/unit/test_d145_phase_restart.py` |
+| The production envelope-seam count | **`tests/unit/test_d144_first_canary_transport_narrowing.py` pins it to an exact number and WILL FAIL when a seam is added.** That is the tripwire working: review the new seam for `FIRST_CANARY_REQUIRED_TRANSPORT`, then raise the count with the reason beside it | `tests/unit/test_d144_first_canary_transport_narrowing.py`, `tests/unit/test_d145_phase_restart.py` |
+
+**Three cautions.** First, **a checkpoint is not a result**: the checkpoint is written last, after
+every durable write of the phase and after the create-once result document in F2's process, so an
+ordering change there changes what survives a death between the two. Second, **the equivalence
+test is the anti-divergence guard**: it compares a phased run against a whole run and requires the
+differing fields to be exactly those that differ between two whole runs — a baseline it measures
+rather than assumes — so anything run-scoped added to `CanaryResult` must be added truthfully or
+the test will say so. Third, **the phase-restart tests pin `shutil.disk_usage`**: if the module
+ever measures free space another way, the floor tests would pass while proving nothing, which is
+why one test asserts the seam still exists.

@@ -52,10 +52,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import disclosure_drift
 from disclosure_drift.config import EVIDENCE_ROOT_ENV
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.m3.canary_phases import (
+    CANARY_PHASE_SEQUENCE,
+    PHASE_F0,
+    PHASE_F1,
+    PHASE_F2,
+    PHASE_RESTART_CONTRACT,
+    PHASE_STATUS_COMPLETE,
+    PHASE_SUCCESSOR,
+    PhaseCheckpoint,
+    execution_identity,
+    read_phase_checkpoint,
+    require_phase_admission,
+    stored_int,
+    validate_phase,
+    write_phase_checkpoint,
+)
 from disclosure_drift.m3.canary_runtime import (
     acquire_canary_execution_lock,
+    process_is_live_canary,
+    process_peak_resident_bytes,
 )
 from disclosure_drift.m3.capacity_plan import plan_fingerprint
 from disclosure_drift.m3.compact_evidence import (
@@ -67,6 +86,9 @@ from disclosure_drift.m3.compact_evidence import (
 from disclosure_drift.m3.dock_transport import TRANSPORT_DOCK
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.external_working_root import (
+    LAUNCH_MINIMUM_FREE_BYTES,
+    PRE_F1_MINIMUM_FREE_BYTES,
+    QUALIFIED_EXTERNAL_VOLUME_UUID,
     CapacityObservation,
     ExternalCanaryPreflight,
     F2CapacityGuard,
@@ -78,6 +100,7 @@ from disclosure_drift.m3.offline_parse import (
     DIAGNOSTIC_PREFIX_CLASSIFICATION,
     STREAMED_SOURCE_IDS,
     AssociationTotality,
+    FullIndexCorroboration,
     SelectedPlannedSource,
     SingleSourceOutcome,
     StructuralSourcePreflight,
@@ -91,7 +114,9 @@ from disclosure_drift.m3.offline_parse import (
     write_containment,
 )
 from disclosure_drift.m3.working_catalog import (
+    PROGRESS_LEDGER_FILENAME,
     WORKING_CATALOG_FILENAME,
+    RunProgressLedger,
     WorkingCatalog,
     cache_size_pragma,
     file_digest,
@@ -105,6 +130,8 @@ from disclosure_drift.storage.sqlite import applied_versions, utc_now
 __all__ = [
     "CANARY_BATCH_SIZE",
     "CANARY_CONTRACT",
+    "CANARY_PHASE_MODES",
+    "PHASE_ADMISSION_FLOOR",
     "CANARY_PREFIX_RESULT_FILENAME",
     "CANARY_RESULT_FILENAME",
     "CANARY_RESOLUTION_SCOPE",
@@ -113,13 +140,17 @@ __all__ = [
     "PRE_F2_MINIMUM_FREE_BYTES",
     "WORKING_CATALOG_CACHE_BYTES",
     "WORKING_CATALOG_CACHE_SIZE_PRAGMA",
+    "CanaryPhaseResult",
     "CanaryPrefixResult",
     "CanaryPreflight",
     "CanaryResult",
     "CanaryWorld",
     "SingleSourceCanaryError",
+    "attach_world",
     "create_world",
+    "phase_execution_identity",
     "preflight_single_source_canary",
+    "run_single_source_canary_phase",
     "require_canary_work_root",
     "require_disposable_work_root",
     "resolve_private_root",
@@ -1349,6 +1380,101 @@ def require_f0_success(outcome: SingleSourceOutcome) -> SingleSourceOutcome:
     return outcome
 
 
+def _bind_catalog(working: WorkingCatalog) -> tuple[_WorkingCatalogWriter, CensusCatalog]:
+    """Bind the accepted writer and the compact-contract catalog to one working catalog.
+
+    Stated once so the whole-run path and the accepted **Decision 145** phase path cannot drift
+    into two bindings of the same thing. :data:`COMPACT_EVIDENCE` is passed **here**, explicitly,
+    which is the accepted Decision 116 §5 item 7 requirement: the full-observation default is
+    unreachable by omission rather than merely unlikely, on **every** path that runs a phase.
+    """
+    writer = _WorkingCatalogWriter(working)
+    return writer, CensusCatalog(writer, compact_evidence=COMPACT_EVIDENCE)
+
+
+def _f0(
+    *,
+    working: WorkingCatalog,
+    tree: DataTree,
+    selected: SelectedPlannedSource,
+    writer: _WorkingCatalogWriter,
+    catalog: CensusCatalog,
+    sidecar: CompactEvidenceSidecar,
+    batch_size: int,
+    capacity_guard: Callable[[], None] | None,
+) -> SingleSourceOutcome:
+    """**Phase F0** -- parse the one governed source, and record what it produced.
+
+    The run's longest phase by far: roughly twenty-seven hours over ~985,000 members on the
+    first planned source. Every durable row it implies is committed when this returns, the
+    compact sidecar holds the member manifest and the source completeness digest, and the
+    run-local ledger reads ``parsed``.
+
+    Extracted so that the whole-run path and the accepted **Decision 145** phase-restart path run
+    the *same* F0 rather than two that must be kept in step. The caller supplies the write
+    containment and the phase observations; nothing about the parse is decided here.
+    """
+    source = selected.source
+    working.ledger.begin_source(source.source_instance_id, source.source_id)
+    outcome = materialize_one_planned_source(
+        writer=writer,
+        tree=tree,
+        catalog=catalog,
+        selected=selected,
+        sidecar=sidecar,
+        batch_size=batch_size,
+        checkpoint_batches=True,
+        capacity_guard=capacity_guard,
+    )
+    # D140-R12: between F0's return and anything that reads its output. The ledger is not
+    # marked parsed for a run that did not parse, and F1 is not reached at all.
+    require_f0_success(outcome)
+    working.ledger.mark_parsed(
+        source.source_instance_id,
+        parts=outcome.members,
+        batches=outcome.outcome.parsed_records,
+    )
+    return outcome
+
+
+def _f1(
+    *,
+    catalog: CensusCatalog,
+    batch_size: int,
+    capacity_guard: Callable[[], None] | None,
+) -> int:
+    """**Phase F1** -- the Decision 012 resolution pass over every persisted accession.
+
+    Decision 094 §6.4 order, unchanged: every persisted accession is resolved **before** the
+    association relation is projected, because §6.2 item 5 reads the resolver's own output.
+
+    Its evidence accumulates on ``catalog`` as a ``ResolutionEvidence``, which is the
+    one piece of cross-phase state that lives only in memory while the phase runs --
+    and is exactly why accepted Decision 145 writes it to durable state at F1's terminal rather
+    than carrying it in RAM across a process boundary it cannot cross.
+    """
+    return catalog.count_persisted_accession_resolutions(
+        batch_size=batch_size, checkpoint_batches=True, capacity_guard=capacity_guard
+    )
+
+
+def _f2(
+    *,
+    connection: sqlite3.Connection,
+    capacity_guard: Callable[[], None] | None,
+) -> AssociationTotality:
+    """**Phase F2** -- the Decision 094 §6.4 canonical association projection.
+
+    One transaction, so a stop inside it is a rollback: the in-flight projection is discarded
+    rather than truncated. ``capacity_guard`` is sampled from its innermost loop (D138-R8), which
+    is what lets a continuous floor reached mid-projection abort from **inside** the open
+    transaction.
+    """
+    return materialize_census_associations(
+        connection, compact_evidence=True, capacity_guard=capacity_guard
+    )
+
+
 def _materialize(
     *,
     working: WorkingCatalog,
@@ -1370,29 +1496,19 @@ def _materialize(
     source is ``in_progress`` before its first durable row, ``parsed`` once every row it implies
     is durable, and ``disposed`` only once the accepted terminal is known.
     """
-    writer = _WorkingCatalogWriter(working)
+    writer, catalog = _bind_catalog(working)
     connection = working.connection
-    catalog = CensusCatalog(writer, compact_evidence=COMPACT_EVIDENCE)
     source = selected.source
     with write_containment(connection):
-        working.ledger.begin_source(source.source_instance_id, source.source_id)
-        outcome = materialize_one_planned_source(
-            writer=writer,
+        outcome = _f0(
+            working=working,
             tree=tree,
-            catalog=catalog,
             selected=selected,
+            writer=writer,
+            catalog=catalog,
             sidecar=sidecar,
             batch_size=batch_size,
-            checkpoint_batches=True,
             capacity_guard=capacity_guard,
-        )
-        # D140-R12: between F0's return and anything that reads its output. The ledger is not
-        # marked parsed for a run that did not parse, and F1 is not reached at all.
-        require_f0_success(outcome)
-        working.ledger.mark_parsed(
-            source.source_instance_id,
-            parts=outcome.members,
-            batches=outcome.outcome.parsed_records,
         )
         if observe is not None:
             # F0 has produced every durable row the source implies; F1 has not begun. The two
@@ -1403,9 +1519,7 @@ def _materialize(
         # Decision 094 §6.4 order, unchanged: every persisted accession is resolved first,
         # because §6.2 item 5 reads the resolver's own output, and only then is the canonical
         # association relation projected.
-        catalog.count_persisted_accession_resolutions(
-            batch_size=batch_size, checkpoint_batches=True, capacity_guard=capacity_guard
-        )
+        _f1(catalog=catalog, batch_size=batch_size, capacity_guard=capacity_guard)
         # Accepted Decision 126 §7 (D126-R6) places the admission gate exactly here, between
         # F1's return and F2's call: this is the only point at which the measurement and the
         # transaction it admits cannot be separated by a race. Decision 137 (D137-R5) raised the
@@ -1417,9 +1531,7 @@ def _materialize(
         # transaction opens and says nothing about what happens inside it. `capacity_guard` is
         # sampled from F2's own innermost loop, so a floor reached mid-projection aborts from
         # within the open transaction and rolls it back. `None` on every unprotected path.
-        totality = materialize_census_associations(
-            connection, compact_evidence=True, capacity_guard=capacity_guard
-        )
+        totality = _f2(connection=connection, capacity_guard=capacity_guard)
         if observe is not None:
             observe("POST_F2")
         counts = _counts(connection)
@@ -1448,41 +1560,100 @@ def _record_evidence(
     corroborate, so the digest is truthfully empty rather than fabricated.
     """
     resolution = materialized.resolution
-    sidecar.record_resolution(
-        resolution_scope=CANARY_RESOLUTION_SCOPE,
-        accessions=resolution.accessions,
-        implicit_resolutions=resolution.implicit,
-        explicit_resolutions=resolution.explicit,
-        omitted_field_rows=resolution.omitted_field_rows,
-        materialized_field_rows=resolution.materialized_field_rows,
-        omitted_cohort_rows=resolution.omitted_cohort_rows,
-        materialized_cohort_rows=resolution.materialized_cohort_rows,
-        completeness_digest=resolution.completeness_digest(),
-    )
     outcome = materialized.outcome
     corroboration = outcome.corroboration
     observation = outcome.observation
-    if corroboration is not None and observation is not None:
-        sidecar.record_corroboration(
-            source_observation_id=observation.observation_id,
-            source_id=observation.source_id,
-            artifact_sha256=observation.logical_sha256 or "",
-            index_rows=corroboration.index_rows,
-            corroborating=corroboration.corroborating,
-            exceptions=corroboration.exceptions,
-            unbound=len(corroboration.unbound),
-            omitted_observations=corroboration.omitted_observations,
-            materialized_observations=corroboration.written,
-            corroboration_digest=corroboration.digest,
-        )
-    manifest = (
-        "" if observation is None else sidecar.member_manifest_digest(observation.observation_id)
+    return _record_evidence_values(
+        sidecar=sidecar,
+        resolution=_resolution_record(resolution),
+        corroboration=None if corroboration is None else _corroboration_record(corroboration),
+        observation_id=None if observation is None else observation.observation_id,
+        source_id=None if observation is None else observation.source_id,
+        artifact_sha256="" if observation is None else (observation.logical_sha256 or ""),
+        projection_digest=outcome.completeness_digest,
     )
+
+
+def _resolution_record(resolution: ResolutionEvidence) -> Mapping[str, object]:
+    """One resolution pass's eight accepted D113 §8 values, as plain data.
+
+    The projection that makes F1's evidence **durable-shaped**: every field is a count or a hex
+    digest, so the same eight values reach the sidecar whether they were produced a microsecond
+    ago in this process or read back from a checkpoint written by one that has since exited.
+    """
+    return {
+        "accessions": resolution.accessions,
+        "implicit_resolutions": resolution.implicit,
+        "explicit_resolutions": resolution.explicit,
+        "omitted_field_rows": resolution.omitted_field_rows,
+        "materialized_field_rows": resolution.materialized_field_rows,
+        "omitted_cohort_rows": resolution.omitted_cohort_rows,
+        "materialized_cohort_rows": resolution.materialized_cohort_rows,
+        "completeness_digest": resolution.completeness_digest(),
+    }
+
+
+def _corroboration_record(corroboration: FullIndexCorroboration) -> Mapping[str, object]:
+    """One full-index quarter's accepted D113 §9 corroboration values, as plain data."""
+    return {
+        "index_rows": corroboration.index_rows,
+        "corroborating": corroboration.corroborating,
+        "exceptions": corroboration.exceptions,
+        "unbound": len(corroboration.unbound),
+        "omitted_observations": corroboration.omitted_observations,
+        "materialized_observations": corroboration.written,
+        "corroboration_digest": corroboration.digest,
+    }
+
+
+def _record_evidence_values(
+    *,
+    sidecar: CompactEvidenceSidecar,
+    resolution: Mapping[str, object],
+    corroboration: Mapping[str, object] | None,
+    observation_id: str | None,
+    source_id: str | None,
+    artifact_sha256: str,
+    projection_digest: str,
+) -> Mapping[str, str]:
+    """Write the D113 §§8-9 evidence and return the five accepted identities -- one implementation.
+
+    Given plain values rather than a live parse result, so the whole-run path and the accepted
+    **Decision 145** phase path write **the same rows by the same rule**. A second copy of this
+    for the phase path would be a second place the evidence contract could drift.
+    """
+    sidecar.record_resolution(
+        resolution_scope=CANARY_RESOLUTION_SCOPE,
+        accessions=stored_int(resolution["accessions"]),
+        implicit_resolutions=stored_int(resolution["implicit_resolutions"]),
+        explicit_resolutions=stored_int(resolution["explicit_resolutions"]),
+        omitted_field_rows=stored_int(resolution["omitted_field_rows"]),
+        materialized_field_rows=stored_int(resolution["materialized_field_rows"]),
+        omitted_cohort_rows=stored_int(resolution["omitted_cohort_rows"]),
+        materialized_cohort_rows=stored_int(resolution["materialized_cohort_rows"]),
+        completeness_digest=str(resolution["completeness_digest"]),
+    )
+    if corroboration is not None and observation_id is not None:
+        sidecar.record_corroboration(
+            source_observation_id=observation_id,
+            source_id=source_id or "",
+            artifact_sha256=artifact_sha256,
+            index_rows=stored_int(corroboration["index_rows"]),
+            corroborating=stored_int(corroboration["corroborating"]),
+            exceptions=stored_int(corroboration["exceptions"]),
+            unbound=stored_int(corroboration["unbound"]),
+            omitted_observations=stored_int(corroboration["omitted_observations"]),
+            materialized_observations=stored_int(corroboration["materialized_observations"]),
+            corroboration_digest=str(corroboration["corroboration_digest"]),
+        )
+    manifest = "" if observation_id is None else sidecar.member_manifest_digest(observation_id)
     return {
         "member_manifest_digest": manifest,
-        "projection_digest": outcome.completeness_digest,
-        "resolution_digest": resolution.completeness_digest(),
-        "corroboration_digest": "" if corroboration is None else corroboration.digest,
+        "projection_digest": projection_digest,
+        "resolution_digest": str(resolution["completeness_digest"]),
+        "corroboration_digest": (
+            "" if corroboration is None else str(corroboration["corroboration_digest"])
+        ),
         "compact_evidence_identity": sidecar.identity(),
     }
 
@@ -1930,6 +2101,829 @@ def run_single_source_prefix_profile(
 # --------------------------------------------------------------------------- #
 # The operator surface
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Governed major-phase restart -- accepted Decision 145
+# --------------------------------------------------------------------------- #
+#: The accepted free-space floor each phase is **admitted** under, by the phase it is about to
+#: begin -- accepted Decision 145 §7.
+#:
+#: Every value here is an already-accepted constant used at its already-accepted meaning; not one
+#: floor is invented, moved, or relaxed. ``F0`` starts a run from nothing and keeps the D137-R4
+#: launch floor exactly. ``F1`` and ``F2`` **continue** one, and the launch floor answers a
+#: question that is false by construction once F0 has written a hundred gibibytes -- *"is there
+#: room to run the whole canary from nothing?"*. The questions a continuation must answer are the
+#: accepted phase questions, and they already have accepted numbers: D138-R6's ``PRE_F1`` floor
+#: before F1, and the Decision 126 §7 pre-F2 admission gate before F2.
+#:
+#: **Admission is not the only check either phase faces.** F1 records and enforces ``PRE_F1``
+#: again through :func:`~disclosure_drift.m3.external_working_root.require_phase_free_space`, and
+#: F2 runs :func:`_require_pre_f2_free_space` immediately before opening its transaction -- the
+#: same deliberate redundancy through one primitive the work root already uses.
+PHASE_ADMISSION_FLOOR: Final[Mapping[str, int]] = {
+    PHASE_F0: LAUNCH_MINIMUM_FREE_BYTES,
+    PHASE_F1: PRE_F1_MINIMUM_FREE_BYTES,
+    PHASE_F2: PRE_F2_MINIMUM_FREE_BYTES,
+}
+
+
+#: The operator mode that runs each major phase, and the phase it runs -- accepted Decision 145.
+#:
+#: One mode per phase rather than a ``--mode phase --phase f1`` pair, deliberately: the mode a
+#: governed run was launched under is then legible in ``ps`` output, in the host execution lock's
+#: own detail record, and in the runbook, without a second argument that could disagree with it.
+CANARY_PHASE_MODES: Final[Mapping[str, str]] = {
+    f"phase-{phase}": phase for phase in CANARY_PHASE_SEQUENCE
+}
+
+
+def phase_execution_identity(*, batch_size: int = CANARY_BATCH_SIZE) -> str:
+    """Digest the frozen values that govern how this build executes a phase -- D145 §12.
+
+    **What it is for.** A successor process is a continuation of the *same* governed run. It must
+    refuse to continue a predecessor's checkpoint under code whose governing semantics have
+    moved, and this is the mechanical form of that: every value that decides *what a phase does*
+    is folded into one digest, recorded at each terminal, and re-derived and compared by the
+    process that continues.
+
+    **What is in it, and why nothing else is.** The path reads no configuration file -- its
+    configuration *is* these frozen constants -- so this is the configuration identity as well as
+    the code identity, and inventing a second parallel identity system for either would be
+    exactly what Decision 145 §12 forbids. The package version is folded in, so a build whose
+    version moved refuses even where every constant happens to agree.
+
+    **``cache_bytes`` is deliberately absent.** Accepted Decision 119's equivalence proof
+    establishes that the page-cache budget moves no row, no ordering, no digest and no identity;
+    folding a provably evidence-neutral execution parameter into a continuity check would refuse
+    continuations that are provably fine. ``batch_size`` **is** folded in, because it decides
+    when rows become durable and no accepted record blesses changing it mid-run.
+    """
+    return execution_identity(
+        {
+            "canary_contract": CANARY_CONTRACT,
+            "restart_contract": PHASE_RESTART_CONTRACT,
+            "evidence_contract": COMPACT_EVIDENCE_CONTRACT,
+            "resolution_scope": CANARY_RESOLUTION_SCOPE,
+            "required_transport": FIRST_CANARY_REQUIRED_TRANSPORT,
+            "qualified_volume_uuid": QUALIFIED_EXTERNAL_VOLUME_UUID,
+            "batch_size": batch_size,
+            "launch_minimum_free_bytes": LAUNCH_MINIMUM_FREE_BYTES,
+            "pre_f1_minimum_free_bytes": PRE_F1_MINIMUM_FREE_BYTES,
+            "pre_f2_minimum_free_bytes": PRE_F2_MINIMUM_FREE_BYTES,
+            "package_version": disclosure_drift.__version__,
+        }
+    )
+
+
+def attach_world(work_root: Path, run_id: str) -> CanaryWorld:
+    """Open the disposable world a previous phase created. **It creates nothing.**
+
+    The exact inverse of :func:`create_world`, and the inversion is the point:
+    ``create_world`` refuses an identity whose world already exists, and this refuses one whose
+    world does not. Between them there is no path that creates a world for a continuation, so a
+    successor process can never manufacture the state it was supposed to inherit -- which is the
+    failure mode that would turn "F0 finished" into "F0 was skipped".
+
+    Raises:
+        SingleSourceCanaryError: the identity is unlawful, or its world, working catalog, or
+            run-local ledger is absent or is not what it must be.
+    """
+    validate_run_id(run_id)
+    if work_root.is_symlink():
+        message = "the canary work root is a symbolic link and is refused"
+        raise SingleSourceCanaryError(message)
+    if not work_root.is_dir():
+        message = (
+            "the canary work root does not exist as a directory; a phase continuation attaches "
+            "to a world beneath it and never creates one, so an absent work root is a refusal"
+        )
+        raise SingleSourceCanaryError(message)
+    target = work_root / run_id
+    if target.is_symlink():
+        message = f"canary world {run_id!r} exists as a symbolic link and is refused"
+        raise SingleSourceCanaryError(message)
+    if not target.is_dir():
+        message = (
+            f"canary world {run_id!r} does not exist; a phase continuation never creates the "
+            "world it was supposed to inherit. Nothing was created and the run is refused"
+        )
+        raise SingleSourceCanaryError(message)
+    world = CanaryWorld(run_id=run_id, directory=target)
+    if not world.working_catalog.is_file():
+        message = (
+            f"canary world {run_id!r} holds no working catalog; there is no completed phase to "
+            "continue from and nothing was created"
+        )
+        raise SingleSourceCanaryError(message)
+    if world.result.exists():
+        message = (
+            f"canary world {run_id!r} already carries its create-once result document, so the "
+            "run has already finished. A finished run is never re-entered"
+        )
+        raise SingleSourceCanaryError(message)
+    return world
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryPhaseResult:
+    """What one major phase, running in one process, established -- accepted Decision 145.
+
+    It is **not** a canary result and cannot be mistaken for one: it carries no association
+    totality, no five accepted identities, and no complete-source claim, because a phase reached
+    none of them. The run's :class:`CanaryResult` is written by F2's process alone.
+
+    The process fields are the §9 RAM-reclamation evidence, recorded rather than asserted: this
+    process's own id and peak resident size, the predecessor's, and the proof that the
+    predecessor's process was gone before this one began.
+    """
+
+    contract: str
+    phase: str
+    successor_phase: str | None
+    run_id: str
+    source_instance_id: str
+    started_at_utc: str
+    completed_at_utc: str
+    execution_identity: str
+
+    # -- the RAM-reclamation evidence -- D145 §9 -------------------------- #
+    pid: int
+    rss_peak_bytes_at_start: int | None
+    rss_peak_bytes_at_terminal: int | None
+    predecessor_phase: str | None
+    predecessor_pid: int | None
+    predecessor_rss_peak_bytes_at_terminal: int | None
+    #: Whether the predecessor's process was proved absent **before** this phase began. ``True``
+    #: for every admitted continuation, because a live predecessor is a refusal rather than a
+    #: recorded observation; ``None`` for F0, which has no predecessor to prove anything about.
+    predecessor_process_gone: bool | None
+
+    # -- what the phase left behind --------------------------------------- #
+    world_relative_working_catalog: str
+    world_relative_sidecar: str
+    operational_catalog_sha256_before: str
+    operational_catalog_sha256_after: str
+    #: Written by F2's process only. ``False`` for F0 and F1, which finish a phase and not a run.
+    result_document_written: bool
+    capacity_observations: tuple[Mapping[str, object], ...] = ()
+
+    @property
+    def operational_catalog_unchanged(self) -> bool:
+        """Whether the accepted catalog is byte-identical to what this phase started from."""
+        return self.operational_catalog_sha256_before == self.operational_catalog_sha256_after
+
+    def as_record(self) -> Mapping[str, object]:
+        """The complete phase outcome as a plain mapping, carrying no absolute path."""
+        record: dict[str, object] = {name: getattr(self, name) for name in self.__slots__}
+        record["operational_catalog_unchanged"] = self.operational_catalog_unchanged
+        return record
+
+
+def run_single_source_canary_phase(
+    *,
+    phase: str,
+    operational_catalog: Path,
+    tree: DataTree,
+    work_root: Path,
+    run_id: str,
+    source_instance_id: str,
+    batch_size: int = CANARY_BATCH_SIZE,
+    cache_bytes: int | None = WORKING_CATALOG_CACHE_BYTES,
+    require_volume_uuid: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> CanaryPhaseResult:
+    """Run **exactly one** major execution phase in **this** process, and stop -- Decision 145.
+
+    The governed major-phase restart. One process per phase, so that a phase which reached its
+    durable terminal can be followed by a process that *does not exist yet* -- and the memory the
+    finished phase was holding is returned to the operating system by the only mechanism that
+    genuinely returns it, which is the process ending.
+
+    The sequence, and the whole of it::
+
+        phase -> durable terminal checkpoint -> clean exit -> fresh process
+              -> FULL reauthentication -> next phase
+
+    **This is not pause/resume and grants no physical rights.** The restart right exists only
+    *after* a phase reached durable terminal success. A crash, a kill, an out-of-memory
+    termination, a closed lid, or a pulled cable part-way through a phase leaves **no
+    checkpoint**, and an absent checkpoint refuses the successor: an interrupted run is still
+    interrupted, governed exactly as accepted Decision 142 §8 already governs it. There is no
+    ``SAFE_TO_EJECT`` state, the external volume must stay attached to the selected topology for
+    the whole sequence, and ``GOVERNED_PAUSE_RESUME`` remains ``NOT_IMPLEMENTED``.
+
+    **The successor trusts nothing the predecessor checked.** Every launch predicate is
+    re-established here, in this process, before any work begins: the work-root boundary, the
+    complete Decision 137 external envelope narrowed to the Decision 142 §4 topology, the exact
+    Volume UUID, AC power and an open lid, D130 isolation, the external ``SQLITE_TMPDIR``, the
+    host execution lock, the accepted catalog's own digest, and the predecessor's durable
+    terminal checkpoint including the proof that its process is gone.
+
+    Args:
+        phase: Which major phase to run -- one of the three in
+            :data:`~disclosure_drift.m3.canary_phases.CANARY_PHASE_SEQUENCE`.
+            ``f0`` creates the disposable world; ``f1`` and ``f2`` attach to it and never create
+            one.
+        operational_catalog: The accepted catalog. Opened strictly read-only, always.
+        tree: The data tree the frozen source artifacts are read from. Read by F0 alone -- F1 and
+            F2 touch no artifact, which is why neither re-authenticates one.
+        work_root: The disposable work root. Validated here, on every phase.
+        run_id: This world's identity. Create-once at F0, and the identity every later phase must
+            match exactly.
+        source_instance_id: The one planned source's own plan key.
+        batch_size: Parts per real transaction. Folded into the execution identity, so a
+            continuation under a different value refuses.
+        cache_bytes: The page-cache budget for the run-local working catalog. Deliberately **not**
+            part of the execution identity; see :func:`phase_execution_identity`.
+        require_volume_uuid: The mandatory external-volume assertion (D140-R2), re-supplied and
+            re-checked on every phase.
+        environ: The environment ``SQLITE_TMPDIR`` is cross-checked against.
+
+    Raises:
+        CanaryPhaseError: the phase already ran, its predecessor did not finish, an identity does
+            not match, or the predecessor's process is still alive.
+        ExternalWorkingRootError: the working root is external and a guard did not hold.
+        SingleSourceCanaryError: a canary precondition failed.
+    """
+    validate_phase(phase)
+    # 0. The write boundary and the complete envelope, exactly as the whole-run path establishes
+    #    them, before anything is measured, opened, created, or attached to. D144-R1's narrowing
+    #    is passed here too: a restart between phases must NOT be a way to reach a topology the
+    #    owner did not select, so there is no seam here that admits a qualified direct attachment.
+    resolved_work_root = require_canary_work_root(work_root, tree=tree)
+    external: ExternalCanaryPreflight | None = require_external_envelope(
+        resolved_work_root,
+        observed_at=utc_now(),
+        environ=environ,
+        asserted_uuid=require_volume_uuid,
+        required_transport=FIRST_CANARY_REQUIRED_TRANSPORT,
+        minimum_free_bytes=PHASE_ADMISSION_FLOOR[phase],
+    )
+    started = utc_now()
+    if not operational_catalog.is_file():
+        message = "the accepted operational catalog does not exist at its fixed relative path"
+        raise SingleSourceCanaryError(message)
+    #    D140-R16, re-taken by every phase process rather than inherited. The lock is held for
+    #    this phase's lifetime and released when this process exits, so at most one canary
+    #    process executes on this host at any moment -- which is what the capacity model needs.
+    lock = acquire_canary_execution_lock(
+        _private_root_of(operational_catalog), detail={"run_id": run_id, "mode": f"phase-{phase}"}
+    )
+    try:
+        return _run_phase_locked(
+            phase=phase,
+            operational_catalog=operational_catalog,
+            tree=tree,
+            resolved_work_root=resolved_work_root,
+            run_id=run_id,
+            source_instance_id=source_instance_id,
+            batch_size=batch_size,
+            cache_bytes=cache_bytes,
+            external=external,
+            started=started,
+        )
+    finally:
+        lock.release()
+
+
+def _run_phase_locked(  # noqa: PLR0913 - one phase, and every predicate it must re-establish
+    *,
+    phase: str,
+    operational_catalog: Path,
+    tree: DataTree,
+    resolved_work_root: Path,
+    run_id: str,
+    source_instance_id: str,
+    batch_size: int,
+    cache_bytes: int | None,
+    external: ExternalCanaryPreflight | None,
+    started: str,
+) -> CanaryPhaseResult:
+    """One phase, with the host execution lock already held. See the caller."""
+    rss_at_start = process_peak_resident_bytes()
+    # 1. The one source and the plan it came from, re-read live in THIS process through a
+    #    strictly read-only handle. The plan fingerprint is the input identity a continuation is
+    #    compared on, so it is derived rather than carried.
+    with strictly_read_only_connection(operational_catalog) as reader:
+        selected = select_planned_source(reader, source_instance_id)
+        fingerprint, _ = plan_fingerprint(reader)
+        observation = planned_source_observation(reader, selected)
+
+    if phase == PHASE_F0:
+        # D140-R20/R21: the artifact is authenticated and its shard-to-parent structure proved
+        # BEFORE a world exists. F1 and F2 read no artifact at all, so neither re-authenticates
+        # one -- re-digesting 1.5 GB to admit a phase that never opens it would be theatre.
+        preauthenticate_source(tree=tree, selected=selected, observation=observation)
+        free_before = shutil.disk_usage(_measurable(resolved_work_root)).free
+        if external is not None:
+            external.admitted.reauthenticate()
+        world = create_world(resolved_work_root, run_id, require_existing_root=external is not None)
+    else:
+        world = attach_world(resolved_work_root, run_id)
+        free_before = shutil.disk_usage(world.directory).free
+
+    catalog_before = ""
+    migration_head = 0
+    with WorkingCatalog(
+        operational_catalog, world.directory, cache_bytes=cache_bytes, attach=phase != PHASE_F0
+    ) as working:
+        identity = working.identity
+        catalog_before = identity.source_file_sha256
+        migration_head = identity.migration_head
+        # 2. Admission. Has this phase already run, did its predecessor finish, and is this the
+        #    same governed run under the same governing code? Every answer refuses.
+        admission = require_phase_admission(
+            working.ledger,
+            phase=phase,
+            run_id=run_id,
+            source_instance_id=source_instance_id,
+            execution_identity=phase_execution_identity(batch_size=batch_size),
+            catalog_source_sha256=identity.source_file_sha256,
+            migration_head=identity.migration_head,
+            plan_fingerprint=fingerprint,
+        )
+        predecessor = admission.predecessor
+        predecessor_gone: bool | None = None
+        if predecessor is not None:
+            # 3. The RAM-reclamation property itself, enforced rather than hoped for: the phase
+            #    before this one ran in a process that is GONE. A checkpoint is written before
+            #    its process exits, so a checkpoint plus a live writer is exactly the state that
+            #    must refuse -- two processes writing one working catalog is not a restart.
+            if process_is_live_canary(predecessor.pid, run_id=run_id):
+                message = (
+                    f"the process that completed phase {predecessor.phase!r} (pid "
+                    f"{predecessor.pid}) is still running this canary. A governed phase restart "
+                    "is a CLEAN EXIT followed by a fresh process, never a second process joining "
+                    "a live one, and two writers on one working catalog is not a restart. This "
+                    "phase is refused and nothing was started"
+                )
+                raise SingleSourceCanaryError(message)
+            predecessor_gone = True
+
+        inherited = _inherited_observations(predecessor)
+        observations: list[CapacityObservation] = []
+
+        def record_phase(label: str) -> None:
+            """Record one accepted D137-R7 boundary in this process, and enforce its floor."""
+            if external is None:  # pragma: no cover - never bound without an external requirement
+                return
+            taken = observe_capacity(
+                label,
+                working_root=world.directory,
+                database=world.working_catalog,
+                wal=world.working_catalog.with_name(f"{WORKING_CATALOG_FILENAME}-wal"),
+                temp_directory=external.temp_directory,
+                volume=external.volume,
+                observed_at=utc_now(),
+            )
+            observations.append(taken)
+            require_phase_free_space(taken)
+
+        capacity_guard: F2CapacityGuard | None = None
+        if external is not None:
+            observations.append(external.observation)
+            capacity_guard = F2CapacityGuard(
+                working_root=world.directory,
+                volume=external.volume,
+                record_into=observations,
+                admitted=external.admitted,
+            )
+
+        context = _PhaseContext(
+            phase=phase,
+            working=working,
+            world=world,
+            tree=tree,
+            selected=selected,
+            sidecar=CompactEvidenceSidecar(world.sidecar),
+            batch_size=batch_size,
+            capacity_guard=capacity_guard,
+            record_phase=record_phase,
+            fingerprint=fingerprint,
+            started=started,
+            free_before=free_before,
+            catalog_before=identity.source_file_sha256,
+        )
+        handoff: _F2Handoff | None = None
+        try:
+            if phase == PHASE_F0:
+                payload = _phase_f0_body(context)
+            elif phase == PHASE_F1:
+                payload = _phase_f1_body(context)
+            else:
+                payload, handoff = _phase_f2_body(context)
+        finally:
+            context.sidecar.close()
+
+    # 4. Everything above is committed and every handle on the working catalog is closed, so the
+    #    digest and the byte length below describe the same bytes rather than two moments -- the
+    #    accepted whole-run rule, unrelaxed.
+    catalog_after, _ = file_digest(operational_catalog)
+    observed = [*inherited, *(taken.as_record() for taken in observations)]
+    result_written = False
+    if handoff is not None:
+        working_sha256, working_bytes = file_digest(world.working_catalog)
+        result = _phase_result_document(
+            handoff=handoff,
+            working_sha256=working_sha256,
+            working_bytes=working_bytes,
+            run_id=run_id,
+            selected=selected,
+            fingerprint=fingerprint,
+            catalog_after=catalog_after,
+            free_after=shutil.disk_usage(world.directory).free,
+            capacity_observations=tuple(observed),
+        )
+        # Create-once, and written BEFORE the terminal checkpoint. If this process died between
+        # the two, the run's deliverable would still exist and F2 would refuse to run again --
+        # `attach_world` refuses a world that already carries its result document.
+        _write_once(world.result, json.dumps(result.as_record(), indent=2, sort_keys=True).encode())
+        result_written = True
+
+    # 5. The durable terminal checkpoint, written LAST and exactly once, through a short-lived
+    #    handle of its own now that the working catalog's context has closed. Its presence is the
+    #    completion proof, so it is never written before the thing it attests to is durable.
+    checkpoint = PhaseCheckpoint(
+        contract=PHASE_RESTART_CONTRACT,
+        phase=phase,
+        status=PHASE_STATUS_COMPLETE,
+        run_id=run_id,
+        source_instance_id=source_instance_id,
+        execution_identity=phase_execution_identity(batch_size=batch_size),
+        catalog_source_sha256=catalog_before,
+        migration_head=migration_head,
+        plan_fingerprint=fingerprint,
+        completed_at_utc=utc_now(),
+        pid=os.getpid(),
+        rss_peak_bytes_at_start=rss_at_start,
+        rss_peak_bytes_at_terminal=process_peak_resident_bytes(),
+        payload={**payload, "capacity_observations": observed},
+    )
+    _write_terminal_checkpoint(world, checkpoint)
+    return CanaryPhaseResult(
+        contract=PHASE_RESTART_CONTRACT,
+        phase=phase,
+        successor_phase=PHASE_SUCCESSOR[phase],
+        run_id=run_id,
+        source_instance_id=source_instance_id,
+        started_at_utc=started,
+        completed_at_utc=checkpoint.completed_at_utc,
+        execution_identity=checkpoint.execution_identity,
+        pid=checkpoint.pid,
+        rss_peak_bytes_at_start=checkpoint.rss_peak_bytes_at_start,
+        rss_peak_bytes_at_terminal=checkpoint.rss_peak_bytes_at_terminal,
+        predecessor_phase=None if predecessor is None else predecessor.phase,
+        predecessor_pid=None if predecessor is None else predecessor.pid,
+        predecessor_rss_peak_bytes_at_terminal=(
+            None if predecessor is None else predecessor.rss_peak_bytes_at_terminal
+        ),
+        predecessor_process_gone=predecessor_gone,
+        world_relative_working_catalog=WORKING_CATALOG_FILENAME,
+        world_relative_sidecar=COMPACT_EVIDENCE_SIDECAR_FILENAME,
+        operational_catalog_sha256_before=catalog_before,
+        operational_catalog_sha256_after=catalog_after,
+        result_document_written=result_written,
+        capacity_observations=tuple(observed),
+    )
+
+
+def _inherited_observations(
+    predecessor: PhaseCheckpoint | None,
+) -> tuple[Mapping[str, object], ...]:
+    """Every capacity observation the earlier phases of this run already recorded.
+
+    Carried forward so the run's own result document holds one chronological capacity record
+    across all three processes rather than three disconnected fragments.
+    """
+    if predecessor is None:
+        return ()
+    recorded = predecessor.payload.get("capacity_observations", ())
+    if not isinstance(recorded, (list, tuple)):  # pragma: no cover - written as a list
+        return ()
+    return tuple(item for item in recorded if isinstance(item, Mapping))
+
+
+def _write_terminal_checkpoint(world: CanaryWorld, checkpoint: PhaseCheckpoint) -> None:
+    """Persist one phase's terminal checkpoint through a handle opened only to write it.
+
+    Opened after the working catalog's own context has closed, so the checkpoint is the **last**
+    durable act of the phase and cannot be written over work that is still in flight.
+    """
+    ledger = RunProgressLedger(world.directory / PROGRESS_LEDGER_FILENAME)
+    try:
+        write_phase_checkpoint(ledger, checkpoint)
+    finally:
+        ledger.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _PhaseContext:
+    """Everything one phase body needs, assembled once by the process that will run it."""
+
+    phase: str
+    working: WorkingCatalog
+    world: CanaryWorld
+    tree: DataTree
+    selected: SelectedPlannedSource
+    sidecar: CompactEvidenceSidecar
+    batch_size: int
+    capacity_guard: F2CapacityGuard | None
+    record_phase: Callable[[str], None]
+    fingerprint: str
+    started: str
+    free_before: int
+    catalog_before: str
+
+
+@dataclass(frozen=True, slots=True)
+class _F2Handoff:
+    """What F2's process measured inside its working-catalog context, for the result document.
+
+    A small carrier rather than a wide argument list, and it exists because two of the values it
+    holds -- the working catalog's digest and its byte length -- may only be measured **after**
+    the last handle on that file is closed, so that they describe the same bytes rather than two
+    moments. That is the accepted whole-run rule and it is not relaxed here.
+    """
+
+    identities: Mapping[str, str]
+    counts: Mapping[str, int]
+    totality: Mapping[str, int]
+    wal_bytes: int
+    source_sha256: str
+    migration_head: int
+    f0_payload: Mapping[str, object]
+    f1_payload: Mapping[str, object]
+
+
+def _phase_f0_body(context: _PhaseContext) -> Mapping[str, object]:
+    """Run F0 in this process, and record what a later phase will need from it.
+
+    **What the payload is, and what it is not.** It is not a second copy of F0's evidence: the
+    member manifest, the source completeness digest and the per-member digests all live in the
+    compact sidecar, durably, written as F0 ran. The payload carries the values that had **no
+    durable home** -- the accepted parse disposition and parser states, the observation's own
+    identity, the corroboration totals for a full-index quarter, and the run-level facts F0's
+    process is the only one in a position to measure. That is exactly the bounded persistence
+    accepted Decision 145 §7 authorizes, and no more.
+    """
+    working = context.working
+    writer, catalog = _bind_catalog(working)
+    with write_containment(working.connection):
+        outcome = _f0(
+            working=working,
+            tree=context.tree,
+            selected=context.selected,
+            writer=writer,
+            catalog=catalog,
+            sidecar=context.sidecar,
+            batch_size=context.batch_size,
+            capacity_guard=context.capacity_guard,
+        )
+        # F0 has produced every durable row the source implies. The accepted POST_F0 gate is
+        # this phase's terminal question -- *did F0 leave enough behind?* -- and PRE_F1 is the
+        # next process's opening one, which is where the two labels now genuinely sit.
+        context.record_phase("POST_F0")
+    observation = outcome.observation
+    corroboration = outcome.corroboration
+    return {
+        "started_at_utc": context.started,
+        "plan_position": context.selected.plan_position,
+        "plan_source_count": context.selected.plan_source_count,
+        "operational_catalog_sha256_before": context.catalog_before,
+        "work_root_free_bytes_before": context.free_before,
+        "source_id": context.selected.source.source_id,
+        "source_observation_id": None if observation is None else observation.observation_id,
+        "source_artifact_sha256": (
+            "" if observation is None else (observation.logical_sha256 or "")
+        ),
+        "source_artifact_byte_length": (
+            0 if observation is None else int(observation.content_size_bytes or 0)
+        ),
+        "disposition": outcome.outcome.disposition,
+        "parser_state_before": outcome.outcome.parser_state_before,
+        "parser_state_after": outcome.outcome.parser_state_after,
+        "parser_run_id": outcome.outcome.parser_run_id,
+        "members": outcome.members,
+        "projection_records": outcome.records,
+        "parsed_records": outcome.outcome.parsed_records,
+        "quarantined_records": outcome.outcome.quarantined_records,
+        "omitted_field_observations": outcome.omitted_field_observations,
+        "materialized_field_observations": outcome.materialized_field_observations,
+        "completeness_digest": outcome.completeness_digest,
+        "corroboration": (
+            None if corroboration is None else dict(_corroboration_record(corroboration))
+        ),
+    }
+
+
+def _phase_f1_body(context: _PhaseContext) -> Mapping[str, object]:
+    """Run F1 in this process, and make its evidence durable before the process ends.
+
+    **This is the correction the restart actually needed.** F1's evidence accumulates on the
+    catalog object as a :class:`~disclosure_drift.sec.census.ResolutionEvidence` -- a rolling
+    digest and seven counts -- and in the whole-run path it is read at the very end, long after
+    F1 returned, because the same process is still holding it. A process that exits at F1's
+    terminal would take it with it, and re-deriving it would mean **re-running F1**, which is
+    precisely the duplicate phase execution accepted Decision 145 §13 prohibits. So F1's own
+    process writes it down, at its own terminal, in the same eight accepted D113 §8 values the
+    sidecar records.
+    """
+    working = context.working
+    _writer, catalog = _bind_catalog(working)
+    with write_containment(working.connection):
+        # The accepted PRE_F1 gate, asked by the process that is about to begin F1.
+        context.record_phase("PRE_F1")
+        _f1(
+            catalog=catalog,
+            batch_size=context.batch_size,
+            capacity_guard=context.capacity_guard,
+        )
+        context.record_phase("POST_F1_PRE_F2")
+    return {"resolution": dict(_resolution_record(catalog.resolution_evidence))}
+
+
+def _phase_f2_body(context: _PhaseContext) -> tuple[Mapping[str, object], _F2Handoff]:
+    """Run F2 in this process, record the run's evidence, and finish the canary.
+
+    F2 is the last phase, so its process does what the whole-run path does after F2 returns: it
+    writes the D113 §§8-9 evidence into the sidecar from the durable values every phase left
+    behind, records the accepted disposition in the run-local ledger, and truncates the
+    write-ahead log. The create-once result document is written by its caller, once the last
+    handle on the working catalog is closed.
+
+    **The pre-F2 admission gate is where accepted Decision 126 §7 (D126-R6) put it** -- taken by
+    the path that is about to open the transaction, immediately before it opens, in the same
+    process. A restart between F1 and F2 does not move it, and could not: only the path that
+    opens the transaction can decline to open it.
+    """
+    working = context.working
+    ledger = working.ledger
+    f0 = read_phase_checkpoint(ledger, PHASE_F0)
+    f1 = read_phase_checkpoint(ledger, PHASE_F1)
+    if f0 is None or f1 is None:  # pragma: no cover - admission already required both
+        message = (
+            "F2 cannot assemble the run's result: an earlier phase's durable checkpoint is "
+            "absent. Nothing is estimated and nothing is re-run"
+        )
+        raise SingleSourceCanaryError(message)
+    with write_containment(working.connection):
+        _require_pre_f2_free_space(working.path.parent)
+        totality = _f2(connection=working.connection, capacity_guard=context.capacity_guard)
+        context.record_phase("POST_F2")
+        counts = _counts(working.connection)
+    resolution = _stored_mapping(f1.payload.get("resolution"), field="resolution")
+    corroboration = _stored_mapping(
+        f0.payload.get("corroboration"), field="corroboration", optional=True
+    )
+    identities = _record_evidence_values(
+        sidecar=context.sidecar,
+        resolution=resolution or {},
+        corroboration=corroboration,
+        observation_id=_optional_text(f0.payload.get("source_observation_id")),
+        source_id=_optional_text(f0.payload.get("source_id")),
+        artifact_sha256=str(f0.payload.get("source_artifact_sha256", "")),
+        projection_digest=str(f0.payload.get("completeness_digest", "")),
+    )
+    working.ledger.mark_disposed(
+        context.selected.source.source_instance_id,
+        str(f0.payload["disposition"]),
+        detail=str(f0.payload["parser_state_after"]),
+    )
+    working.checkpoint()
+    handoff = _F2Handoff(
+        identities=identities,
+        counts=counts,
+        totality=totality.as_record(),
+        wal_bytes=working.wal_byte_length(),
+        source_sha256=working.identity.source_file_sha256,
+        migration_head=working.identity.migration_head,
+        f0_payload=f0.payload,
+        f1_payload=f1.payload,
+    )
+    return {"association_totality": dict(totality.as_record()), "counts": dict(counts)}, handoff
+
+
+def _optional_text(value: object) -> str | None:
+    """One optional stored string, or ``None`` -- never the string ``"None"``."""
+    return None if value is None else str(value)
+
+
+def _stored_mapping(
+    value: object, *, field: str, optional: bool = False
+) -> Mapping[str, object] | None:
+    """One stored sub-record, refusing anything that is not one.
+
+    Checkpoint payloads arrive as ``object`` because they were read back from JSON. A field that
+    should carry a phase's evidence and does not is a **refusal**: a run whose evidence cannot be
+    read is never finished with an estimate, and never by re-running the phase that produced it.
+
+    Raises:
+        SingleSourceCanaryError: the field is absent when required, or is not a mapping.
+    """
+    if value is None:
+        if optional:
+            return None
+        message = (
+            f"a phase checkpoint carries no {field!r}; the run's result is never assembled from "
+            "an estimate and the phase that produced it is never re-run to recover it"
+        )
+        raise SingleSourceCanaryError(message)
+    if not isinstance(value, Mapping):
+        message = f"a phase checkpoint's {field!r} is not a mapping and is refused"
+        raise SingleSourceCanaryError(message)
+    return value
+
+
+def _phase_result_document(
+    *,
+    handoff: _F2Handoff,
+    working_sha256: str,
+    working_bytes: int,
+    run_id: str,
+    selected: SelectedPlannedSource,
+    fingerprint: str,
+    catalog_after: str,
+    free_after: int,
+    capacity_observations: tuple[Mapping[str, object], ...],
+) -> CanaryResult:
+    """Assemble the accepted Decision 116 §9 result from what the three phases left durable.
+
+    Every value here was either measured by this process or read from a phase checkpoint that a
+    process wrote at its own terminal. **Nothing is estimated, and nothing is recomputed by
+    re-running a phase.** The whole-run path assembles the identical surface from the same
+    values held in memory; the accepted Decision 145 equivalence proof is that the two records
+    agree field for field.
+    """
+    f0 = handoff.f0_payload
+    f1 = handoff.f1_payload
+    resolution = _stored_mapping(f1.get("resolution"), field="resolution") or {}
+    corroborated = (
+        _stored_mapping(f0.get("corroboration"), field="corroboration", optional=True) or {}
+    )
+    return CanaryResult(
+        contract=CANARY_CONTRACT,
+        evidence_contract=COMPACT_EVIDENCE_CONTRACT,
+        run_id=run_id,
+        started_at_utc=str(f0["started_at_utc"]),
+        completed_at_utc=utc_now(),
+        source_instance_id=selected.source.source_instance_id,
+        source_id=str(f0["source_id"]),
+        plan_position=stored_int(f0["plan_position"]),
+        plan_source_count=stored_int(f0["plan_source_count"]),
+        plan_fingerprint=fingerprint,
+        source_observation_id=_optional_text(f0.get("source_observation_id")),
+        source_artifact_sha256=str(f0["source_artifact_sha256"]),
+        source_artifact_byte_length=stored_int(f0["source_artifact_byte_length"]),
+        disposition=str(f0["disposition"]),
+        parser_state_before=str(f0["parser_state_before"]),
+        parser_state_after=str(f0["parser_state_after"]),
+        parser_run_id=_optional_text(f0.get("parser_run_id")),
+        members=stored_int(f0["members"]),
+        projection_records=stored_int(f0["projection_records"]),
+        parsed_records=stored_int(f0["parsed_records"]),
+        quarantined_records=stored_int(f0["quarantined_records"]),
+        omitted_field_observations=stored_int(f0["omitted_field_observations"]),
+        materialized_field_observations=stored_int(f0["materialized_field_observations"]),
+        canonical_accession_count=handoff.counts["canonical_accession_count"],
+        registrant_count=handoff.counts["registrant_count"],
+        substantive_relation_count=handoff.counts["substantive_relation_count"],
+        quarantined_record_count=handoff.counts["quarantined_record_count"],
+        structural_observation_count=handoff.counts["structural_observation_count"],
+        accession_observation_count=handoff.counts["accession_observation_count"],
+        field_resolution_row_count=handoff.counts["field_resolution_row_count"],
+        cohort_resolution_row_count=handoff.counts["cohort_resolution_row_count"],
+        association_totality=handoff.totality,
+        resolution_accessions=stored_int(resolution["accessions"]),
+        implicit_resolutions=stored_int(resolution["implicit_resolutions"]),
+        explicit_resolutions=stored_int(resolution["explicit_resolutions"]),
+        omitted_field_rows=stored_int(resolution["omitted_field_rows"]),
+        materialized_field_rows=stored_int(resolution["materialized_field_rows"]),
+        omitted_cohort_rows=stored_int(resolution["omitted_cohort_rows"]),
+        materialized_cohort_rows=stored_int(resolution["materialized_cohort_rows"]),
+        index_rows=stored_int(corroborated.get("index_rows", 0)),
+        corroborating_rows=stored_int(corroborated.get("corroborating", 0)),
+        corroboration_exceptions=stored_int(corroborated.get("exceptions", 0)),
+        unbound_accessions=stored_int(corroborated.get("unbound", 0)),
+        omitted_corroboration_observations=stored_int(corroborated.get("omitted_observations", 0)),
+        member_manifest_digest=handoff.identities["member_manifest_digest"],
+        projection_digest=handoff.identities["projection_digest"],
+        resolution_digest=handoff.identities["resolution_digest"],
+        corroboration_digest=handoff.identities["corroboration_digest"],
+        compact_evidence_identity=handoff.identities["compact_evidence_identity"],
+        world_relative_working_catalog=WORKING_CATALOG_FILENAME,
+        world_relative_sidecar=COMPACT_EVIDENCE_SIDECAR_FILENAME,
+        working_catalog_sha256=working_sha256,
+        working_catalog_byte_length=working_bytes,
+        working_catalog_wal_byte_length=handoff.wal_bytes,
+        working_catalog_source_sha256=handoff.source_sha256,
+        migration_head=handoff.migration_head,
+        operational_catalog_sha256_before=str(f0["operational_catalog_sha256_before"]),
+        operational_catalog_sha256_after=catalog_after,
+        work_root_free_bytes_before=stored_int(f0["work_root_free_bytes_before"]),
+        work_root_free_bytes_after=free_after,
+        capacity_observations=capacity_observations,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CanaryOperatorResult:
     """One rendered operator outcome: an exit code and the lines to print.
@@ -1990,6 +2984,7 @@ def run_canary_source_command(
     private_root = resolve_private_root(repository_root, environ=environ)
     operational_catalog = private_root / OPERATIONAL_CATALOG_RELATIVE_PATH
     resolved_work_root = require_disposable_work_root(work_root, repository_root, private_root)
+    phase = CANARY_PHASE_MODES.get(mode)
     # D144-R1: the operator surface narrows too, so `--mode preflight` answers the question the
     # operator is actually asking -- "is THIS the qualified launch configuration?" -- rather
     # than "is this A qualified configuration?". A preflight that went green over a direct
@@ -2000,7 +2995,29 @@ def run_canary_source_command(
         environ=environ,
         asserted_uuid=require_volume_uuid,
         required_transport=FIRST_CANARY_REQUIRED_TRANSPORT,
+        # Accepted Decision 145 §7: a phase that CONTINUES a run is admitted under the accepted
+        # floor for the phase it is about to begin, never under the launch floor -- which asks
+        # whether there is room to run the whole canary from nothing, and is false by
+        # construction once F0 has written. Every other mode keeps the launch floor exactly.
+        minimum_free_bytes=(
+            LAUNCH_MINIMUM_FREE_BYTES if phase is None else PHASE_ADMISSION_FLOOR[phase]
+        ),
     )
+    if phase is not None:
+        outcome = run_single_source_canary_phase(
+            phase=phase,
+            operational_catalog=operational_catalog,
+            tree=DataTree.from_root(private_root),
+            work_root=resolved_work_root,
+            run_id=run_id,
+            source_instance_id=source_instance_id,
+            require_volume_uuid=require_volume_uuid,
+            environ=environ,
+        )
+        return CanaryOperatorResult(
+            exit_code=_EXIT_OK if outcome.operational_catalog_unchanged else _EXIT_GATE_FAILURE,
+            lines=_render(outcome.as_record(), title=f"canary-source {mode}"),
+        )
     if limit is not None:
         # ``profile-prefix`` is the only mode a bound can survive validation under, so this
         # branch is entered by the bound itself rather than by a second reading of the mode.
@@ -2034,7 +3051,8 @@ def run_canary_source_command(
         )
     if mode != "run":
         message = (
-            f"unknown canary mode {mode!r}; the modes are 'preflight', 'run', and 'profile-prefix'"
+            f"unknown canary mode {mode!r}; the modes are 'preflight', 'run', 'profile-prefix', "
+            f"and the accepted Decision 145 phase modes {', '.join(sorted(CANARY_PHASE_MODES))}"
         )
         raise SingleSourceCanaryError(message)
     result = run_single_source_canary(

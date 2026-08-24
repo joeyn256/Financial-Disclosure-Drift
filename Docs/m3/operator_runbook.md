@@ -2008,6 +2008,75 @@ none may be written** — a documented recovery that does not exist is worse tha
 that none does.
 
 
+## 28h. The governed major-phase restart — Decision 145
+
+**Read §28g.F first.** Nothing here is a pause, and nothing here makes the SSD safe to unplug.
+
+### A. What a restart is
+
+The corrected complete-source canary has **three major execution phases**: `F0` (the one-source
+parse), `F1` (the Decision 012 resolution pass), and `F2` (the Decision 094 §6.4 association
+projection). Both boundaries between them are qualified restart boundaries, so the governed
+procedure runs **one operating-system process per phase**:
+
+```text
+disclosure-drift m3 canary-source --mode phase-f0 --source-instance-id <ID> \
+    --run-id <RUN_ID> --work-root <ABSOLUTE_PATH> --require-volume-uuid 397A4D4A-9508-391E-814E-3B533C7BD049
+# the process exits; the operating system reclaims its memory
+disclosure-drift m3 canary-source --mode phase-f1 ... (same arguments)
+# the process exits
+disclosure-drift m3 canary-source --mode phase-f2 ... (same arguments)
+```
+
+The **same** `--run-id` for all three: they are one governed run. `phase-f0` creates the disposable
+world; `phase-f1` and `phase-f2` attach to it and **never** create one.
+
+### B. The rule, and it has no operator discretion
+
+At **every** phase boundary, in this order:
+
+1. the phase reaches durable terminal success and prints its record;
+2. the terminal checkpoint is verified — the command does this and refuses without it;
+3. the current process **exits cleanly**;
+4. the old process id is confirmed terminated;
+5. the successor starts as a **fresh process**;
+6. the successor reauthenticates the full relevant world;
+7. the successor continues only if every predicate passes.
+
+**There is no discretion to skip a restart because memory "looks fine"**, unless a future canary
+authorization explicitly changes this rule.
+
+### C. What a restart does NOT permit
+
+Between phases, the machine is in exactly the state it was in during them:
+
+* **do not** unplug, eject, unmount, or detach the SSD or the dock;
+* **do not** change topology, and **do not** re-plug the SSD directly — a qualified `USB_DIRECT`
+  attachment is **refused** at every phase boundary, exactly as it is at launch;
+* **do not** close the lid, sleep, or unplug AC power;
+* **do not** start any other canary, in any mode, at any point in the sequence — see D below.
+
+### D. The one thing the application does not enforce here
+
+**The host execution lock is released when each phase's process exits and is re-taken by the
+next.** At most one canary *process* runs at a time, which is what the capacity model needs — but
+the *sequence* does not hold the lock end to end.
+
+If another canary is started in the gap between two phases, **this run's next phase refuses** on
+the lock conflict. That is fail-closed for this run, and it is **not** a mechanical bar on the
+other one. **Starting no other canary during a phase sequence is an operator rule**, in the sense
+§28f.C.2 uses that phrase: the application checks nothing about it.
+
+### E. If a phase does not finish
+
+A phase that crashed, was killed, ran out of memory, or lost its volume **leaves no checkpoint**,
+and its successor **refuses**. That is not a failure of the mechanism; it is the mechanism.
+
+**The run is INTERRUPTED, not paused**, and §28g.G governs it unchanged: an interrupted run is
+lost and requires a new run identity. Worlds are create-once and are never resumed, repaired, or
+overwritten.
+
+
 ## 29. Freeze the real snapshot only after Gate H and E0
 
 **`PLANNED — NOT YET IMPLEMENTED (M3.3)`**

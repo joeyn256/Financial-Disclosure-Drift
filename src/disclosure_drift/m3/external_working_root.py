@@ -1235,6 +1235,7 @@ def external_canary_preflight(
     require_archive: bool = True,
     required_transport: str | None = None,
     operator_asserts_power_conditions: bool = False,
+    minimum_free_bytes: int = LAUNCH_MINIMUM_FREE_BYTES,
 ) -> ExternalCanaryPreflight:
     """Run every D137 launch guard against ``working_root``, read-only, and create nothing.
 
@@ -1251,7 +1252,9 @@ def external_canary_preflight(
        records that finding, and this is where the guard is actually applied;
     4. **isolation** (D137-R3) -- refuse a root that is, is inside, or contains the D130 archive;
     5. **archive integrity** (D137-R10) -- the bounded compact precheck, tar never opened;
-    6. **capacity** (D137-R4) -- `>= 185` GiB free, measured on that volume;
+    6. **capacity** (D137-R4) -- `>= 185` GiB free, measured on that volume, unless the
+       caller states the accepted floor for a **continuation** rather than a launch (see
+       ``minimum_free_bytes``);
     7. **temporary placement** (D137-R8) -- an explicit external ``SQLITE_TMPDIR``;
     8. **observation** (D137-R7) -- one ``PRE_LAUNCH`` record.
 
@@ -1270,6 +1273,14 @@ def external_canary_preflight(
         operator_asserts_power_conditions: Whether the operator has explicitly stated the power
             and lid conditions. It excuses an **unreadable** reading only; a host reporting
             battery power or a closed lid is refused whatever is asserted.
+        minimum_free_bytes: The free-space floor guard 6 compares against. It defaults to the
+            accepted D137-R4 **launch** floor and every launch keeps it. Accepted Decision 145
+            supplies a different accepted floor when the process being admitted is *continuing*
+            a run rather than starting one: the launch floor answers "is there room to run the
+            whole canary from nothing?", which is false by construction once F0 has written, and
+            is the wrong question to refuse a continuation with. The floors a continuation may
+            pass are the accepted phase floors -- :data:`PRE_F1_MINIMUM_FREE_BYTES` before F1 and
+            the Decision 126 §7 pre-F2 gate before F2 -- and nothing here invents one.
 
     Raises:
         ExternalWorkingRootError: any guard did not hold. Nothing is created either way.
@@ -1297,7 +1308,7 @@ def external_canary_preflight(
             "beside an archive whose identity cannot be confirmed"
         )
         raise ExternalWorkingRootError(message)
-    free = require_launch_free_space(working_root)
+    free = require_launch_free_space(working_root, minimum=minimum_free_bytes)
     temp_directory = require_external_sqlite_tmpdir(
         working_root=working_root,
         archive=archive,
@@ -1384,6 +1395,7 @@ def require_external_envelope(
     asserted_uuid: str | None = None,
     required_transport: str | None = None,
     operator_asserts_power_conditions: bool = False,
+    minimum_free_bytes: int = LAUNCH_MINIMUM_FREE_BYTES,
 ) -> ExternalCanaryPreflight | None:
     """Apply the complete external envelope when one is owed, and refuse when it cannot hold.
 
@@ -1426,6 +1438,9 @@ def require_external_envelope(
             (D141-R6). Like ``asserted_uuid`` it can only ever narrow.
         operator_asserts_power_conditions: Whether the operator states the power and lid
             conditions explicitly, which excuses an unreadable reading and nothing else.
+        minimum_free_bytes: The free-space floor the envelope's capacity guard compares against.
+            Defaults to the accepted launch floor; see :func:`external_canary_preflight`. It
+            narrows or relaxes **only** that one guard and reaches no other.
 
     Raises:
         ExternalWorkingRootError: an external requirement exists and the assertion was omitted
@@ -1471,6 +1486,7 @@ def require_external_envelope(
         expected_uuid=QUALIFIED_EXTERNAL_VOLUME_UUID,
         required_transport=required_transport,
         operator_asserts_power_conditions=operator_asserts_power_conditions,
+        minimum_free_bytes=minimum_free_bytes,
     )
 
 

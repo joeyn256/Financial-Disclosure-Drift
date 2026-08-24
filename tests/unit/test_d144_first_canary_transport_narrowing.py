@@ -183,7 +183,11 @@ def test_no_production_envelope_call_omits_the_transport_narrowing() -> None:
         and isinstance(node.func, ast.Name)
         and node.func.id == "require_external_envelope"
     ]
-    assert len(calls) == 3, "the production seam count changed; each one needs the narrowing"
+    # Three at Decision 144, four since accepted **Decision 145** added
+    # `run_single_source_canary_phase` -- and this assertion is *why* that seam was reviewed for
+    # the narrowing rather than merely written. It fired, the seam was checked, and it carries
+    # `FIRST_CANARY_REQUIRED_TRANSPORT` like the other three; the loop below re-proves it.
+    assert len(calls) == 4, "the production seam count changed; each one needs the narrowing"
     for call in calls:
         pinned = [
             keyword

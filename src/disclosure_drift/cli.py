@@ -407,7 +407,16 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
             "preflight validates the plan selection, the world, and the boundaries read-only "
             "and creates nothing; run builds the disposable world and parses that one source; "
             "profile-prefix is diagnostic only -- it runs the same path over the first "
-            "--member-limit governed members, finalizes nothing, and can never report success."
+            "--member-limit governed members, finalizes nothing, and can never report success. "
+            "phase-f0, phase-f1 and phase-f2 run ONE major execution phase each, in one process "
+            "each, so that a finished phase's process exits and the operating system reclaims "
+            "its memory before the next phase starts (Decision 145). They are NOT a pause and "
+            "NOT a resume: a phase may begin only after its predecessor reached a durable "
+            "terminal, a phase that was interrupted leaves no checkpoint and refuses its "
+            "successor, and each process re-establishes EVERY launch predicate for itself "
+            "rather than trusting the one before it. The external volume must stay attached to "
+            "the selected topology throughout -- a restart confers no right to detach, eject, "
+            "unmount, sleep, or change topology."
         ),
     )
     canary.add_argument(
@@ -1532,7 +1541,19 @@ _M3_3_RECOVERY_MODES: Final[tuple[str, ...]] = ("preflight", "execute")
 #: the accepted materialization path over a bounded number of members and finalizes nothing
 #: (accepted Decision 119 §6). `run` stays complete-source-only and refuses a bound.
 _M3_3_CANARY_COMMAND: Final = "canary-source"
-_M3_3_CANARY_MODES: Final[tuple[str, ...]] = ("preflight", "run", "profile-prefix")
+_M3_3_CANARY_MODES: Final[tuple[str, ...]] = (
+    "preflight",
+    "run",
+    "profile-prefix",
+    # Accepted Decision 145's governed major-phase restart: one OS process per major execution
+    # phase, so a finished phase's memory is reclaimed by the only mechanism that genuinely
+    # reclaims it -- the process ending. They are NOT a pause: each begins only after its
+    # predecessor reached a durable terminal, and each re-establishes every launch predicate for
+    # itself. `run` is unchanged and is not removed.
+    "phase-f0",
+    "phase-f1",
+    "phase-f2",
+)
 
 #: The M3.3 real-execution surfaces the accepted contract §19 names. Each is recognized so
 #: the command set is complete and each **refuses**: the owner gate it names has not been

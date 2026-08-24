@@ -26,8 +26,10 @@ import fcntl
 import json
 import os
 import re
+import resource
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +57,8 @@ __all__ = [
     "require_launch_power_conditions",
     "free_bytes",
     "power_state",
+    "process_is_live_canary",
+    "process_peak_resident_bytes",
     "runtime_directory_for",
     "write_pid_record",
 ]
@@ -447,6 +451,68 @@ def authenticate_canary_process(
         )
         raise CanaryRuntimeError(message)
     return AuthenticatedCanaryProcess(pid=pid, run_id=run_id, executable=executable, argv=argv)
+
+
+def process_is_live_canary(
+    pid: int,
+    *,
+    run_id: str,
+    subcommand: Sequence[str] = ("m3", "canary-source"),
+    argv_provider: Callable[[int], Sequence[str]] | None = None,
+) -> bool:
+    """Whether ``pid`` is **right now** a live process running this canary run -- D145 §9.
+
+    The successor half of accepted Decision 145's RAM-reclamation evidence. Before a fresh
+    process continues from a predecessor's checkpoint it must be able to say that the
+    predecessor is *gone*, and "gone" cannot be asserted from the checkpoint alone: a checkpoint
+    is written before the process exits, so a checkpoint plus a still-running writer is exactly
+    the state that must refuse.
+
+    **A bare process id is not an identity**, which is why this reuses the D140-R18 shape rather
+    than asking whether the number is in use. Three outcomes:
+
+    * the process does not exist -> ``False``. The predecessor is gone;
+    * the process exists and carries the canary subcommand adjacently **and** ``--run-id`` with
+      exactly this identity -> ``True``. The predecessor, or something claiming to be it, is
+      still running, and the successor refuses;
+    * the process exists and is something else -> ``False``. The id was recycled, which is the
+      one case a naive ``kill(pid, 0)`` would get wrong in the dangerous direction.
+
+    It never signals anything, and it never searches for a process: the id comes from the
+    predecessor's own durable checkpoint and from nowhere else.
+    """
+    try:
+        argv = tuple(process_argv(pid)) if argv_provider is None else tuple(argv_provider(pid))
+    except CanaryRuntimeError:
+        # `process_argv` refuses a process that reports no command line, which is what a process
+        # that has exited reports. That refusal is this function's `False`.
+        return False
+    if not argv:  # pragma: no cover - process_argv already refuses an empty command line
+        return False
+    return _contains_adjacent(argv, list(subcommand)) and _contains_adjacent(
+        argv, ["--run-id", run_id]
+    )
+
+
+def process_peak_resident_bytes() -> int | None:
+    """This process's **peak** resident set size in bytes, or ``None`` if it cannot be read.
+
+    The Decision 145 §9 RAM-reclamation evidence, and it is named for what it actually is.
+    ``ru_maxrss`` is a high-water mark rather than an instantaneous sample, and it is reported as
+    the peak rather than described as something narrower: the reclamation claim is precisely that
+    a process which *reached* a large resident size is replaced by one that has not.
+
+    The unit differs by platform and is normalized here rather than at every call site: Darwin
+    reports bytes, and Linux reports kibibytes.
+    """
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+    except (OSError, ValueError):  # pragma: no cover - getrusage does not fail in practice
+        return None
+    peak = int(usage.ru_maxrss)
+    if peak <= 0:  # pragma: no cover - a non-positive peak is not a measurement
+        return None
+    return peak if sys.platform == "darwin" else peak * 1024
 
 
 def _contains_adjacent(argv: Sequence[str], tokens: Sequence[str]) -> bool:

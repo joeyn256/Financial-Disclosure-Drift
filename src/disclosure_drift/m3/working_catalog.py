@@ -252,12 +252,32 @@ class RunProgressLedger:
                 (key, value),
             )
 
-    def identity_value(self, key: str) -> str | None:
-        """Read one recorded provenance value, or ``None`` when it was never written."""
+    def record_value(self, key: str, value: str) -> None:
+        """Persist one run-local key/value fact beside the working catalog.
+
+        The generic writer behind :meth:`record_identity`, and the durable home accepted
+        Decision 145 puts a phase's terminal checkpoint in. It stays in **this** database rather
+        than in the working catalog for the reason the class docstring already gives: the
+        working catalog is a byte-for-byte schema twin of the accepted operational catalog and
+        must stay one, and a phase checkpoint is bookkeeping about the attempt. Storing it here
+        is why phase-boundary restart needed no migration and why head stays ``0015``.
+        """
+        self._connection.execute(
+            "INSERT INTO run_working_catalog (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    def recorded_value(self, key: str) -> str | None:
+        """Read one recorded run-local value, or ``None`` when it was never written."""
         row = self._connection.execute(
             "SELECT value FROM run_working_catalog WHERE key = ?", (key,)
         ).fetchone()
         return None if row is None else str(row["value"])
+
+    def identity_value(self, key: str) -> str | None:
+        """Read one recorded provenance value, or ``None`` when it was never written."""
+        return self.recorded_value(key)
 
     def begin_source(self, source_instance_id: str, source_id: str) -> None:
         """Record that a source has started, before its first durable row.
@@ -381,13 +401,28 @@ class WorkingCatalog:
             from the first's.
         cache_bytes: An explicit page-cache budget for the writing connection, in bytes, or
             ``None`` for SQLite's own default. See :func:`cache_size_pragma`.
+        attach: Open the working catalog a **previous phase process** already built, instead of
+            building one (accepted Decision 145). It is the successor half of phase-boundary
+            restart and it inverts exactly one rule: creation refuses a directory that already
+            holds a working catalog, and attachment refuses one that does not. It copies
+            nothing, creates nothing, and proves the accepted catalog is still byte-identical to
+            the artifact the copy descends from before admitting anything.
     """
 
     def __init__(
-        self, source_path: Path, directory: Path, *, cache_bytes: int | None = None
+        self,
+        source_path: Path,
+        directory: Path,
+        *,
+        cache_bytes: int | None = None,
+        attach: bool = False,
     ) -> None:
         self._source_path = source_path
         self._directory = directory
+        #: Accepted Decision 145: open the working catalog a **previous phase process** built,
+        #: rather than build one. Defaults to ``False``, so every accepted caller creates
+        #: exactly as it did before and a silent reuse is still impossible on that path.
+        self._attach = attach
         self._path = directory / WORKING_CATALOG_FILENAME
         self._ledger_path = directory / PROGRESS_LEDGER_FILENAME
         self._identity: WorkingCatalogIdentity | None = None
@@ -401,9 +436,22 @@ class WorkingCatalog:
 
     # -- lifecycle --------------------------------------------------------- #
     def __enter__(self) -> WorkingCatalog:
-        self._identity = self._create()
-        self._ledger = RunProgressLedger(self._ledger_path)
-        self._ledger.record_identity(self._identity)
+        if self._attach:
+            # The ledger is opened FIRST here and only here: the recorded identity is what the
+            # attach proves against, so it has to be readable before anything is admitted.
+            if not self._ledger_path.is_file():
+                message = (
+                    f"no run-local progress ledger exists at {self._ledger_path.name}; a phase "
+                    "continuation attaches to the world a previous phase built and never "
+                    "creates one, so an absent ledger is a refusal rather than a fresh start"
+                )
+                raise WorkingCatalogError(message)
+            self._ledger = RunProgressLedger(self._ledger_path)
+            self._identity = self._attach_existing()
+        else:
+            self._identity = self._create()
+            self._ledger = RunProgressLedger(self._ledger_path)
+            self._ledger.record_identity(self._identity)
         context = connect(self._path, writer=True)
         self._context = context
         self._connection = context.__enter__()
@@ -521,6 +569,102 @@ class WorkingCatalog:
             applied_migrations=applied,
             created_at_utc=utc_now(),
         )
+
+    def _attach_existing(self) -> WorkingCatalogIdentity:
+        """Open the working catalog a previous phase built, and prove it is that one.
+
+        **Nothing is copied and nothing is created.** This is the successor half of accepted
+        Decision 145's phase-boundary restart: F0 built the working catalog, F1 and F2 continue
+        into it from separate processes, and the copy that :meth:`_create` refuses to overwrite
+        is exactly the copy this must find already present.
+
+        Three proofs, and each refuses rather than warns:
+
+        * the working catalog and the run-local ledger both **exist**;
+        * the accepted operational catalog is still **byte-identical** to the artifact this copy
+          was taken from -- compared against the digest the ledger recorded at creation, so an
+          accepted catalog that changed between phases refuses instead of being continued
+          against;
+        * the copy's applied migration chain is still exactly the recorded one.
+
+        **The full integrity check is deliberately not repeated here.** ``PRAGMA
+        integrity_check`` is O(database) and :meth:`_create` runs it when the copy is fresh,
+        which is the moment it can be afforded and the moment a bad copy would be born. Running
+        it again at every phase boundary of a multi-hundred-gibibyte working catalog would cost
+        hours per boundary and is not what the boundary is asking about.
+
+        Raises:
+            WorkingCatalogError: the working catalog is absent, its identity was never recorded,
+                the accepted catalog has moved, or the migration chain does not match.
+        """
+        if not self._path.is_file():
+            message = (
+                f"no working catalog exists at {self._path.name}; a phase continuation attaches "
+                "to the one a previous phase built and never builds its own"
+            )
+            raise WorkingCatalogError(message)
+        ledger = self._ledger
+        if ledger is None:  # pragma: no cover - __enter__ opens it before calling this
+            message = "the run-local ledger must be open before a working catalog is attached"
+            raise WorkingCatalogError(message)
+        recorded = {
+            key: ledger.identity_value(key)
+            for key in (
+                "source_path",
+                "source_file_sha256",
+                "source_byte_length",
+                "applied_migrations",
+                "created_at_utc",
+            )
+        }
+        missing = sorted(key for key, value in recorded.items() if value is None)
+        if missing:
+            message = (
+                "the run-local ledger records no working-catalog identity "
+                f"({', '.join(missing)} absent); a copy that cannot name the artifact it "
+                "descends from is never continued against"
+            )
+            raise WorkingCatalogError(message)
+        if not self._source_path.is_file():
+            message = f"accepted catalog {self._source_path} does not exist"
+            raise WorkingCatalogError(message)
+        source_sha256, source_bytes = file_digest(self._source_path)
+        if source_sha256 != recorded["source_file_sha256"]:
+            message = (
+                "the accepted operational catalog is NOT the artifact this working catalog was "
+                "taken from: its digest has changed since the phase that created the copy. A "
+                "continuation is a continuation of one governed run against one frozen catalog, "
+                "so this is refused rather than continued"
+            )
+            raise WorkingCatalogError(message)
+        if str(source_bytes) != recorded["source_byte_length"]:  # pragma: no cover - digest first
+            message = (
+                "the accepted operational catalog's byte length has changed since this working "
+                "catalog was taken from it; the run is refused"
+            )
+            raise WorkingCatalogError(message)
+        applied = tuple(
+            int(part) for part in str(recorded["applied_migrations"]).split(",") if part
+        )
+        self._verify_attached(applied)
+        return WorkingCatalogIdentity(
+            source_path=Path(str(recorded["source_path"])),
+            source_file_sha256=source_sha256,
+            source_byte_length=source_bytes,
+            applied_migrations=applied,
+            created_at_utc=str(recorded["created_at_utc"]),
+        )
+
+    def _verify_attached(self, expected: tuple[int, ...]) -> None:
+        """Refuse an attached copy whose migration chain is no longer the recorded one."""
+        with strictly_read_only_connection(self._path) as copy:
+            applied = applied_versions(copy)
+        if applied != expected:
+            message = (
+                "the attached working catalog's migration chain does not match the one recorded "
+                f"when it was created: expected {list(expected)}, found {list(applied)}"
+            )
+            raise WorkingCatalogError(message)
 
     def _verify_copy(self, expected: tuple[int, ...]) -> None:
         """Refuse a copy that is not the accepted schema, before one row is written."""

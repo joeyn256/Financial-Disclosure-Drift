@@ -1,10 +1,134 @@
 # Milestones/STATUS.md — concrete-state ledger
 
-CURRENT_STAGE: M3.3 — DECISION 145 IMPLEMENTS GOVERNED MAJOR-PHASE RESTART AND RAM RECLAMATION: EXACTLY THE SOUND SUBSET ACCEPTED DECISION 140 §17 IDENTIFIED AND RETURNED FOR OWNER REDESIGN, AND NOTHING WIDER. THE PHASE INVENTORY WAS RECONSTRUCTED FROM THE CONTROLLING IMPLEMENTATION RATHER THAN ASSUMED: THE FIRST COMPLETE-SOURCE CANARY HAS **THREE MAJOR EXECUTION PHASES — F0, F1 AND F2** (the one-source parse; the Decision 012 resolution pass; the Decision 094 §6.4 association projection), named from the accepted Decision 135 §11 capacity vocabulary; world creation and the result document are NOT additional phases. **BOTH INTER-PHASE BOUNDARIES QUALIFY** — F0→F1 and F1→F2 are each QUALIFIED_MAJOR_RESTART_BOUNDARY, 2 of 2 — and the post-F2 boundary is TERMINAL_PROCESS_EXIT_EXPECTED because the next stage is E0 and no continuation was invented to create another restart. Hence PHASE_BOUNDARY_RAM_RECLAMATION = IMPLEMENTED. **ONE OS PROCESS PER PHASE**, through --mode phase-f0|phase-f1|phase-f2, so a finished phase's memory is reclaimed by the only mechanism that genuinely reclaims it — the process ending. **IT IS NOT PAUSE/RESUME AND CONFERS NO PHYSICAL RIGHTS**: the restart right exists ONLY after durable terminal success, an interrupted phase leaves NO CHECKPOINT and refuses its successor, the SSD must stay attached to the selected dock topology throughout, and GOVERNED_PAUSE_RESUME and SAFE_TO_EJECT both remain NOT_IMPLEMENTED. The durable checkpoint lives in the accepted D111 run-local progress ledger, so **NO MIGRATION WAS NEEDED** — head remains 0015 and 0016 is absent. **THE SUCCESSOR TRUSTS NOTHING THE PREDECESSOR CHECKED**: every launch predicate, the full D137 envelope narrowed to the D142 §4 topology, the host lock, the accepted catalog's own digest, the predecessor's terminal checkpoint AND the proof its process is gone are all re-established in the successor's own process. Continuations are admitted under the accepted PHASE floors, never the launch floor, and NOT ONE FLOOR IS INVENTED, MOVED OR RELAXED. D144-R1 SURVIVES: FIRST_CANARY_REQUIRED_TRANSPORT is now passed at FOUR production seams, and the D144 seam-count tripwire FIRED on the fourth and was resolved by review rather than by loosening it. 68 D145 TESTS; FALSIFICATION 15 MUTATIONS / 15 KILLED, every mutated file restored byte-identical by SHA-256; the bounded demonstration ran THREE REAL OS PROCESSES with three distinct PIDs, each proved gone before its successor ran. **D145-R0** additionally normalizes the DECISION 140 ACCEPTANCE LINEAGE — governance metadata only, performed and validated BEFORE any source mutation, touching two documentation surfaces and no source, test, config or migration path. CANARY_AUTHORIZED = NO. Accepted predecessor M3_3_D144_D143_FINDING_CORRECTION_COMPLETE_READY_FOR_OWNER; authorization M3_3_D145_GOVERNED_MAJOR_PHASE_RESTART_AND_RAM_RECLAMATION_AUTHORIZED with its D145-R0 addendum, spent by this publication; completion token M3_3_D145_GOVERNED_MAJOR_PHASE_RAM_RECLAMATION_COMPLETE_READY_FOR_OWNER.
-ACTIVE_BLOCKER: THE COMPLETE-SOURCE CANARY REMAINS UNAUTHORIZED, AND BUILDING THE MECHANISM IS NOT PERMISSION TO USE IT. Decision 145 creates architecture and implementation only; the future canary authorization must EXPLICITLY authorize the multi-process sequence, and it is a separate owner instrument that has not been issued. THE D144-CORRECTED TREE STILL HAS NOT BEEN INDEPENDENTLY REVIEWED, and Decision 145 has now changed it further — neither the D143 rereview nor a review of this record may be performed by the session that made the changes. census_orchestrator.py::_parse_bulk REMAINS PROVABLY CANARY-UNREACHABLE AND AN OPEN PRE-NETWORK BLOCKER, INDEPENDENTLY RE-TRACED AFTER THE PHASE DECOMPOSITION AND DELIBERATELY UNREPAIRED. SEVEN LIMITATIONS ARE STATED RATHER THAN SMOOTHED, and two are new: the HOST EXECUTION LOCK IS RELEASED BETWEEN PHASES and re-taken by the next process, so at most one canary PROCESS runs at a time but a SEQUENCE no longer holds the lock end to end — a conflicting canary starting in the gap makes this run's next phase refuse, which is fail-closed for this run and is an operator rule rather than a mechanical bar on the intruder; and --mode run STILL EXISTS, so WHICH MODE IS TYPED is governed by the runbook and the future canary authorization rather than by a refusal in code, while every predicate WITHIN the sequence is mechanical and non-bypassable. NEITHER D137 NOR D138 IS OWNER ACCEPTED; D140 AND D141 ARE ACCEPTED FOR CONTINUATION ONLY; AND D145 ACCEPTS NONE OF THEM. A passing preflight still prints canary_authorized: false.
-IMPLEMENTATION_AUTHORIZATION: SPENT — M3_3_D145_GOVERNED_MAJOR_PHASE_RESTART_AND_RAM_RECLAMATION_AUTHORIZED and its D145-R0 addendum were issued outside this repository and are now consumed by the publication of Decision 145. NO FURTHER IMPLEMENTATION AUTHORITY ARISES FROM THAT PUBLICATION. It did NOT authorize, and does not now authorize, canary execution, canary-world creation, an execution namespace, a launch receipt, E0, network acquisition, SEC traffic, migration 0016, pause/resume implementation, physical detach testing, _parse_bulk repair, or any unrelated architecture redesign. It accepts NEITHER Decision 137, 138, 140, 141, 142, 143 NOR 144 — D145-R0 records the Decision 140 owner instrument that already existed and confers nothing new. All three activation constants remain None, both tracked network switches remain false, and migration head remains 0015 with 0016 absent.
-NEXT_AUTHORIZED_ACTION: STOP AND RETURN DECISION 145 TO GPT-5.6 SOL — AND NOTHING ELSE. DO NOT START THE CANARY. DO NOT PERFORM THE INDEPENDENT REREVIEW IN THE SESSION THAT MADE THESE CHANGES. Whether the tree is now reviewable, and by whom, is the owner's to decide; a canary authority remains a separate owner instrument that has not been issued.
+CURRENT_STAGE: M3.3 — DECISION 146 IS THE INDEPENDENT ADVERSARIAL REVIEW OF DECISION 145 THAT D145 §26 REQUIRED AND THAT THE SESSION WHICH WROTE D145 WAS FORBIDDEN TO PERFORM, DONE FROM A GENUINELY FRESH CONTEXT WITH D145'S CONCLUSIONS NOT INHERITED. REVIEWED_HEAD 69a73d99a2aa5aafeb905d3fcfd40dba6f88e68d, REVIEWED_TREE 1ab21d76913e367d972b024c5c1fb006160d52b6 — THE VERDICT APPLIES TO THAT TREE, NOT TO THE DOCUMENTATION-ONLY COMMIT THAT PUBLISHES IT. VERDICT D146_FINAL_INDEPENDENT_POST_D145_PRECANARY_REVIEW_FAIL — 0 BLOCKER / 1 MAJOR / 2 MINOR / 7 OBSERVATION. THE PHASE INVENTORY WAS RECONSTRUCTED INDEPENDENTLY AND AGREES WITH D145: the whole-run driver _materialize calls EXACTLY THREE phase primitives, so the first canary has THREE MAJOR EXECUTION PHASES — F0, F1, F2 — under the accepted Decision 135 §11 vocabulary; WORLD CREATION IS NOT A FOURTH PHASE AND THE RESULT DOCUMENT IS NOT A FIFTH; BOTH INTER-PHASE BOUNDARIES QUALIFY, 2 OF 2, and post-F2 is TERMINAL_PROCESS_EXIT_EXPECTED. MAJOR-1 — phase_execution_identity() BINDS NO EXECUTABLE GOVERNING CODE. D145 §12 claims it prevents MECHANICALLY "a process continuing from a revision whose governing semantics moved" and labels it CODE and configuration identity; it folds ten frozen constants plus disclosure_drift.__version__, which is the literal "0.1.0" and has been touched by EXACTLY ONE COMMIT IN THE ENTIRE HISTORY — fa16668, the Milestone 1 foundation. PROVED BY MUTATION RATHER THAN ARGUED: with the accepted POST_F0 floor relaxed 60 -> 1 GiB AND the admission-side predecessor-status guard deleted outright, the digest is BIT-IDENTICAL at ef0b492c03ccd5b154eca8c0c3cd27463cab0686ac69b34a89b0fc66a339a69b; an exhaustive search of src/ finds NO git SHA, NO source digest and NO build identity anywhere; and the test named test_a_successor_refuses_a_changed_code_revision establishes the property only for a version string that never moves. THE DIGEST IS SOUND FOR THE CONSTANTS IT BINDS — THE CLAIM DRAWN FROM IT IS NOT. MINOR-1 — §12 says the digest folds "the FOUR capacity floors" and it folds THREE; POST_F0 (60 GiB), F2_ALERT (20 GiB) and F2_HARD_FLOOR (10 GiB) are not among them. MINOR-2 — the PRE_F2_MINIMUM_FREE_BYTES docstring still states as PRESENT FACT two Decision 126 §7 rationale sentences that D145 itself made false; §24 item 5 corrected the record but not the source, and named one of the two. NINE OF THE TEN REVIEW AXES ARE SUBSTANTIATED. PROCESS REPLACEMENT IS REAL — three OS processes through the real operator command, each self-reported pid asserted EQUAL TO THE PARENT-OBSERVED child.pid so the proof does not rest on self-report, predecessor proved gone, ru_maxrss reported ONLY as PEAK and never thresholded. THE CHECKPOINT is terminal-only, create-once and written LAST after the working-catalog context closes, in WAL with synchronous = FULL; THE F2 RESULT-BEFORE-CHECKPOINT WINDOW IS REFUSE, NOT RESUME — attach_world and create_world BOTH refuse a world carrying its result document. THE HOST-LOCK GAP IS ACCEPTABLE_LIMITATION: five interleavings were traced and an intruder in the gap can make this run's successor REFUSE but CANNOT corrupt, duplicate or advance it. TOPOLOGY SURVIVES EVERY RESTART AT FOUR SEAMS and THE D144 TRIPWIRE WAS STRENGTHENED, NOT LOOSENED — the complete diff is 3 -> 4 plus a comment, with the every-call-site loop untouched. D126-R6 IS HONOURED and no correction or supersession of Decision 126 is required. THE D140 ACCEPTANCE LINEAGE IS UNAMBIGUOUS, reconstructed WITHOUT assuming uniqueness: exactly three D140-shaped tokens exist in the tree AND in the entire git history, in three distinct roles, with NO competing acceptance candidate. _parse_bulk REMAINS CANARY-UNREACHABLE, independently re-traced three ways. EQUIVALENCE REPRODUCED — 6 variable fields and 55 identical, and the proof MEASURES its own baseline rather than hardcoding it, so it fails in BOTH directions. M2's HONESTY WAS RE-RUN, NOT READ: deleting the admission-side status guard SURVIVES all 68 tests, confirming D145's statement that it is unreachable, while the write-side substitute is killed by exactly one. A REVIEW RECORDS; IT DOES NOT REPAIR — no source, test, script, config or migration path is touched, and the four bounded review mutations were restored byte-identical by SHA-256 with an empty git diff BEFORE publication. CANARY_AUTHORIZED = NO.
+ACTIVE_BLOCKER: THE COMPLETE-SOURCE CANARY REMAINS UNAUTHORIZED, AND THE INDEPENDENT POST-D145 REVIEW FAILED ON ONE MAJOR FINDING THAT IS RECORDED AND DELIBERATELY UNREPAIRED. D146-MAJOR-1: phase_execution_identity() binds no executable governing code, so Decision 145 §12's MECHANICAL claim to prevent continuation "from a revision whose governing semantics moved" is FALSE — the digest folds ten frozen constants plus a package version that has never changed since the Milestone 1 foundation commit, and two governing mutations left it BIT-IDENTICAL. No other accepted mechanism closes the gap: there is no git SHA, source digest or build identity anywhere in src/. THE REMEDY IS THE OWNER'S CHOICE between binding a genuine code identity and narrowing the §12 claim to what the digest actually does. TWO MINOR FINDINGS ALSO STAND: the "four capacity floors" count is three, and the PRE_F2 docstring restates two now-false Decision 126 §7 rationale sentences as present fact. DECISION 145 IS NOT OWNER ACCEPTED, AND A D146 REVIEW CONFERS NO ACCEPTANCE ON ANYTHING — Decisions 137 and 138 remain IMPLEMENTED — PENDING INDEPENDENT REVIEW AND OWNER ACCEPTANCE, and D140 and D141 are accepted FOR CONTINUATION ONLY. census_orchestrator.py::_parse_bulk REMAINS PROVABLY CANARY-UNREACHABLE AND AN OPEN PRE-NETWORK BLOCKER, INDEPENDENTLY RE-TRACED AND DELIBERATELY UNREPAIRED. SEVEN OBSERVATIONS ARE RECORDED RATHER THAN SMOOTHED, INCLUDING THAT NO DIGEST OF THE WORKING-CATALOG FILE ITSELF IS COMPARED AT ATTACH (outside the accepted threat model, recorded for the owner) AND THAT MODE SELECTION IS A GOVERNANCE BOUNDARY RATHER THAN A MECHANICAL ONE. A passing preflight still prints canary_authorized: false.
+IMPLEMENTATION_AUTHORIZATION: SPENT — M3_3_D146_FINAL_INDEPENDENT_POST_D145_PRECANARY_REVIEW_AUTHORIZED was issued outside this repository and is now consumed by the publication of Decision 146. IT AUTHORIZED READ-ONLY RECONSTRUCTION, BOUNDED VALIDATION AND THE PUBLICATION OF THE REVIEW — AND NOTHING ELSE. It did NOT authorize starting the canary, --mode run or any phase mode against the real canary, E0, SEC acquisition, either network gate, minting any execution authority, source or test fixes, migration creation, modification of the accepted catalog, or repair/resume/overwrite of any real canary world. NO NEW AUTHORIZATION EXISTS.
+NEXT_AUTHORIZED_ACTION: STOP AND RETURN DECISION 145 AND THIS REVIEW TO GPT-5.6 SOL FOR OWNER ADJUDICATION OF D146-MAJOR-1, D146-MINOR-1 AND D146-MINOR-2 — AND NOTHING ELSE. DO NOT START THE CANARY. DO NOT REPAIR THESE FINDINGS IN THE SESSION THAT FOUND THEM. DO NOT BEGIN ANOTHER DECISION. DO NOT BEGIN E0. DO NOT ENABLE NETWORK. DO NOT PERFORM SEC ACQUISITION. ONE FORWARD REQUIREMENT IS RECORDED FOR THE OWNER TO CARRY INTO THE FUTURE CANARY INSTRUMENT: it MUST authorize only --mode phase-f0, phase-f1 and phase-f2, each in its own process with a clean exit between them; it MUST forbid --mode run for the authorized real canary; and any --mode run invocation against it is OUTSIDE AUTHORITY.
 
+
+> **CONTROLLING CURRENT POSITION, 2026-08-23 (LATEST) — published
+> [Decision 146](../Docs/Decisions/decision_146_m3_3_final_independent_post_d145_precanary_review.md),
+> the **FINAL INDEPENDENT POST-D145 PRE-CANARY REVIEW**. Reviewed predecessor
+> `M3_3_D145_GOVERNED_MAJOR_PHASE_RAM_RECLAMATION_COMPLETE_READY_FOR_OWNER`, authorization
+> `M3_3_D146_FINAL_INDEPENDENT_POST_D145_PRECANARY_REVIEW_AUTHORIZED` (issued outside this
+> repository and spent by this publication), completion token
+> `M3_3_D146_FINAL_INDEPENDENT_POST_D145_PRECANARY_REVIEW_FAILED_READY_FOR_OWNER`.
+> **`CANARY_AUTHORIZED = NO`, unchanged.**
+>
+> **Read this first: this block now carries the current position, and every block below it does
+> not.** The Decision 145 block that follows carried the `(LATEST)` marker until this record.
+> **Decisions 135 through 145 state their position as at their own dates and are otherwise left
+> byte-unchanged**, as every superseded block in this file is — and **Decision 143 is still not
+> rewritten**: its `FAIL` verdict stands.
+>
+> **WHAT THIS RECORD IS.** The independent adversarial review of
+> [Decision 145](../Docs/Decisions/decision_145_m3_3_governed_major_phase_restart.md) that Decision
+> 145 §26 required and that the session which wrote Decision 145 was **forbidden** to perform. It
+> was done from a genuinely fresh context, with no subagents and no delegated reasoning, and
+> **Decision 145's conclusions were not inherited**: the phase inventory, the boundary
+> classification, the `_parse_bulk` reachability and the D140 acceptance lineage were each
+> reconstructed from the repository *before* Decision 145's own account of them was read.
+>
+> ```text
+> REVIEWED_HEAD  69a73d99a2aa5aafeb905d3fcfd40dba6f88e68d
+> REVIEWED_TREE  1ab21d76913e367d972b024c5c1fb006160d52b6
+> VERDICT        D146_FINAL_INDEPENDENT_POST_D145_PRECANARY_REVIEW_FAIL
+> FINDINGS       0 BLOCKER / 1 MAJOR / 2 MINOR / 7 OBSERVATION
+> ```
+>
+> **The verdict applies to that tree, not to the documentation-only commit that publishes it.**
+>
+> **THE PHASE INVENTORY WAS RECONSTRUCTED, AND IT AGREES.** The whole-run driver `_materialize`
+> calls exactly three phase primitives — `_f0`, `_f1`, `_f2` — so the first canary has **THREE
+> MAJOR EXECUTION PHASES: `F0`, `F1`, `F2`**, named from the accepted Decision 135 §11 capacity
+> vocabulary. **World creation is not a fourth phase** — it is a `mkdir` inside F0's own process
+> that emits no checkpoint and admits no successor — **and the result document is not a fifth**,
+> being written inside F2's own process. **Both inter-phase boundaries qualify — 2 of 2** — and
+> post-`F2` is `TERMINAL_PROCESS_EXIT_EXPECTED`.
+>
+> **MAJOR-1 — `phase_execution_identity()` BINDS NO EXECUTABLE GOVERNING CODE.** Decision 145 §12
+> claims it prevents, **mechanically**, *"a process continuing from a revision whose governing
+> semantics moved"*, and labels it **code** and configuration identity. It folds ten frozen
+> constants plus `disclosure_drift.__version__` — the literal `"0.1.0"`, touched by **exactly one
+> commit in the entire history**, `fa16668`, the Milestone 1 foundation. **This was proved by
+> mutation rather than argued.** With the accepted `POST_F0` capacity floor relaxed `60 -> 1` GiB
+> **and** the admission-side predecessor-status guard deleted outright, the digest is
+> **bit-identical**:
+>
+> ```text
+> execution_identity @ HEAD     ef0b492c03ccd5b154eca8c0c3cd27463cab0686ac69b34a89b0fc66a339a69b
+> execution_identity @ mutated  ef0b492c03ccd5b154eca8c0c3cd27463cab0686ac69b34a89b0fc66a339a69b
+> ```
+>
+> An exhaustive search of `src/` finds **no git SHA, no source digest and no build identity**
+> anywhere, so no other accepted mechanism closes the gap. The test named
+> `test_a_successor_refuses_a_changed_code_revision` establishes the property only for a version
+> string that never moves — a correct positive control for a mechanism that is inert in practice.
+> **The digest is sound for the constants it binds; the claim drawn from it is not.** The realistic
+> exposure is bounded — one operator, one machine, one governed checkout, a window of hours — so
+> this is a correctness-of-claim defect with a narrow surface, not a live corruption channel. **The
+> remedy is the owner's choice** between binding a genuine semantic code identity and narrowing §12
+> to what the digest actually does.
+>
+> **TWO MINOR FINDINGS.** §12 says the digest folds *"the **four** capacity floors"* and it folds
+> **three** — `POST_F0` (60 GiB), `F2_ALERT` (20 GiB) and `F2_HARD_FLOOR` (10 GiB) are not among
+> them, and the `60 -> 1` GiB relaxation above is that finding made concrete on an accepted gate.
+> And the `PRE_F2_MINIMUM_FREE_BYTES` **source docstring** still states as present fact two Decision
+> 126 §7 rationale sentences that Decision 145 itself made false; §24 item 5 corrected the record
+> but not the source, and named one of the two.
+>
+> **NINE OF THE TEN REVIEW AXES ARE SUBSTANTIATED, AND THAT IS RECORDED RATHER THAN BURIED.**
+>
+> * **Process replacement is real.** Three genuinely separate OS processes launched through the
+>   **real operator command**, and each phase's self-reported `pid` is asserted **equal to the
+>   parent-observed `child.pid`**, so the proof does not rest on self-report. No `gc.collect()`, no
+>   cache clearing, no same-process continuation, no large resident parent, and **no RSS percentage
+>   threshold anywhere** — `ru_maxrss` is reported only as a **peak**.
+> * **The checkpoint is terminal-only, create-once and written LAST**, after the working catalog's
+>   context has closed, in `WAL` with `synchronous = FULL` autocommit. **The F2
+>   result-before-checkpoint window is REFUSE, not resume**: `attach_world` and `create_world` both
+>   refuse a world carrying its result document, so the deliverable survives and the run stays
+>   interrupted. This review does **not** relabel that as resumability.
+> * **The host-lock gap is `ACCEPTABLE_LIMITATION`.** Five interleavings were traced. An intruder in
+>   the gap can make this run's successor **REFUSE**, but cannot silently corrupt, duplicate or
+>   advance it — because the world is create-once and named by `run_id`, capacity is re-measured
+>   **inside** the lock at every phase, and advancement is gated on a durable checkpoint rather than
+>   on anything that merely exists.
+> * **Topology survives every restart at four production seams**, and **the D144 tripwire was
+>   strengthened, not loosened**: the complete diff is the constant `3 -> 4` plus a comment, with
+>   the every-call-site assertion untouched and now covering four seams instead of three.
+> * **D126-R6 is honoured** — the pre-F2 gate is still taken by the process that opens the
+>   transaction — so **no note, correction or supersession of Decision 126 is required**, and this
+>   review does not rewrite it. Two sentences of *nonbinding rationale* aged, not one.
+> * **The D140 acceptance lineage is unambiguous**, reconstructed **without assuming uniqueness**:
+>   exactly three D140-shaped tokens exist in the tree **and in the entire git history**, in three
+>   distinct roles, with no competing acceptance candidate. D145-R0 is confirmed accurate in full.
+> * **`_parse_bulk` remains canary-unreachable**, re-traced three independent ways including a live
+>   fresh-interpreter import closure and a check that no dynamic import exists on the phase path.
+> * **Equivalence was reproduced**: **6** variable fields — run id, two timestamps, two free-space
+>   readings and the working-catalog file digest — and **55** identical, including all five accepted
+>   identities. The proof **measures** its own baseline rather than hardcoding it, so it fails in
+>   **both** directions.
+> * **M2's honesty was re-run, not read.** Deleting the admission-side status guard **survives all
+>   68 tests**, confirming Decision 145's own statement that it is unreachable by construction; the
+>   write-side substitute is killed by exactly one test, matching the reported count. Declining to
+>   count an unkillable mutation is honest reporting.
+>
+> **A REVIEW RECORDS; IT DOES NOT REPAIR.** No file under `src/`, `tests/`, `scripts/`, `configs/`
+> or `migrations/` is changed. The four bounded review mutations were restored **byte-identical by
+> SHA-256** with an empty `git diff`, proved **before** the record was written.
+>
+> **IT ACCEPTS NOTHING.** Not Decision 145, and not Decisions 137, 138, 141, 142, 143 or 144.
+> Decisions 137 and 138 remain `IMPLEMENTED — PENDING INDEPENDENT REVIEW AND OWNER ACCEPTANCE`.
+> Migration head remains `0015` with `0016` absent; all three activation constants remain `None`;
+> both network switches remain `false`. `GOVERNED_PAUSE_RESUME` and `SAFE_TO_EJECT` both remain
+> `NOT_IMPLEMENTED`.
+>
+> **ONE FORWARD REQUIREMENT IS RECORDED FOR THE OWNER.** The future real-canary authorization
+> **MUST** authorize only `--mode phase-f0`, `phase-f1` and `phase-f2`, each in its own process with
+> a clean exit between them; it **MUST** forbid `--mode run` for the authorized real canary; and any
+> `--mode run` invocation against it is **OUTSIDE AUTHORITY**. `--mode run` is **not removed** by
+> this record.
 
 > **CONTROLLING CURRENT POSITION, 2026-08-23 (LATEST) — published
 > [Decision 145](../Docs/Decisions/decision_145_m3_3_governed_major_phase_restart.md), the

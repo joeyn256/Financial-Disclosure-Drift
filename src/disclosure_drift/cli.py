@@ -440,15 +440,23 @@ def _add_m3_group(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
         metavar="VOLUME_UUID",
         help=(
             "Assert that the work root is on the external volume with exactly this Volume UUID. "
-            "It does NOT switch the protection on: a work root on any external volume is "
-            "ALWAYS held to the full Decision 137 envelope -- exact volume identity, isolation "
-            "from the immutable D130 archive, the bounded archive precheck, the 185 GiB launch "
-            "floor, and an explicit external SQLITE_TMPDIR -- whether or not this is supplied. "
-            "Omitting it cannot disable a single guard. Supplied, it must be the one qualified "
-            "volume and it forces the envelope onto a root that would classify as internal. A "
-            "wrong UUID, an absent volume, and a lookup that fails are all refusals; there is "
-            "no fallback to internal storage. Supplying it is not an authorization to launch a "
-            "corrected complete-source canary."
+            "MANDATORY on any external route -- by /Volumes/<name> intent, by residence, or by "
+            "assertion -- and OMITTING IT IS ITSELF A REFUSAL, raised before the volume is "
+            "consulted (Decision 140, D140-R2). It does NOT switch the protection on and never "
+            "did: a work root on any external volume is ALWAYS held to the full Decision 137 "
+            "envelope -- exact volume identity, the qualified transport, AC power and an open "
+            "lid, isolation from the immutable D130 archive, the bounded archive precheck, the "
+            "185 GiB launch floor, and an explicit external SQLITE_TMPDIR. What omitting it "
+            "does is refuse the run, rather than disable a guard: an omitted identity was the "
+            "one input that let an absent volume, or an ordinary directory left at its mount "
+            "point, be read as internal storage and run with no envelope at all. Supplied, it "
+            "must be the one qualified volume, and it can only ever ADD a requirement -- it "
+            "forces the envelope onto a root that would otherwise classify as internal, and an "
+            "internal root asserted with it is refused on the identity check. A wrong UUID, an "
+            "absent volume, and a lookup that fails are all refusals; there is no fallback to "
+            "internal storage. An internal work root with no assertion is the accepted Decision "
+            "116 historical path, unchanged, and this flag is not required for it. Supplying it "
+            "is not an authorization to launch a corrected complete-source canary."
         ),
     )
     canary.add_argument(

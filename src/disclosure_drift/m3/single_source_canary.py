@@ -64,6 +64,7 @@ from disclosure_drift.m3.compact_evidence import (
     COMPACT_EVIDENCE_SIDECAR_FILENAME,
     CompactEvidenceSidecar,
 )
+from disclosure_drift.m3.dock_transport import TRANSPORT_DOCK
 from disclosure_drift.m3.evidence_paths import require_external_evidence_root
 from disclosure_drift.m3.external_working_root import (
     CapacityObservation,
@@ -107,6 +108,7 @@ __all__ = [
     "CANARY_PREFIX_RESULT_FILENAME",
     "CANARY_RESULT_FILENAME",
     "CANARY_RESOLUTION_SCOPE",
+    "FIRST_CANARY_REQUIRED_TRANSPORT",
     "OPERATIONAL_CATALOG_RELATIVE_PATH",
     "PRE_F2_MINIMUM_FREE_BYTES",
     "WORKING_CATALOG_CACHE_BYTES",
@@ -135,6 +137,37 @@ class SingleSourceCanaryError(DisclosureDriftError):
 #: tell exactly which shape produced it. It is deliberately **not** an evidence contract: the
 #: evidence contract is ``e0-compact-evidence/2`` and this module only binds it.
 CANARY_CONTRACT: Final = "m3.3-single-source-canary/1.0"
+
+#: The **one** transport every production first-canary path narrows the external working-root
+#: envelope to: ``USB_VIA_THUNDERBOLT_DOCK``.
+#:
+#: **The selection is accepted Decision 142 §4 (D142-R2); the enforcement is Decision 144
+#: (D144-R1).** Decision 141 built the narrowing mechanism and deliberately left it unused:
+#: §16 (D141-R8) recognized two qualified topologies, refused a third, and said the choice of
+#: *one* for the real canary was the owner's to make. Decision 142 made it. What the D143
+#: independent review then found (MAJOR-1) is that the selection lived only in prose --
+#: ``required_transport`` defaulted to ``None`` at all three production seams, which
+#: :func:`~disclosure_drift.m3.dock_transport.require_qualified_transport` documents as
+#: admitting *either* qualified topology. The whole envelope passed over a directly attached
+#: qualified SSD, which is the operator fallback accepted Decision 142 §6 forbids in terms.
+#:
+#: **It is a module constant and deliberately not an operator input.** There is no CLI flag, no
+#: configuration key, and no environment variable that supplies, widens, or disables it, and
+#: none may be added: a selection an operator can retype under a refusal is the fallback D142 §6
+#: rules out. Changing it is a reviewed source change against a later owner decision.
+#:
+#: **It narrows and never widens.** ``required_transport`` is checked *after* the observed class
+#: has already had to be one of
+#: :data:`~disclosure_drift.m3.dock_transport.QUALIFIED_TRANSPORT_CLASSES`, so this constant can
+#: only ever turn an admission into a refusal. Every other guard -- the mandatory Volume UUID,
+#: AC power and lid, D130 isolation, the archive precheck, the capacity floors, and
+#: ``SQLITE_TMPDIR`` placement -- is untouched by it.
+#:
+#: **:data:`~disclosure_drift.m3.dock_transport.TRANSPORT_DIRECT` is not revoked** (D141-R8, and
+#: D142 §5 restating it). It remains a separately qualified class, the library entry points
+#: still admit it when nothing narrower is demanded, and a third topology still refuses. What is
+#: narrowed is this repository's *first-canary* production envelope, and nothing else.
+FIRST_CANARY_REQUIRED_TRANSPORT: Final = TRANSPORT_DOCK
 
 #: The accepted catalog, relative to the private evidence root.
 #:
@@ -1046,11 +1079,17 @@ def run_single_source_canary(
     #    precheck, the 185 GiB launch floor, and an explicit external SQLITE_TMPDIR -- all
     #    established here, before a world exists to place, and all refusing rather than falling
     #    back to internal storage. An internal root gets exactly what Decision 116 left it.
+    #    Decision 144 (D144-R1): and the envelope is narrowed to the ONE topology accepted
+    #    Decision 142 §4 selected. The mechanism existed and no production caller supplied it,
+    #    so the owner's selection was prose and a directly attached qualified SSD passed --
+    #    including as the answer to a dock refusal, which D142 §6 forbids. There is no fallback
+    #    here to take: the narrowing is a constant, and a refusal is a stop.
     external: ExternalCanaryPreflight | None = require_external_envelope(
         resolved_work_root,
         observed_at=utc_now(),
         environ=environ,
         asserted_uuid=require_volume_uuid,
+        required_transport=FIRST_CANARY_REQUIRED_TRANSPORT,
     )
     started = utc_now()
     if not operational_catalog.is_file():
@@ -1775,11 +1814,15 @@ def run_single_source_prefix_profile(
         )
         raise SingleSourceCanaryError(message)
     resolved_work_root = require_canary_work_root(work_root, tree=tree)
+    # D144-R1: a diagnostic prefix of the first canary is measured over the topology the first
+    # canary will run on, or it describes a configuration nobody selected. It narrows to the
+    # same constant for the same reason the complete-source path does.
     require_external_envelope(
         resolved_work_root,
         observed_at=utc_now(),
         environ=environ,
         asserted_uuid=require_volume_uuid,
+        required_transport=FIRST_CANARY_REQUIRED_TRANSPORT,
     )
     started = utc_now()
     if not operational_catalog.is_file():
@@ -1947,11 +1990,16 @@ def run_canary_source_command(
     private_root = resolve_private_root(repository_root, environ=environ)
     operational_catalog = private_root / OPERATIONAL_CATALOG_RELATIVE_PATH
     resolved_work_root = require_disposable_work_root(work_root, repository_root, private_root)
+    # D144-R1: the operator surface narrows too, so `--mode preflight` answers the question the
+    # operator is actually asking -- "is THIS the qualified launch configuration?" -- rather
+    # than "is this A qualified configuration?". A preflight that went green over a direct
+    # attachment would be the D142 §6 fallback with a receipt.
     external: ExternalCanaryPreflight | None = require_external_envelope(
         resolved_work_root,
         observed_at=utc_now(),
         environ=environ,
         asserted_uuid=require_volume_uuid,
+        required_transport=FIRST_CANARY_REQUIRED_TRANSPORT,
     )
     if limit is not None:
         # ``profile-prefix`` is the only mode a bound can survive validation under, so this

@@ -1422,15 +1422,27 @@ UUID optional on an external route**, and none may be added to create one.
 An internal work root with no assertion behaves exactly as accepted Decision 116 left it. Nothing
 about the historical internal path changed.
 
-### The physical and operator conditions — D137-R9
+### The physical and operator conditions — D137-R9, brought current
 
-Assert each of these **yourself** before running anything. **Five of the twelve are mechanically
-verified and seven are not**, because most of them cannot be verified from software and a fake
-automated check is worse than an honest checklist.
+> **CURRENCY — read [§28f.C](#c-launch-precheck) for the launch table that governs today.** The
+> list below is the **Decision 137-era** condition set, kept because it is the origin of these
+> twelve conditions and because their numbering is cited elsewhere. It was **stale**: it recorded
+> external power as verified by the operator, carried **no lid row and no transport row**, and
+> counted *"five of the twelve"* as mechanical. That is the D143 review's **MINOR-2**, and the
+> staleness ran in the conservative direction — it understated what the machine checks and asked
+> the operator to verify something the machine already refuses. It is corrected here by
+> [Decision 144](../Decisions/decision_144_m3_3_d143_finding_correction.md) §6 (D144-R3) rather
+> than deleted, and **conditions 1–12 keep their original numbers** so that references to them do
+> not silently repoint. **Where this list and §28f.C could ever be read as disagreeing, §28f.C
+> controls.**
+
+**Eight of the fourteen are mechanically verified at launch, four are the operator's to hold, and
+two are held by the launch command**, because most of the operator's four cannot be verified from
+software and a fake automated check is worse than an honest checklist.
 
 | # | Condition | Verified by |
 |---|---|---|
-| 1 | The Mac is connected to **external power** | operator |
+| 1 | The Mac is connected to **external power** | **automatic** — at launch, D141-R9 |
 | 2 | The **exact qualified SSD** is connected — Volume UUID `397A4D4A-9508-391E-814E-3B533C7BD049` | **automatic** |
 | 3 | The SSD is **physically stationary** for the whole run | operator |
 | 4 | It is **not ejected or unplugged**, at any point | operator |
@@ -1442,6 +1454,12 @@ automated check is worse than an honest checklist.
 | 10 | **`>= 185` GiB / `198,642,237,440` bytes** free on that volume | **automatic** |
 | 11 | The working root is **outside the D130 archive tree** | **automatic** |
 | 12 | `SQLITE_TMPDIR` is **explicit and on that same volume** | **automatic** |
+| 13 | The **lid is open** | **automatic** — at launch, D141-R9 |
+| 14 | The volume is attached over **exactly** `USB_VIA_THUNDERBOLT_DOCK` | **automatic** — D141-R5 + **D144-R1** |
+
+**"At launch" is the whole of the guarantee for 1, 13 and 14.** Power, lid and transport are read
+once, immediately before the run is admitted, and **nothing re-reads them afterwards**. Keeping
+them true for the following thirty hours is condition 3, 4 and 7 territory — the operator's.
 
 Conditions 3–6 are not inferable from software. **Do not treat their absence from the preflight
 output as evidence that they hold** — the preflight cannot see them, and says nothing about them.
@@ -1798,18 +1816,60 @@ Run the read-only preflight and read every line. It creates nothing:
     --require-volume-uuid '397A4D4A-9508-391E-814E-3B533C7BD049'
 ```
 
-All of these must hold, and each is checked by the application rather than by reading this page:
+**The table below was corrected by
+[Decision 144](../Decisions/decision_144_m3_3_d143_finding_correction.md) §5 (D144-R2).** It
+previously presented **eight** rows under a single categorical header — *"each is checked by the
+application rather than by reading this page"* — and **two of them were not checked by the
+application**: the transport row demanded the dock class while the code checked only membership
+in the two-element qualified set, and the co-tenancy row named something the code does not
+inspect at all. That is the D143 review's **MAJOR-2**, and it is the defect class §28f exists to
+remove: a page that claims a machine is watching, when it is not, is worse than a page that asks
+the operator to look. The two categories are now separated, and nothing is claimed for one that
+belongs to the other.
 
-| Gate | Requirement |
-|---|---|
-| Transport | `transport_class` is `USB_VIA_THUNDERBOLT_DOCK` |
-| Identity | the volume reports **exactly** the qualified UUID, mounted **now**, at a real mount point |
-| Power | `on_ac_power` true, `clamshell_closed` false |
-| Isolation | the work root is outside the D130 archive |
-| Archive | the bounded D130 compact precheck matches; the `~104` GB tar is **stat-ed, never opened** |
-| Capacity | `>= 185` GiB free **on that volume** |
-| Temporary root | `SQLITE_TMPDIR` set, absolute, existing, external, outside D130, same volume |
-| Co-tenancy | no heavy competing SSD workload — see E |
+#### C.1 Mechanically enforced launch predicates
+
+**Every row here is refused by the application, before anything is created.** They are listed so
+you can read the preflight output against them — not so you can check them yourself.
+
+| Gate | Requirement | Enforced by |
+|---|---|---|
+| Transport | `transport_class` is **exactly** `USB_VIA_THUNDERBOLT_DOCK` — a qualified `USB_DIRECT` attachment **refuses** on this path | D141-R5 + **D144-R1** |
+| Identity | the volume reports **exactly** the qualified UUID, mounted **now**, at a real mount point | D137-R1, D140-R2, D140-R3 |
+| Power | `on_ac_power` true, `clamshell_closed` false | D141-R9 |
+| Isolation | the work root is outside the D130 archive | D137-R3 |
+| Archive | the bounded D130 compact precheck matches; the `~104` GB tar is **stat-ed, never opened** | D137-R10 |
+| Capacity | `>= 185` GiB free **on that volume** | D137-R4 |
+| Temporary root | `SQLITE_TMPDIR` set, absolute, existing, external, outside D130, same volume | D137-R8, D138-R3 |
+| One canary | a **second complete-source canary** on this host is refused, whatever run identity it is given | D140-R16 |
+
+**The transport row became mechanically true on 2026-08-23, and was not before.** Accepted
+[Decision 142](../Decisions/decision_142_m3_3_precanary_architecture_freeze.md) §4 selected the
+dock topology; **Decision 144 (D144-R1) is what makes the production path demand it.** All three
+canary entry points now narrow the envelope to that one class, so a directly attached qualified
+SSD refuses here — including as the answer to a dock refusal, which §28g.D forbids in terms.
+
+**The "one canary" row is exact, and its scope is worth stating rather than rounding up**
+(D143 OBSERVATION-1, closed by [Decision 144](../Decisions/decision_144_m3_3_d143_finding_correction.md)
+§8): the host execution lock is taken by **`--mode run`**, so it excludes a second
+complete-source canary and **nothing else**. A concurrent `--mode profile-prefix` on the same
+host is **not** mechanically excluded and would consume volume space the running canary's
+capacity model assumes it alone consumes. Do not start one. That is an operator rule, and it is
+listed as one in C.2 rather than borrowed into the table above.
+
+#### C.2 Operator rules — the application checks none of these
+
+**Nothing below is verified by any launch predicate.** Their absence from the preflight output is
+not evidence that they hold; the preflight cannot see them and says nothing about them.
+
+* **No heavy competing SSK SSD workload** while a canary runs — the full list is in E. **Nothing
+  in the application inspects other processes, and nothing here kills a user application.**
+* **No concurrent `--mode profile-prefix` run**, per the scope note above.
+* The SSD, the dock and the Mac stay **physically stationary**, with nothing resting on a cable.
+* The SSD and the dock are **not disconnected, ejected, reformatted or repartitioned** at any
+  point during the run — see F, and §28g.F.
+* The lid **stays** open and the machine **stays** on AC for the whole run. Both are checked
+  **at launch** and neither is re-checked afterwards.
 
 `canary_authorized` prints **`false`**. That is correct and is not a gate to be worked around:
 **passing every check is not an authorization to launch.**

@@ -386,6 +386,16 @@ def test_the_direct_topology_refuses_when_the_dock_profile_is_selected(
             required_transport=dt.TRANSPORT_DOCK,
         )
     # ...and is admitted when nothing narrower is demanded, because D141 revokes nothing.
+    #
+    # **This second half is no longer the production argument set.** The D143 review cited it as
+    # the visible evidence of MAJOR-1: at the time, all three canary seams called the envelope
+    # with exactly these arguments, so what this asserted about the library was also true of a
+    # real launch. Decision 144 (D144-R1) narrowed those seams to
+    # `canary.FIRST_CANARY_REQUIRED_TRANSPORT`, and the production behaviour is now proved in
+    # `test_d144_first_canary_transport_narrowing.py`. What remains here is the D141-R8 and
+    # D142 §5 compatibility property alone: the *library* still admits the direct topology when
+    # nothing narrows it, which is what keeps `USB_DIRECT` a qualified class rather than a
+    # revoked one.
     assert (
         ewr.require_external_envelope(
             work, observed_at="2026-08-23T00:00:00Z", asserted_uuid=_QUALIFIED

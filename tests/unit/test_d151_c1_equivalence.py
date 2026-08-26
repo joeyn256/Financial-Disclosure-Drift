@@ -162,8 +162,9 @@ def chunked_f0_world(
 
     The accepted D140-R12 gate stops the consolidation, so there is no
     :class:`~disclosure_drift.m3.chunk_consolidation.ConsolidationResult` to return -- which is
-    the point. What is returned is the world directory the refusal left behind, so the rows it
-    holds can still be compared against the monolithic ones.
+    the point. What is returned is the world directory the refusal left behind: its durable
+    diagnostic rows and, since D151-C5 INFO-6, its finalized diagnostic sidecar -- exactly what
+    the accepted monolithic F0 leaves -- so both can be compared against the monolithic ones.
     """
     run = c1x.run_chunked_f0(
         root,
@@ -189,12 +190,12 @@ def chunked_f0_world(
 # ==========================================================================
 # The measurement
 # ==========================================================================
-def measure(world_directory: Path, *, sidecar: bool = True) -> dict[str, Any]:
-    """Everything two F0 worlds are compared on.
+def measure(world_directory: Path) -> dict[str, Any]:
+    """Everything two F0 worlds are compared on -- a refused blocking-terminal world included.
 
-    ``sidecar=False`` measures only the durable catalog, for the one case where there is no
-    merged sidecar to measure: a consolidation the accepted blocking-terminal gate refused stops
-    before the sidecar is merged, leaving exactly the diagnostic rows and nothing more.
+    A consolidation the accepted D140-R12 gate refused leaves its durable diagnostic rows AND its
+    finalized diagnostic sidecar (D151-C5 INFO-6), exactly as the accepted monolithic F0 does, so
+    the same measurement applies to both outcomes of both paths.
     """
     measured: dict[str, Any] = {}
     with connect(world_directory / WORKING_CATALOG_FILENAME, writer=False) as connection:
@@ -210,8 +211,6 @@ def measure(world_directory: Path, *, sidecar: bool = True) -> dict[str, Any]:
             {key: value for key, value in dict(entry).items() if not key.endswith("_at_utc")}
             for entry in runs
         ]
-    if not sidecar:
-        return measured
     evidence = CompactEvidenceSidecar(world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME)
     try:
         measured["sidecar_identity"] = evidence.identity()
@@ -305,14 +304,14 @@ def test_c32_to_c43_the_chunked_world_equals_the_monolithic_one(
         # A source that reaches a BLOCKING terminal. Both paths stop at the accepted D140-R12
         # gate -- ``monolithic_f0`` was driven with ``strict=False`` precisely because the gate
         # would refuse it, and the consolidated path is refused by the same predicate. What is
-        # still asserted is that the MERGE was exact: the rows the refusal left behind for
-        # diagnosis are the rows the monolithic run produced.
+        # asserted is that the MERGE was exact AND complete (D151-C5 INFO-6): the rows the
+        # refusal left behind for diagnosis are the rows the monolithic run produced, and the
+        # finalized diagnostic sidecar beside them is the monolithic one, member for member.
         world = chunked_f0_world(
             tmp_path, database, tree, chunk_members=size, label=f"{label}-n{size}"
         )
-        candidate = measure(world, sidecar=False)
-        assert candidate["counts"] == reference["counts"]
-        assert candidate["tables"] == reference["tables"]
+        candidate = measure(world)
+        assert_equivalent(reference, candidate)
         assert candidate["parser_state"] == reference["parser_state"] == "failed"
         assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
 

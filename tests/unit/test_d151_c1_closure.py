@@ -20,6 +20,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,6 +46,16 @@ from disclosure_drift.m3.offline_parse import PROHIBITED_IMPORT_PREFIXES  # noqa
 
 C1_MODULES = (cp, cev, ce, cs, cc)
 C1_MODULE_NAMES = tuple(module.__name__ for module in C1_MODULES)
+
+
+@pytest.fixture
+def pinned_repository(tmp_path: Path) -> Any:
+    """The shared pin, for the one test here that spawns a chunk child (D151-C5 MINOR-2)."""
+    patcher = pytest.MonkeyPatch()
+    c1.pin_repository(tmp_path / "repo", patcher)
+    yield
+    patcher.undo()
+    c1.unpin_repository()
 
 
 # ==========================================================================
@@ -230,6 +241,7 @@ def test_a50_a_monolithic_world_is_never_read_as_a_chunked_one(tmp_path: Path) -
         )
 
 
+@pytest.mark.usefixtures("pinned_repository")
 def test_a50_a_chunk_world_is_never_read_as_a_final_world(
     tmp_path: Path,
 ) -> None:
@@ -362,10 +374,12 @@ def test_a30_repository_identity_has_exactly_one_derivation_and_it_fails_closed(
 
     **D151-C3 §9 changes exactly one half of this and not the other.** The consolidator now
     derives the live identity **for itself**, so that a checkout which moved after the chunks ran
-    is caught -- something no comparison among the chunks could ever see. What has not changed is
-    that there is exactly **one** derivation in the repository: the consolidator reaches it by
-    importing the accepted module, and no C1 module runs ``git``, parses porcelain output, or
-    reads a revision from an environment variable or a configuration key.
+    is caught -- something no comparison among the chunks could ever see. **D151-C5 MINOR-2 adds
+    the chunk child**: it measures its own identity before it creates anything and holds the
+    request's claim to it. What has not changed is that there is exactly **one** derivation in
+    the repository: both modules reach it by importing the accepted module, and no C1 module runs
+    ``git``, parses porcelain output, or reads a revision from an environment variable or a
+    configuration key.
     """
     from disclosure_drift.m3.repository_identity import (
         RepositoryIdentityError,
@@ -400,9 +414,9 @@ def test_a30_repository_identity_has_exactly_one_derivation_and_it_fails_closed(
     assert not untracked.clean
     assert untracked.untracked_paths == ("untracked.py",)
 
-    # Exactly one C1 module reaches the identity, exactly one accepted way, and none of them
-    # implements a second derivation: no `git` invocation, no porcelain parsing, no subprocess
-    # reaching a version-control tool.
+    # Exactly two C1 modules reach the identity -- the chunk child and the consolidator -- each
+    # exactly one accepted way, and none of them implements a second derivation: no `git`
+    # invocation, no porcelain parsing, no subprocess reaching a version-control tool.
     reaching = []
     for module in C1_MODULES:
         source = Path(module.__file__).read_text(encoding="utf-8")
@@ -412,12 +426,16 @@ def test_a30_repository_identity_has_exactly_one_derivation_and_it_fails_closed(
         assert "'git'" not in source, module.__name__
         assert "porcelain" not in source, module.__name__
         assert "rev-parse" not in source, module.__name__
-    assert reaching == ["disclosure_drift.m3.chunk_consolidation"]
-    consolidation = Path(cc.__file__).read_text(encoding="utf-8")
-    assert (
+    assert reaching == [
+        "disclosure_drift.m3.chunk_execution",
+        "disclosure_drift.m3.chunk_consolidation",
+    ]
+    accepted_import = (
         "from disclosure_drift.m3.repository_identity import (\n"
         "    RepositoryIdentity,\n"
         "    require_clean_running_repository,\n"
         ")"
-    ) in consolidation
+    )
+    for module in (ce, cc):
+        assert accepted_import in Path(module.__file__).read_text(encoding="utf-8"), module.__name__
     assert RepositoryIdentityError is not None

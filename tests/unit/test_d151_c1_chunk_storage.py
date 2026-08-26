@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -43,6 +44,16 @@ from disclosure_drift.m3.external_working_root import QUALIFIED_EXTERNAL_VOLUME_
 from disclosure_drift.paths import DataTree  # noqa: E402
 
 SYNTHETIC_VOLUME = "00000000-0000-0000-0000-0000C1C1C1C1"
+
+
+@pytest.fixture(autouse=True)
+def _pinned_repository(tmp_path: Path) -> Any:
+    """The shared pin: since D151-C5 every chunk child authenticates its own code identity."""
+    patcher = pytest.MonkeyPatch()
+    c1.pin_repository(tmp_path / "repo", patcher)
+    yield
+    patcher.undo()
+    c1.unpin_repository()
 
 
 @pytest.fixture

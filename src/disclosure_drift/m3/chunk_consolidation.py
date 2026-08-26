@@ -36,6 +36,14 @@ its omitted observations are back-filled by the accepted reconstruction, and eve
 local-first witness is upgraded to a rival by the accepted
 :func:`~disclosure_drift.m3.compact_evidence.materialized_fields` over the payload the chunk
 already persisted. Nothing is reparsed from the archive.
+
+**Two D151-C5 hardenings, stated where they bite.** The chunks' agreed execution contract is held
+to the parser run row the chunks actually wrote (:func:`_require_parser_run_truth`): agreement
+among receipts is agreement among claims, and the manifest-bound run row is the evidence. And the
+compact-evidence sidecar is merged and finalized **before** the accepted blocking-terminal gate,
+which is where the accepted monolithic F0 finalizes its own -- so a consolidated F0 that reaches a
+blocking terminal leaves the same diagnostic sidecar beside the same diagnostic rows that a
+monolithic one leaves, and still no ledger terminal, no checkpoint and no receipt.
 """
 
 from __future__ import annotations
@@ -46,7 +54,7 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -866,13 +874,21 @@ def _load_accession_observations(connection: sqlite3.Connection, aliases: Sequen
     )
 
 
-def _reduced_parser_run(connection: sqlite3.Connection, aliases: Sequence[str]) -> _ReducedRun:
+def _reduced_parser_run(
+    connection: sqlite3.Connection, aliases: Sequence[str], *, contract: ExecutionContract
+) -> _ReducedRun:
     """Reduce every chunk's run row to the one row the source's single parser run implies.
 
     ``parser_run_id`` is a content digest over the observation, the parser and its version, so
     every chunk computes the **same** identifier -- which is correct: they are parts of one
     logical parser run, and there is exactly one of it. What has to be reduced is what the run
     *counted*.
+
+    **The parser identity is read from the rows and held to the contract** -- D151-C5 INFO-2.
+    The chunks' rows must name one parser and one version, and that pair must be the pair the
+    unanimously validated execution contract declares (:func:`_require_parser_run_truth`). Both
+    are established here, before the reduced row is written, so a refusal leaves the world with
+    no run row and no loaded table.
 
     The summary is folded in canonical plan order by the accepted rules. One of them deserves its
     proof written down: ``structural`` is capped at
@@ -901,6 +917,16 @@ def _reduced_parser_run(connection: sqlite3.Connection, aliases: Sequence[str]) 
         )
         raise ChunkConsolidationError(message)
     parser_run_id = identifiers.pop()
+    parser_identities = {(str(row["parser_id"]), str(row["parser_version"])) for row in rows}
+    if len(parser_identities) != 1:
+        message = (
+            f"the chunks' parser run rows name {len(parser_identities)} distinct parser/version "
+            f"pairs ({sorted(parser_identities)[:4]}); one source is one parser run under one "
+            "parser, and a consolidation that had to choose between two is refused"
+        )
+        raise ChunkConsolidationError(message)
+    parser_id, parser_version = next(iter(parser_identities))
+    _require_parser_run_truth(contract=contract, parser_id=parser_id, parser_version=parser_version)
     summaries = [json.loads(str(row["summary_json"])) for row in rows]
     unknown: set[str] = set()
     warnings: list[object] = []
@@ -931,8 +957,8 @@ def _reduced_parser_run(connection: sqlite3.Connection, aliases: Sequence[str]) 
         outcome = "completed"
     summary_json = _stable_json(
         {
-            "parser_id": str(rows[0]["parser_id"]),
-            "parser_version": str(rows[0]["parser_version"]),
+            "parser_id": parser_id,
+            "parser_version": parser_version,
             "layer_version": PARSER_LAYER_VERSION,
             "counts": {
                 "parsed": parsed,
@@ -968,8 +994,8 @@ def _reduced_parser_run(connection: sqlite3.Connection, aliases: Sequence[str]) 
         (
             parser_run_id,
             str(rows[0]["source_observation_id"]),
-            str(rows[0]["parser_id"]),
-            str(rows[0]["parser_version"]),
+            parser_id,
+            parser_version,
             min(str(row["started_at_utc"]) for row in rows),
             max(str(row["finished_at_utc"]) for row in rows),
             parsed,
@@ -983,6 +1009,8 @@ def _reduced_parser_run(connection: sqlite3.Connection, aliases: Sequence[str]) 
     )
     return _ReducedRun(
         parser_run_id=parser_run_id,
+        parser_id=parser_id,
+        parser_version=parser_version,
         outcome=outcome,
         parsed=parsed,
         quarantined=quarantined,
@@ -993,14 +1021,53 @@ def _reduced_parser_run(connection: sqlite3.Connection, aliases: Sequence[str]) 
 
 @dataclass(frozen=True, slots=True)
 class _ReducedRun:
-    """The one parser-run row every chunk is a part of, reduced."""
+    """The one parser-run row every chunk is a part of, reduced.
+
+    ``parser_id`` and ``parser_version`` are the pair the chunks' own run rows name -- the
+    reduced accepted evidence -- and are already proved equal to the execution contract's.
+    """
 
     parser_run_id: str
+    parser_id: str
+    parser_version: str
     outcome: str
     parsed: int
     quarantined: int
     parser_state: str
     duplicate_identities: tuple[str, ...]
+
+
+def _require_parser_run_truth(
+    *, contract: ExecutionContract, parser_id: str, parser_version: str
+) -> None:
+    """Hold the chunks' agreed execution contract to the parser run they actually wrote.
+
+    **Agreement among receipts is agreement among claims -- D151-C5 INFO-2.**
+    :func:`resolve_chunk_inputs` proves every chunk's receipt names the same ``parser_id`` and
+    ``parser_version``. A receipt is excluded from its own artifact manifest, so the same forgery
+    applied to every receipt leaves every artifact byte-identical, every manifest green, and every
+    chunk in perfect agreement with every other. The parser run row each chunk wrote into its
+    manifest-bound working catalog is different in kind: the accepted catalog writer wrote it from
+    the parser that actually ran, and it cannot be edited without moving bytes the receipt binds.
+    That row is the truth, and the contract is held to it here -- in the process about to build
+    the final world from those rows, before the reduced row is written.
+
+    ``batch_size`` is deliberately not compared: it is an execution-only durability granularity
+    the accepted contract already governs chunk-to-chunk, and no run row records it.
+
+    Raises:
+        ChunkConsolidationError: the agreed contract names a parser or a version the reduced
+            parser-run evidence does not.
+    """
+    _require(
+        contract.parser_id == parser_id and contract.parser_version == parser_version,
+        f"every chunk receipt agrees the execution contract was parser {contract.parser_id!r} "
+        f"version {contract.parser_version!r}, and the parser run row the chunks actually wrote "
+        f"-- the reduced accepted evidence this world is built from -- records {parser_id!r} "
+        f"version {parser_version!r}. A contract every receipt agrees on is still a claim; the "
+        "durable run row is what the parser wrote, and a consolidation whose declared contract "
+        "does not describe its own evidence is refused. Nothing was merged",
+    )
 
 
 def _apply_duplicate_identities(connection: sqlite3.Connection, reduced: _ReducedRun) -> None:
@@ -1547,19 +1614,24 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
     9. the two accepted whole-observation derivations are run **once**, exactly as the monolithic
        path runs them once;
     10. the indexes are rebuilt;
-    11. **the accepted D140-R12 blocking-terminal gate is applied**, between the merge's
-        completion and anything that reads its output -- exactly where the accepted
-        :func:`~disclosure_drift.m3.single_source_canary._f0` applies it;
-    12. only then is the run-local ledger marked parsed;
-    13. the compact-evidence sidecar is merged and its completeness digest replayed;
+    11. the compact-evidence sidecar is merged, its completeness digest replayed and its source
+        row finalized -- **before the gate**, which is the accepted position: the accepted
+        :func:`~disclosure_drift.m3.offline_parse.materialize_one_planned_source` finishes its
+        sidecar before it returns, and only then does
+        :func:`~disclosure_drift.m3.single_source_canary._f0` ask the gate (D151-C5 INFO-6);
+    12. **the accepted D140-R12 blocking-terminal gate is applied**, over the complete derived
+        outcome, between the merge's completion and anything that reads its output -- exactly
+        where the accepted ``_f0`` applies it;
+    13. only then is the run-local ledger marked parsed;
     14. every chunk's manifest is re-verified, proving consolidation mutated none of them;
     15. the F0 phase checkpoint is written from a **mechanically derived** payload, so the
         accepted F1 admits this world by the accepted rule;
     16. the final receipt is written **LAST**.
 
-    **Step 11 is the disposition boundary, and it is the accepted one.** A consolidated F0 whose
-    reduced parser run reached a blocking terminal leaves its durable rows exactly where they
-    are, for diagnosis -- and marks nothing parsed, writes no phase checkpoint, writes no final
+    **Step 12 is the disposition boundary, and it is the accepted one.** A consolidated F0 whose
+    reduced parser run reached a blocking terminal leaves its durable rows and its finalized
+    diagnostic sidecar exactly where they are, for diagnosis -- the same state the accepted
+    monolithic F0 leaves -- and marks nothing parsed, writes no phase checkpoint, writes no final
     receipt, and is refused by the accepted F1 admission because there is no F0 terminal to
     continue from. The refusal is raised by
     :func:`~disclosure_drift.m3.single_source_canary.require_f0_success` itself rather than by a
@@ -1625,7 +1697,7 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
                 # to it, and the final world is opened with `PRAGMA foreign_keys = ON` exactly
                 # as every other catalog connection is.
                 with write_containment(connection):
-                    reduced = _reduced_parser_run(connection, aliases)
+                    reduced = _reduced_parser_run(connection, aliases, contract=contract)
                     for table in _LOAD_ORDER:
                         if table == "census_accession_observations":
                             continue
@@ -1659,42 +1731,48 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
             counts = table_row_counts(connection)
         finally:
             _detach_all(connection, aliases)
+        # The compact-evidence sidecar, merged and finalized BEFORE the gate -- D151-C5 INFO-6.
+        # This is the accepted order: `materialize_one_planned_source` records the member
+        # manifest as it parses and finishes the source row before it returns, and only then
+        # does `_f0` ask `require_f0_success`. A blocking terminal therefore leaves the same
+        # finalized diagnostic sidecar the monolithic path leaves, beside the same durable rows.
+        completeness, manifest_digest, totals, evidence = _merge_sidecar(
+            sidecar_path=world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME,
+            inputs=inputs,
+            plan=plan,
+            source_id=plan.source_id,
+        )
+        # The complete accepted outcome, derived once: the reduced run's disposition and counts,
+        # and the merged sidecar's evidence totals and completeness digest. The gate and the
+        # terminal describe this one object.
+        outcome = derived_f0_outcome(
+            plan=plan,
+            state=state,
+            reduced=reduced,
+            members=totals["members"],
+            records=totals["records"],
+            omitted=totals["omitted"],
+            materialized=totals["materialized"],
+            completeness_digest=completeness,
+        )
         # D140-R12, at the accepted position: between the parse's completion and anything that
         # reads its output. The predicate is the ACCEPTED one, called rather than restated, so a
         # consolidated F0 reaches the same disposition boundary a monolithic F0 reaches. Nothing
-        # below this line runs for a blocking terminal -- not the ledger, not the sidecar merge,
-        # not the checkpoint, not the receipt -- and the world stays exactly as it is.
-        gated = derived_f0_outcome(plan=plan, state=state, reduced=reduced)
-        require_f0_success(gated)
+        # below this line runs for a blocking terminal -- not the ledger, not the checkpoint, not
+        # the receipt -- and the world stays exactly as it is.
+        require_f0_success(outcome)
         world.ledger.mark_parsed(
             plan.source_instance_id,
             parts=plan.total_members,
             batches=reduced.parsed,
         )
 
-    completeness, manifest_digest, totals, evidence = _merge_sidecar(
-        sidecar_path=world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME,
-        inputs=inputs,
-        plan=plan,
-        source_id=plan.source_id,
-    )
     for item in inputs:
         verify_artifact_manifest(
             item.directory,
             item.receipt.manifest,
             exclude=(CHUNK_RECEIPT_FILENAME, TRANSFER_RECEIPT_FILENAME),
         )
-    # The complete accepted outcome: the gated one, now carrying the evidence totals the merged
-    # sidecar established. `replace` rather than a second construction, so the gate and the
-    # terminal describe one object rather than two that must be kept in step.
-    outcome = replace(
-        gated,
-        members=totals["members"],
-        records=totals["records"],
-        omitted_field_observations=totals["omitted"],
-        materialized_field_observations=totals["materialized"],
-        completeness_digest=completeness,
-    )
     checkpoint = PhaseCheckpoint(
         contract=PHASE_RESTART_CONTRACT,
         phase=PHASE_F0,

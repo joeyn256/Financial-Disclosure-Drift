@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from disclosure_drift.m3 import chunk_execution as _chunk_execution
 from disclosure_drift.m3 import chunk_plan as cp
 from disclosure_drift.m3 import repository_identity
 from disclosure_drift.m3.chunk_plan import ChunkBounds, ChunkPlanError
@@ -241,6 +242,28 @@ def unpin_repository() -> None:
     PINNED_ROOT = None
 
 
+def child_bootstrap(root: Path) -> str:
+    """The production chunk-child bootstrap, with the accepted identity seam applied INSIDE it.
+
+    D151-C5 MINOR-2: a chunk child measures its own code identity through the accepted
+    ``require_clean_running_repository`` in ITS OWN process, before it creates anything -- where a
+    monkeypatch made in this process cannot reach. So the one-name redirect :func:`pin_repository`
+    applies here is applied there as well, ahead of the production entry point control is then
+    handed to. Everything after the redirect is the accepted child, unmodified: it still shells
+    out to Git over a repository that genuinely exists, still refuses a dirty tree, and still holds
+    the request's claim to its own measurement. This is exactly the seam the accepted phase
+    machinery is driven through in ``test_d151_c3_phase_runner``.
+    """
+    return (
+        "import sys;"
+        "from pathlib import Path;"
+        "from disclosure_drift.m3 import repository_identity as ri;"
+        f"ri.running_repository_identity = lambda: ri.repository_identity_at(Path({str(root)!r}));"
+        "from disclosure_drift.m3.chunk_execution import _child_main;"
+        "sys.exit(_child_main(sys.argv[1]))"
+    )
+
+
 def pin_repository(root: Path, monkeypatch: pytest.MonkeyPatch) -> RepositoryIdentity:
     """Make a REAL, clean Git repository the one the accepted identity mechanism reports.
 
@@ -251,6 +274,10 @@ def pin_repository(root: Path, monkeypatch: pytest.MonkeyPatch) -> RepositoryIde
     of it is the accepted one, unmodified: ``require_clean_running_repository`` still runs, still
     shells out to Git, and still refuses a dirty tree. That is what makes "a dirty repository
     refuses" a real proof here rather than a mocked one.
+
+    The same redirect is applied inside every chunk child spawned while the pin is active
+    (:func:`child_bootstrap`), because since D151-C5 the child authenticates its own code identity
+    in its own process and the request it is handed names this pinned repository.
 
     It is needed because the suite runs from a working checkout that is, by definition, dirty
     while the change under test is being written.
@@ -274,6 +301,7 @@ def pin_repository(root: Path, monkeypatch: pytest.MonkeyPatch) -> RepositoryIde
     monkeypatch.setattr(
         repository_identity, "running_repository_identity", lambda: repository_identity_at(root)
     )
+    monkeypatch.setattr(_chunk_execution, "_CHILD_BOOTSTRAP", child_bootstrap(root))
     identity = repository_identity.require_clean_running_repository()
     assert identity.clean
     global PINNED, PINNED_ROOT  # noqa: PLW0603 - the module-scoped pin this module owns

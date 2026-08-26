@@ -26,6 +26,17 @@ contributed to. A primary chunk therefore emits its own declaration contribution
 shard; the union of those contributions is the complete map; and a shard chunk consumes that
 map. The barrier is the accepted contract expressed as an ordinal property, not a new rule.
 
+**The child authenticates its own code identity -- D151-C5 MINOR-2.** A chunk request names the
+repository commit and tree the coordinator believes the chunk runs under. The child does not copy
+those two values into its receipt; it **measures** the checkout its own source was imported from,
+through the accepted
+:func:`~disclosure_drift.m3.repository_identity.require_clean_running_repository`, and refuses --
+before any attempt directory, world, sidecar or ledger row exists -- unless the measurement is
+clean and is exactly what the request names. Every consolidation cross-check downstream compares
+receipts against each other and against the consolidating checkout; all of them would agree with a
+receipt that was wrong in the same way, which is why the proof has to be made in the process that
+does the work. See :func:`authenticate_running_repository`.
+
 **Nothing here authorizes a real chunked F0.**
 :data:`REAL_CHUNKED_F0_EXECUTION_AUTHORITY` is ``None``, no command-line surface reaches this
 module, no environment variable is consulted, and :func:`require_real_chunk_execution_authority`
@@ -91,6 +102,10 @@ from disclosure_drift.m3.offline_parse import (
     select_planned_source,
     write_containment,
 )
+from disclosure_drift.m3.repository_identity import (
+    RepositoryIdentity,
+    require_clean_running_repository,
+)
 from disclosure_drift.m3.working_catalog import WorkingCatalog, file_digest
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.archive import ArchiveDefenceError, iter_named_members
@@ -114,6 +129,7 @@ __all__ = [
     "ChunkExecutionError",
     "ChunkRequest",
     "attempt_directory",
+    "authenticate_running_repository",
     "chunk_execution_contract",
     "chunk_execution_identity",
     "completed_chunk_receipt",
@@ -347,8 +363,12 @@ class ChunkRequest:
 
     Serialized to JSON and handed to the child by path. The child re-derives every predicate
     from it rather than inheriting anything from the parent's memory: it re-reads the plan,
-    re-derives the canonical ordering, re-authenticates the artifact, and re-selects the planned
-    source. A successor process may never say *"the coordinator already checked this"*.
+    re-derives the canonical ordering, re-authenticates the artifact, re-selects the planned
+    source, and -- first of all -- measures the repository its own code was imported from and
+    holds ``repository_head_sha`` / ``repository_tree_sha`` to that measurement
+    (:func:`authenticate_running_repository`). A successor process may never say *"the
+    coordinator already checked this"*, and the two repository fields are the coordinator's
+    **claim** about the child, never the child's evidence about itself.
 
     ``abort_after_members`` and ``abort_mode`` are **fault injection**, and they are stated in
     the request rather than read from an environment variable so that they cannot be switched on
@@ -740,20 +760,75 @@ def merge_parent_map(contributions: Sequence[Mapping[str, set[str]]]) -> dict[st
     return merged
 
 
+def authenticate_running_repository(request: ChunkRequest) -> RepositoryIdentity:
+    """Measure the repository THIS process imported its code from, and hold the request to it.
+
+    **The coordinator's claim is not proof -- D151-C5 MINOR-2.** ``request.repository_head_sha``
+    and ``request.repository_tree_sha`` say which code the coordinator *believes* this chunk runs
+    under. Before this correction the child copied those two values into its receipt unexamined,
+    so a child whose source had moved -- an edit landed between chunk 0 and chunk 1, a checkout
+    that was never clean, a coordinator handed a stale identity -- would have produced a receipt
+    describing code it did not run, and every downstream comparison (receipt against receipt,
+    receipts against the consolidating checkout) would have agreed with it, because every receipt
+    would have been wrong in the same way.
+
+    So the child authenticates itself. The identity is **measured** through the accepted
+    :func:`~disclosure_drift.m3.repository_identity.require_clean_running_repository` -- the one
+    derivation the repository has, which asks Git about the checkout this module's own source was
+    imported from and refuses a working tree that carries a modified tracked file or an untracked,
+    non-ignored one -- and the request is then required to name exactly that commit and exactly
+    that tree. Both are compared, for the reason
+    :class:`~disclosure_drift.m3.repository_identity.RepositoryIdentity` gives: a tree comparison
+    alone would admit a history that moved, and a commit comparison alone would refuse a
+    byte-identical continuation without saying so. There is no second parser here, no argument
+    that overrides the measurement, and nothing read from the environment or a configuration key.
+
+    It runs **before anything is created**: no attempt directory, no working world, no sidecar,
+    no witness ledger, no ledger row. A refusal therefore leaves the chunk exactly where it was --
+    absent -- and the coordinator's receipt discovery finds nothing to admit. The identity it
+    returns is the one the receipt records, so the receipt carries a measurement, never a claim.
+
+    Raises:
+        RepositoryIdentityError: the working tree is not clean, or the identity cannot be derived.
+        ChunkExecutionError: the measured identity is not the one the request names.
+    """
+    identity = require_clean_running_repository()
+    expected = (request.repository_head_sha, request.repository_tree_sha)
+    observed = (identity.head_sha, identity.tree_sha)
+    if observed != expected:
+        message = (
+            f"chunk {request.chunk_id!r} was asked to execute under repository "
+            f"{expected[0]}/{expected[1]} and the code this process actually imported is "
+            f"{observed[0]}/{observed[1]}. The identity compared here is MEASURED by the chunk "
+            "process itself from the checkout its source was loaded from, never copied from the "
+            "coordinator's request: a receipt written under an unverified claim would describe "
+            "code the chunk did not run. The chunk is refused before anything is created, and "
+            "nothing was checked out, reset, or repaired"
+        )
+        raise ChunkExecutionError(message)
+    return identity
+
+
 def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
     """Parse exactly one chunk's interval, and write its terminal receipt LAST.
 
-    Every predicate is re-established here, in the process that will do the work: the plan is
-    re-read and its digest recomputed, the canonical ordering is re-derived from the archive and
-    proved to be the one the plan partitions, the artifact is re-authenticated by digest and
-    length, and the planned source is re-selected through the accepted selector. Nothing is
-    inherited from the coordinator's memory.
+    Every predicate is re-established here, in the process that will do the work: the code
+    identity is measured and held to the request **before anything else** (D151-C5 MINOR-2), the
+    plan is re-read and its digest recomputed, the canonical ordering is re-derived from the
+    archive and proved to be the one the plan partitions, the artifact is re-authenticated by
+    digest and length, and the planned source is re-selected through the accepted selector.
+    Nothing is inherited from the coordinator's memory.
 
     Raises:
-        ChunkExecutionError: any chunk-level precondition fails.
+        RepositoryIdentityError: the checkout this code runs from is dirty or unidentifiable.
+        ChunkExecutionError: any chunk-level precondition fails, the request names a repository
+            identity other than the measured one included.
         ChunkPlanError: the plan or the archive's ordering is not the one this chunk belongs to.
         OfflineParseError: the accepted parse path refuses.
     """
+    # FIRST, ahead of every read and every write: the child proves which code it is running.
+    # An attempt directory that does not yet exist stays that way on a refusal.
+    repository = authenticate_running_repository(request)
     attempt_root = Path(request.attempt_directory)
     if attempt_root.exists():
         message = (
@@ -910,15 +985,17 @@ def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
         source_observation_id=plan.source_observation_id,
         source_sha256=plan.source_sha256,
         source_byte_length=plan.source_byte_length,
-        repository_head_sha=request.repository_head_sha,
-        repository_tree_sha=request.repository_tree_sha,
+        # The MEASURED identity, proved equal to the request's claim above -- so what the receipt
+        # binds is what this process ran, established by this process.
+        repository_head_sha=repository.head_sha,
+        repository_tree_sha=repository.tree_sha,
         execution_identity=chunk_execution_identity(
             plan=plan,
             chunk_id=bounds.chunk_id,
             batch_size=request.batch_size,
             cache_bytes=request.cache_bytes,
-            repository_head_sha=request.repository_head_sha,
-            repository_tree_sha=request.repository_tree_sha,
+            repository_head_sha=repository.head_sha,
+            repository_tree_sha=repository.tree_sha,
             catalog_source_sha256=catalog_sha256,
             migration_head=migration_head,
         ),
@@ -927,8 +1004,8 @@ def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
             batch_size=request.batch_size,
             catalog_source_sha256=catalog_sha256,
             migration_head=migration_head,
-            repository_head_sha=request.repository_head_sha,
-            repository_tree_sha=request.repository_tree_sha,
+            repository_head_sha=repository.head_sha,
+            repository_tree_sha=repository.tree_sha,
         ),
         cache_bytes=request.cache_bytes,
         attempt=request.attempt,

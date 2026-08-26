@@ -46,6 +46,23 @@ HEAD = "a" * 40
 TREE = "b" * 40
 
 
+@pytest.fixture(autouse=True)
+def _pinned_repository(tmp_path: Path) -> Any:
+    """The shared pin: a real, clean throwaway repository, through the accepted identity seam.
+
+    Since D151-C5 every chunk child authenticates its own code identity through the accepted
+    clean-repository predicate before it creates anything, and the checkout this suite runs from
+    is dirty by construction while a change is being written. The pin lives in
+    ``test_d151_c1_chunk_plan`` so that every shared driver -- and every child it spawns -- reads
+    the same one.
+    """
+    patcher = pytest.MonkeyPatch()
+    c1.pin_repository(tmp_path / "repo", patcher)
+    yield
+    patcher.undo()
+    c1.unpin_repository()
+
+
 # ==========================================================================
 # The chunked-F0 driver used by this module and by the consolidation proofs
 # ==========================================================================
@@ -69,7 +86,9 @@ def chunk_request(
     to the identity the accepted mechanism reports for the checkout this process is running from
     -- which is what a real coordinator would record. One shared pin rather than one per module,
     because these drivers are used across modules: see :data:`c1.PINNED`. Passing a literal is
-    reserved for the tests that are attacking the field itself.
+    reserved for the tests that are attacking the field itself -- and since D151-C5 the child
+    measures its own identity and refuses a request that names any other, so a literal identity
+    is exactly what a refusal test hands it.
     """
     if repository is not None:
         identity = repository

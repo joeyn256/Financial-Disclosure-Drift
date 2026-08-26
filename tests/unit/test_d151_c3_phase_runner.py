@@ -23,9 +23,10 @@ volume-UUID, power and lid predicates are Host-A hardware questions and are not 
 
 *The free-space measurement* is pinned, through the accepted ``shutil.disk_usage`` seam that
 Decisions 127 and 137 already use. :data:`PRE_F2_MINIMUM_FREE_BYTES` is untouched, the comparison
-is untouched, and :func:`test_the_fifty_gib_guard_is_not_weakened` proves both halves: the guard
-still holds the accepted constant, and F2 over this very world is REFUSED at the host's real
-reading.
+is untouched, and :func:`test_the_fifty_gib_guard_is_not_weakened` proves both halves through that
+same seam -- the guard still holds the accepted constant, F2 over this very world is REFUSED one
+byte below the floor and ADMITTED at it -- without ever asking the physical host how much room it
+has (D151-C5 MINOR-1).
 """
 
 from __future__ import annotations
@@ -359,22 +360,31 @@ def test_r14_the_accepted_f1_admission_really_reads_the_derived_checkpoint(
 
 
 # ==========================================================================
-# The 50-GiB guard is used, not weakened
+# The 50-GiB guard is used, not weakened -- proved on any host
 # ==========================================================================
 def test_the_fifty_gib_guard_is_not_weakened(tmp_path: Path) -> None:
-    """The accepted pre-F2 floor holds its accepted value AND refuses at the host's real reading.
+    """The accepted pre-F2 floor holds its accepted value, refuses below it, and admits at it.
 
-    Two halves, and both matter. The constant is the accepted one. And with the ``disk_usage``
-    seam removed -- that is, at whatever this host genuinely has free -- the accepted guard
-    REFUSES F2 over a consolidated world, which is exactly the behaviour Host B must exhibit and
-    exactly what the pinned measurement above is standing in for.
+    **D151-C5 MINOR-1.** The previous form of this proof removed the ``disk_usage`` seam and
+    asserted that the physical host had less than 50 GiB free, so its negative half fired only
+    on a capacity-ineligible host and FAILED outright on Host A. An authoritative unit test cannot
+    depend on how much room the machine running it happens to have.
+
+    Both halves now go through the accepted ``shutil.disk_usage`` seam -- the one Decisions 127
+    and 137 already use, and the one every other phase in this module is driven through -- and
+    the accepted guard does the comparing, unmodified, against the accepted constant:
+
+    * at ``floor - 1`` bytes the accepted guard REFUSES F2 over a consolidated world, before its
+      single transaction opens: no F2 terminal, no result document, F1's terminal untouched;
+    * at exactly ``floor`` bytes -- the boundary of ``free < PRE_F2_MINIMUM_FREE_BYTES`` -- the
+      same world, with every other predicate holding, is ADMITTED and F2 completes;
+    * at ``floor + 1`` bytes a fresh world is admitted as well.
+
+    The constant is asserted first and never touched. Nothing here reads the host's own free
+    space, so the verdict is the same on Host A, on Host B, and in CI.
     """
-    import shutil
-
-    assert canary.PRE_F2_MINIMUM_FREE_BYTES == 50 * 1024**3
-    assert shutil.disk_usage(tmp_path).free < canary.PRE_F2_MINIMUM_FREE_BYTES, (
-        "this host has more than 50 GiB free, so the negative half of this proof would not fire"
-    )
+    floor = canary.PRE_F2_MINIMUM_FREE_BYTES
+    assert floor == 50 * 1024**3
     database, tree = c1.build_world(tmp_path, members=4, filings=2)
     root = tmp_path / "chunked"
     root.mkdir()
@@ -386,14 +396,66 @@ def test_the_fifty_gib_guard_is_not_weakened(tmp_path: Path) -> None:
         tree=tree,
         run_id="floor-run",
     )
+    world = root / "work" / "floor-run"
+
+    # One byte below the floor, through the accepted seam: the accepted guard refuses, and the
+    # reading it refused is the pinned one -- so the seam demonstrably reached the guard.
     refused = run_accepted_phase(
         phase=PHASE_F2,
         work_root=root / "work",
         database=database,
         tree=tree,
         run_id="floor-run",
-        free_bytes=None,
+        free_bytes=floor - 1,
         check=False,
     )
     assert refused.get("failed")
     assert "pre-F2 free-space admission failed" in refused["stderr"]
+    assert f"{floor - 1} bytes free" in refused["stderr"]
+    assert not (world / "canary_result.json").exists()
+    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
+    try:
+        assert read_phase_checkpoint(ledger, PHASE_F2) is None
+        assert read_phase_checkpoint(ledger, PHASE_F1) is not None
+    finally:
+        ledger.close()
+
+    # Exactly the floor: the boundary of the accepted comparison, and every other predicate
+    # holds, so the same world is admitted and F2 reaches its terminal.
+    admitted = run_accepted_phase(
+        phase=PHASE_F2,
+        work_root=root / "work",
+        database=database,
+        tree=tree,
+        run_id="floor-run",
+        free_bytes=floor,
+    )
+    assert admitted["record"]["phase"] == PHASE_F2
+    assert admitted["record"]["result_document_written"] is True
+    assert (world / "canary_result.json").exists()
+    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
+    try:
+        assert read_phase_checkpoint(ledger, PHASE_F2) is not None
+    finally:
+        ledger.close()
+
+    # One byte above the floor, on a fresh world: admitted as well.
+    other = tmp_path / "chunked-plus-one"
+    other.mkdir()
+    consolidated_world(other, database, tree, chunk_members=2, run_id="floor-plus-one")
+    run_accepted_phase(
+        phase=PHASE_F1,
+        work_root=other / "work",
+        database=database,
+        tree=tree,
+        run_id="floor-plus-one",
+    )
+    plus_one = run_accepted_phase(
+        phase=PHASE_F2,
+        work_root=other / "work",
+        database=database,
+        tree=tree,
+        run_id="floor-plus-one",
+        free_bytes=floor + 1,
+    )
+    assert plus_one["record"]["result_document_written"] is True

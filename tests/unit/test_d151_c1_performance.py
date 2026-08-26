@@ -43,6 +43,23 @@ from disclosure_drift.m3 import chunk_consolidation as cc  # noqa: E402
 from disclosure_drift.m3 import chunk_storage as cs  # noqa: E402
 from disclosure_drift.paths import DataTree  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _pinned_repository(tmp_path: Path) -> Any:
+    """The shared pin: a real, clean throwaway repository, through the accepted identity seam.
+
+    A consolidation derives the executing repository's identity for itself (D151-C3 §9), and the
+    checkout this suite runs from is dirty by construction while a change is being written. The
+    pin lives in ``test_d151_c1_chunk_plan`` so that every shared driver reads the same one --
+    a per-module pin leaves a cross-module driver recording the wrong identity.
+    """
+    patcher = pytest.MonkeyPatch()
+    c1.pin_repository(tmp_path / "repo", patcher)
+    yield
+    patcher.undo()
+    c1.unpin_repository()
+
+
 #: A row wide enough that a page holds few of them, so the page-touch pattern is what is measured
 #: rather than the row-packing.
 _PAYLOAD = "x" * 200
@@ -138,7 +155,13 @@ def _measure_chunked(
 ) -> dict[str, Any]:
     start = time.perf_counter()
     run = c1x.run_chunked_f0(
-        tmp_path, database, tree, chunk_members=size, label=label, batch_size=250
+        tmp_path,
+        database,
+        tree,
+        chunk_members=size,
+        label=label,
+        batch_size=250,
+        repository=c1.PINNED,
     )
     chunk_wall = time.perf_counter() - start
     start = time.perf_counter()
@@ -147,6 +170,7 @@ def _measure_chunked(
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final",
+        run_id="performance-run",
     )
     consolidate_wall = time.perf_counter() - start
     chunk_bytes = sum(
@@ -250,7 +274,9 @@ def test_the_transfer_and_readback_costs_are_recorded(tmp_path: Path) -> None:
     do it. Scaling those bytes to a real device is extrapolation and is labelled as such.
     """
     database, tree = c1.build_world(tmp_path, members=24, filings=12, shards=4, shared_alias=False)
-    run = c1x.run_chunked_f0(tmp_path, database, tree, chunk_members=6, label="tiers")
+    run = c1x.run_chunked_f0(
+        tmp_path, database, tree, chunk_members=6, label="tiers", repository=c1.PINNED
+    )
     external = tmp_path / "external"
     transferred = 0
     start = time.perf_counter()
@@ -273,6 +299,7 @@ def test_the_transfer_and_readback_costs_are_recorded(tmp_path: Path) -> None:
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final-internal",
+        run_id="tier-internal",
     )
     internal_wall = time.perf_counter() - start
 
@@ -285,6 +312,7 @@ def test_the_transfer_and_readback_costs_are_recorded(tmp_path: Path) -> None:
         operational_catalog=database,
         world_directory=run["base"] / "final-external",
         external_root=external,
+        run_id="tier-external",
     )
     external_wall = time.perf_counter() - start
 

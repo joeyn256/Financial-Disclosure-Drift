@@ -35,8 +35,13 @@ from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
     write_once_json,
 )
 from disclosure_drift.m3.compact_evidence import CompactEvidenceSidecar  # noqa: E402
+from disclosure_drift.m3.repository_identity import (  # noqa: E402
+    RepositoryIdentity,
+    running_repository_identity,
+)
 from disclosure_drift.paths import DataTree  # noqa: E402
 
+#: Literal identities, for the tests that attack the repository field itself rather than use it.
 HEAD = "a" * 40
 TREE = "b" * 40
 
@@ -56,8 +61,22 @@ def chunk_request(
     batch_size: int = 2,
     abort_after_members: int | None = None,
     abort_mode: str = "raise",
+    repository: RepositoryIdentity | None = None,
 ) -> ce.ChunkRequest:
-    """One chunk request, with every path stated by the caller and nothing discovered."""
+    """One chunk request, with every path stated by the caller and nothing discovered.
+
+    ``repository`` defaults to the **shared** pin when a test has established one, and otherwise
+    to the identity the accepted mechanism reports for the checkout this process is running from
+    -- which is what a real coordinator would record. One shared pin rather than one per module,
+    because these drivers are used across modules: see :data:`c1.PINNED`. Passing a literal is
+    reserved for the tests that are attacking the field itself.
+    """
+    if repository is not None:
+        identity = repository
+    elif c1.PINNED is not None:
+        identity = c1.PINNED
+    else:
+        identity = running_repository_identity()
     return ce.ChunkRequest(
         plan_path=str(plan_path),
         chunk_id=chunk_id,
@@ -68,8 +87,8 @@ def chunk_request(
         source_instance_id=c1.INSTANCE,
         batch_size=batch_size,
         cache_bytes=None,
-        repository_head_sha=HEAD,
-        repository_tree_sha=TREE,
+        repository_head_sha=identity.head_sha,
+        repository_tree_sha=identity.tree_sha,
         parent_map_path=None if parent_map_path is None else str(parent_map_path),
         abort_after_members=abort_after_members,
         abort_mode=abort_mode,
@@ -85,6 +104,7 @@ def run_chunked_f0(
     label: str = "run",
     batch_size: int = 2,
     stop_after: int | None = None,
+    repository: RepositoryIdentity | None = None,
 ) -> dict[str, Any]:
     """Drive a whole chunked F0: plan, every chunk in its own process, and the parent-map barrier.
 
@@ -123,6 +143,7 @@ def run_chunked_f0(
                 tree=tree,
                 parent_map_path=parent_map_path,
                 batch_size=batch_size,
+                repository=repository,
             ),
             predecessor_pid=previous,
         )
@@ -145,7 +166,7 @@ def run_chunked_f0(
 
 @pytest.fixture
 def world(tmp_path: Path) -> tuple[Path, DataTree]:
-    return c1.build_world(tmp_path, members=8, filings=2, shards=3, share_every=2)
+    return c1.build_world(tmp_path, members=6, filings=2, shards=3, share_every=2)
 
 
 # ==========================================================================

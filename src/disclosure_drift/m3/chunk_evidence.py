@@ -45,6 +45,7 @@ __all__ = [
     "ArtifactManifest",
     "ChunkEvidenceError",
     "ChunkReceipt",
+    "ExecutionContract",
     "SemanticSummary",
     "build_artifact_manifest",
     "file_sha256",
@@ -59,13 +60,13 @@ class ChunkEvidenceError(DisclosureDriftError):
 
 
 #: The chunk terminal receipt's contract identity.
-CHUNK_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-chunk-receipt/1"
+CHUNK_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-chunk-receipt/2"
 
 #: The verified-transfer receipt's contract identity.
 TRANSFER_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-transfer-receipt/1"
 
 #: The consolidated world receipt's contract identity.
-FINAL_WORLD_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-final-receipt/1"
+FINAL_WORLD_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-final-receipt/2"
 
 #: The chunk terminal receipt's fixed filename. Written LAST, inside the chunk attempt directory.
 CHUNK_RECEIPT_FILENAME: Final = "chunk_receipt.json"
@@ -483,6 +484,93 @@ def _stored_int(value: object, field: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionContract:
+    """The execution-semantic values every chunk of one run must share -- D151-C3 §8 C.
+
+    **Why the named fields are recorded and not only their digest.** A consolidator that compared
+    digests alone would refuse correctly and be unable to say why, which is exactly the defect
+    accepted Decision 147 recorded against its own admission path and corrected by comparing the
+    named identities first and the aggregate last. The same shape is used here.
+
+    **What is deliberately absent, and why each one.** ``chunk_id`` is absent because it is the
+    one value that legitimately differs between two chunks of the same execution -- normalizing it
+    away is the whole point of this record. ``cache_bytes`` is absent because accepted **Decision
+    119**'s equivalence proof establishes that the page-cache budget moves no row, no ordering, no
+    digest and no identity, which is why :func:`phase_execution_identity` omits it too; it stays
+    on the receipt as a recorded observation and is never a reason to refuse a chunk.
+
+    Everything else here can make two chunks non-equivalent executions, so every one of them must
+    agree: the parser and its version, the evidence contract and whether the compact contract was
+    bound, the durability granularity, the repository revision, the seed catalog's own digest, and
+    the migration head that catalog was at.
+    """
+
+    contract_identity: str
+    parser_id: str
+    parser_version: str
+    evidence_contract: str
+    compact_evidence: bool
+    batch_size: int
+    catalog_source_sha256: str
+    migration_head: int
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "contract_identity": self.contract_identity,
+            "parser_id": self.parser_id,
+            "parser_version": self.parser_version,
+            "evidence_contract": self.evidence_contract,
+            "compact_evidence": self.compact_evidence,
+            "batch_size": self.batch_size,
+            "catalog_source_sha256": self.catalog_source_sha256,
+            "migration_head": self.migration_head,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> ExecutionContract:
+        """Rebuild one execution contract from its stored mapping.
+
+        Raises:
+            ChunkEvidenceError: a field is absent or is not of the recorded type.
+        """
+        try:
+            compact = record["compact_evidence"]
+            if not isinstance(compact, bool):
+                message = (
+                    "an execution contract's compact_evidence is not a boolean and is refused; "
+                    "whether the compact contract was bound is never inferred from a truthy value"
+                )
+                raise ChunkEvidenceError(message)
+            return cls(
+                contract_identity=str(record["contract_identity"]),
+                parser_id=str(record["parser_id"]),
+                parser_version=str(record["parser_version"]),
+                evidence_contract=str(record["evidence_contract"]),
+                compact_evidence=compact,
+                batch_size=_stored_int(record["batch_size"], "batch_size"),
+                catalog_source_sha256=str(record["catalog_source_sha256"]),
+                migration_head=_stored_int(record["migration_head"], "migration_head"),
+            )
+        except KeyError as exc:
+            message = f"an execution contract is missing {exc}; it is refused rather than read"
+            raise ChunkEvidenceError(message) from exc
+
+    def disagreements(self, other: ExecutionContract) -> tuple[tuple[str, str, str], ...]:
+        """Every field on which two chunks' execution contracts differ, named.
+
+        Returns them all rather than the first, so one refusal describes the whole divergence.
+        """
+        found: list[tuple[str, str, str]] = []
+        mine = dict(self.as_record())
+        theirs = dict(other.as_record())
+        for field in mine:
+            if mine[field] != theirs[field]:
+                found.append((field, str(mine[field]), str(theirs[field])))
+        return tuple(found)
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkReceipt:
     """One chunk's create-once terminal record -- D151-C1 §14.
 
@@ -490,6 +578,16 @@ class ChunkReceipt:
     one row of this chunk: the plan it belongs to, which interval it consumed, the artifact it
     consumed, the code that executed it, the process that executed it, the exact objects it
     produced with their sizes and digests, and what those objects mean.
+
+    **Two instants, not one** -- D151-C3 §6. ``started_at_utc`` is when this chunk's process
+    began and ``completed_at_utc`` is when its receipt was assembled, and they are separate
+    fields because a consolidated F0's own ``started_at_utc`` is derived from the **earliest**
+    chunk start. Deriving a governed value from a field whose name says one thing and whose
+    contents say another is exactly the kind of quiet inaccuracy a derivation must not rest on.
+
+    ``execution_contract`` is the normalized, chunk-independent half of the execution identity:
+    the values two chunks of one run must share. ``execution_identity`` remains the full digest,
+    which additionally folds ``chunk_id`` and ``cache_bytes`` and is therefore unique per chunk.
     """
 
     contract: str
@@ -506,9 +604,12 @@ class ChunkReceipt:
     repository_head_sha: str
     repository_tree_sha: str
     execution_identity: str
+    execution_contract: ExecutionContract
+    cache_bytes: int | None
     attempt: int
     pid: int
     rss_peak_bytes: int | None
+    started_at_utc: str
     completed_at_utc: str
     status: str
     manifest: ArtifactManifest
@@ -531,9 +632,12 @@ class ChunkReceipt:
             "repository_head_sha": self.repository_head_sha,
             "repository_tree_sha": self.repository_tree_sha,
             "execution_identity": self.execution_identity,
+            "execution_contract": dict(self.execution_contract.as_record()),
+            "cache_bytes": self.cache_bytes,
             "attempt": self.attempt,
             "pid": self.pid,
             "rss_peak_bytes": self.rss_peak_bytes,
+            "started_at_utc": self.started_at_utc,
             "completed_at_utc": self.completed_at_utc,
             "status": self.status,
             "manifest": dict(self.manifest.as_record()),
@@ -550,10 +654,19 @@ class ChunkReceipt:
         try:
             manifest = record["manifest"]
             summary = record["summary"]
-            if not isinstance(manifest, Mapping) or not isinstance(summary, Mapping):
-                message = "a chunk receipt's manifest or summary is not a mapping and is refused"
+            contract = record["execution_contract"]
+            if (
+                not isinstance(manifest, Mapping)
+                or not isinstance(summary, Mapping)
+                or not isinstance(contract, Mapping)
+            ):
+                message = (
+                    "a chunk receipt's manifest, summary or execution contract is not a mapping "
+                    "and is refused"
+                )
                 raise ChunkEvidenceError(message)
             peak = record.get("rss_peak_bytes")
+            cache = record["cache_bytes"]
             return cls(
                 contract=str(record["contract"]),
                 chunk_id=str(record["chunk_id"]),
@@ -569,9 +682,12 @@ class ChunkReceipt:
                 repository_head_sha=str(record["repository_head_sha"]),
                 repository_tree_sha=str(record["repository_tree_sha"]),
                 execution_identity=str(record["execution_identity"]),
+                execution_contract=ExecutionContract.from_record(contract),
+                cache_bytes=None if cache is None else _stored_int(cache, "cache_bytes"),
                 attempt=_stored_int(record["attempt"], "attempt"),
                 pid=_stored_int(record["pid"], "pid"),
                 rss_peak_bytes=None if peak is None else _stored_int(peak, "rss_peak_bytes"),
+                started_at_utc=str(record["started_at_utc"]),
                 completed_at_utc=str(record["completed_at_utc"]),
                 status=str(record["status"]),
                 manifest=ArtifactManifest.from_record(manifest),

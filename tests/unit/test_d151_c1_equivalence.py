@@ -68,6 +68,22 @@ from disclosure_drift.storage.sqlite import connect  # noqa: E402
 BATCH = 2
 
 
+@pytest.fixture(autouse=True)
+def _pinned_repository(tmp_path: Path) -> Any:
+    """The shared pin: a real, clean throwaway repository, through the accepted identity seam.
+
+    A consolidation derives the executing repository's identity for itself (D151-C3 §9), and the
+    checkout this suite runs from is dirty by construction while a change is being written. The
+    pin lives in ``test_d151_c1_chunk_plan`` so that every shared driver reads the same one --
+    a per-module pin leaves a cross-module driver recording the wrong identity.
+    """
+    patcher = pytest.MonkeyPatch()
+    c1.pin_repository(tmp_path / "repo", patcher)
+    yield
+    patcher.undo()
+    c1.unpin_repository()
+
+
 # ==========================================================================
 # The two executions
 # ==========================================================================
@@ -122,21 +138,64 @@ def chunked_f0(
 ) -> cc.ConsolidationResult:
     """A whole chunked F0: plan, one process per chunk, then deterministic consolidation."""
     run = c1x.run_chunked_f0(
-        root, database, tree, chunk_members=chunk_members, label=label, batch_size=BATCH
+        root,
+        database,
+        tree,
+        chunk_members=chunk_members,
+        label=label,
+        batch_size=BATCH,
+        repository=c1.PINNED,
     )
     return cc.consolidate_chunks(
         plan=run["plan"],
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final",
+        run_id="equivalence-run",
     )
+
+
+def chunked_f0_world(
+    root: Path, database: Path, tree: DataTree, *, chunk_members: int, label: str
+) -> Path:
+    """Consolidate a source that reaches a BLOCKING terminal, and return the refused world.
+
+    The accepted D140-R12 gate stops the consolidation, so there is no
+    :class:`~disclosure_drift.m3.chunk_consolidation.ConsolidationResult` to return -- which is
+    the point. What is returned is the world directory the refusal left behind, so the rows it
+    holds can still be compared against the monolithic ones.
+    """
+    run = c1x.run_chunked_f0(
+        root,
+        database,
+        tree,
+        chunk_members=chunk_members,
+        label=label,
+        batch_size=BATCH,
+        repository=c1.PINNED,
+    )
+    world_directory = run["base"] / "final"
+    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+        cc.consolidate_chunks(
+            plan=run["plan"],
+            internal_root=run["chunk_root"],
+            operational_catalog=database,
+            world_directory=world_directory,
+            run_id="equivalence-run",
+        )
+    return world_directory
 
 
 # ==========================================================================
 # The measurement
 # ==========================================================================
-def measure(world_directory: Path) -> dict[str, Any]:
-    """Everything two F0 worlds are compared on."""
+def measure(world_directory: Path, *, sidecar: bool = True) -> dict[str, Any]:
+    """Everything two F0 worlds are compared on.
+
+    ``sidecar=False`` measures only the durable catalog, for the one case where there is no
+    merged sidecar to measure: a consolidation the accepted blocking-terminal gate refused stops
+    before the sidecar is merged, leaving exactly the diagnostic rows and nothing more.
+    """
     measured: dict[str, Any] = {}
     with connect(world_directory / WORKING_CATALOG_FILENAME, writer=False) as connection:
         measured["tables"] = dict(cc.world_logical_digest(connection))
@@ -151,14 +210,16 @@ def measure(world_directory: Path) -> dict[str, Any]:
             {key: value for key, value in dict(entry).items() if not key.endswith("_at_utc")}
             for entry in runs
         ]
-    sidecar = CompactEvidenceSidecar(world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME)
+    if not sidecar:
+        return measured
+    evidence = CompactEvidenceSidecar(world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME)
     try:
-        measured["sidecar_identity"] = sidecar.identity()
-        measured["manifest_digest"] = sidecar.member_manifest_digest(c1.OBSERVATION)
-        measured["source_evidence"] = dict(sidecar.source_evidence(c1.OBSERVATION) or {})
-        measured["members"] = [dict(entry) for entry in sidecar.members(c1.OBSERVATION)]
+        measured["sidecar_identity"] = evidence.identity()
+        measured["manifest_digest"] = evidence.member_manifest_digest(c1.OBSERVATION)
+        measured["source_evidence"] = dict(evidence.source_evidence(c1.OBSERVATION) or {})
+        measured["members"] = [dict(entry) for entry in evidence.members(c1.OBSERVATION)]
     finally:
-        sidecar.close()
+        evidence.close()
     return measured
 
 
@@ -234,9 +295,26 @@ def test_c32_to_c43_the_chunked_world_equals_the_monolithic_one(
     monolithic_f0(database, tree, tmp_path / "mono", strict=strict)
     reference = measure(tmp_path / "mono")
     for size in PARTITIONS:
-        result = chunked_f0(tmp_path, database, tree, chunk_members=size, label=f"{label}-n{size}")
-        assert_equivalent(reference, measure(result.world_directory))
-        assert result.receipt.status == "complete"
+        if strict:
+            result = chunked_f0(
+                tmp_path, database, tree, chunk_members=size, label=f"{label}-n{size}"
+            )
+            assert_equivalent(reference, measure(result.world_directory))
+            assert result.receipt.status == "complete"
+            continue
+        # A source that reaches a BLOCKING terminal. Both paths stop at the accepted D140-R12
+        # gate -- ``monolithic_f0`` was driven with ``strict=False`` precisely because the gate
+        # would refuse it, and the consolidated path is refused by the same predicate. What is
+        # still asserted is that the MERGE was exact: the rows the refusal left behind for
+        # diagnosis are the rows the monolithic run produced.
+        world = chunked_f0_world(
+            tmp_path, database, tree, chunk_members=size, label=f"{label}-n{size}"
+        )
+        candidate = measure(world, sidecar=False)
+        assert candidate["counts"] == reference["counts"]
+        assert candidate["tables"] == reference["tables"]
+        assert candidate["parser_state"] == reference["parser_state"] == "failed"
+        assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
 
 
 def test_the_partition_actually_varied(tmp_path: Path) -> None:
@@ -284,12 +362,15 @@ def test_c37_directory_enumeration_order_does_not_decide_anything(tmp_path: Path
     database, tree = c1.build_world(tmp_path, members=6, filings=2, shards=2, share_every=2)
     monolithic_f0(database, tree, tmp_path / "mono")
     reference = measure(tmp_path / "mono")
-    run = c1x.run_chunked_f0(tmp_path, database, tree, chunk_members=1, label="ordered")
+    run = c1x.run_chunked_f0(
+        tmp_path, database, tree, chunk_members=1, label="ordered", repository=c1.PINNED
+    )
     forward = cc.consolidate_chunks(
         plan=run["plan"],
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final-a",
+        run_id="ordered-a",
     )
     # Present the same chunks through placements assembled in the opposite order. The
     # consolidator re-derives plan order for itself, so the presentation cannot matter.
@@ -309,6 +390,7 @@ def test_c37_directory_enumeration_order_does_not_decide_anything(tmp_path: Path
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final-b",
+        run_id="ordered-b",
     )
     assert_equivalent(reference, measure(forward.world_directory))
     assert_equivalent(measure(forward.world_directory), measure(backward.world_directory))
@@ -319,12 +401,15 @@ def test_the_batch_size_does_not_move_the_result(tmp_path: Path) -> None:
     database, tree = c1.build_world(tmp_path, members=6, filings=2, shards=2, share_every=2)
     monolithic_f0(database, tree, tmp_path / "mono")
     reference = measure(tmp_path / "mono")
-    run = c1x.run_chunked_f0(tmp_path, database, tree, chunk_members=2, label="b7", batch_size=7)
+    run = c1x.run_chunked_f0(
+        tmp_path, database, tree, chunk_members=2, label="b7", batch_size=7, repository=c1.PINNED
+    )
     result = cc.consolidate_chunks(
         plan=run["plan"],
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final",
+        run_id="batch-seven",
     )
     assert_equivalent(reference, measure(result.world_directory))
 
@@ -375,57 +460,46 @@ def test_c44_the_consolidated_world_is_accepted_by_f1_and_f2(tmp_path: Path) -> 
 def test_c44_the_consolidated_world_carries_the_accepted_f0_phase_checkpoint(
     tmp_path: Path,
 ) -> None:
-    """The accepted Decision 145 admission rule, satisfied by the accepted writer."""
-    from disclosure_drift.m3.repository_identity import RepositoryIdentity
+    """The accepted Decision 145 admission rule, satisfied by a DERIVED checkpoint.
 
+    D151-C3 §6: the caller no longer supplies the checkpoint or its payload. Consolidation writes
+    one, through the accepted writer, from identities it measured for itself -- and the accepted
+    admission mechanism, unmodified, admits F1 from it.
+    """
     database, tree = c1.build_world(tmp_path, members=6, filings=2, shards=2)
-    run = c1x.run_chunked_f0(tmp_path, database, tree, chunk_members=2, label="checkpoint")
+    result = chunked_f0(tmp_path, database, tree, chunk_members=2, label="checkpoint")
+    assert c1.PINNED is not None
     identity = canary.phase_execution_identity(
-        repository=RepositoryIdentity(
-            contract="m3.3-canary-repository-identity/1",
-            head_sha=c1x.HEAD,
-            tree_sha=c1x.TREE,
-            dirty_tracked_paths=(),
-            untracked_paths=(),
-        )
-    )
-    checkpoint = cc.consolidated_phase_checkpoint(
-        run_id="c1-run",
-        source_instance_id=c1.INSTANCE,
-        execution_identity_value=identity,
-        repository_head_sha=c1x.HEAD,
-        repository_tree_sha=c1x.TREE,
-        catalog_source_sha256="c" * 64,
-        migration_head=15,
-        plan_fingerprint="fingerprint",
-        payload={"source": "chunked"},
-        pid=1234,
-    )
-    result = cc.consolidate_chunks(
-        plan=run["plan"],
-        internal_root=run["chunk_root"],
-        operational_catalog=database,
-        world_directory=run["base"] / "final",
-        phase_checkpoint=checkpoint,
+        repository=c1.PINNED, batch_size=result.inputs[0].receipt.execution_contract.batch_size
     )
     ledger = RunProgressLedger(result.world_directory / PROGRESS_LEDGER_FILENAME)
     try:
         admission = require_phase_admission(
             ledger,
             phase=PHASE_F1,
-            run_id="c1-run",
+            run_id="equivalence-run",
             source_instance_id=c1.INSTANCE,
             execution_identity=identity,
-            repository_head_sha=c1x.HEAD,
-            repository_tree_sha=c1x.TREE,
-            catalog_source_sha256="c" * 64,
-            migration_head=15,
-            plan_fingerprint="fingerprint",
+            repository_head_sha=c1.PINNED.head_sha,
+            repository_tree_sha=c1.PINNED.tree_sha,
+            catalog_source_sha256=result.receipt.catalog_source_sha256,
+            migration_head=result.inputs[0].receipt.execution_contract.migration_head,
+            plan_fingerprint=_plan_fingerprint_of(database),
         )
         assert admission.predecessor is not None
         assert admission.predecessor.phase == "f0"
     finally:
         ledger.close()
+
+
+def _plan_fingerprint_of(database: Path) -> str:
+    """The accepted plan fingerprint, derived the way the accepted phase path derives it."""
+    from disclosure_drift.m3.capacity_plan import plan_fingerprint
+    from disclosure_drift.storage.catalog import strictly_read_only_connection
+
+    with strictly_read_only_connection(database) as reader:
+        fingerprint, _ = plan_fingerprint(reader)
+    return fingerprint
 
 
 def test_c45_an_individual_chunk_is_never_a_final_f0_world(tmp_path: Path) -> None:

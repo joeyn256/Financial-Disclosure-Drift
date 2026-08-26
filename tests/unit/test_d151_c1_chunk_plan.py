@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -26,8 +27,10 @@ from typing import Any
 import pytest
 
 from disclosure_drift.m3 import chunk_plan as cp
+from disclosure_drift.m3 import repository_identity
 from disclosure_drift.m3.chunk_plan import ChunkBounds, ChunkPlanError
 from disclosure_drift.m3.offline_parse import OfflineParseError
+from disclosure_drift.m3.repository_identity import RepositoryIdentity, repository_identity_at
 from disclosure_drift.paths import DataTree
 from disclosure_drift.sec.archive import ArchiveDefenceError, iter_members
 
@@ -208,6 +211,76 @@ def build_world(root: Path, **kwargs: Any) -> tuple[Path, DataTree]:
     return database, tree
 
 
+#: The repository identity every D151 driver records and every consolidation must measure.
+#:
+#: **One pin, in one place.** It lives in this module rather than in each test module because the
+#: drivers are shared: a consolidation test may reach the equivalence module's driver, and a
+#: per-module pin would then leave that driver recording the real working checkout while the
+#: consolidator measured a temporary one. The reversed-order run found exactly that.
+PINNED: RepositoryIdentity | None = None
+
+#: Where that repository is, for the tests that need to move it or make it dirty.
+PINNED_ROOT: Path | None = None
+
+
+def pinned_repository() -> RepositoryIdentity:
+    """The pinned identity, or a refusal.
+
+    Raises:
+        AssertionError: no test pinned a repository, so a driver would silently record the real
+            working checkout's identity and a consolidation would refuse against it.
+    """
+    assert PINNED is not None, "no repository is pinned; call pin_repository in an autouse fixture"
+    return PINNED
+
+
+def unpin_repository() -> None:
+    """Clear the pin at a fixture's teardown, beside undoing its monkeypatch."""
+    global PINNED, PINNED_ROOT  # noqa: PLW0603 - the module-scoped pin this module owns
+    PINNED = None
+    PINNED_ROOT = None
+
+
+def pin_repository(root: Path, monkeypatch: pytest.MonkeyPatch) -> RepositoryIdentity:
+    """Make a REAL, clean Git repository the one the accepted identity mechanism reports.
+
+    **This is the repository's own accepted test seam, not a bypass.** Exactly one name is
+    redirected -- ``running_repository_identity``, which answers *which* repository is executing
+    -- and it is redirected to :func:`repository_identity_at` over a repository that genuinely
+    exists on disk, with a genuine commit and a genuine ``git status``. Every predicate downstream
+    of it is the accepted one, unmodified: ``require_clean_running_repository`` still runs, still
+    shells out to Git, and still refuses a dirty tree. That is what makes "a dirty repository
+    refuses" a real proof here rather than a mocked one.
+
+    It is needed because the suite runs from a working checkout that is, by definition, dirty
+    while the change under test is being written.
+    """
+    root.mkdir(parents=True)
+    for argv in (
+        ["init", "--quiet", "--initial-branch=main"],
+        ["config", "user.email", "d151@example.invalid"],
+        ["config", "user.name", "D151"],
+    ):
+        subprocess.run(["git", "-C", str(root), *argv], check=True, capture_output=True)  # noqa: S603, S607
+    (root / "governing.txt").write_text("the chunked-F0 governing revision\n", encoding="utf-8")
+    subprocess.run(  # noqa: S603, S607
+        ["git", "-C", str(root), "add", "governing.txt"], check=True, capture_output=True
+    )
+    subprocess.run(  # noqa: S603, S607
+        ["git", "-C", str(root), "commit", "--quiet", "-m", "governing revision"],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(
+        repository_identity, "running_repository_identity", lambda: repository_identity_at(root)
+    )
+    identity = repository_identity.require_clean_running_repository()
+    assert identity.clean
+    global PINNED, PINNED_ROOT  # noqa: PLW0603 - the module-scoped pin this module owns
+    PINNED, PINNED_ROOT = identity, root
+    return identity
+
+
 def observation_of(tree: DataTree, database: Path) -> Any:
     """The one stored bulk observation this world carries."""
     import sys
@@ -239,8 +312,15 @@ def build_plan(tree: DataTree, database: Path, *, chunk_members: int) -> cp.Chun
 
 @pytest.fixture
 def world(tmp_path: Path) -> tuple[Path, DataTree]:
-    """A world with shards, a co-filed accession, and a non-JSON member."""
-    return build_world(tmp_path, members=8, filings=2, shards=3, share_every=2)
+    """A world with shards, a co-filed accession, and a non-JSON member.
+
+    Nine governed members -- six primaries and three shards -- which is exactly
+    :data:`~disclosure_drift.m3.chunk_plan.SINGLE_PASS_CHUNK_CAP`. That is deliberate: the
+    smallest partition this plan can express, one member per chunk, sits **on** the D151-C3 §11
+    single-pass cap rather than below it, so every sweep over ``chunk_members=1`` is a run at the
+    architectural boundary rather than a comfortable distance inside it.
+    """
+    return build_world(tmp_path, members=6, filings=2, shards=3, share_every=2)
 
 
 # ==========================================================================

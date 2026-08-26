@@ -31,6 +31,13 @@ choose it: D151-C1 §5 and §28 reserve that to a later owner freeze. Every call
 ``chunk_members``, and changing it produces a **different plan identity** rather than a
 re-partitioning of the same one.
 
+**The number of chunks is capped, and the cap is architectural.** The single-pass merge reads
+every chunk in one compound select, so a partition it cannot attach at once is a partition it
+cannot consolidate. :data:`SINGLE_PASS_CHUNK_CAP` is **nine** -- one slot below the ten the
+running SQLite library actually attaches, deliberately, as reserved headroom rather than as a
+library limit. A plan needing more is refused **at construction**, before any chunk process
+starts, and the cap it was sealed under is part of its digest.
+
 **Nothing here authorizes anything.** No world is created, no member is decompressed, no
 database is opened, and no process is started. Reading a central directory is a measurement.
 """
@@ -49,18 +56,17 @@ from disclosure_drift.errors import DisclosureDriftError
 
 # The shard predicate is the accepted one, imported rather than restated: a second expression of
 # "is this member a historical shard" is a second answer waiting to disagree with F0's. The
-# name-level archive defences arrive the same way. `iter_members` applies those to the whole
-# central directory before it yields anything; this module applies exactly the same ones to the
-# same entries, and the payload-level defences -- declared size, expansion ratio, cumulative
-# expansion -- stay where they are, in the accepted readers, during chunk execution, where the
-# bytes actually are.
+# name-level archive defences arrive the same way, and by REUSE rather than by restatement:
+# `scan_central_directory` is the single implementation `iter_members` itself runs, so the
+# population this module partitions is the population the accepted traversal reads -- member
+# count ceiling, special-member refusal, canonicalization, portable collision, forward
+# file-versus-descendant collision and reverse descendant-versus-file collision, all of them,
+# once. The payload-level defences -- declared size, expansion ratio, cumulative expansion --
+# stay where they are, in the accepted readers, during chunk execution, where the bytes are.
 from disclosure_drift.m3.offline_parse import _is_historical_shard_member
 from disclosure_drift.sec.archive import (
     ArchiveDefenceError,
-    _portable_member_key,
-    _refuse_special_member,
-    _strict_ancestor_prefixes,
-    canonical_member_name,
+    scan_central_directory,
 )
 
 __all__ = [
@@ -72,6 +78,8 @@ __all__ = [
     "PRODUCTION_CHUNK_MEMBERS",
     "REGION_PRIMARY",
     "REGION_SHARD",
+    "RESERVED_ATTACHMENT_HEADROOM",
+    "SINGLE_PASS_CHUNK_CAP",
     "CanonicalMember",
     "ChunkBounds",
     "ChunkPlan",
@@ -95,7 +103,7 @@ class ChunkPlanError(DisclosureDriftError):
 
 #: This plan shape's own contract identity, folded into every plan digest so a chunk built by a
 #: differently shaped successor refuses rather than half-reading a record it does not know.
-CHUNK_PLAN_CONTRACT: Final = "m3.3-chunked-f0-plan/1"
+CHUNK_PLAN_CONTRACT: Final = "m3.3-chunked-f0-plan/2"
 
 #: The canonical member ordering's own identity. Separate from the plan contract because the two
 #: can move independently: a plan may gain a field without the ordering changing, and an ordering
@@ -123,6 +131,33 @@ CHUNK_REGION_ORDER: Final[tuple[str, str]] = (REGION_PRIMARY, REGION_SHARD)
 #: has no meaning. Restricting the plan here rather than "supporting" the degenerate case keeps
 #: a caller from believing a single-payload source was chunked when it could not have been.
 CHUNKABLE_SOURCE_IDS: Final[frozenset[str]] = frozenset({"sec_bulk_submissions"})
+
+#: The attachment count one **single-pass** consolidation may require of SQLite.
+#:
+#: **This is an architectural cap, not a library limit, and the difference matters.** The running
+#: SQLite build's ``SQLITE_LIMIT_ATTACHED`` is **ten**, measured from the library rather than
+#: declared, and neither ``main`` nor ``temp`` consumes one of those ten -- ten real attaches
+#: succeed beside both. The single-pass merge could therefore read ten chunks. It is capped at
+#: **nine** deliberately, leaving :data:`RESERVED_ATTACHMENT_HEADROOM` of exactly one slot
+#: unspent, so that a later reviewed change may attach one more database -- a correction ledger,
+#: a second evidence artifact, a verification handle -- without the partition size becoming the
+#: thing that has to move.
+#:
+#: A plan requiring more than this is refused **at construction**, before any chunk process
+#: starts, and the cap it was built under is folded into :attr:`ChunkPlan.plan_digest`, so a
+#: sealed plan cannot later be reinterpreted as a larger one. The consolidator then re-asks the
+#: running library the capability question for itself -- see
+#: :func:`~disclosure_drift.m3.chunk_consolidation.require_attachable` -- because a plan built on
+#: one host may be consolidated on another.
+#:
+#: Multi-pass sorted loading remains a **future** fallback; D151-C3 §3 does not implement it.
+SINGLE_PASS_CHUNK_CAP: Final = 9
+
+#: How many attachment slots the single-pass architecture deliberately leaves unspent.
+#:
+#: Not the main database and not the temporary one: measurement says neither consumes a slot.
+#: One slot of genuine headroom, which is what makes the cap nine rather than ten.
+RESERVED_ATTACHMENT_HEADROOM: Final = 1
 
 #: The frozen production chunk size. **Closed** -- D151-C1 §5 and §28.
 #:
@@ -197,46 +232,31 @@ def canonical_member_sequence(archive_path: Path) -> tuple[CanonicalMember, ...]
 
     **Central directory only.** No member is decompressed and no payload is read, for the same
     reason :func:`~disclosure_drift.m3.offline_parse._historical_shard_member_names` reads it
-    that way: building a plan must not cost what the run costs. The name-level defences the
-    accepted traversal applies -- non-regular members refused, canonicalization, portable-name
-    collision, file-versus-directory collision -- are applied here to the same entries, in the
-    same order, through the same implementations.
+    that way: building a plan must not cost what the run costs.
+
+    **The name-level defences are the accepted ones by reuse, not by restatement** --
+    :func:`~disclosure_drift.sec.archive.scan_central_directory` is the single implementation
+    :func:`~disclosure_drift.sec.archive.iter_members` itself runs. That is what makes the
+    populations provably identical rather than intended to be: the member-count ceiling, the
+    special-member refusal, canonicalization, the portable-name collision, the **forward**
+    file-versus-descendant collision and the **reverse** descendant-versus-file collision all
+    admit and refuse here exactly as they do there, because they are the same statements.
+
+    The suffix filter and the ordinal numbering are then applied over the admitted file members
+    in central-directory order -- which is the order ``iter_members`` assigns
+    ``ArchiveMember.member_index`` in, over the same filtered population.
 
     Raises:
-        ArchiveDefenceError: the archive is corrupt, or a member name is hostile or collides.
+        ArchiveDefenceError: the archive is corrupt, a member name is hostile or collides, or
+            the archive holds more members than the accepted ceiling admits.
     """
     primary: list[tuple[int, str]] = []
     shard: list[tuple[int, str]] = []
     try:
         with zipfile.ZipFile(archive_path) as archive:
-            entries = archive.infolist()
-            all_paths: set[str] = set()
-            files: set[str] = set()
-            strict_ancestors: set[str] = set()
+            admitted = scan_central_directory(archive_path, archive.infolist())
             ordinal = 0
-            for info in entries:
-                _refuse_special_member(info)
-                canonical = canonical_member_name(info.filename)
-                portable = _portable_member_key(canonical)
-                if portable in all_paths:
-                    message = (
-                        f"refusing archive member {info.filename!r}: its portable path "
-                        "collides with another member after NFC normalization and case-folding"
-                    )
-                    raise ArchiveDefenceError(message)
-                if info.is_dir():
-                    all_paths.add(portable)
-                    strict_ancestors.update(_strict_ancestor_prefixes(portable))
-                    continue
-                if portable in strict_ancestors:
-                    message = (
-                        f"refusing archive member {info.filename!r}: file and directory paths "
-                        "collide after portable canonicalization"
-                    )
-                    raise ArchiveDefenceError(message)
-                files.add(portable)
-                all_paths.add(portable)
-                strict_ancestors.update(_strict_ancestor_prefixes(portable))
+            for canonical, _info in admitted.values():
                 if not canonical.endswith(GOVERNED_MEMBER_SUFFIX):
                     continue
                 if _is_historical_shard_member(canonical):
@@ -367,9 +387,10 @@ class ChunkPlan:
 
     Everything a chunk must agree with before it may consume one byte: which contract, which
     source instance, which observation, which artifact (by digest **and** length), which
-    canonical ordering, how many members that ordering holds, how they were partitioned, and
-    every chunk's exact interval. ``plan_digest`` folds all of it, so a single changed bound
-    produces a different plan rather than a compatible one.
+    canonical ordering, how many members that ordering holds, how they were partitioned, the
+    single-pass cap it was sealed under, and every chunk's exact interval. ``plan_digest`` folds
+    all of it, so a single changed bound -- or a raised cap -- produces a different plan rather
+    than a compatible one.
     """
 
     contract: str
@@ -385,6 +406,7 @@ class ChunkPlan:
     shard_members: int
     chunk_members: int
     chunk_count: int
+    single_pass_chunk_cap: int
     chunks: tuple[ChunkBounds, ...]
     plan_digest: str
 
@@ -410,6 +432,7 @@ class ChunkPlan:
             "shard_members": self.shard_members,
             "chunk_members": self.chunk_members,
             "chunk_count": self.chunk_count,
+            "single_pass_chunk_cap": self.single_pass_chunk_cap,
             "chunks": [dict(bounds.as_record()) for bounds in self.chunks],
         }
 
@@ -444,6 +467,9 @@ class ChunkPlan:
                 shard_members=_stored_int(record["shard_members"], "shard_members"),
                 chunk_members=_stored_int(record["chunk_members"], "chunk_members"),
                 chunk_count=_stored_int(record["chunk_count"], "chunk_count"),
+                single_pass_chunk_cap=_stored_int(
+                    record["single_pass_chunk_cap"], "single_pass_chunk_cap"
+                ),
                 chunks=tuple(
                     ChunkBounds.from_record(item)
                     for item in raw_chunks
@@ -503,10 +529,18 @@ def build_chunk_plan(
 
     ``chunk_members`` is the caller's, deliberately. See :data:`PRODUCTION_CHUNK_MEMBERS`.
 
+    **The single-pass cap is established here, before anything executes.** A partition needing
+    more than :data:`SINGLE_PASS_CHUNK_CAP` chunks is refused by :func:`require_plan_coverage`
+    at the end of this function -- so the refusal lands before chunk zero starts, which is the
+    D151-C3 §11 requirement, and the cap is folded into the sealed digest so the plan cannot
+    later be reinterpreted as a larger one.
+
     Raises:
         ChunkPlanError: the source is not chunkable, ``chunk_members`` is not positive, the
-            archive holds no governed member, or the coverage check fails.
-        ArchiveDefenceError: the archive is corrupt or a member name is hostile.
+            archive holds no governed member, the partition needs more chunks than the
+            single-pass architecture admits, or the coverage check fails.
+        ArchiveDefenceError: the archive is corrupt, a member name is hostile, or the archive
+            holds more members than the accepted ceiling admits.
     """
     require_chunkable_source(source_id)
     if chunk_members <= 0:
@@ -556,6 +590,7 @@ def build_chunk_plan(
         shard_members=shard_members,
         chunk_members=chunk_members,
         chunk_count=len(bounds),
+        single_pass_chunk_cap=SINGLE_PASS_CHUNK_CAP,
         chunks=tuple(bounds),
         plan_digest="",
     )
@@ -569,8 +604,9 @@ def build_chunk_plan(
 def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
     """Return ``plan``, or refuse a partition that is not one -- D151-C1 §29 C03-C05.
 
-    Six properties, and every one of them refuses rather than warns:
+    Seven properties, and every one of them refuses rather than warns:
 
+    * the partition fits the **single-pass** architecture -- D151-C3 §11;
     * chunk identifiers are **unique**;
     * intervals are **ascending** and **contiguous** -- no gap;
     * intervals do not **overlap**;
@@ -579,9 +615,37 @@ def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
     * no interval **straddles** the primary/shard boundary, and no shard chunk precedes a
       primary chunk.
 
+    **The cap is checked here rather than only where the merge runs**, which is the whole point
+    of D151-C3 §11: a partition this architecture cannot consolidate must be refused *before the
+    first chunk process starts*, not after every chunk has been parsed. This function runs inside
+    :func:`build_chunk_plan` and inside :meth:`ChunkPlan.from_record`, so a plan is refused both
+    when it is built and when it is read back, and a record that declares a **larger** cap than
+    this build enforces is refused as well -- the declared value is never trusted over the
+    constant.
+
     Raises:
         ChunkPlanError: any of them fails, naming the exact chunk and the exact bounds.
     """
+    if plan.single_pass_chunk_cap > SINGLE_PASS_CHUNK_CAP:
+        message = (
+            f"a chunk plan declares a single-pass cap of {plan.single_pass_chunk_cap} where this "
+            f"build enforces {SINGLE_PASS_CHUNK_CAP}. The declared value is a record of what the "
+            "plan was sealed under, never a permission to exceed what this build implements"
+        )
+        raise ChunkPlanError(message)
+    if plan.chunk_count > plan.single_pass_chunk_cap:
+        message = (
+            f"this partition needs {plan.chunk_count} chunks and the single-pass chunked-F0 "
+            f"architecture admits {plan.single_pass_chunk_cap}. The refusal is HERE, at plan "
+            "construction, so that it lands before chunk zero starts rather than after every "
+            "chunk has been parsed and the merge discovers it cannot read them all in one pass. "
+            "The running SQLite build attaches ten databases and neither main nor temp consumes "
+            f"one of them; the cap is {SINGLE_PASS_CHUNK_CAP} rather than ten because "
+            f"{RESERVED_ATTACHMENT_HEADROOM} slot is deliberately left unspent. Use a larger "
+            "chunk size; multi-pass sorted loading is a future fallback this build does not "
+            "implement"
+        )
+        raise ChunkPlanError(message)
     if plan.primary_members + plan.shard_members != plan.total_members:
         message = (
             f"a chunk plan's region counts do not sum to its member count: "

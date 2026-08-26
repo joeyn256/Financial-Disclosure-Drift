@@ -50,6 +50,28 @@ from disclosure_drift.m3.working_catalog import (  # noqa: E402
 from disclosure_drift.paths import DataTree  # noqa: E402
 from disclosure_drift.storage.sqlite import connect  # noqa: E402
 
+#: The identity every chunk in this module records and every consolidation must measure.
+#:
+#: Module-wide and autouse, because a consolidation now derives the executing repository's
+#: identity for ITSELF (D151-C3 §9) and every test here consolidates. The seam pins a real
+#: throwaway repository; the accepted clean-repository predicate runs over it unmodified.
+
+
+@pytest.fixture(autouse=True)
+def _pinned_repository(tmp_path: Path) -> Any:
+    """The shared pin: a real, clean throwaway repository, through the accepted identity seam.
+
+    A consolidation derives the executing repository's identity for itself (D151-C3 §9), and the
+    checkout this suite runs from is dirty by construction while a change is being written. The
+    pin lives in ``test_d151_c1_chunk_plan`` so that every shared driver reads the same one --
+    a per-module pin leaves a cross-module driver recording the wrong identity.
+    """
+    patcher = pytest.MonkeyPatch()
+    c1.pin_repository(tmp_path / "repo", patcher)
+    yield
+    patcher.undo()
+    c1.unpin_repository()
+
 
 @pytest.fixture
 def world(tmp_path: Path) -> tuple[Path, DataTree]:
@@ -58,7 +80,9 @@ def world(tmp_path: Path) -> tuple[Path, DataTree]:
 
 def _run(tmp_path: Path, world: tuple[Path, DataTree], *, size: int = 2, label: str = "c") -> Any:
     database, tree = world
-    return c1x.run_chunked_f0(tmp_path, database, tree, chunk_members=size, label=label)
+    return c1x.run_chunked_f0(
+        tmp_path, database, tree, chunk_members=size, label=label, repository=c1.PINNED
+    )
 
 
 def _consolidate(run: Any, database: Path, *, suffix: str = "") -> cc.ConsolidationResult:
@@ -67,6 +91,7 @@ def _consolidate(run: Any, database: Path, *, suffix: str = "") -> cc.Consolidat
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / f"final{suffix}",
+        run_id="c3-consolidation",
     )
 
 
@@ -342,7 +367,12 @@ def _trace_consolidation(
 ) -> tuple[list[str], cc.ConsolidationResult]:
     database, tree = c1.build_world(tmp_path / label, members=members, filings=3)
     run = c1x.run_chunked_f0(
-        tmp_path / label, database, tree, chunk_members=max(members // 4, 1), label=f"{label}-run"
+        tmp_path / label,
+        database,
+        tree,
+        chunk_members=max(members // 4, 1),
+        label=f"{label}-run",
+        repository=c1.PINNED,
     )
     _TracingWorkingCatalog.statements = []
     monkeypatch.setattr(cc, "WorkingCatalog", _TracingWorkingCatalog)
@@ -351,6 +381,7 @@ def _trace_consolidation(
         internal_root=run["chunk_root"],
         operational_catalog=database,
         world_directory=run["base"] / "final",
+        run_id="c3-consolidation",
     )
     monkeypatch.undo()
     return list(_TracingWorkingCatalog.statements), result

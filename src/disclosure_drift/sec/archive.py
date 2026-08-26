@@ -53,6 +53,7 @@ __all__ = [
     "iter_members",
     "iter_named_members",
     "safe_member_name",
+    "scan_central_directory",
 ]
 
 MAX_MEMBER_BYTES: Final = 512 * 1024 * 1024
@@ -237,6 +238,102 @@ def safe_member_name(name: str) -> str:
     return canonical_member_name(name)
 
 
+def scan_central_directory(
+    archive_path: Path,
+    entries: Sequence[zipfile.ZipInfo],
+    *,
+    max_members: int | None = None,
+) -> dict[str, tuple[str, zipfile.ZipInfo]]:
+    """Apply every **name-level** archive defence to one central directory, once.
+
+    This is the single implementation of the name-level pass, extracted so that every caller
+    that needs to know *which members an archive holds* gets the identical answer. A second
+    expression of these rules is a second answer waiting to disagree with this one, and a
+    planning pass that admitted a member the reading pass refuses -- or the reverse -- would
+    be a partition of a population that does not exist.
+
+    Six refusals, in this order, and each is dispositive:
+
+    * the archive holds more than ``max_members`` entries;
+    * a member is not a **regular** file entry -- a symbolic link, a device, anything else;
+    * a member's name is hostile: traversal, absolute, drive-lettered, backslashed,
+      percent-encoded, control-charactered, reserved-device-named, or empty once normalized;
+    * two members **collide** after NFC normalization and case-folding;
+    * a member's **ancestor** is already an admitted file -- the forward ``x`` then ``x/y``
+      collision;
+    * an admitted path is a **descendant** of this file -- the reverse ``x/y`` then ``x``
+      collision.
+
+    **Payload-level defences are deliberately absent**: declared size, expansion ratio and
+    cumulative expansion are properties of bytes, and this pass decompresses nothing. They stay
+    with the reader, where the bytes are.
+
+    ``max_members`` of ``None`` resolves :data:`MAX_MEMBER_COUNT` **at call time** rather than at
+    definition time, so a caller that states no ceiling is genuinely governed by the module
+    constant -- which is what lets the ceiling be exercised, at a small value, over both callers
+    at once instead of being asserted about only one of them.
+
+    Returns:
+        Every admitted **file** member, keyed by its portable collision identity and carrying
+        its canonical name and its ``ZipInfo``, in central-directory order. Directory entries
+        participate in the collision checks and are not returned.
+
+    Raises:
+        ArchiveDefenceError: any of the six.
+    """
+    ceiling = MAX_MEMBER_COUNT if max_members is None else max_members
+    if len(entries) > ceiling:
+        message = (
+            f"refusing archive {archive_path.name}: {len(entries)} members exceed "
+            f"the limit {ceiling}"
+        )
+        raise ArchiveDefenceError(message)
+    files: dict[str, tuple[str, zipfile.ZipInfo]] = {}
+    all_paths: set[str] = set()
+    # The union of every admitted path's strict ancestor prefixes. It answers the reverse-order
+    # collision -- is some already-admitted path a descendant of this file? -- in constant time.
+    # The prior implementation rescanned the whole growing admitted set per member, which is
+    # quadratic in the member count and was the accidental ~46-minute stall on the 985,480-entry
+    # submissions archive (Decision 051 §4.1). The membership test is semantically identical:
+    # see :func:`_strict_ancestor_prefixes`.
+    strict_ancestors: set[str] = set()
+    for info in entries:
+        _refuse_special_member(info)
+        canonical = canonical_member_name(info.filename)
+        portable = _portable_member_key(canonical)
+        if portable in all_paths:
+            message = (
+                f"refusing archive member {info.filename!r}: its portable path "
+                f"collides with another member after NFC normalization and case-folding"
+            )
+            raise ArchiveDefenceError(message)
+        parent_keys = [
+            _portable_member_key(parent.as_posix())
+            for parent in PurePosixPath(canonical).parents
+            if parent.as_posix() != "."
+        ]
+        if any(parent in files for parent in parent_keys):
+            message = (
+                f"refusing archive member {info.filename!r}: a parent path is "
+                "already a file after portable canonicalization"
+            )
+            raise ArchiveDefenceError(message)
+        if info.is_dir():
+            all_paths.add(portable)
+            strict_ancestors.update(_strict_ancestor_prefixes(portable))
+            continue
+        if portable in strict_ancestors:
+            message = (
+                f"refusing archive member {info.filename!r}: file and directory "
+                "paths collide after portable canonicalization"
+            )
+            raise ArchiveDefenceError(message)
+        files[portable] = (canonical, info)
+        all_paths.add(portable)
+        strict_ancestors.update(_strict_ancestor_prefixes(portable))
+    return files
+
+
 def iter_members(
     archive_path: Path,
     *,
@@ -266,59 +363,11 @@ def iter_members(
     """
     try:
         with zipfile.ZipFile(archive_path) as archive:
-            entries = archive.infolist()
-            if len(entries) > max_members:
-                message = (
-                    f"refusing archive {archive_path.name}: {len(entries)} members exceed "
-                    f"the limit {max_members}"
-                )
-                raise ArchiveDefenceError(message)
-
-            files: dict[str, tuple[str, zipfile.ZipInfo]] = {}
-            directories: set[str] = set()
-            all_paths: set[str] = set()
-            # The union of every admitted path's strict ancestor prefixes. It answers the
-            # reverse-order collision — is some already-admitted path a descendant of this file? —
-            # in constant time. The prior implementation rescanned the whole growing admitted set
-            # per member, which is quadratic in the member count and was the accidental ~46-minute
-            # stall on the 985,480-entry submissions archive (Decision 051 §4.1). The membership
-            # test is semantically identical: see :func:`_strict_ancestor_prefixes`.
-            strict_ancestors: set[str] = set()
-            for info in entries:
-                _refuse_special_member(info)
-                canonical = canonical_member_name(info.filename)
-                portable = _portable_member_key(canonical)
-                if portable in all_paths:
-                    message = (
-                        f"refusing archive member {info.filename!r}: its portable path "
-                        f"collides with another member after NFC normalization and case-folding"
-                    )
-                    raise ArchiveDefenceError(message)
-                parent_keys = [
-                    _portable_member_key(parent.as_posix())
-                    for parent in PurePosixPath(canonical).parents
-                    if parent.as_posix() != "."
-                ]
-                if any(parent in files for parent in parent_keys):
-                    message = (
-                        f"refusing archive member {info.filename!r}: a parent path is "
-                        "already a file after portable canonicalization"
-                    )
-                    raise ArchiveDefenceError(message)
-                if info.is_dir():
-                    directories.add(portable)
-                    all_paths.add(portable)
-                    strict_ancestors.update(_strict_ancestor_prefixes(portable))
-                    continue
-                if portable in strict_ancestors:
-                    message = (
-                        f"refusing archive member {info.filename!r}: file and directory "
-                        "paths collide after portable canonicalization"
-                    )
-                    raise ArchiveDefenceError(message)
-                files[portable] = (canonical, info)
-                all_paths.add(portable)
-                strict_ancestors.update(_strict_ancestor_prefixes(portable))
+            # Every name-level defence, through the one implementation
+            # :func:`scan_central_directory` holds. Nothing is decompressed by it.
+            files = scan_central_directory(
+                archive_path, archive.infolist(), max_members=max_members
+            )
 
             expanded = 0
             index = 0

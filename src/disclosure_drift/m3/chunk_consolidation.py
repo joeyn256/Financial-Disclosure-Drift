@@ -42,9 +42,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -56,6 +58,8 @@ from disclosure_drift.m3.canary_phases import (
     PhaseCheckpoint,
     write_phase_checkpoint,
 )
+from disclosure_drift.m3.canary_runtime import process_peak_resident_bytes
+from disclosure_drift.m3.capacity_plan import plan_fingerprint
 from disclosure_drift.m3.chunk_evidence import (
     CHUNK_RECEIPT_FILENAME,
     FINAL_WORLD_RECEIPT_CONTRACT,
@@ -63,13 +67,18 @@ from disclosure_drift.m3.chunk_evidence import (
     TRANSFER_RECEIPT_FILENAME,
     ArtifactManifest,
     ChunkReceipt,
+    ExecutionContract,
     build_artifact_manifest,
     verify_artifact_manifest,
     write_once_json,
 )
 from disclosure_drift.m3.chunk_evidence import CHUNK_WITNESS_FILENAME as _WITNESS_FILENAME
 from disclosure_drift.m3.chunk_execution import F0_WRITTEN_TABLES, table_row_counts
-from disclosure_drift.m3.chunk_plan import ChunkPlan
+from disclosure_drift.m3.chunk_plan import (
+    SINGLE_PASS_CHUNK_CAP,
+    ChunkPlan,
+    require_chunkable_source,
+)
 from disclosure_drift.m3.chunk_storage import (
     ChunkPlacement,
     authoritative_input,
@@ -82,12 +91,34 @@ from disclosure_drift.m3.compact_evidence import (
     materialized_fields,
     reconstructed_observations,
 )
-from disclosure_drift.m3.offline_parse import _STREAMED_PARSER_STATE, write_containment
+from disclosure_drift.m3.offline_parse import (
+    _STREAMED_PARSER_STATE,
+    PlannedSourceOutcome,
+    SingleSourceOutcome,
+    classify_planned_source,
+    planned_source_observation,
+    select_planned_source,
+    write_containment,
+)
+from disclosure_drift.m3.repository_identity import (
+    RepositoryIdentity,
+    require_clean_running_repository,
+)
+
+# The accepted D140-R12 blocking-terminal gate, and the accepted phase execution identity --
+# imported rather than restated. A consolidated F0 reaches the SAME disposition boundary the
+# accepted monolithic F0 reaches, decided by the SAME predicate, so there is no weaker parallel
+# success rule for a chunked run to pass while a monolithic one would have stopped.
+from disclosure_drift.m3.single_source_canary import (
+    phase_execution_identity,
+    require_f0_success,
+)
 from disclosure_drift.m3.working_catalog import (
     PROGRESS_LEDGER_FILENAME,
     WORKING_CATALOG_FILENAME,
     RunProgressLedger,
     WorkingCatalog,
+    file_digest,
 )
 from disclosure_drift.sec.census import (
     STREAMED_STRUCTURAL_DETAIL_LIMIT,
@@ -96,15 +127,19 @@ from disclosure_drift.sec.census import (
 )
 from disclosure_drift.sec.census import _json as _stable_json
 from disclosure_drift.sec.parsers.base import PARSER_LAYER_VERSION
+from disclosure_drift.storage.catalog import strictly_read_only_connection
 from disclosure_drift.storage.sqlite import transaction, utc_now
 
 __all__ = [
+    "ACCEPTED_F0_PAYLOAD_KEYS",
     "CONSOLIDATION_CONTRACT",
     "attachment_limit",
     "ChunkConsolidationError",
     "ConsolidationResult",
     "FinalWorldReceipt",
     "consolidate_chunks",
+    "derived_f0_outcome",
+    "derived_f0_payload",
     "require_attachable",
     "resolve_chunk_inputs",
     "world_logical_digest",
@@ -227,7 +262,8 @@ def resolve_chunk_inputs(
 ) -> tuple[ChunkInput, ...]:
     """Resolve every chunk of one plan to exactly one verified authoritative copy.
 
-    Nine refusals, and every one of them is dispositive -- D151-C1 §15:
+    **Every chunk must belong to ONE coherent execution, and that is proved rather than
+    assumed** -- D151-C1 §15, corrected by D151-C3 §8. Twelve refusals, each dispositive:
 
     * a **missing** chunk -- never treated as empty, never reconstructed, never skipped;
     * a chunk carrying **two** valid terminal receipts (ambiguous authority);
@@ -235,9 +271,20 @@ def resolve_chunk_inputs(
     * a chunk built under a **different plan digest**;
     * a chunk built over a **different canonical member ordering**;
     * a chunk built over a **different source artifact**;
+    * a chunk naming a **different planned source instance** than the plan;
+    * a chunk naming a **different source observation** than the plan;
     * a chunk whose recorded interval is not the interval the plan assigns it (a shifted bound);
+    * a chunk whose **normalized execution contract** differs from its predecessors' -- parser,
+      parser version, evidence contract, durability granularity, repository revision, seed
+      catalog digest or migration head;
     * a **foreign** chunk directory the plan does not name;
     * chunks whose intervals, taken together, leave a **gap**, **overlap**, or miss the source.
+
+    **Why the instance and observation checks are here and not implied.** A receipt is excluded
+    from its own artifact manifest -- it must be, since it does not exist when the manifest is
+    taken -- so editing ``source_instance_id`` or ``source_observation_id`` inside it leaves every
+    artifact byte-identical and every manifest verification green. Only a comparison against the
+    plan catches it, so a comparison against the plan is made.
 
     Raises:
         ChunkConsolidationError: any of them.
@@ -253,6 +300,7 @@ def resolve_chunk_inputs(
     inputs: list[ChunkInput] = []
     head: str | None = None
     tree: str | None = None
+    contract: ExecutionContract | None = None
     cursor = 0
     for ordinal, (bounds, placement) in enumerate(zip(plan.chunks, resolved, strict=True)):
         directory, tier = authoritative_input(placement)
@@ -278,6 +326,20 @@ def resolve_chunk_inputs(
             "plan names",
         )
         _require(
+            receipt.source_instance_id == plan.source_instance_id,
+            f"chunk {bounds.chunk_id!r} names planned source instance "
+            f"{receipt.source_instance_id!r} where the plan partitions "
+            f"{plan.source_instance_id!r}. A chunk receipt is excluded from its own artifact "
+            "manifest, so this field can be edited without moving one byte of the chunk's data "
+            "-- which is exactly why it is compared against the plan rather than trusted",
+        )
+        _require(
+            receipt.source_observation_id == plan.source_observation_id,
+            f"chunk {bounds.chunk_id!r} names source observation "
+            f"{receipt.source_observation_id!r} where the plan records "
+            f"{plan.source_observation_id!r}",
+        )
+        _require(
             (receipt.region, receipt.start, receipt.end)
             == (bounds.region, bounds.start, bounds.end),
             f"chunk {bounds.chunk_id!r} records interval {receipt.region}"
@@ -298,6 +360,19 @@ def resolve_chunk_inputs(
             f"{receipt.repository_tree_sha} where an earlier chunk executed under {head}/{tree}. "
             "One consolidated world is never assembled from chunks produced by governing code "
             "that moved between them",
+        )
+        if contract is None:
+            contract = receipt.execution_contract
+        divergence = contract.disagreements(receipt.execution_contract)
+        _require(
+            not divergence,
+            f"chunk {bounds.chunk_id!r} ran under a different execution contract than an earlier "
+            "chunk of the same plan: "
+            + "; ".join(
+                f"{field} {expected!r} != {observed!r}" for field, expected, observed in divergence
+            )
+            + ". Two chunks that did not execute equivalently are not two parts of one execution, "
+            "and a world assembled from them would be one no single run could have produced",
         )
         # The dispositive verification, at the point of consumption rather than only at
         # discovery: the bytes about to be read are the bytes the receipt bound.
@@ -359,18 +434,76 @@ def _refuse_foreign_chunk_directories(
             raise ChunkConsolidationError(message)
 
 
+def _nearest_existing(path: Path) -> Path:
+    """The closest ancestor of ``path`` that exists -- what a free-space reading can be taken of.
+
+    A volume's free space is a property of the volume, so any existing ancestor answers the same
+    question. Walking up rather than assuming the parent exists means a caller that names a world
+    two directories deep gets a real measurement instead of a ``FileNotFoundError``.
+    """
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return Path(path.anchor or ".")  # pragma: no cover - the filesystem root always exists
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ChunkConsolidationError(message)
 
 
+def _require_consolidation_identity(
+    *,
+    inputs: Sequence[ChunkInput],
+    repository: RepositoryIdentity,
+    contract: ExecutionContract,
+    operational_catalog: Path,
+) -> None:
+    """Prove the world about to be built is the one the chunks were built for -- D151-C3 §8 B, D.
+
+    :func:`resolve_chunk_inputs` has already proved the chunks agree **with each other**. This
+    asks the different question: does the environment doing the consolidating agree with them?
+
+    **Repository identity is a measurement, not a claim.** ``repository`` came from
+    :func:`~disclosure_drift.m3.repository_identity.require_clean_running_repository`, which asks
+    Git about the checkout this module's own source was imported from. The chunks' recorded
+    identity is compared against that, so a consolidation run from a checkout that has **moved
+    since the chunks ran** refuses -- which a comparison among the chunks alone could never
+    catch, because they would still agree with one another perfectly.
+
+    **The seed catalog is identified cryptographically, never by path.** Two files at the same
+    path are not the same file, and the accepted operational catalog is the seed every chunk's
+    working copy descends from. Its digest is read here and compared with the digest every chunk
+    recorded; a byte that moved refuses, whatever the path says.
+
+    Raises:
+        ChunkConsolidationError: the checkout moved, or the seed catalog is a different artifact.
+    """
+    recorded_head = inputs[0].receipt.repository_head_sha
+    recorded_tree = inputs[0].receipt.repository_tree_sha
+    _require(
+        repository.head_sha == recorded_head and repository.tree_sha == recorded_tree,
+        f"the chunks executed under repository {recorded_head}/{recorded_tree} and this "
+        f"consolidation is running from {repository.head_sha}/{repository.tree_sha}. The "
+        "identity compared here is MEASURED from the checkout this code was imported from, not "
+        "taken from the receipts, so a checkout that moved after the chunks ran is caught even "
+        "though every chunk still agrees with every other. Nothing was merged and nothing was "
+        "checked out, reset or repaired",
+    )
+    observed_catalog, _ = file_digest(operational_catalog)
+    _require(
+        observed_catalog == contract.catalog_source_sha256,
+        f"the accepted catalog this consolidation would seed the final world from digests to "
+        f"{observed_catalog!r} and every chunk executed against {contract.catalog_source_sha256!r}"
+        ". The seed is identified by its BYTES, never by its path: two artifacts at one path are "
+        "not one artifact, and a world seeded from a catalog the chunks never saw is not the "
+        "world their rows belong to",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Attaching the chunks
 # --------------------------------------------------------------------------- #
-#: How many attachments the merge needs beyond the chunks themselves: the main database.
-_RESERVED_ATTACHMENTS: Final = 1
-
-
 def _columns(connection: sqlite3.Connection, table: str, *, schema: str = "main") -> list[str]:
     return [
         str(row["name"])
@@ -382,14 +515,13 @@ def attachment_limit() -> int:
     """How many databases this SQLite build will attach to one connection at once.
 
     ``SQLITE_MAX_ATTACHED`` is a **compile-time** ceiling -- ``sqlite3_limit`` can lower it and
-    can never raise it -- so this is measured from the running library rather than declared. The
-    stock amalgamation, and the library Python links here, report ten.
+    can never raise it -- so this is **measured from the running library** rather than declared.
+    The library Python links here reports ten, and ten real attaches succeed: neither ``main``
+    nor ``temp`` consumes one of them.
 
-    The merge reads every chunk in one compound select, so this is a real bound on the chunk
-    count and is stated rather than discovered mid-run. It is also, usefully, the bound that
-    produces the operational chunk size D151-C1 §5 asks for: the governed source's 985,834
-    members over nine chunks is roughly 109,500 members per chunk, which at the measured
-    complete-source rate is about three hours -- the top of the stated 2-3 hour target.
+    This is asked again at consolidation time, on the host that is actually merging, because a
+    plan built on one host may be consolidated on another and a compile-time ceiling is a
+    property of a build rather than of a plan.
     """
     connection = sqlite3.connect(":memory:")
     try:
@@ -399,22 +531,49 @@ def attachment_limit() -> int:
 
 
 def require_attachable(chunk_count: int, *, limit: int | None = None) -> int:
-    """Refuse a partition this merge cannot read in one pass.
+    """Refuse a partition this merge cannot read in one pass -- D151-C3 §§3, 11.
+
+    **Two independent questions, and neither substitutes for the other.**
+
+    The first is a **capability** question asked of the running library: will this SQLite build
+    attach as many databases as this plan needs? The merge reads every chunk in one compound
+    select, so a build whose ``SQLITE_LIMIT_ATTACHED`` is below the chunk count cannot execute
+    the plan at all -- whatever the plan was sealed under, and whatever a different host would
+    have allowed.
+
+    The second is an **architectural** question, and it is the one
+    :data:`~disclosure_drift.m3.chunk_plan.SINGLE_PASS_CHUNK_CAP` answers: this build issues a
+    single-pass merge over at most nine chunks. That is one **below** the ten the library
+    attaches, deliberately -- one slot of reserved headroom, not a library limit and not the main
+    database, which consumes none. It is stated here as a second check because the plan already
+    refuses at construction: this is the successor's own re-derivation, in the process that will
+    do the work, and it never says *"the planner already checked this"*.
+
+    Neither refusal is repaired by merging in passes. Several sorted passes into one B-tree
+    interleave and lose exactly the write locality the sort is for, and an intermediate that
+    removed the interleaving would be a second full copy of the source. Multi-pass sorted loading
+    remains a future fallback.
 
     Raises:
-        ChunkConsolidationError: the plan has more chunks than SQLite will attach at once.
+        ChunkConsolidationError: the running library cannot attach that many, or the partition
+            exceeds the single-pass architectural cap.
     """
-    ceiling = (attachment_limit() if limit is None else limit) - _RESERVED_ATTACHMENTS
-    if chunk_count > ceiling:
+    observed = attachment_limit() if limit is None else limit
+    if chunk_count > observed:
         message = (
-            f"this plan carries {chunk_count} chunks and the merge reads every one of them in "
-            f"one compound select, which this SQLite build bounds at {ceiling} attached "
-            "databases. The partition is REFUSED rather than merged in passes: several sorted "
-            "passes into one B-tree interleave and lose exactly the write locality the sort is "
-            "for, and an intermediate that removed the interleaving would be a second full copy "
-            "of the source. Use a larger chunk size -- which is also what the 2-3 hour "
-            "per-chunk target implies -- or implement the two-level merge this record "
-            "deliberately does not"
+            f"this consolidation needs {chunk_count} attached chunk databases and the SQLite "
+            f"build running HERE reports SQLITE_LIMIT_ATTACHED = {observed}. The merge reads "
+            "every chunk in one compound select, so this build cannot execute this plan at all. "
+            "The partition is REFUSED rather than merged in passes, and nothing was created"
+        )
+        raise ChunkConsolidationError(message)
+    if chunk_count > SINGLE_PASS_CHUNK_CAP:
+        message = (
+            f"this consolidation needs {chunk_count} chunks and the single-pass chunked-F0 "
+            f"architecture admits {SINGLE_PASS_CHUNK_CAP}. The running library attaches "
+            f"{observed} and neither main nor temp consumes one of them; the cap sits one below "
+            "that as deliberate reserved headroom, not because the library refuses. Use a larger "
+            "chunk size, or implement the two-level merge this build deliberately does not"
         )
         raise ChunkConsolidationError(message)
     return chunk_count
@@ -1055,12 +1214,28 @@ def _merge_sidecar(
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class FinalWorldReceipt:
-    """The consolidated world's create-once terminal record -- D151-C1 §15."""
+    """The consolidated world's create-once terminal record -- D151-C1 §15, D151-C3 §8 E.
+
+    **It binds the identity consolidation actually ran under, not the one it was told about.**
+    ``repository_head_sha`` and ``repository_tree_sha`` are the identity
+    :func:`~disclosure_drift.m3.repository_identity.require_clean_running_repository` measured
+    from the live checkout at consolidation time; ``catalog_source_sha256`` is the digest of the
+    seed catalog the final world was actually built from, taken by reading it; and
+    ``execution_contract_identity`` is the normalized execution identity every admitted chunk
+    agreed on. A reader of this receipt can therefore answer *which code, which catalog, which
+    execution* without trusting anything a caller said.
+    """
 
     contract: str
+    consolidation_contract: str
     plan_digest: str
+    source_instance_id: str
     source_observation_id: str
     source_sha256: str
+    repository_head_sha: str
+    repository_tree_sha: str
+    catalog_source_sha256: str
+    execution_contract_identity: str
     chunk_count: int
     chunk_inputs: tuple[Mapping[str, object], ...]
     chunks_unchanged: bool
@@ -1088,9 +1263,15 @@ class FinalWorldReceipt:
         """The complete receipt as a plain mapping, carrying no absolute path."""
         return {
             "contract": self.contract,
+            "consolidation_contract": self.consolidation_contract,
             "plan_digest": self.plan_digest,
+            "source_instance_id": self.source_instance_id,
             "source_observation_id": self.source_observation_id,
             "source_sha256": self.source_sha256,
+            "repository_head_sha": self.repository_head_sha,
+            "repository_tree_sha": self.repository_tree_sha,
+            "catalog_source_sha256": self.catalog_source_sha256,
+            "execution_contract_identity": self.execution_contract_identity,
             "chunk_count": self.chunk_count,
             "chunk_inputs": [dict(item) for item in self.chunk_inputs],
             "chunks_unchanged": self.chunks_unchanged,
@@ -1116,6 +1297,212 @@ class FinalWorldReceipt:
         }
 
 
+#: Every key the accepted :func:`~disclosure_drift.m3.single_source_canary._phase_f0_body`
+#: returns, plus the one its caller adds. Stated as a constant so the derivation below can be
+#: checked **against the accepted source** rather than against a reader's memory of it: a test
+#: parses the accepted function's own return statement and asserts this set is exactly its keys.
+#:
+#: A field added to the accepted payload and not derived here would be a field F1 or F2 reads and
+#: a consolidated world does not carry, so the check is a real gate rather than documentation.
+ACCEPTED_F0_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "started_at_utc",
+        "plan_position",
+        "plan_source_count",
+        "operational_catalog_sha256_before",
+        "work_root_free_bytes_before",
+        "source_id",
+        "source_observation_id",
+        "source_artifact_sha256",
+        "source_artifact_byte_length",
+        "disposition",
+        "parser_state_before",
+        "parser_state_after",
+        "parser_run_id",
+        "members",
+        "projection_records",
+        "parsed_records",
+        "quarantined_records",
+        "omitted_field_observations",
+        "materialized_field_observations",
+        "completeness_digest",
+        "corroboration",
+        "capacity_observations",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _AcceptedPlanState:
+    """What the accepted plan says about this source, read before anything was written.
+
+    Read from the **operational catalog** through a strictly read-only handle, which is where
+    :func:`~disclosure_drift.m3.single_source_canary.run_canary_phase` reads the same three
+    values from. That matters for one of them in particular: ``parser_state_before`` is the state
+    the source was in *before* this F0, and the operational catalog is the one copy consolidation
+    never writes to, so reading it there is correct by construction rather than by careful
+    ordering.
+    """
+
+    plan_position: int
+    plan_source_count: int
+    parser_state_before: str
+    disposition: str
+    plan_fingerprint: str
+    observation_id: str
+    artifact_sha256: str
+    artifact_byte_length: int
+
+
+def _accepted_plan_state(operational_catalog: Path, plan: ChunkPlan) -> _AcceptedPlanState:
+    """Derive the accepted plan facts a consolidated F0 terminal must carry.
+
+    Every value is read through the **accepted** selector and the **accepted** classifier --
+    :func:`select_planned_source`, :func:`planned_source_observation`,
+    :func:`classify_planned_source`, :func:`plan_fingerprint` -- so a consolidated world's
+    terminal describes the same plan the accepted monolithic F0 would have described.
+
+    The bound observation is then required to be the artifact the plan partitions, by identifier,
+    digest **and** byte length. A chunk already proved that for itself; this proves the plan and
+    the accepted catalog still agree at the moment the world is assembled.
+
+    Raises:
+        ChunkConsolidationError: the bound observation is not the plan's artifact.
+        OfflineParseError: the accepted selector or classifier refuses.
+    """
+    with strictly_read_only_connection(operational_catalog) as reader:
+        selected = select_planned_source(reader, plan.source_instance_id)
+        observation = planned_source_observation(reader, selected)
+        disposition = classify_planned_source(selected.source, observation)
+        fingerprint, _ = plan_fingerprint(reader)
+    _require(
+        observation is not None,
+        f"planned source {plan.source_instance_id!r} binds no stored observation at "
+        "consolidation time; a consolidated F0 terminal is never assembled over an observation "
+        "that is not there",
+    )
+    assert observation is not None  # noqa: S101 - narrowed by the refusal above
+    _require(
+        observation.observation_id == plan.source_observation_id,
+        f"the planned source is bound to observation {observation.observation_id!r} where the "
+        f"chunk plan records {plan.source_observation_id!r}",
+    )
+    _require(
+        (observation.logical_sha256 or "") == plan.source_sha256
+        and int(observation.content_size_bytes or 0) == plan.source_byte_length,
+        "the bound observation names a different source artifact than the chunk plan does",
+    )
+    return _AcceptedPlanState(
+        plan_position=selected.plan_position,
+        plan_source_count=selected.plan_source_count,
+        parser_state_before=selected.source.parser_state,
+        disposition=disposition,
+        plan_fingerprint=fingerprint,
+        observation_id=observation.observation_id,
+        artifact_sha256=observation.logical_sha256 or "",
+        artifact_byte_length=int(observation.content_size_bytes or 0),
+    )
+
+
+def derived_f0_outcome(
+    *,
+    plan: ChunkPlan,
+    state: _AcceptedPlanState,
+    reduced: _ReducedRun,
+    members: int = 0,
+    records: int = 0,
+    omitted: int = 0,
+    materialized: int = 0,
+    completeness_digest: str = "",
+) -> SingleSourceOutcome:
+    """The accepted F0 outcome object a consolidated world implies -- D151-C3 §6.
+
+    **Every semantic value here is derived, none is accepted from a caller.** The disposition and
+    the pre-parse parser state come from the accepted plan through the accepted classifier; the
+    post-parse state, the run identifier and the record counts come from the reduced parser run
+    the chunks' own rows produced; the evidence totals and the completeness digest come from the
+    merged compact sidecar. A caller has no way to state any of them, which is the point: a
+    consolidated world that reached a blocking terminal cannot be presented as one that did not.
+
+    ``corroboration`` is ``None``, and mechanically so rather than by omission. The accepted
+    :func:`materialize_one_planned_source` populates it only for ``sec_full_index_company``, and
+    :func:`~disclosure_drift.m3.chunk_plan.require_chunkable_source` admits only
+    ``sec_bulk_submissions`` -- so a chunked F0 has no corroboration to carry, and the accepted
+    F2 reads the field as optional. The two facts are asserted together at the call site.
+    """
+    return SingleSourceOutcome(
+        outcome=PlannedSourceOutcome(
+            source_instance_id=plan.source_instance_id,
+            source_id=plan.source_id,
+            disposition=cast("Any", state.disposition),
+            parser_run_id=reduced.parser_run_id,
+            parsed_records=reduced.parsed,
+            quarantined_records=reduced.quarantined,
+            parser_state_before=state.parser_state_before,
+            parser_state_after=reduced.parser_state,
+        ),
+        observation=None,
+        corroboration=None,
+        completeness_digest=completeness_digest,
+        members=members,
+        records=records,
+        omitted_field_observations=omitted,
+        materialized_field_observations=materialized,
+    )
+
+
+def derived_f0_payload(
+    *,
+    outcome: SingleSourceOutcome,
+    state: _AcceptedPlanState,
+    plan: ChunkPlan,
+    started_at_utc: str,
+    catalog_source_sha256: str,
+    work_root_free_bytes_before: int,
+    capacity_observations: Sequence[Mapping[str, object]],
+) -> Mapping[str, object]:
+    """The accepted F0 phase-checkpoint payload, reconstructed field for field -- D151-C3 §6.
+
+    **This is the accepted payload, not a payload shaped like it.** Every key
+    :func:`~disclosure_drift.m3.single_source_canary._phase_f0_body` returns is produced here from
+    the same value it produces there, and its caller's one added key --
+    ``capacity_observations`` -- is produced here too. :data:`ACCEPTED_F0_PAYLOAD_KEYS` names the
+    complete set and a test derives that set from the accepted function's own source, so a field
+    added there and missed here is a test failure rather than a world F2 refuses at the end of a
+    twenty-seven-hour run.
+
+    **What a caller may still state, and why each one is physical rather than semantic.**
+    ``started_at_utc`` is derived from the earliest chunk's recorded start; the free-space reading
+    and the capacity observations are measurements of a host at instants that have passed, and no
+    consolidated database holds them. None of the three can contradict the world: they name when
+    and where, never what.
+    """
+    return {
+        "started_at_utc": started_at_utc,
+        "plan_position": state.plan_position,
+        "plan_source_count": state.plan_source_count,
+        "operational_catalog_sha256_before": catalog_source_sha256,
+        "work_root_free_bytes_before": work_root_free_bytes_before,
+        "source_id": plan.source_id,
+        "source_observation_id": state.observation_id,
+        "source_artifact_sha256": state.artifact_sha256,
+        "source_artifact_byte_length": state.artifact_byte_length,
+        "disposition": outcome.outcome.disposition,
+        "parser_state_before": outcome.outcome.parser_state_before,
+        "parser_state_after": outcome.outcome.parser_state_after,
+        "parser_run_id": outcome.outcome.parser_run_id,
+        "members": outcome.members,
+        "projection_records": outcome.records,
+        "parsed_records": outcome.outcome.parsed_records,
+        "quarantined_records": outcome.outcome.quarantined_records,
+        "omitted_field_observations": outcome.omitted_field_observations,
+        "materialized_field_observations": outcome.materialized_field_observations,
+        "completeness_digest": outcome.completeness_digest,
+        "corroboration": None,
+        "capacity_observations": list(capacity_observations),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ConsolidationResult:
     """What one consolidation established, and where it put it."""
@@ -1131,48 +1518,103 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
     internal_root: Path,
     operational_catalog: Path,
     world_directory: Path,
+    run_id: str,
     external_root: Path | None = None,
     cache_bytes: int | None = None,
-    phase_checkpoint: PhaseCheckpoint | None = None,
+    capacity_observations: Sequence[Mapping[str, object]] = (),
 ) -> ConsolidationResult:
     """Build ONE canonical F0 world from every validated chunk -- D151-C1 §§15, 16, 22.
 
     The sequence, in the order it must happen:
 
-    1. every chunk is resolved to exactly one verified authoritative copy, and the whole set is
-       proved to be this plan's exact coverage;
-    2. the final world is created from the **same** accepted operational catalog every chunk
-       copied, so the seed is identical rather than merely equivalent;
-    3. every chunk's working catalog is attached read-only and immutably -- **there is no staging
+    1. the **live repository identity** is derived through the accepted clean-repository
+       mechanism, and a dirty or moved checkout refuses before anything is read;
+    2. every chunk is resolved to exactly one verified authoritative copy, the whole set is
+       proved to be this plan's exact coverage, and every chunk is proved to belong to **one**
+       execution -- same plan, same instance, same observation, same repository revision, same
+       normalized execution contract;
+    3. the chunks' recorded repository identity is required to be the identity **this checkout**
+       reports, and the seed catalog is required by **digest** to be the one every chunk copied;
+    4. the final world is created from that same accepted operational catalog, so the seed is
+       identical rather than merely equivalent;
+    5. every chunk's working catalog is attached read-only and immutably -- **there is no staging
        copy**: the chunks already are the staged form;
-    4. the declared secondary indexes are dropped;
-    5. each table is bulk-loaded by one **key-sorted** statement, under the accepted write
+    6. the declared secondary indexes are dropped;
+    7. each table is bulk-loaded by one **key-sorted** statement, under the accepted write
        containment;
-    6. the cross-chunk first-witness corrections are computed into a ``TEMP`` table and loaded in
+    8. the cross-chunk first-witness corrections are computed into a ``TEMP`` table and loaded in
        the same sorted pass as the observation rows;
-    7. the two accepted whole-observation derivations are run **once**, exactly as the monolithic
+    9. the two accepted whole-observation derivations are run **once**, exactly as the monolithic
        path runs them once;
-    8. the indexes are rebuilt;
-    9. the compact-evidence sidecar is merged and its completeness digest replayed;
-    10. every chunk's manifest is re-verified, proving consolidation mutated none of them;
-    11. the F0 phase checkpoint is written, so the **accepted** F1 admits this world;
-    12. the final receipt is written **LAST**.
+    10. the indexes are rebuilt;
+    11. **the accepted D140-R12 blocking-terminal gate is applied**, between the merge's
+        completion and anything that reads its output -- exactly where the accepted
+        :func:`~disclosure_drift.m3.single_source_canary._f0` applies it;
+    12. only then is the run-local ledger marked parsed;
+    13. the compact-evidence sidecar is merged and its completeness digest replayed;
+    14. every chunk's manifest is re-verified, proving consolidation mutated none of them;
+    15. the F0 phase checkpoint is written from a **mechanically derived** payload, so the
+        accepted F1 admits this world by the accepted rule;
+    16. the final receipt is written **LAST**.
+
+    **Step 11 is the disposition boundary, and it is the accepted one.** A consolidated F0 whose
+    reduced parser run reached a blocking terminal leaves its durable rows exactly where they
+    are, for diagnosis -- and marks nothing parsed, writes no phase checkpoint, writes no final
+    receipt, and is refused by the accepted F1 admission because there is no F0 terminal to
+    continue from. The refusal is raised by
+    :func:`~disclosure_drift.m3.single_source_canary.require_f0_success` itself rather than by a
+    parallel rule stated here.
+
+    Args:
+        run_id: The run this F0 belongs to. A **name**, not a semantic value: it can say which
+            run, never what the run found.
+        capacity_observations: Physical capacity measurements taken during chunk execution, if
+            any. Carried into the terminal exactly as the accepted phase path carries its own.
 
     Raises:
-        ChunkConsolidationError: any precondition fails.
+        ChunkConsolidationError: any consolidation precondition fails.
+        SingleSourceCanaryError: the consolidated F0 reached a blocking terminal.
+        RepositoryIdentityError: the executing checkout is dirty or cannot be identified.
     """
+    require_chunkable_source(plan.source_id)
+    # The live identity of the checkout doing the consolidating, measured through the accepted
+    # mechanism rather than accepted as an argument -- D151-C3 §9. A dirty or untracked-file
+    # working tree refuses here, before a chunk is read.
+    repository = require_clean_running_repository()
     inputs = resolve_chunk_inputs(plan, internal_root=internal_root, external_root=external_root)
     require_attachable(len(inputs))
+    contract = inputs[0].receipt.execution_contract
+    _require_consolidation_identity(
+        inputs=inputs,
+        repository=repository,
+        contract=contract,
+        operational_catalog=operational_catalog,
+    )
+    state = _accepted_plan_state(operational_catalog, plan)
+    started_at_utc = min(item.receipt.started_at_utc for item in inputs)
     if world_directory.exists():
         message = (
             f"the consolidated world {world_directory.name!r} already exists; a final world is "
             "create-once and is never reused, resumed, repaired, or overwritten"
         )
         raise ChunkConsolidationError(message)
+    # Measured before the world exists, which is exactly what the accepted payload field means:
+    # how much room there was on the volume this F0 was about to write into. Taken from the
+    # nearest ancestor that exists, because `mkdir(parents=True)` below may be creating several.
+    free_before = shutil.disk_usage(_nearest_existing(world_directory)).free
     world_directory.mkdir(mode=_DIRECTORY_MODE, parents=True)
 
     with WorkingCatalog(operational_catalog, world_directory, cache_bytes=cache_bytes) as world:
         connection = world.connection
+        migration_head = world.identity.migration_head
+        _require(
+            migration_head == contract.migration_head,
+            f"the final world was seeded at migration head {migration_head} where every chunk "
+            f"executed at {contract.migration_head}",
+        )
+        # Ahead of the first durable row, exactly as the accepted `_f0` opens: an interruption
+        # between here and the merge is visibly an interruption rather than an untouched source.
+        world.ledger.begin_source(plan.source_instance_id, plan.source_id)
         aliases = _attach_all(connection, [item.catalog_path for item in inputs], "k")
         try:
             indexes = _deferrable_indexes(connection)
@@ -1210,16 +1652,22 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
                     connection.execute(
                         "UPDATE census_plan_sources SET parser_state = ? "
                         "WHERE source_instance_id = ?",
-                        (reduced.parser_state, inputs[0].receipt.source_instance_id),
+                        (reduced.parser_state, plan.source_instance_id),
                     )
             for _name, sql in indexes:
                 connection.execute(sql)
             counts = table_row_counts(connection)
         finally:
             _detach_all(connection, aliases)
-        world.ledger.begin_source(inputs[0].receipt.source_instance_id, plan.source_id)
+        # D140-R12, at the accepted position: between the parse's completion and anything that
+        # reads its output. The predicate is the ACCEPTED one, called rather than restated, so a
+        # consolidated F0 reaches the same disposition boundary a monolithic F0 reaches. Nothing
+        # below this line runs for a blocking terminal -- not the ledger, not the sidecar merge,
+        # not the checkpoint, not the receipt -- and the world stays exactly as it is.
+        gated = derived_f0_outcome(plan=plan, state=state, reduced=reduced)
+        require_f0_success(gated)
         world.ledger.mark_parsed(
-            inputs[0].receipt.source_instance_id,
+            plan.source_instance_id,
             parts=plan.total_members,
             batches=reduced.parsed,
         )
@@ -1236,18 +1684,66 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
             item.receipt.manifest,
             exclude=(CHUNK_RECEIPT_FILENAME, TRANSFER_RECEIPT_FILENAME),
         )
-    if phase_checkpoint is not None:
-        ledger = RunProgressLedger(world_directory / PROGRESS_LEDGER_FILENAME)
-        try:
-            write_phase_checkpoint(ledger, phase_checkpoint)
-        finally:
-            ledger.close()
+    # The complete accepted outcome: the gated one, now carrying the evidence totals the merged
+    # sidecar established. `replace` rather than a second construction, so the gate and the
+    # terminal describe one object rather than two that must be kept in step.
+    outcome = replace(
+        gated,
+        members=totals["members"],
+        records=totals["records"],
+        omitted_field_observations=totals["omitted"],
+        materialized_field_observations=totals["materialized"],
+        completeness_digest=completeness,
+    )
+    checkpoint = PhaseCheckpoint(
+        contract=PHASE_RESTART_CONTRACT,
+        phase=PHASE_F0,
+        status=PHASE_STATUS_COMPLETE,
+        run_id=run_id,
+        source_instance_id=plan.source_instance_id,
+        # The accepted phase identity, derived from the live repository and the durability
+        # granularity every chunk is proved to have shared -- never supplied.
+        execution_identity=phase_execution_identity(
+            repository=repository, batch_size=contract.batch_size
+        ),
+        repository_head_sha=repository.head_sha,
+        repository_tree_sha=repository.tree_sha,
+        catalog_source_sha256=contract.catalog_source_sha256,
+        migration_head=contract.migration_head,
+        plan_fingerprint=state.plan_fingerprint,
+        completed_at_utc=utc_now(),
+        pid=os.getpid(),
+        rss_peak_bytes_at_start=None,
+        rss_peak_bytes_at_terminal=process_peak_resident_bytes(),
+        payload=dict(
+            derived_f0_payload(
+                outcome=outcome,
+                state=state,
+                plan=plan,
+                started_at_utc=started_at_utc,
+                catalog_source_sha256=contract.catalog_source_sha256,
+                work_root_free_bytes_before=free_before,
+                capacity_observations=capacity_observations,
+            )
+        ),
+    )
+    ledger = RunProgressLedger(world_directory / PROGRESS_LEDGER_FILENAME)
+    try:
+        write_phase_checkpoint(ledger, checkpoint)
+    finally:
+        ledger.close()
     manifest = build_artifact_manifest(world_directory, exclude=(FINAL_WORLD_RECEIPT_FILENAME,))
     receipt = FinalWorldReceipt(
         contract=FINAL_WORLD_RECEIPT_CONTRACT,
+        consolidation_contract=CONSOLIDATION_CONTRACT,
         plan_digest=plan.plan_digest,
+        source_instance_id=plan.source_instance_id,
         source_observation_id=plan.source_observation_id,
         source_sha256=plan.source_sha256,
+        repository_head_sha=repository.head_sha,
+        repository_tree_sha=repository.tree_sha,
+        catalog_source_sha256=contract.catalog_source_sha256,
+        execution_contract_identity=contract.contract_identity,
         chunk_count=len(inputs),
         chunk_inputs=tuple(dict(item.as_record()) for item in inputs),
         chunks_unchanged=True,
@@ -1275,47 +1771,6 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
     # which every consumer reads as "this is not a consolidated F0 world".
     write_once_json(world_directory / FINAL_WORLD_RECEIPT_FILENAME, dict(receipt.as_record()))
     return ConsolidationResult(world_directory=world_directory, receipt=receipt, inputs=inputs)
-
-
-def consolidated_phase_checkpoint(
-    *,
-    run_id: str,
-    source_instance_id: str,
-    execution_identity_value: str,
-    repository_head_sha: str,
-    repository_tree_sha: str,
-    catalog_source_sha256: str,
-    migration_head: int,
-    plan_fingerprint: str,
-    payload: Mapping[str, object],
-    pid: int,
-) -> PhaseCheckpoint:
-    """The accepted F0 phase checkpoint a consolidated world carries.
-
-    **This is what makes the world F1's, rather than merely shaped like it.** Accepted Decision
-    145 admits a phase only when its predecessor left a durable terminal checkpoint carrying
-    matching identities; a chunk world never writes one, so a single chunk can never be continued
-    by F1. The consolidated world writes exactly one, through the accepted writer, so the
-    accepted F1 admits it by the accepted rule -- no second admission path, and no relaxation.
-    """
-    return PhaseCheckpoint(
-        contract=PHASE_RESTART_CONTRACT,
-        phase=PHASE_F0,
-        status=PHASE_STATUS_COMPLETE,
-        run_id=run_id,
-        source_instance_id=source_instance_id,
-        execution_identity=execution_identity_value,
-        repository_head_sha=repository_head_sha,
-        repository_tree_sha=repository_tree_sha,
-        catalog_source_sha256=catalog_source_sha256,
-        migration_head=migration_head,
-        plan_fingerprint=plan_fingerprint,
-        completed_at_utc=utc_now(),
-        pid=pid,
-        rss_peak_bytes_at_start=None,
-        rss_peak_bytes_at_terminal=None,
-        payload=dict(payload),
-    )
 
 
 def world_logical_digest(connection: sqlite3.Connection) -> Mapping[str, str]:

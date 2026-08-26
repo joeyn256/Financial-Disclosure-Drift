@@ -56,6 +56,7 @@ from disclosure_drift.m3.chunk_evidence import (
     CHUNK_WITNESS_FILENAME,
     ChunkEvidenceError,
     ChunkReceipt,
+    ExecutionContract,
     SemanticSummary,
     build_artifact_manifest,
     read_receipt_document,
@@ -113,6 +114,7 @@ __all__ = [
     "ChunkExecutionError",
     "ChunkRequest",
     "attempt_directory",
+    "chunk_execution_contract",
     "chunk_execution_identity",
     "completed_chunk_receipt",
     "execute_chunk_body",
@@ -223,6 +225,85 @@ def require_real_chunk_execution_authority() -> str:
     return granted
 
 
+def _common_execution_values(
+    *,
+    plan: ChunkPlan,
+    batch_size: int,
+    repository_head_sha: str,
+    repository_tree_sha: str,
+    catalog_source_sha256: str,
+    migration_head: int,
+) -> dict[str, object]:
+    """Every execution-governing value two chunks of ONE run must share.
+
+    Assembled once and used twice -- by the normalized contract identity and by the full
+    per-chunk identity -- so the two can never fold different notions of the same value.
+    """
+    return {
+        "chunk_execution_contract": CHUNK_EXECUTION_CONTRACT,
+        "plan_digest": plan.plan_digest,
+        "member_order_digest": plan.member_order_digest,
+        "evidence_contract": COMPACT_EVIDENCE_CONTRACT,
+        "compact_evidence": bool(COMPACT_EVIDENCE),
+        "parser_id": _BULK_PARSER_ID,
+        "parser_version": SOURCES[plan.source_id].parser_version,
+        "batch_size": batch_size,
+        "repository_head_sha": repository_head_sha,
+        "repository_tree_sha": repository_tree_sha,
+        "catalog_source_sha256": catalog_source_sha256,
+        "migration_head": migration_head,
+    }
+
+
+def chunk_execution_contract(
+    *,
+    plan: ChunkPlan,
+    batch_size: int,
+    catalog_source_sha256: str,
+    migration_head: int,
+    repository_head_sha: str,
+    repository_tree_sha: str,
+) -> ExecutionContract:
+    """The **normalized** execution identity of one chunk -- D151-C3 §8 C.
+
+    Normalized means: exactly the fields removed are the ones that legitimately differ between
+    two chunks of the same execution. There are two of them, and each is named rather than
+    dropped quietly.
+
+    ``chunk_id`` is chunk-specific by definition -- comparing it across chunks would be comparing
+    the thing that is supposed to differ.
+
+    ``cache_bytes`` is excluded because accepted **Decision 119**'s equivalence proof establishes
+    that the page-cache budget moves no row, no ordering, no digest and no identity; it is why
+    :func:`~disclosure_drift.m3.single_source_canary.phase_execution_identity` omits it as well.
+    It stays recorded on the receipt, as an observation, and is never grounds for refusing a
+    chunk.
+
+    Everything else is required to agree, because any of them could make two chunks
+    non-equivalent executions: the parser and its version, the evidence contract and whether the
+    compact contract was bound, the durability granularity, the repository revision, the seed
+    catalog's own digest, and the migration head.
+    """
+    common = _common_execution_values(
+        plan=plan,
+        batch_size=batch_size,
+        repository_head_sha=repository_head_sha,
+        repository_tree_sha=repository_tree_sha,
+        catalog_source_sha256=catalog_source_sha256,
+        migration_head=migration_head,
+    )
+    return ExecutionContract(
+        contract_identity=execution_identity(common),
+        parser_id=_BULK_PARSER_ID,
+        parser_version=str(SOURCES[plan.source_id].parser_version),
+        evidence_contract=COMPACT_EVIDENCE_CONTRACT,
+        compact_evidence=bool(COMPACT_EVIDENCE),
+        batch_size=batch_size,
+        catalog_source_sha256=catalog_source_sha256,
+        migration_head=migration_head,
+    )
+
+
 def chunk_execution_identity(
     *,
     plan: ChunkPlan,
@@ -239,23 +320,23 @@ def chunk_execution_identity(
     Folded into the chunk receipt so that a consolidator can refuse a chunk produced under
     different governing values without comparing seventeen fields, and so that two chunks of one
     plan can be proved to have run under the same ones.
+
+    This is the **full** identity: it folds the common values plus the two chunk-specific ones,
+    so no two chunks of one plan share it. :func:`chunk_execution_contract` is the normalized
+    half, which they must.
     """
     return execution_identity(
         {
-            "chunk_execution_contract": CHUNK_EXECUTION_CONTRACT,
+            **_common_execution_values(
+                plan=plan,
+                batch_size=batch_size,
+                repository_head_sha=repository_head_sha,
+                repository_tree_sha=repository_tree_sha,
+                catalog_source_sha256=catalog_source_sha256,
+                migration_head=migration_head,
+            ),
             "chunk_id": chunk_id,
-            "plan_digest": plan.plan_digest,
-            "member_order_digest": plan.member_order_digest,
-            "evidence_contract": COMPACT_EVIDENCE_CONTRACT,
-            "compact_evidence": bool(COMPACT_EVIDENCE),
-            "parser_id": _BULK_PARSER_ID,
-            "parser_version": SOURCES[plan.source_id].parser_version,
-            "batch_size": batch_size,
             "cache_bytes": cache_bytes,
-            "repository_head_sha": repository_head_sha,
-            "repository_tree_sha": repository_tree_sha,
-            "catalog_source_sha256": catalog_source_sha256,
-            "migration_head": migration_head,
         }
     )
 
@@ -841,10 +922,20 @@ def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
             catalog_source_sha256=catalog_sha256,
             migration_head=migration_head,
         ),
+        execution_contract=chunk_execution_contract(
+            plan=plan,
+            batch_size=request.batch_size,
+            catalog_source_sha256=catalog_sha256,
+            migration_head=migration_head,
+            repository_head_sha=request.repository_head_sha,
+            repository_tree_sha=request.repository_tree_sha,
+        ),
+        cache_bytes=request.cache_bytes,
         attempt=request.attempt,
         pid=os.getpid(),
         rss_peak_bytes=_peak(rss_before),
-        completed_at_utc=started,
+        started_at_utc=started,
+        completed_at_utc=utc_now(),
         status="complete",
         manifest=manifest,
         summary=summary,

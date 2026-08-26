@@ -259,11 +259,63 @@ def test_the_accepted_offline_parse_surface_is_unchanged() -> None:
 
 
 def test_every_c1_module_is_importable_without_a_world(tmp_path: Path) -> None:
-    """Importing a C1 module creates nothing, opens nothing, and starts nothing."""
-    before = {path.name for path in tmp_path.iterdir()}
-    for name in C1_MODULE_NAMES:
-        importlib.reload(importlib.import_module(name))
-    assert {path.name for path in tmp_path.iterdir()} == before
+    """Importing a C1 module creates nothing, opens nothing, and starts nothing.
+
+    **Measured in a FRESH INTERPRETER, and that is the D151-C3 §12 correction.** This test
+    previously called :func:`importlib.reload` on the production modules in this process, which
+    is not a re-import: it re-executes the module body and **rebinds every class object it
+    defines**, so ``ChunkPlanError`` after the reload is a different class from the one an
+    already-imported test module captured at its own import time. A later
+    ``pytest.raises(ChunkPlanError)`` in the same session would then fail depending only on
+    whether this test had run yet -- an order dependency planted in production state by a test
+    that was not even about exceptions.
+
+    A subprocess answers the actual question, which is about a **first** import rather than a
+    re-import, and it answers it without touching this interpreter at all.
+    """
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    program = (
+        "import sys, json;"
+        "from pathlib import Path;"
+        "root = Path(sys.argv[1]);"
+        "before = sorted(p.name for p in root.iterdir());"
+        f"names = {list(C1_MODULE_NAMES)!r};"
+        "import importlib;"
+        "[importlib.import_module(name) for name in names];"
+        "after = sorted(p.name for p in root.iterdir());"
+        "print(json.dumps({'before': before, 'after': after, 'imported': sorted("
+        "n for n in sys.modules if n in names)}))"
+    )
+    completed = subprocess.run(  # noqa: S603 - fixed argument vector, no shell
+        [sys.executable, "-c", program, str(probe)], capture_output=True, text=True, check=True
+    )
+    observed = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert observed["before"] == observed["after"] == []
+    assert observed["imported"] == sorted(C1_MODULE_NAMES)
+
+
+def test_no_test_in_this_module_reloads_a_production_module() -> None:
+    """D151-C3 §12, stated as a property of the suite rather than of one test.
+
+    ``importlib.reload`` on a production module rebinds its exception classes for every module
+    that has already imported them. Nothing in this file may do it, and this asserts that from
+    the file's own source so a future edit that reintroduces it fails here.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "reload"
+    ]
+    assert calls == []
+    # A second check for a reload reached under an alias the attribute walk cannot see. The
+    # needles are assembled at run time so that this assertion is not itself a match for them.
+    for needle in ("importlib." + "reload(", "from importlib import " + "reload"):
+        assert needle not in source, needle
 
 
 def test_the_prohibited_prefixes_are_the_accepted_list() -> None:
@@ -308,11 +360,12 @@ def test_a30_repository_identity_has_exactly_one_derivation_and_it_fails_closed(
     anything is that a **dirty** working tree can never produce them: accepted Decision 147's
     :func:`require_clean_running_repository` refuses before any identity is folded into a digest.
 
-    No C1 module derives a repository identity of its own -- none of them runs ``git``, and none
-    imports the identity module. The values arrive in the chunk request, and the future
-    activation that fills that request has exactly one accepted place to get them from. That is
-    stated here, and the accepted primitive's fail-closed behaviour is exercised against a
-    synthetic repository so the guarantee is demonstrated rather than cited.
+    **D151-C3 §9 changes exactly one half of this and not the other.** The consolidator now
+    derives the live identity **for itself**, so that a checkout which moved after the chunks ran
+    is caught -- something no comparison among the chunks could ever see. What has not changed is
+    that there is exactly **one** derivation in the repository: the consolidator reaches it by
+    importing the accepted module, and no C1 module runs ``git``, parses porcelain output, or
+    reads a revision from an environment variable or a configuration key.
     """
     from disclosure_drift.m3.repository_identity import (
         RepositoryIdentityError,
@@ -347,9 +400,24 @@ def test_a30_repository_identity_has_exactly_one_derivation_and_it_fails_closed(
     assert not untracked.clean
     assert untracked.untracked_paths == ("untracked.py",)
 
-    # And no C1 module reaches for git, or for the identity module, on any path.
+    # Exactly one C1 module reaches the identity, exactly one accepted way, and none of them
+    # implements a second derivation: no `git` invocation, no porcelain parsing, no subprocess
+    # reaching a version-control tool.
+    reaching = []
     for module in C1_MODULES:
         source = Path(module.__file__).read_text(encoding="utf-8")
-        assert "repository_identity" not in source, module.__name__
+        if "repository_identity" in source:
+            reaching.append(module.__name__)
         assert '"git"' not in source, module.__name__
+        assert "'git'" not in source, module.__name__
+        assert "porcelain" not in source, module.__name__
+        assert "rev-parse" not in source, module.__name__
+    assert reaching == ["disclosure_drift.m3.chunk_consolidation"]
+    consolidation = Path(cc.__file__).read_text(encoding="utf-8")
+    assert (
+        "from disclosure_drift.m3.repository_identity import (\n"
+        "    RepositoryIdentity,\n"
+        "    require_clean_running_repository,\n"
+        ")"
+    ) in consolidation
     assert RepositoryIdentityError is not None

@@ -83,9 +83,11 @@ from disclosure_drift.m3.chunk_evidence import (
 from disclosure_drift.m3.chunk_evidence import CHUNK_WITNESS_FILENAME as _WITNESS_FILENAME
 from disclosure_drift.m3.chunk_execution import F0_WRITTEN_TABLES, table_row_counts
 from disclosure_drift.m3.chunk_plan import (
+    CHUNK_PLAN_CONTRACT,
     SINGLE_PASS_CHUNK_CAP,
     ChunkPlan,
     require_chunkable_source,
+    require_sealed_plan,
 )
 from disclosure_drift.m3.chunk_storage import (
     ChunkPlacement,
@@ -149,6 +151,7 @@ __all__ = [
     "derived_f0_outcome",
     "derived_f0_payload",
     "require_attachable",
+    "require_single_pass_plan",
     "resolve_chunk_inputs",
     "world_logical_digest",
 ]
@@ -585,6 +588,59 @@ def require_attachable(chunk_count: int, *, limit: int | None = None) -> int:
         )
         raise ChunkConsolidationError(message)
     return chunk_count
+
+
+def require_single_pass_plan(plan: ChunkPlan) -> ChunkPlan:
+    """Refuse, before anything is read, a plan this single-pass consolidator may not consume.
+
+    **This is the D151-C10 decoupling seen from the consolidator's side.** A plan may now describe
+    more chunks than the single-pass architecture can merge -- a calibration-only plan does, by
+    definition -- and the consolidator's answer to such a plan is the one it always gave: the
+    single-pass cap, asked FIRST, over the plan's own chunk bounds, before the repository is
+    measured, before a receipt is opened, before a directory is listed and before a database is
+    attached. Three questions, in this order:
+
+    1. **Is the plan exactly its sealed self?** The digest is recomputed and the coverage rules
+       are re-derived through :func:`~disclosure_drift.m3.chunk_plan.require_sealed_plan`, so an
+       object altered after sealing is refused rather than consumed.
+    2. **Does it fit the single-pass architecture?** More than
+       :data:`~disclosure_drift.m3.chunk_plan.SINGLE_PASS_CHUNK_CAP` chunks is refused with the
+       architectural reason -- ahead of the library capability question, which is only asked of
+       a partition the architecture admits (:func:`require_attachable`).
+    3. **Is it a single-pass plan at all?** Stated as defence in depth: a calibration-only plan is
+       wider than the cap by construction, so question 2 has already refused it, and this line is
+       reached only if that invariant is ever removed. It is retained so that the consolidator's
+       own source says a calibration-only plan is never consolidated, whatever the plan module
+       says.
+
+    Raises:
+        ChunkPlanError: the plan is not its sealed self, or fails a coverage rule.
+        ChunkConsolidationError: the partition exceeds the single-pass cap, the running library
+            cannot attach it, or the plan is not a single-pass plan.
+    """
+    require_sealed_plan(plan)
+    width = len(plan.chunks)
+    if width > SINGLE_PASS_CHUNK_CAP:
+        message = (
+            f"this consolidation needs {width} chunks and the single-pass chunked-F0 "
+            f"architecture admits {SINGLE_PASS_CHUNK_CAP}. The refusal is HERE, at the "
+            "consolidator's entry, before the repository is measured, before a chunk receipt is "
+            "read and before a database is attached: nothing was created, listed, merged or "
+            "attached. A partition wider than the cap is never merged in passes and never "
+            "partially merged; multi-pass consolidation is a future architecture this build does "
+            "not implement"
+        )
+        raise ChunkConsolidationError(message)
+    require_attachable(width)
+    if plan.contract != CHUNK_PLAN_CONTRACT:
+        message = (
+            f"a plan sealed under contract {plan.contract!r} is never consolidated by this "
+            f"single-pass consolidator, which consumes only {CHUNK_PLAN_CONTRACT!r}. A "
+            "calibration-only plan exists to execute and measure one chunk; its chunks are "
+            "noncanonical evidence and no world is ever assembled from them"
+        )
+        raise ChunkConsolidationError(message)
+    return plan
 
 
 def _attach_all(
@@ -1592,6 +1648,11 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
 ) -> ConsolidationResult:
     """Build ONE canonical F0 world from every validated chunk -- D151-C1 §§15, 16, 22.
 
+    **Before the sequence begins**, the plan itself is refused unless it is exactly its sealed
+    self and within the single-pass width (:func:`require_single_pass_plan`, D151-C10) -- so a
+    plan wider than the cap, a calibration-only plan among them, costs no measurement, no read,
+    no directory and no attach.
+
     The sequence, in the order it must happen:
 
     1. the **live repository identity** is derived through the accepted clean-repository
@@ -1649,6 +1710,11 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
         RepositoryIdentityError: the executing checkout is dirty or cannot be identified.
     """
     require_chunkable_source(plan.source_id)
+    # D151-C10: the plan is proved to be exactly its sealed self and to be one this SINGLE-PASS
+    # consolidator may consume -- BEFORE the repository is measured, before a receipt is read,
+    # before a directory is listed, and before anything is attached. A calibration-only plan is
+    # wider than the cap by construction and is refused here, by width, every time.
+    require_single_pass_plan(plan)
     # The live identity of the checkout doing the consolidating, measured through the accepted
     # mechanism rather than accepted as an argument -- D151-C3 §9. A dirty or untracked-file
     # working tree refuses here, before a chunk is read.

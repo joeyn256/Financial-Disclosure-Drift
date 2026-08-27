@@ -38,6 +38,17 @@ running SQLite library actually attaches, deliberately, as reserved headroom rat
 library limit. A plan needing more is refused **at construction**, before any chunk process
 starts, and the cap it was sealed under is part of its digest.
 
+**A calibration-only plan is the one deliberate exception, and it is a different contract.**
+D151-C10 decouples the width a plan may *describe* from the width the single-pass consolidator
+may *consume*. A plan sealed under :data:`CALIBRATION_PLAN_CONTRACT` may partition the source into
+more than :data:`SINGLE_PASS_CHUNK_CAP` chunks -- at most :data:`CALIBRATION_CHUNK_CEILING` -- so
+that ONE individual chunk of a smaller size can be executed and measured before any multi-pass
+consolidation exists. The contract string is already folded into every plan digest, so the
+distinction moves the sealed identity without adding a key to an ordinary plan's digest inputs;
+an accepted ordinary plan keeps its identity byte for byte. A calibration-only plan is required
+to be WIDER than the single-pass cap, so it can never sit inside the width the consolidator
+accepts, and nothing here makes the consolidator able to read more than nine chunks.
+
 **Nothing here authorizes anything.** No world is created, no member is decompressed, no
 database is opened, and no process is started. Reading a central directory is a measurement.
 """
@@ -70,6 +81,8 @@ from disclosure_drift.sec.archive import (
 )
 
 __all__ = [
+    "CALIBRATION_CHUNK_CEILING",
+    "CALIBRATION_PLAN_CONTRACT",
     "CHUNKABLE_SOURCE_IDS",
     "CHUNK_PLAN_CONTRACT",
     "CHUNK_REGION_ORDER",
@@ -84,14 +97,17 @@ __all__ = [
     "ChunkBounds",
     "ChunkPlan",
     "ChunkPlanError",
+    "build_calibration_chunk_plan",
     "build_chunk_plan",
     "canonical_member_sequence",
     "chunk_by_id",
     "chunks_in_region",
     "compute_member_order_digest",
+    "partition_regions",
     "production_chunk_members",
     "require_chunkable_source",
     "require_plan_coverage",
+    "require_sealed_plan",
     "resolve_chunk_members",
     "verify_source_identity",
 ]
@@ -158,6 +174,33 @@ SINGLE_PASS_CHUNK_CAP: Final = 9
 #: Not the main database and not the temporary one: measurement says neither consumes a slot.
 #: One slot of genuine headroom, which is what makes the cap nine rather than ten.
 RESERVED_ATTACHMENT_HEADROOM: Final = 1
+
+#: The contract of a **calibration-only** plan -- D151-C10.
+#:
+#: A calibration-only plan describes a deterministic complete-source partition WIDER than the
+#: single-pass cap, so that one individual chunk of it can be executed and measured before any
+#: multi-pass consolidation exists. It is a different contract rather than a flag on the ordinary
+#: one, for reasons that are all mechanical: the contract is already folded into every plan
+#: digest, so the distinction moves the sealed identity without adding a key to an ordinary
+#: plan's digest inputs -- an accepted ordinary plan keeps its identity byte for byte; a reader
+#: that knows only the ordinary contract refuses this one outright rather than half-reading it;
+#: and the record carries it in a field every consumer already reads. It cannot be relabelled
+#: after sealing, because the digest folds it, and it is not an authorization of anything.
+CALIBRATION_PLAN_CONTRACT: Final = "m3.3-chunked-f0-calibration-plan/1"
+
+#: How many chunks a calibration-only plan may describe. **Thirty-four, exactly.**
+#:
+#: Not a library limit and not a performance figure: it is the narrowest ceiling that admits the
+#: owner-authorized calibration point, ``chunk_members = 30000`` over the governed source --
+#: ``ceil(980497 / 30000) = 33`` primary chunks and ``ceil(5337 / 30000) = 1`` shard chunk. A
+#: partition needing more is refused at construction and on every read, exactly as an ordinary
+#: plan is refused above nine. It says nothing about consolidation, which remains single-pass
+#: over at most :data:`SINGLE_PASS_CHUNK_CAP` chunks whatever this ceiling is, and a wider
+#: ceiling is a new owner instrument and a reviewed change, never a larger literal.
+CALIBRATION_CHUNK_CEILING: Final = 34
+
+#: The two plan contracts this build reads. Any other is refused before its digest is checked.
+_PLAN_CONTRACTS: Final[frozenset[str]] = frozenset({CHUNK_PLAN_CONTRACT, CALIBRATION_PLAN_CONTRACT})
 
 #: The frozen production chunk size. **Closed** -- D151-C1 §5 and §28.
 #:
@@ -391,6 +434,11 @@ class ChunkPlan:
     single-pass cap it was sealed under, and every chunk's exact interval. ``plan_digest`` folds
     all of it, so a single changed bound -- or a raised cap -- produces a different plan rather
     than a compatible one.
+
+    ``contract`` is one of exactly two -- :data:`CHUNK_PLAN_CONTRACT` for a single-pass plan and
+    :data:`CALIBRATION_PLAN_CONTRACT` for a calibration-only one -- and it is inside the digest,
+    which is what makes :attr:`calibration_only` a property of the sealed identity rather than a
+    label a caller could change after the fact.
     """
 
     contract: str
@@ -409,6 +457,15 @@ class ChunkPlan:
     single_pass_chunk_cap: int
     chunks: tuple[ChunkBounds, ...]
     plan_digest: str
+
+    @property
+    def calibration_only(self) -> bool:
+        """Whether this plan is sealed under :data:`CALIBRATION_PLAN_CONTRACT` -- D151-C10.
+
+        Derived from the contract the digest folds, never from a separate field a caller could
+        set: a plan is calibration-only exactly when its sealed identity says so.
+        """
+        return self.contract == CALIBRATION_PLAN_CONTRACT
 
     def as_record(self) -> Mapping[str, object]:
         """The complete plan as a plain mapping, carrying no absolute path."""
@@ -483,21 +540,14 @@ class ChunkPlan:
         if len(plan.chunks) != len(raw_chunks):
             message = "a chunk-plan record carries a chunk entry that is not a mapping; refused"
             raise ChunkPlanError(message)
-        if plan.contract != CHUNK_PLAN_CONTRACT:
+        if plan.contract not in _PLAN_CONTRACTS:
             message = (
                 f"a chunk plan carrying contract {plan.contract!r} is refused; this build "
-                f"executes {CHUNK_PLAN_CONTRACT!r} and never adopts another shape"
+                f"executes {CHUNK_PLAN_CONTRACT!r} and {CALIBRATION_PLAN_CONTRACT!r} and never "
+                "adopts another shape"
             )
             raise ChunkPlanError(message)
-        recomputed = _plan_digest(plan)
-        if recomputed != plan.plan_digest:
-            message = (
-                "a chunk plan's recorded digest does not describe its own contents: recorded "
-                f"{plan.plan_digest!r}, recomputed {recomputed!r}. A plan whose digest nothing "
-                "checks is not an identity, and it is refused rather than repaired"
-            )
-            raise ChunkPlanError(message)
-        return require_plan_coverage(plan)
+        return require_sealed_plan(plan)
 
 
 def _plan_digest(plan: ChunkPlan) -> str:
@@ -509,40 +559,38 @@ def _plan_digest(plan: ChunkPlan) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def build_chunk_plan(
-    *,
-    archive_path: Path,
-    source_instance_id: str,
-    source_observation_id: str,
-    source_id: str,
-    source_sha256: str,
-    source_byte_length: int,
-    chunk_members: int,
-) -> ChunkPlan:
-    """Build one deterministic chunk plan over one frozen archive -- D151-C1 §5.
+def require_sealed_plan(plan: ChunkPlan) -> ChunkPlan:
+    """Return ``plan`` only if it is exactly its sealed self -- D151-C10.
 
-    The partition is stated rather than searched for: each **region** is cut into intervals of
-    ``chunk_members`` members, the last interval of each region carries the remainder, and the
-    boundary between the regions is always a chunk boundary. A source with no shards produces no
-    shard chunks; a source with no primaries produces no primary chunks; an empty governed
-    population is refused, because a plan over nothing is not a plan.
-
-    ``chunk_members`` is the caller's, deliberately. See :data:`PRODUCTION_CHUNK_MEMBERS`.
-
-    **The single-pass cap is established here, before anything executes.** A partition needing
-    more than :data:`SINGLE_PASS_CHUNK_CAP` chunks is refused by :func:`require_plan_coverage`
-    at the end of this function -- so the refusal lands before chunk zero starts, which is the
-    D151-C3 §11 requirement, and the cap is folded into the sealed digest so the plan cannot
-    later be reinterpreted as a larger one.
+    The digest is recomputed over the plan's own fields and compared with the one it carries,
+    and every coverage rule -- the width rule its contract selects included -- is re-derived.
+    :meth:`ChunkPlan.from_record` runs this over every plan read from disk; the consolidator runs
+    it over the plan object it is handed, so a plan altered in memory after sealing -- a
+    relabelled contract, a trimmed chunk tuple, a rewritten count, a raised cap -- is refused at
+    the point of consumption rather than trusted because it was once valid. A frozen dataclass
+    makes such an alteration a copy rather than a mutation; this is what makes the copy worthless.
 
     Raises:
-        ChunkPlanError: the source is not chunkable, ``chunk_members`` is not positive, the
-            archive holds no governed member, the partition needs more chunks than the
-            single-pass architecture admits, or the coverage check fails.
-        ArchiveDefenceError: the archive is corrupt, a member name is hostile, or the archive
-            holds more members than the accepted ceiling admits.
+        ChunkPlanError: the recorded digest does not describe the plan's own contents, or a
+            coverage rule fails.
     """
-    require_chunkable_source(source_id)
+    recomputed = _plan_digest(plan)
+    if recomputed != plan.plan_digest:
+        message = (
+            "a chunk plan's recorded digest does not describe its own contents: recorded "
+            f"{plan.plan_digest!r}, recomputed {recomputed!r}. A plan whose digest nothing "
+            "checks is not an identity, and it is refused rather than repaired"
+        )
+        raise ChunkPlanError(message)
+    return require_plan_coverage(plan)
+
+
+def _require_positive_chunk_members(chunk_members: int) -> int:
+    """Refuse a chunk size that is not a partition size, before anything is read.
+
+    Raises:
+        ChunkPlanError: ``chunk_members`` is zero or negative.
+    """
     if chunk_members <= 0:
         message = (
             f"a chunk plan needs a positive chunk size; got {chunk_members}. Zero or negative "
@@ -550,18 +598,25 @@ def build_chunk_plan(
             "is a partition of the source"
         )
         raise ChunkPlanError(message)
-    if source_byte_length < 0:
-        message = f"a chunk plan needs a non-negative source byte length; got {source_byte_length}"
-        raise ChunkPlanError(message)
-    members = canonical_member_sequence(archive_path)
-    if not members:
-        message = (
-            f"archive {archive_path.name} holds no governed {GOVERNED_MEMBER_SUFFIX} member; a "
-            "chunk plan over an empty population is refused rather than built as zero chunks"
-        )
-        raise ChunkPlanError(message)
-    primary_members = sum(1 for member in members if member.region == REGION_PRIMARY)
-    shard_members = len(members) - primary_members
+    return chunk_members
+
+
+def partition_regions(
+    *, primary_members: int, shard_members: int, chunk_members: int
+) -> tuple[ChunkBounds, ...]:
+    """The deterministic partition of a two-region population into chunk intervals.
+
+    Pure arithmetic over three integers, stated once so that both plan builders share it and so
+    that the partition a real source produces can be proved from its region counts alone: each
+    **region** is cut into intervals of ``chunk_members`` members, the last interval of each
+    region carries the remainder, the boundary between the regions is always a chunk boundary,
+    and chunk identifiers number the intervals in canonical order. A region with no members
+    produces no chunk. It builds no plan and reads nothing.
+
+    Raises:
+        ChunkPlanError: ``chunk_members`` is not positive.
+    """
+    _require_positive_chunk_members(chunk_members)
     bounds: list[ChunkBounds] = []
     for region, base, count in (
         (REGION_PRIMARY, 0, primary_members),
@@ -576,8 +631,40 @@ def build_chunk_plan(
                     end=base + min(offset + chunk_members, count),
                 )
             )
+    return tuple(bounds)
+
+
+def _build_plan(
+    *,
+    contract: str,
+    archive_path: Path,
+    source_instance_id: str,
+    source_observation_id: str,
+    source_id: str,
+    source_sha256: str,
+    source_byte_length: int,
+    chunk_members: int,
+) -> ChunkPlan:
+    """The one plan body both public builders run; ``contract`` is the only thing they choose."""
+    require_chunkable_source(source_id)
+    _require_positive_chunk_members(chunk_members)
+    if source_byte_length < 0:
+        message = f"a chunk plan needs a non-negative source byte length; got {source_byte_length}"
+        raise ChunkPlanError(message)
+    members = canonical_member_sequence(archive_path)
+    if not members:
+        message = (
+            f"archive {archive_path.name} holds no governed {GOVERNED_MEMBER_SUFFIX} member; a "
+            "chunk plan over an empty population is refused rather than built as zero chunks"
+        )
+        raise ChunkPlanError(message)
+    primary_members = sum(1 for member in members if member.region == REGION_PRIMARY)
+    shard_members = len(members) - primary_members
+    bounds = partition_regions(
+        primary_members=primary_members, shard_members=shard_members, chunk_members=chunk_members
+    )
     plan = ChunkPlan(
-        contract=CHUNK_PLAN_CONTRACT,
+        contract=contract,
         member_order_contract=MEMBER_ORDER_CONTRACT,
         source_instance_id=source_instance_id,
         source_observation_id=source_observation_id,
@@ -591,7 +678,7 @@ def build_chunk_plan(
         chunk_members=chunk_members,
         chunk_count=len(bounds),
         single_pass_chunk_cap=SINGLE_PASS_CHUNK_CAP,
-        chunks=tuple(bounds),
+        chunks=bounds,
         plan_digest="",
     )
     # The digest is over every field except itself, so the plan is built once with an empty
@@ -601,12 +688,111 @@ def build_chunk_plan(
     return require_plan_coverage(sealed)
 
 
+def build_chunk_plan(
+    *,
+    archive_path: Path,
+    source_instance_id: str,
+    source_observation_id: str,
+    source_id: str,
+    source_sha256: str,
+    source_byte_length: int,
+    chunk_members: int,
+) -> ChunkPlan:
+    """Build one deterministic single-pass chunk plan over one frozen archive -- D151-C1 §5.
+
+    The partition is stated rather than searched for (:func:`partition_regions`): each
+    **region** is cut into intervals of ``chunk_members`` members, the last interval of each
+    region carries the remainder, and the boundary between the regions is always a chunk
+    boundary. A source with no shards produces no shard chunks; a source with no primaries
+    produces no primary chunks; an empty governed population is refused, because a plan over
+    nothing is not a plan.
+
+    ``chunk_members`` is the caller's, deliberately. See :data:`PRODUCTION_CHUNK_MEMBERS`.
+
+    **The single-pass cap is established here, before anything executes.** A partition needing
+    more than :data:`SINGLE_PASS_CHUNK_CAP` chunks is refused by :func:`require_plan_coverage`
+    at the end of this function -- so the refusal lands before chunk zero starts, which is the
+    D151-C3 §11 requirement, and the cap is folded into the sealed digest so the plan cannot
+    later be reinterpreted as a larger one. A wider partition for calibration is a different
+    contract with its own builder, :func:`build_calibration_chunk_plan`; it is never this one
+    with the cap relaxed.
+
+    Raises:
+        ChunkPlanError: the source is not chunkable, ``chunk_members`` is not positive, the
+            archive holds no governed member, the partition needs more chunks than the
+            single-pass architecture admits, or the coverage check fails.
+        ArchiveDefenceError: the archive is corrupt, a member name is hostile, or the archive
+            holds more members than the accepted ceiling admits.
+    """
+    return _build_plan(
+        contract=CHUNK_PLAN_CONTRACT,
+        archive_path=archive_path,
+        source_instance_id=source_instance_id,
+        source_observation_id=source_observation_id,
+        source_id=source_id,
+        source_sha256=source_sha256,
+        source_byte_length=source_byte_length,
+        chunk_members=chunk_members,
+    )
+
+
+def build_calibration_chunk_plan(
+    *,
+    archive_path: Path,
+    source_instance_id: str,
+    source_observation_id: str,
+    source_id: str,
+    source_sha256: str,
+    source_byte_length: int,
+    chunk_members: int,
+) -> ChunkPlan:
+    """Build one deterministic CALIBRATION-ONLY chunk plan over one frozen archive -- D151-C10.
+
+    The same partition arithmetic, the same canonical ordering, the same source binding and the
+    same digest as :func:`build_chunk_plan`, sealed under :data:`CALIBRATION_PLAN_CONTRACT`
+    instead of :data:`CHUNK_PLAN_CONTRACT`. That one difference is inside the digest, so the
+    result is a distinct authenticated identity that no reader can mistake for a single-pass
+    plan and no caller can turn into one after the fact.
+
+    **What it is for, and only that.** A calibration-only plan describes a partition WIDER than
+    the single-pass cap -- more than :data:`SINGLE_PASS_CHUNK_CAP` and at most
+    :data:`CALIBRATION_CHUNK_CEILING` chunks -- so that ONE individual chunk of a smaller size can
+    be executed, in the accepted child process with every accepted binding, and measured. Its
+    chunks are noncanonical evidence: no F0 terminal, no F1 admission, no final world. The
+    single-pass consolidator refuses the whole plan by width before it reads anything, and this
+    build implements no consolidation that could read it.
+
+    A partition that fits the single-pass cap is refused here: it is an ordinary plan and is
+    built as one. Nothing here authorizes a real run; real execution stays closed by
+    :data:`~disclosure_drift.m3.chunk_execution.REAL_CHUNKED_F0_EXECUTION_AUTHORITY`.
+
+    Raises:
+        ChunkPlanError: the source is not chunkable, ``chunk_members`` is not positive, the
+            archive holds no governed member, the partition fits the single-pass cap or exceeds
+            the calibration ceiling, or the coverage check fails.
+        ArchiveDefenceError: the archive is corrupt, a member name is hostile, or the archive
+            holds more members than the accepted ceiling admits.
+    """
+    return _build_plan(
+        contract=CALIBRATION_PLAN_CONTRACT,
+        archive_path=archive_path,
+        source_instance_id=source_instance_id,
+        source_observation_id=source_observation_id,
+        source_id=source_id,
+        source_sha256=source_sha256,
+        source_byte_length=source_byte_length,
+        chunk_members=chunk_members,
+    )
+
+
 def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
     """Return ``plan``, or refuse a partition that is not one -- D151-C1 §29 C03-C05.
 
     Seven properties, and every one of them refuses rather than warns:
 
-    * the partition fits the **single-pass** architecture -- D151-C3 §11;
+    * the partition's width is the one its **contract** admits -- within the single-pass cap for
+      an ordinary plan (D151-C3 §11); wider than that cap and at most the calibration ceiling for
+      a calibration-only plan (D151-C10); no width at all for any other contract;
     * chunk identifiers are **unique**;
     * intervals are **ascending** and **contiguous** -- no gap;
     * intervals do not **overlap**;
@@ -633,19 +819,7 @@ def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
             "plan was sealed under, never a permission to exceed what this build implements"
         )
         raise ChunkPlanError(message)
-    if plan.chunk_count > plan.single_pass_chunk_cap:
-        message = (
-            f"this partition needs {plan.chunk_count} chunks and the single-pass chunked-F0 "
-            f"architecture admits {plan.single_pass_chunk_cap}. The refusal is HERE, at plan "
-            "construction, so that it lands before chunk zero starts rather than after every "
-            "chunk has been parsed and the merge discovers it cannot read them all in one pass. "
-            "The running SQLite build attaches ten databases and neither main nor temp consumes "
-            f"one of them; the cap is {SINGLE_PASS_CHUNK_CAP} rather than ten because "
-            f"{RESERVED_ATTACHMENT_HEADROOM} slot is deliberately left unspent. Use a larger "
-            "chunk size; multi-pass sorted loading is a future fallback this build does not "
-            "implement"
-        )
-        raise ChunkPlanError(message)
+    _require_admissible_width(plan)
     if plan.primary_members + plan.shard_members != plan.total_members:
         message = (
             f"a chunk plan's region counts do not sum to its member count: "
@@ -724,6 +898,64 @@ def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
         )
         raise ChunkPlanError(message)
     return plan
+
+
+def _require_admissible_width(plan: ChunkPlan) -> None:
+    """The width rule, decided by the contract the digest folds -- D151-C3 §11, D151-C10.
+
+    An ordinary plan may not need more chunks than the single-pass cap; that rule is unchanged.
+    A calibration-only plan must need MORE than that cap -- a partition the single-pass
+    architecture admits is an ordinary plan and is built as one, so no calibration-only plan can
+    ever sit inside the width the consolidator accepts -- and at most
+    :data:`CALIBRATION_CHUNK_CEILING`. Any other contract is refused: a plan of unknown shape
+    has no width rule, and it gets no benefit of the doubt.
+
+    Raises:
+        ChunkPlanError: the width is not the one the contract admits.
+    """
+    if plan.contract == CHUNK_PLAN_CONTRACT:
+        if plan.chunk_count > plan.single_pass_chunk_cap:
+            message = (
+                f"this partition needs {plan.chunk_count} chunks and the single-pass chunked-F0 "
+                f"architecture admits {plan.single_pass_chunk_cap}. The refusal is HERE, at plan "
+                "construction, so that it lands before chunk zero starts rather than after every "
+                "chunk has been parsed and the merge discovers it cannot read them all in one "
+                "pass. The running SQLite build attaches ten databases and neither main nor temp "
+                f"consumes one of them; the cap is {SINGLE_PASS_CHUNK_CAP} rather than ten "
+                f"because {RESERVED_ATTACHMENT_HEADROOM} slot is deliberately left unspent. Use "
+                "a larger chunk size; multi-pass sorted loading is a future fallback this build "
+                "does not implement"
+            )
+            raise ChunkPlanError(message)
+        return
+    if plan.contract == CALIBRATION_PLAN_CONTRACT:
+        if plan.chunk_count <= plan.single_pass_chunk_cap:
+            message = (
+                f"a calibration-only chunk plan needs {plan.chunk_count} chunks, which the "
+                f"single-pass chunked-F0 architecture admits ({plan.single_pass_chunk_cap}). A "
+                "calibration-only plan exists solely to describe a partition WIDER than the "
+                "single-pass cap so that one chunk of it can be measured; a partition that fits "
+                "is an ordinary plan and is built as one. This is what keeps every "
+                "calibration-only plan outside the width the consolidator accepts, and it is "
+                "refused rather than admitted as a narrower plan under a wider label"
+            )
+            raise ChunkPlanError(message)
+        if plan.chunk_count > CALIBRATION_CHUNK_CEILING:
+            message = (
+                f"a calibration-only chunk plan needs {plan.chunk_count} chunks and D151-C10 "
+                f"admits at most CALIBRATION_CHUNK_CEILING = {CALIBRATION_CHUNK_CEILING}: the "
+                "narrowest ceiling that describes the owner-authorized 30,000-member calibration "
+                "partition (33 primary chunks and 1 shard chunk). The planner is bounded rather "
+                "than open-ended; a wider partition needs a new owner instrument and a reviewed "
+                "change, never a larger literal"
+            )
+            raise ChunkPlanError(message)
+        return
+    message = (
+        f"a chunk plan carrying contract {plan.contract!r} has no width rule in this build; "
+        f"only {CHUNK_PLAN_CONTRACT!r} and {CALIBRATION_PLAN_CONTRACT!r} are executed"
+    )
+    raise ChunkPlanError(message)
 
 
 def chunk_by_id(plan: ChunkPlan, chunk_id: str) -> ChunkBounds:

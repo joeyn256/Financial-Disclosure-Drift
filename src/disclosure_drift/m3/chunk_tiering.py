@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from disclosure_drift.errors import DisclosureDriftError
+from disclosure_drift.m3 import external_working_root as _external
 from disclosure_drift.m3.chunk_evidence import TRANSFER_RECEIPT_FILENAME
 from disclosure_drift.m3.chunk_plan import CHUNK_REGION_ORDER, ChunkPlan
 from disclosure_drift.m3.chunk_storage import (
@@ -55,6 +57,12 @@ from disclosure_drift.m3.chunk_storage import (
     TransferReceipt,
     accepted_internal_reserve_bytes,
 )
+from disclosure_drift.m3.external_working_root import (
+    SQLITE_TMPDIR_ENV,
+    ExternalWorkingRootError,
+    VolumeIdentity,
+    VolumeIdentityProvider,
+)
 
 __all__ = [
     "ARTIFACT_LIFECYCLE_STATES",
@@ -64,12 +72,17 @@ __all__ = [
     "LIFECYCLE_INTERNAL_RECLAIMED",
     "LIFECYCLE_INTERNAL_RECLAIM_ELIGIBLE",
     "LIFECYCLE_TRANSITIONS",
+    "MERGE_LEVELS",
+    "MERGE_LEVEL_ONE",
+    "MERGE_LEVEL_TWO",
     "MULTIPASS_LEVEL_ONE_PEAK_RATIO",
     "MULTIPASS_LEVEL_TWO_PEAK_RATIO",
     "MULTIPASS_STORAGE_PLAN_CONTRACT",
-    "MULTIPASS_TRANSIENT_BYTES",
+    "MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES",
+    "MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES",
     "PRODUCTION_SPILL_POLICY",
     "QUALIFIED_EXTERNAL_TIER",
+    "SqliteTempBinding",
     "SPILL_POLICIES",
     "SPILL_POLICY_LARGEST_ARTIFACT",
     "SPILL_POLICY_PLAN_ORDINAL",
@@ -121,9 +134,62 @@ MULTIPASS_LEVEL_ONE_PEAK_RATIO: Final[float | None] = None
 #: **Closed** for the same reason.
 MULTIPASS_LEVEL_TWO_PEAK_RATIO: Final[float | None] = None
 
-#: The transient allowance beside a merge world -- SQLite temporary space, the correction tables,
-#: the receipt and manifest writes. **Closed**: measured on the eventual host, never assumed.
-MULTIPASS_TRANSIENT_BYTES: Final[int | None] = None
+#: The LEVEL-1 transient allowance beside one group merge -- D151-C17 R5. SQLite temporary
+#: space, the level-1 correction tables, the receipt and manifest writes. **Closed**: measured on
+#: the eventual host, never assumed, and never borrowed from the level-2 term.
+MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES: Final[int | None] = None
+
+#: The LEVEL-2 transient allowance beside the finalization -- D151-C17 R5, closing D151-C16
+#: MINOR-1. **Closed**, and separately closed: level 2 is not level 1 with more inputs. Only
+#: level 2 materializes WHOLE-PLAN temporary state, so its allowance is a different measurement
+#: and is never satisfied by :data:`MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES`.
+#:
+#: **What the eventual measurement must be, and by what method.** The quantity that freezes this
+#: term is the TOTAL SQLITE TEMPORARY FILESYSTEM HIGH-WATER across the whole governed finalizer:
+#: the peak temporary allocation on the volume :func:`require_sqlite_temp_binding` binds, at any
+#: instant of the run. It is **not** a sum of estimated table sizes.
+#:
+#: The method is the accepted one, and it is not negotiable, because D140-R7 already settled it:
+#: SQLite's spill is **not observable from outside the spilling process** -- it unlinks the files
+#: it is still writing, so a traversal of the temporary root reads a lower bound of unknown
+#: tightness that is *zero during a large sort*. See
+#: :func:`~disclosure_drift.m3.external_working_root._visible_directory_allocation`, whose whole
+#: docstring is that warning, and
+#: :data:`~disclosure_drift.m3.external_working_root.UNMEASURED_UNLINKED_SQLITE_TEMP`, the status
+#: an honest observation carries instead of a fabricated zero. **Free space is the authoritative
+#: signal**: a ``statvfs`` counts allocated unlinked blocks, which is exactly what a spill
+#: consumes. So this term is frozen from the observed FREE-SPACE DRAWDOWN on the bound volume,
+#: sampled across the finalizer and taken at its high-water -- never from a directory walk, and
+#: never from a schema enumeration.
+#:
+#: D151-C15 §INFO-2 projected this from two tables. D151-C16 measured the real finalizer and
+#: found SIX temporary tables coexisting at the counter peak::
+#:
+#:     chunk_observation_corrections   the level-2 staged correction rows
+#:     chunk_witness_rank              the level-2 ranking over the intermediates
+#:     plan_chunk_witnesses            every chunk's canonical accession rows, whole plan
+#:     plan_witness_rank               a SECOND copy of that, same cardinality, ranked
+#:     chunk_first_witness             every chunk's first-witness ledger, whole plan
+#:     chunk_member_delta              the reduced member deltas
+#:
+#: and none of those six is the whole cost either: the whole-plan window functions in
+#: :func:`~disclosure_drift.m3.chunk_consolidation._member_deltas` and in the ranking above sort
+#: their whole input, and SQLite serves that from sorter and transient-B-tree WORKFILES that are
+#: not named tables and cannot be read out of ``temp.sqlite_master`` at all. A measurement that
+#: enumerates tables therefore systematically understates this term.
+#:
+#: **So: measure the filesystem, not the schema.** Named-table and page counts are legitimate
+#: supporting diagnostics; they are never the quantity. A future storage-qualification session
+#: that reports only the two D151-C15 tables, or only the six above, or a traversal of the
+#: temporary root, has not measured this term.
+MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES: Final[int | None] = None
+
+#: The two merge levels, named once. A storage step is charged at exactly one of them, and the
+#: name is carried in the step's own record so a sealed plan cannot later be read as if the other
+#: level's allowance had applied.
+MERGE_LEVEL_ONE: Final = "level-1"
+MERGE_LEVEL_TWO: Final = "level-2"
+MERGE_LEVELS: Final[tuple[str, ...]] = (MERGE_LEVEL_ONE, MERGE_LEVEL_TWO)
 
 #: Which deterministic spill policy production will use. **Closed** -- addendum §5. The four
 #: candidate keys are exposed below so their consequences can be analyzed; none is frozen.
@@ -561,6 +627,137 @@ def require_qualified_external_tier(
 
 
 # --------------------------------------------------------------------------- #
+# SQLite temporary placement -- D151-C17 R6, closing D151-C16 MINOR-2
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class SqliteTempBinding:
+    """Measured proof that SQLite's spill lands on the filesystem admission charges."""
+
+    volume_uuid: str
+    filesystem_type: str
+    device_identifier: str
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering that carries **no** absolute path.
+
+        The temporary root and the charged directory are both deliberately absent, for the reason
+        :meth:`~disclosure_drift.m3.external_working_root.VolumeIdentity.as_record` states: the
+        volume UUID is the identity the guard decided on, and an operator surface never carries a
+        personal path.
+        """
+        return {
+            "volume_uuid": self.volume_uuid,
+            "filesystem_type": self.filesystem_type,
+            "device_identifier": self.device_identifier,
+        }
+
+
+def require_sqlite_temp_binding(
+    *,
+    charged_path: Path,
+    environ: Mapping[str, str] | None = None,
+    provider: VolumeIdentityProvider | None = None,
+) -> SqliteTempBinding:
+    """Refuse a merge whose SQLite spill would not land where its free space was charged.
+
+    **The defect this closes -- D151-C16 MINOR-2.** :func:`require_merge_admission` charges a
+    step's peak, reserve and transient allowance against the free bytes of the filesystem hosting
+    the merge world. SQLite does not put its temporary store there. It puts it where
+    ``SQLITE_TMPDIR`` says, and if that is unset it falls back to the operating system's
+    temporary directory -- on this platform, the internal volume -- silently. A merge could then
+    be admitted against one filesystem's free space while spilling whole-plan sorter and
+    workfile bytes onto another, which is exactly the accounting the level-2 transient allowance
+    exists to make honest.
+
+    **The mechanism is the accepted one, reused rather than restated -- D151-C17 §§11, 12.** The
+    identity compared is
+    :class:`~disclosure_drift.m3.external_working_root.VolumeIdentity`, obtained through the
+    accepted :data:`~disclosure_drift.m3.external_working_root.VolumeIdentityProvider` -- the
+    same structured ``diskutil`` reading, resolved from that module's globals at call time so a
+    substituted provider reaches this guard too. Nothing here compares path strings, prefixes,
+    or writability, and nothing here accepts the presence of an environment variable as proof of
+    anything: the variable says where to look, and the volume identity is what decides.
+
+    Five conditions, all fail-closed, in the shape D137-R8 established:
+
+    * the variable is **set** and non-blank in the environment SQLite itself consumes;
+    * an explicitly supplied ``environ`` **agrees** with that process environment;
+    * the value is an **absolute** path;
+    * it names an **existing directory**;
+    * its volume identity **equals** the identity of the filesystem hosting ``charged_path``.
+
+    ``charged_path`` need not exist yet -- a merge world is identified before it is created --
+    so its nearest existing ancestor is measured, which is on the same volume by construction.
+
+    Args:
+        charged_path: The directory whose free bytes admission will charge.
+        environ: A caller or test mapping, cross-checked against the process environment.
+        provider: The volume identity provider. ``None`` resolves the accepted one at call time.
+
+    Returns:
+        The measured binding, for the caller to record.
+
+    Raises:
+        ChunkTieringError: the temporary root is absent, unusable, or on a different volume.
+    """
+    consumed = os.environ.get(SQLITE_TMPDIR_ENV)
+    if environ is not None and environ.get(SQLITE_TMPDIR_ENV) != consumed:
+        message = (
+            f"the {SQLITE_TMPDIR_ENV} value supplied for validation is not the one SQLite will "
+            "read from the process environment; validating one environment while SQLite "
+            "consumes another proves nothing about where the spill lands, so the disagreement "
+            "is refused rather than resolved in either direction"
+        )
+        raise ChunkTieringError(message)
+    if consumed is None or not consumed.strip():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} is not set, so SQLite would spill this merge's temporary and "
+            "sorter files to the operating system's temporary directory, on a volume this "
+            "step's storage admission has not charged. A merge world is NOT created: the "
+            "temporary root is stated explicitly and verified, never discovered mid-merge"
+        )
+        raise ChunkTieringError(message)
+    candidate = Path(consumed.strip())
+    if not candidate.is_absolute():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} is not an absolute path; a relative temporary root resolves "
+            "against the working directory, which is not a stated location, and no merge world "
+            "is created against a temporary root that cannot be identified"
+        )
+        raise ChunkTieringError(message)
+    if not candidate.is_dir():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} does not name an existing directory; the temporary root is "
+            "created and verified before a merge begins, never mid-transaction"
+        )
+        raise ChunkTieringError(message)
+    resolve = _external.macos_volume_identity if provider is None else provider
+    try:
+        temp_volume: VolumeIdentity = resolve(candidate)
+        charged_volume: VolumeIdentity = resolve(_external._nearest_existing(charged_path))  # noqa: SLF001 - the accepted pre-creation resolver
+    except ExternalWorkingRootError as exc:
+        message = (
+            f"the volume hosting the merge world or the {SQLITE_TMPDIR_ENV} temporary root could "
+            f"not be identified ({exc}); an identity that cannot be read is refused, never "
+            "assumed to match"
+        )
+        raise ChunkTieringError(message) from exc
+    if temp_volume.volume_uuid.strip().casefold() != charged_volume.volume_uuid.strip().casefold():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} is on volume {temp_volume.volume_uuid} and this merge's "
+            f"storage admission charges free space on volume {charged_volume.volume_uuid}. "
+            "SQLite's spill must be counted by the same capacity model as the world it serves, "
+            "so the merge is refused BEFORE any world, attempt directory or database exists"
+        )
+        raise ChunkTieringError(message)
+    return SqliteTempBinding(
+        volume_uuid=charged_volume.volume_uuid,
+        filesystem_type=charged_volume.filesystem_type,
+        device_identifier=charged_volume.device_identifier,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Admission -- addendum §3, §4; D151-C13 §§18-21
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
@@ -570,10 +767,38 @@ class MultipassStorageRequirements:
     internal_reserve_bytes: int
     level_one_peak_ratio: float
     level_two_peak_ratio: float
-    transient_bytes: int
+    level_one_transient_bytes: int
+    level_two_transient_bytes: int
+
+    def transient_for(self, level: str) -> int:
+        """This requirement's transient allowance for exactly ``level`` -- D151-C17 R5.
+
+        There is no fallback in either direction and no default. A level whose allowance is
+        absent is a refusal, never the other level's number: level 2 materializes whole-plan
+        temporary state that no level-1 group does, so borrowing level 1's allowance for it would
+        under-reserve by exactly the amount D151-C16 MINOR-1 was about, and borrowing level 2's
+        for level 1 would silently over-reserve and mask a level-1 measurement error.
+
+        Raises:
+            ChunkTieringError: ``level`` is not one of :data:`MERGE_LEVELS`.
+        """
+        if level == MERGE_LEVEL_ONE:
+            return self.level_one_transient_bytes
+        if level == MERGE_LEVEL_TWO:
+            return self.level_two_transient_bytes
+        message = (
+            f"a merge step must be charged at exactly one of {list(MERGE_LEVELS)}; got "
+            f"{level!r}. A step whose level is not stated has no transient allowance, and an "
+            "unknown level is refused rather than resolved to either level's number"
+        )
+        raise ChunkTieringError(message)
 
     def __post_init__(self) -> None:
-        for name in ("internal_reserve_bytes", "transient_bytes"):
+        for name in (
+            "internal_reserve_bytes",
+            "level_one_transient_bytes",
+            "level_two_transient_bytes",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 message = (
@@ -595,25 +820,44 @@ class MultipassStorageRequirements:
             "internal_reserve_bytes": self.internal_reserve_bytes,
             "level_one_peak_ratio": self.level_one_peak_ratio,
             "level_two_peak_ratio": self.level_two_peak_ratio,
-            "transient_bytes": self.transient_bytes,
+            "level_one_transient_bytes": self.level_one_transient_bytes,
+            "level_two_transient_bytes": self.level_two_transient_bytes,
         }
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> MultipassStorageRequirements:
         """Rebuild the requirements from their stored mapping.
 
+        A record carrying the pre-D151-C17 generic ``transient_bytes`` key is refused rather than
+        read: one number cannot answer both levels, and silently treating it as either level's
+        allowance is the defect D151-C16 MINOR-2 named.
+
         Raises:
-            ChunkTieringError: a field is absent or is not of the recorded type.
+            ChunkTieringError: a field is absent, carries the superseded generic key, or is not
+                of the recorded type.
         """
+        if "transient_bytes" in record:
+            message = (
+                "storage requirements carry the superseded generic 'transient_bytes'; since "
+                "D151-C17 a requirement states 'level_one_transient_bytes' and "
+                "'level_two_transient_bytes' separately, and a single generic allowance is "
+                "refused rather than applied to a level it was not measured for"
+            )
+            raise ChunkTieringError(message)
         try:
             reserve = record["internal_reserve_bytes"]
-            transient = record["transient_bytes"]
+            level_one_transient = record["level_one_transient_bytes"]
+            level_two_transient = record["level_two_transient_bytes"]
             one = record["level_one_peak_ratio"]
             two = record["level_two_peak_ratio"]
         except KeyError as exc:
             message = f"storage requirements are missing {exc}; refused rather than defaulted"
             raise ChunkTieringError(message) from exc
-        if not isinstance(reserve, int) or not isinstance(transient, int):
+        if (
+            not isinstance(reserve, int)
+            or not isinstance(level_one_transient, int)
+            or not isinstance(level_two_transient, int)
+        ):
             message = "storage requirement byte counts must be integers; refused"
             raise ChunkTieringError(message)
         if not isinstance(one, int | float) or not isinstance(two, int | float):
@@ -623,7 +867,8 @@ class MultipassStorageRequirements:
             internal_reserve_bytes=reserve,
             level_one_peak_ratio=float(one),
             level_two_peak_ratio=float(two),
-            transient_bytes=transient,
+            level_one_transient_bytes=level_one_transient,
+            level_two_transient_bytes=level_two_transient,
         )
 
 
@@ -643,23 +888,35 @@ def accepted_multipass_storage_requirements() -> MultipassStorageRequirements:
             f"frozen ({exc}). No level-1 world is created"
         )
         raise ChunkTieringError(message) from exc
+    absent = [
+        name
+        for name, term in (
+            ("MULTIPASS_LEVEL_ONE_PEAK_RATIO", MULTIPASS_LEVEL_ONE_PEAK_RATIO),
+            ("MULTIPASS_LEVEL_TWO_PEAK_RATIO", MULTIPASS_LEVEL_TWO_PEAK_RATIO),
+            ("MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES", MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES),
+            ("MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES", MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES),
+        )
+        if term is None
+    ]
     if (
         MULTIPASS_LEVEL_ONE_PEAK_RATIO is None
         or MULTIPASS_LEVEL_TWO_PEAK_RATIO is None
-        or MULTIPASS_TRANSIENT_BYTES is None
+        or MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES is None
+        or MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES is None
     ):
         message = (
-            "a real multipass consolidation is NOT ADMISSIBLE: the merge peak ratios and the "
-            "transient allowance are None. They are measurements the owner freezes in a later "
-            "reviewed change; a None term is a REFUSAL, never a zero, and no level-1 world is "
-            "created until every term exists"
+            "a real multipass consolidation is NOT ADMISSIBLE: "
+            f"{absent} are None. They are measurements the owner freezes in a later reviewed "
+            "change; a None term is a REFUSAL, never a zero, no level's term stands in for "
+            "another's, and no world is created until every term exists"
         )
         raise ChunkTieringError(message)
     return MultipassStorageRequirements(  # pragma: no cover - unreachable while the terms are None
         internal_reserve_bytes=reserve,
         level_one_peak_ratio=MULTIPASS_LEVEL_ONE_PEAK_RATIO,
         level_two_peak_ratio=MULTIPASS_LEVEL_TWO_PEAK_RATIO,
-        transient_bytes=MULTIPASS_TRANSIENT_BYTES,
+        level_one_transient_bytes=MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES,
+        level_two_transient_bytes=MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES,
     )
 
 
@@ -668,6 +925,7 @@ class MergeStepRequirement:
     """What one merge step needs free on the internal tier before it may begin."""
 
     step: str
+    level: str
     input_bytes: int
     seed_catalog_bytes: int
     peak_ratio: float
@@ -681,9 +939,15 @@ class MergeStepRequirement:
         return self.peak_bytes + self.reserve_bytes + self.transient_bytes
 
     def as_record(self) -> Mapping[str, object]:
-        """A deterministic rendering."""
+        """A deterministic rendering.
+
+        ``level`` is inside the record, and therefore inside every identity that folds it, so a
+        sealed storage plan states which level's transient allowance each step was charged at and
+        cannot afterwards be read as though the other level's had applied -- D151-C17 R5, §16.
+        """
         return {
             "step": self.step,
+            "level": self.level,
             "input_bytes": self.input_bytes,
             "seed_catalog_bytes": self.seed_catalog_bytes,
             "peak_ratio": self.peak_ratio,
@@ -697,6 +961,7 @@ class MergeStepRequirement:
 def merge_step_requirement(
     *,
     step: str,
+    level: str,
     input_bytes: int,
     seed_catalog_bytes: int,
     peak_ratio: float,
@@ -704,9 +969,15 @@ def merge_step_requirement(
 ) -> MergeStepRequirement:
     """One step's requirement: ``ceil(inputs x ratio) + seed`` peak, then reserve and transient.
 
+    ``level`` selects the transient allowance through
+    :meth:`MultipassStorageRequirements.transient_for`, which has no fallback -- D151-C17 R5.
+    The level is required, not inferred from ``step``: a step name is a label, and deriving a
+    storage charge from a label is how one level's allowance silently becomes another's.
+
     Raises:
-        ChunkTieringError: a byte quantity is negative.
+        ChunkTieringError: a byte quantity is negative, or ``level`` is not a merge level.
     """
+    transient = requirements.transient_for(level)
     if input_bytes < 0 or seed_catalog_bytes < 0:
         message = (
             f"a merge step requirement needs non-negative byte quantities; got inputs="
@@ -716,12 +987,13 @@ def merge_step_requirement(
     peak = -(-input_bytes * peak_ratio // 1)  # ceiling, exact for integer-valued products
     return MergeStepRequirement(
         step=step,
+        level=level,
         input_bytes=input_bytes,
         seed_catalog_bytes=seed_catalog_bytes,
         peak_ratio=peak_ratio,
         peak_bytes=int(peak) + seed_catalog_bytes,
         reserve_bytes=requirements.internal_reserve_bytes,
-        transient_bytes=requirements.transient_bytes,
+        transient_bytes=transient,
     )
 
 
@@ -730,6 +1002,7 @@ class MergeAdmission:
     """One admission decision, with every input it was made from."""
 
     step: str
+    level: str
     free_bytes: int
     required_free_bytes: int
     peak_bytes: int
@@ -741,6 +1014,7 @@ class MergeAdmission:
         """A deterministic rendering."""
         return {
             "step": self.step,
+            "level": self.level,
             "free_bytes": self.free_bytes,
             "required_free_bytes": self.required_free_bytes,
             "peak_bytes": self.peak_bytes,
@@ -773,6 +1047,7 @@ def require_merge_admission(
     required = requirement.required_free_bytes
     decision = MergeAdmission(
         step=requirement.step,
+        level=requirement.level,
         free_bytes=free_bytes,
         required_free_bytes=required,
         peak_bytes=requirement.peak_bytes,
@@ -785,7 +1060,8 @@ def require_merge_admission(
             f"merge step {requirement.step!r} is NOT ADMITTED onto the internal tier: "
             f"{free_bytes} bytes free, below the required {required} = {requirement.peak_bytes} "
             f"projected peak + {requirement.reserve_bytes} reserve + "
-            f"{requirement.transient_bytes} transient. STOP: no world is created. Nothing was "
+            f"{requirement.transient_bytes} transient at {requirement.level}. STOP: no world "
+            "is created. Nothing was "
             "deleted, spilled, reclaimed or cleaned to reach the floor, and there is no mode "
             "that writes until the filesystem refuses"
         )
@@ -889,6 +1165,7 @@ def plan_multipass_storage(
         steps.append(
             merge_step_requirement(
                 step=group_id,
+                level=MERGE_LEVEL_ONE,
                 input_bytes=sum(chunk_bytes_by_id[chunk_id] for chunk_id in chunk_ids),
                 seed_catalog_bytes=seed_catalog_bytes,
                 peak_ratio=requirements.level_one_peak_ratio,
@@ -898,6 +1175,7 @@ def plan_multipass_storage(
     steps.append(
         merge_step_requirement(
             step="final",
+            level=MERGE_LEVEL_TWO,
             input_bytes=sum(step.peak_bytes for step in steps),
             seed_catalog_bytes=seed_catalog_bytes,
             peak_ratio=requirements.level_two_peak_ratio,

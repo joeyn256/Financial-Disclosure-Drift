@@ -41,7 +41,11 @@ from disclosure_drift.m3 import chunk_multipass as cm  # noqa: E402
 from disclosure_drift.m3 import chunk_plan as cp  # noqa: E402
 from disclosure_drift.m3 import chunk_storage as cs  # noqa: E402
 from disclosure_drift.m3 import chunk_tiering as ct  # noqa: E402
-from disclosure_drift.m3 import repository_identity  # noqa: E402
+from disclosure_drift.m3 import (
+    dock_transport,  # noqa: E402
+    repository_identity,  # noqa: E402
+)
+from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
 from disclosure_drift.m3.canary_phases import PHASE_F0, read_phase_checkpoint  # noqa: E402
 from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
     CHUNK_PLAN_FILENAME,
@@ -78,6 +82,14 @@ def multipass_child_bootstrap(root: Path) -> str:
         # request, so a synthetic child is opened here, in test code, exactly as the parent is.
         "from disclosure_drift.m3 import chunk_multipass as cm;"
         f"cm.REAL_MULTIPASS_F0_AUTHORITY = {c13.SYNTHETIC_AUTHORITY!r};"
+        # D151-C17 R6: the child measures the temp/world volume binding for ITSELF, so the
+        # accepted provider seam is substituted inside the child too -- the same synthetic
+        # identity the parent uses, so no test depends on the host's real volume layout. The
+        # comparison the child performs is the production one, unpatched.
+        "from disclosure_drift.m3 import external_working_root as ewr;"
+        "ewr.macos_volume_identity = lambda path: ewr.VolumeIdentity("
+        f"volume_uuid={c13.SYNTHETIC_MERGE_VOLUME!r}, mount_point=Path('/'), "
+        "filesystem_type='apfs', device_identifier='disk-synthetic');"
         "from disclosure_drift.m3.chunk_multipass import _child_main;"
         "sys.exit(_child_main(sys.argv[1]))"
     )
@@ -115,7 +127,7 @@ def _pinned_repository(tmp_path: Path) -> Any:
     """The shared pin, and the same redirect inside every merge child this module spawns."""
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
-    c13.open_synthetic_multipass(patcher)
+    c13.open_synthetic_multipass(patcher, temp_root=tmp_path / "sqlite-temp")
     patcher.setattr(cm, "_CHILD_BOOTSTRAP", multipass_child_bootstrap(tmp_path / "repo"))
     yield
     patcher.undo()
@@ -836,7 +848,12 @@ def test_z01_every_authority_and_every_sizing_constant_is_none() -> None:
     assert cs.CHUNK_PEAK_REQUIREMENT_BYTES is None
     assert ct.MULTIPASS_LEVEL_ONE_PEAK_RATIO is None
     assert ct.MULTIPASS_LEVEL_TWO_PEAK_RATIO is None
-    assert ct.MULTIPASS_TRANSIENT_BYTES is None
+    assert ct.MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES is None
+    assert ct.MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES is None
+    assert not hasattr(ct, "MULTIPASS_TRANSIENT_BYTES"), (
+        "the generic transient term is superseded by the two level-specific ones (D151-C17 R5); "
+        "leaving it in place is what would let level 2 be charged at level 1's allowance"
+    )
     assert ct.PRODUCTION_SPILL_POLICY is None
     assert ct.QUALIFIED_EXTERNAL_TIER is None
     assert "NOT AUTHORIZED" in refusal_in_a_fresh_interpreter()
@@ -863,7 +880,32 @@ def test_z02_no_environment_configuration_or_command_line_route(
         tree = ast.parse(source)
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-        assert "environ" not in names and "environ" not in attributes, module.__name__
+        # D151-C17 R6 narrows this invariant rather than dropping it. The multipass path now
+        # reads EXACTLY ONE environment name -- SQLITE_TMPDIR -- because that is the only
+        # environment SQLite itself consults to decide where it spills, and validating any other
+        # mapping would prove nothing (the accepted D138-R3 reasoning). What the invariant always
+        # protected is unchanged and re-proved below: no environment value can GRANT authority or
+        # SUPPLY a sizing term. This read is strictly subtractive -- every outcome of it is a
+        # refusal or a no-op, never an admission.
+        environment_reads = {
+            node.value.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr == "environ"
+            and isinstance(node.value, ast.Name)
+        }
+        assert environment_reads <= {"os"}, module.__name__
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "environ"
+            ):
+                argument = node.args[0]
+                assert isinstance(argument, ast.Name), (module.__name__, ast.dump(argument))
+                assert argument.id == "SQLITE_TMPDIR_ENV", (module.__name__, argument.id)
         assert "getenv" not in names and "getenv" not in attributes, module.__name__
         assert "DISCLOSURE_DRIFT" not in source, module.__name__
         assert "load_config" not in names, module.__name__
@@ -896,28 +938,54 @@ def test_z02_no_environment_configuration_or_command_line_route(
     assert "NOT AUTHORIZED" in refusal_in_a_fresh_interpreter()
     with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):
         ct.accepted_multipass_storage_requirements()
+    # D151-C17 R6: the one environment name the path DOES read cannot grant anything either.
+    # Pointing it at a real directory admits nothing -- the sizing terms still refuse -- and the
+    # binding guard it feeds still measures two volume identities rather than trusting the value.
+    monkeypatch.setenv(ewr.SQLITE_TMPDIR_ENV, str(Path(cm.__file__).parent))
+    assert "NOT AUTHORIZED" in refusal_in_a_fresh_interpreter()
+    with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):
+        ct.accepted_multipass_storage_requirements()
 
 
 def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
     for module in NEW_MODULES:
         source = Path(module.__file__).read_text(encoding="utf-8")
+        # AST, not substring -- D151-C17. chunk_tiering now DESCRIBES, at length, SQLite
+        # unlinking the spill files it is still writing, because that is the whole reason the
+        # level-2 transient term must be measured as free-space drawdown rather than by a
+        # traversal. A text ban cannot tell that prose from a capability; the call can.
+        module_tree = ast.parse(source)
+        invoked = {
+            node.func.attr
+            for node in ast.walk(module_tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        } | {
+            node.func.id
+            for node in ast.walk(module_tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
         for capability in (
-            "shutil.rmtree",
-            "os.remove(",
-            "os.rmdir(",
-            ".unlink(",
-            "shutil.move",
-            "shutil.copy",
             "rmtree",
+            "remove",
+            "rmdir",
             "unlink",
+            "move",
+            "copy",
+            "copy2",
+            "copyfile",
+            "copytree",
         ):
-            assert capability not in source, (module.__name__, capability)
+            assert capability not in invoked, (module.__name__, capability)
+        assert "shutil" not in {
+            node.value.id
+            for node in ast.walk(module_tree)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        }, module.__name__
         for prefix in PROHIBITED_IMPORT_PREFIXES:
             assert f"import {prefix}" not in source
             assert f"from {prefix}" not in source
         assert "from disclosure_drift.m3.e0" not in source
         assert "M3_3_E0_EXECUTION_AUTHORITY" not in source
-        assert "external_working_root" not in source
         tree = ast.parse(source)
         names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)} | {
             node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
@@ -925,6 +993,73 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
         for needle in ("SecClient", "HttpxTransport", "socket", "urlopen", "create_connection"):
             assert needle not in names, (module.__name__, needle)
     assert "shutil" not in Path(ct.__file__).read_text(encoding="utf-8")
+    # D151-C17 R6: chunk_tiering reaches external_working_root, and chunk_multipass still does
+    # not. The ban becomes an allowlist of exactly the accepted D137-R8 volume-identity names,
+    # and the capability claim behind the original ban is PROVED rather than assumed: neither
+    # that module nor the one it pulls in can delete, copy, move, or open a socket. Their only
+    # subprocess use is a fixed-argv, read-only identity query -- which is what measuring a
+    # volume identity IS, and the reason the import exists at all.
+    assert "external_working_root" not in Path(cm.__file__).read_text(encoding="utf-8")
+    tiering_source = Path(ct.__file__).read_text(encoding="utf-8")
+    imported = {
+        alias.name
+        for node in ast.walk(ast.parse(tiering_source))
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "disclosure_drift.m3.external_working_root"
+        for alias in node.names
+    }
+    assert imported == {
+        "SQLITE_TMPDIR_ENV",
+        "ExternalWorkingRootError",
+        "VolumeIdentity",
+        "VolumeIdentityProvider",
+    }, imported
+    for reached in (ewr, dock_transport):
+        reached_tree = ast.parse(Path(reached.__file__).read_text(encoding="utf-8"))
+        # AST, not substring: both modules DESCRIBE SQLite unlinking its own spill files in
+        # prose, and a text ban cannot tell a comment from a capability. What must be absent is
+        # the call.
+        called = {
+            node.func.attr
+            for node in ast.walk(reached_tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        } | {
+            node.func.id
+            for node in ast.walk(reached_tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        for capability in (
+            "rmtree",
+            "unlink",
+            "remove",
+            "rmdir",
+            "copy",
+            "copy2",
+            "copytree",
+            "move",
+            "socket",
+            "urlopen",
+            "create_connection",
+        ):
+            assert capability not in called, (reached.__name__, capability)
+        imported_modules = {
+            alias.name.split(".")[0]
+            for node in ast.walk(reached_tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        assert not imported_modules & {"socket", "urllib", "http", "httpx", "requests"}
+        # ``shutil`` is reachable in external_working_root, so the claim is proved rather than
+        # asserted by absence: every reference to it is ``disk_usage``, a measurement, exactly as
+        # chunk_storage.internal_free_bytes documents for the same import.
+        shutil_uses = {
+            node.attr
+            for node in ast.walk(reached_tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "shutil"
+        }
+        assert shutil_uses <= {"disk_usage"}, (reached.__name__, shutil_uses)
 
 
 def test_z04_the_new_modules_are_importable_without_a_world(tmp_path: Path) -> None:

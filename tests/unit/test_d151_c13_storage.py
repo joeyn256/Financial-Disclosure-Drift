@@ -46,7 +46,7 @@ SYNTHETIC_VOLUME = "00000000-0000-0000-0000-0000C1C1C1C1"
 def _pinned_repository(tmp_path: Path) -> Any:
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
-    c13.open_synthetic_multipass(patcher)
+    c13.open_synthetic_multipass(patcher, temp_root=tmp_path / "sqlite-temp")
     patcher.setattr(cm, "_CHILD_BOOTSTRAP", c13i.multipass_child_bootstrap(tmp_path / "repo"))
     yield
     patcher.undo()
@@ -323,7 +323,8 @@ def _requirements(**changes: Any) -> ct.MultipassStorageRequirements:
         "internal_reserve_bytes": 100,
         "level_one_peak_ratio": 1.5,
         "level_two_peak_ratio": 2.0,
-        "transient_bytes": 7,
+        "level_one_transient_bytes": 7,
+        "level_two_transient_bytes": 11,
     }
     base.update(changes)
     return ct.MultipassStorageRequirements(**base)
@@ -332,6 +333,7 @@ def _requirements(**changes: Any) -> ct.MultipassStorageRequirements:
 def test_t06_the_floor_admits_exactly_and_one_byte_below_refuses() -> None:
     requirement = ct.merge_step_requirement(
         step="group-0000",
+        level=ct.MERGE_LEVEL_ONE,
         input_bytes=1000,
         seed_catalog_bytes=50,
         peak_ratio=1.5,
@@ -347,12 +349,18 @@ def test_t06_the_floor_admits_exactly_and_one_byte_below_refuses() -> None:
         ct.require_merge_admission(free_bytes=-1, requirement=requirement)
     # ceil(): a fractional product rounds UP, never down.
     odd = ct.merge_step_requirement(
-        step="x", input_bytes=7, seed_catalog_bytes=0, peak_ratio=1.5, requirements=_requirements()
+        step="x",
+        level=ct.MERGE_LEVEL_ONE,
+        input_bytes=7,
+        seed_catalog_bytes=0,
+        peak_ratio=1.5,
+        requirements=_requirements(),
     )
     assert odd.peak_bytes == 11
     with pytest.raises(ct.ChunkTieringError, match="non-negative"):
         ct.merge_step_requirement(
             step="x",
+            level=ct.MERGE_LEVEL_ONE,
             input_bytes=-1,
             seed_catalog_bytes=0,
             peak_ratio=1.0,
@@ -362,6 +370,7 @@ def test_t06_the_floor_admits_exactly_and_one_byte_below_refuses() -> None:
     assert (
         ct.merge_step_requirement(
             step="x",
+            level=ct.MERGE_LEVEL_ONE,
             input_bytes=huge,
             seed_catalog_bytes=0,
             peak_ratio=1.0,
@@ -377,10 +386,9 @@ def test_t06_a22_none_terms_refuse_and_are_never_zero(monkeypatch: pytest.Monkey
     assert "never a zero reserve" in str(refusal.value)
     # With a reserve frozen and the ratios still None, the ratios refuse next.
     monkeypatch.setattr(cs, "INTERNAL_RESERVE_BYTES", 1 << 30)
-    with pytest.raises(
-        ct.ChunkTieringError, match="peak ratios and the transient allowance are None"
-    ):
+    with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE") as refusal:
         ct.accepted_multipass_storage_requirements()
+    assert "MULTIPASS_LEVEL_ONE_PEAK_RATIO" in str(refusal.value)
     for name in ("MULTIPASS_LEVEL_ONE_PEAK_RATIO", "MULTIPASS_LEVEL_TWO_PEAK_RATIO"):
         monkeypatch.setattr(ct, name, 1.0)
     with pytest.raises(ct.ChunkTieringError, match="None"):
@@ -388,7 +396,8 @@ def test_t06_a22_none_terms_refuse_and_are_never_zero(monkeypatch: pytest.Monkey
     # Explicit requirements validate their own terms.
     for changes in (
         {"internal_reserve_bytes": -1},
-        {"transient_bytes": -1},
+        {"level_one_transient_bytes": -1},
+        {"level_two_transient_bytes": -1},
         {"level_one_peak_ratio": 0.5},
         {"level_two_peak_ratio": 0.99},
         {"internal_reserve_bytes": True},

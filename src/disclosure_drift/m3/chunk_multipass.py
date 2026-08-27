@@ -54,12 +54,31 @@ launchers, of both merge bodies and of the child entry point -- ahead of every r
 directory, child process, storage-plan record, intermediate and final world. While
 :data:`REAL_MULTIPASS_F0_AUTHORITY` is ``None`` each of them refuses before its first filesystem
 mutation, and a hand-written child request refuses inside the child. Authority is necessary and
-not sufficient: **storage admission is the second gate.** Before a level-1 world or the final
-world is created, the step's projected peak plus the governed reserve plus the transient allowance
-must be free on the internal tier (:mod:`~disclosure_drift.m3.chunk_tiering`). Every owner term is
-``None`` and ``None`` refuses, so an open authority alone admits nothing, and no parameter of any
-production entry substitutes for the owner terms. No input is deleted, spilled or reclaimed by
-anything here, no command-line surface reaches this module, and no environment variable is read.
+not sufficient: **storage admission is the last gate.** Before a level-1 world or the final
+world is created, the step's projected peak plus the governed reserve plus **that level's own**
+transient allowance must be free on the internal tier (:mod:`~disclosure_drift.m3.chunk_tiering`).
+Every owner term is ``None`` and ``None`` refuses, so an open authority alone admits nothing, and
+no parameter of any production entry substitutes for the owner terms. No input is deleted, spilled
+or reclaimed by anything here, and no command-line surface reaches this module.
+
+**Between them, the SQLite temporary placement is proved -- D151-C17 R6.** Storage admission
+charges free bytes on the filesystem that will host the world; SQLite spills its whole-plan
+sorters and workfiles wherever ``SQLITE_TMPDIR`` points, and silently onto the internal volume
+when it points nowhere. :func:`~disclosure_drift.m3.chunk_tiering.require_sqlite_temp_binding`
+therefore measures both volume identities through the accepted D137-R8 provider and refuses a
+mismatch before any world, attempt directory or database exists. The orchestrator proves it, and
+then **each merge child proves it again for itself**: a child that accepted the parent's word, or
+a field in its request, would be trusting a claim it had not measured. That variable is the only
+environment this module reads, it is read from the environment SQLite itself consumes, and its
+presence alone is never the proof -- the volume identity is.
+
+**The two transient allowances are separate -- D151-C17 R5.** Level 2 materializes whole-plan
+temporary state that no level-1 group does, so
+:data:`~disclosure_drift.m3.chunk_tiering.MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES` and
+:data:`~disclosure_drift.m3.chunk_tiering.MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES` are independent
+owner terms, each refusing on its own, with no fallback in either direction. Each storage step
+records which level it was charged at, so a sealed plan cannot be re-read as if the other
+allowance had applied.
 
 **The final receipt's four correction counters are whole-F0 -- D151-C15 R1.** The accepted
 single-pass receipt reports the cross-chunk first-witness correction its consolidation applied over
@@ -156,6 +175,8 @@ from disclosure_drift.m3.chunk_storage import (
     internal_free_bytes,
 )
 from disclosure_drift.m3.chunk_tiering import (
+    MERGE_LEVEL_ONE,
+    MERGE_LEVEL_TWO,
     MergeAdmission,
     MultipassStoragePlan,
     MultipassStorageRequirements,
@@ -163,6 +184,7 @@ from disclosure_drift.m3.chunk_tiering import (
     merge_step_requirement,
     plan_multipass_storage,
     require_merge_admission,
+    require_sqlite_temp_binding,
 )
 from disclosure_drift.m3.compact_evidence import (
     COMPACT_EVIDENCE_SIDECAR_FILENAME,
@@ -1754,15 +1776,22 @@ def _require_seed_identity(
 def _admit_merge_step(
     *,
     step: str,
+    level: str,
     target: Path,
     input_bytes: int,
     seed_catalog_bytes: int,
     peak_ratio: float,
     requirements: MultipassStorageRequirements,
 ) -> MergeAdmission:
-    """The load-bearing storage gate, run BEFORE the step's world directory exists -- §20."""
+    """The load-bearing storage gate, run BEFORE the step's world directory exists -- §20.
+
+    ``level`` is required and is not inferred from ``step``: it selects this step's own transient
+    allowance through :meth:`MultipassStorageRequirements.transient_for`, which has no fallback
+    between levels (D151-C17 R5).
+    """
     requirement = merge_step_requirement(
         step=step,
+        level=level,
         input_bytes=input_bytes,
         seed_catalog_bytes=seed_catalog_bytes,
         peak_ratio=peak_ratio,
@@ -1987,6 +2016,11 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
     require_chunkable_source(plan.source_id)
     group = group_by_id(schedule, request.group_id)
     requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
+    # D151-C17 R6, at the stated position: storage requirements, then the temp binding, then
+    # everything expensive. This process proves for ITSELF that SQLite's spill lands on the
+    # filesystem the admission below charges; a child that trusted its parent's word would be
+    # trusting a claim it had not measured.
+    require_sqlite_temp_binding(charged_path=attempt_root)
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
     started = utc_now()
@@ -2009,6 +2043,7 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
     )
     admission = _admit_merge_step(
         step=group.group_id,
+        level=MERGE_LEVEL_ONE,
         target=attempt_root,
         input_bytes=sum(item.receipt.manifest.total_bytes for item in inputs),
         seed_catalog_bytes=catalog_bytes,
@@ -2160,6 +2195,8 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
     plan, schedule = _read_plan_and_schedule(request.plan_path, request.schedule_path)
     require_chunkable_source(plan.source_id)
     requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
+    # D151-C17 R6, measured in THIS process, before anything is resolved or created.
+    require_sqlite_temp_binding(charged_path=Path(request.world_directory))
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
     # The plan's chunks, resolved ONCE through the accepted single-pass admission -- the twelve
@@ -2194,6 +2231,7 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
         raise ChunkMultipassError(message)
     admission = _admit_merge_step(
         step="final",
+        level=MERGE_LEVEL_TWO,
         target=world_directory,
         input_bytes=sum(item.receipt.manifest.total_bytes for item in intermediates),
         seed_catalog_bytes=catalog_bytes,
@@ -2571,6 +2609,10 @@ def run_multipass_f0(  # noqa: PLR0915
     """
     require_real_multipass_authority()
     requirements = accepted_multipass_storage_requirements()
+    # D151-C17 R6: where SQLite will spill is settled BEFORE the run root exists. Every merge
+    # child re-establishes this for itself; this is the orchestrator refusing early, not the
+    # proof any child relies on.
+    require_sqlite_temp_binding(charged_path=multipass_root)
     require_multipass_plan(plan)
     repository = require_clean_running_repository()
     schedule = derive_merge_schedule(plan)
@@ -2606,6 +2648,7 @@ def run_multipass_f0(  # noqa: PLR0915
         # it creates anything: decided per step, never "run until full".
         _admit_merge_step(
             step=group.group_id,
+            level=MERGE_LEVEL_ONE,
             target=intermediate_attempt_directory(intermediates_root, group.group_id, 0),
             input_bytes=sum(
                 by_id[chunk_id].receipt.manifest.total_bytes for chunk_id in group.chunk_ids
@@ -2642,6 +2685,7 @@ def run_multipass_f0(  # noqa: PLR0915
     world_directory = multipass_root / _FINAL_DIRECTORY
     _admit_merge_step(
         step="final",
+        level=MERGE_LEVEL_TWO,
         target=world_directory,
         input_bytes=sum(receipt.manifest.total_bytes for receipt in receipts),
         seed_catalog_bytes=catalog_bytes,

@@ -77,7 +77,7 @@ def _pinned_repository(tmp_path: Path) -> Any:
     """The shared pin, through the accepted identity seam -- see ``test_d151_c1_chunk_plan``."""
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
-    c13.open_synthetic_multipass(patcher)
+    c13.open_synthetic_multipass(patcher, temp_root=tmp_path / "sqlite-temp")
     yield
     patcher.undo()
     c1.unpin_repository()

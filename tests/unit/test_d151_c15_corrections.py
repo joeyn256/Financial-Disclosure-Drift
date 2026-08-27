@@ -108,7 +108,7 @@ def _arm(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
 
 def _open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The test-only opening: the synthetic token in this process and in every merge child."""
-    c13.open_synthetic_multipass(monkeypatch)
+    c13.open_synthetic_multipass(monkeypatch, temp_root=tmp_path / "sqlite-temp")
     monkeypatch.setattr(cm, "_CHILD_BOOTSTRAP", c13i.multipass_child_bootstrap(tmp_path / "repo"))
 
 
@@ -358,7 +358,9 @@ def test_c1509_an_open_authority_with_none_storage_terms_refuses_on_storage(
         derivation.__code__.co_filename,
         derivation.__code__.co_firstlineno,
     )
-    assert ct.MULTIPASS_LEVEL_ONE_PEAK_RATIO is None and ct.MULTIPASS_TRANSIENT_BYTES is None
+    assert ct.MULTIPASS_LEVEL_ONE_PEAK_RATIO is None
+    assert ct.MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES is None
+    assert ct.MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES is None
     _arm(monkeypatch, "require_multipass_plan", "resolve_chunk_inputs", "run_group_merge")
     root = run["base"] / "orchestrated"
     with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):

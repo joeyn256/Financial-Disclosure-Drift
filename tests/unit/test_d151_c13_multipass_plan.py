@@ -44,6 +44,7 @@ from disclosure_drift.m3 import chunk_execution as ce  # noqa: E402
 from disclosure_drift.m3 import chunk_multipass as cm  # noqa: E402
 from disclosure_drift.m3 import chunk_plan as cp  # noqa: E402
 from disclosure_drift.m3 import chunk_tiering as ct  # noqa: E402
+from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
 from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
     CHUNK_DECLARATIONS_FILENAME,
     write_once_json,
@@ -66,8 +67,33 @@ GOLDEN_MERGE_SCHEDULE_DIGEST = "f3e86fdd522c1ef06fabeb21c4267e55f052e9e3e4115ea4
 #: world is projected at exactly its inputs, and no transient allowance -- the seam D151-C13 §20
 #: permits a synthetic test to inject. Never a production value; production terms are ``None``.
 REQUIREMENTS = ct.MultipassStorageRequirements(
-    internal_reserve_bytes=0, level_one_peak_ratio=1.0, level_two_peak_ratio=1.0, transient_bytes=0
+    internal_reserve_bytes=0,
+    level_one_peak_ratio=1.0,
+    level_two_peak_ratio=1.0,
+    level_one_transient_bytes=0,
+    level_two_transient_bytes=0,
 )
+
+#: The one volume identity every synthetic merge measures for both its world and its SQLite
+#: temporary root -- D151-C17 §15. Substituting the provider is THE accepted seam; no test in
+#: this repository may depend on the host's real volume layout, and production compares measured
+#: identities either way.
+SYNTHETIC_MERGE_VOLUME = "00000000-0000-0000-0000-00000C170000"
+
+
+def synthetic_volume_provider(uuid: str = SYNTHETIC_MERGE_VOLUME) -> Any:
+    """A :data:`VolumeIdentityProvider` that reports ``uuid`` for every path."""
+
+    def identify(path: Path) -> ewr.VolumeIdentity:
+        return ewr.VolumeIdentity(
+            volume_uuid=uuid,
+            mount_point=Path("/"),
+            filesystem_type="apfs",
+            device_identifier="disk-synthetic",
+        )
+
+    return identify
+
 
 #: The token every SYNTHETIC in-process merge runs under. Test-only, never a production value:
 #: the committed ``REAL_MULTIPASS_F0_AUTHORITY`` is ``None``, and a merge CHILD is opened
@@ -78,17 +104,34 @@ BATCH = 2
 
 
 def open_synthetic_multipass(
-    patcher: pytest.MonkeyPatch, *, requirements: ct.MultipassStorageRequirements = REQUIREMENTS
+    patcher: pytest.MonkeyPatch,
+    *,
+    temp_root: Path,
+    requirements: ct.MultipassStorageRequirements = REQUIREMENTS,
+    volume_uuid: str = SYNTHETIC_MERGE_VOLUME,
 ) -> None:
-    """Open the multipass gate for synthetic execution, in THIS process only -- D151-C15 §8.
+    """Open the multipass gates for synthetic execution, in THIS process only -- D151-C15 §8.
 
-    Two names are redirected, both in test code and both on the production module: the authority
-    literal, to the synthetic token, and the accepted storage-term derivation, to explicit
-    synthetic terms -- the seam D151-C15 §9 removed from the production signature. Nothing in
-    production reads either redirect, and no production parameter substitutes for them.
+    Four names are redirected, all in test code and none of them a production surface:
+
+    * the authority literal, to the synthetic token (D151-C15 R2);
+    * the accepted storage-term derivation, to explicit synthetic terms -- the seam D151-C15 §9
+      removed from the production signature;
+    * ``SQLITE_TMPDIR``, to a created directory, because since D151-C17 R6 production refuses a
+      merge whose temporary root is not stated;
+    * the accepted volume-identity provider, to one that reports a single synthetic identity for
+      every path -- the seam :data:`VolumeIdentityProvider` exists for. Production still COMPARES
+      two measured identities; only the measurement is substituted, so the positive path is
+      exercised here rather than depending on the host's real volume layout.
+
+    Nothing in production reads any of these as a bypass: there is no flag, Boolean, request
+    field or configuration key that skips either gate.
     """
     patcher.setattr(cm, "REAL_MULTIPASS_F0_AUTHORITY", SYNTHETIC_AUTHORITY)
     patcher.setattr(cm, "accepted_multipass_storage_requirements", lambda: requirements)
+    temp_root.mkdir(parents=True, exist_ok=True)
+    patcher.setenv(ewr.SQLITE_TMPDIR_ENV, str(temp_root))
+    patcher.setattr(ewr, "macos_volume_identity", synthetic_volume_provider(volume_uuid))
 
 
 def chunk_directories(run: dict[str, Any]) -> list[Path]:
@@ -104,7 +147,7 @@ def _pinned_repository(tmp_path: Path) -> Any:
     """The shared pin, through the accepted identity seam -- see ``test_d151_c1_chunk_plan``."""
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
-    open_synthetic_multipass(patcher)
+    open_synthetic_multipass(patcher, temp_root=tmp_path / "sqlite-temp")
     yield
     patcher.undo()
     c1.unpin_repository()

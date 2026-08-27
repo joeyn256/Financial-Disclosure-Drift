@@ -1051,14 +1051,17 @@ def test_c527_a18_the_single_pass_cap_is_unchanged() -> None:
 
 def test_c528_a19_a20_activation_capacity_and_calibration_remain_closed() -> None:
     """C528/A19/A20: every authority and every capacity constant is still None; no CLI reach."""
-    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY is None
+    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     assert cs.REAL_CHUNK_TRANSFER_AUTHORITY is None
     assert cs.REAL_INTERNAL_RECLAIM_AUTHORITY is None
     assert cp.PRODUCTION_CHUNK_MEMBERS is None
     assert cs.INTERNAL_RESERVE_BYTES is None
     assert cs.CHUNK_PEAK_REQUIREMENT_BYTES is None
-    with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
-        ce.require_real_chunk_execution_authority()
+    assert ce.require_real_chunk_execution_authority() == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):
         cs.require_real_chunk_transfer_authority()
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):

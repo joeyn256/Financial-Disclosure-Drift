@@ -919,14 +919,17 @@ def test_the_existing_width_gate_semantics_are_unchanged() -> None:
 # C1021-C1025, A15: nothing is opened
 # ==========================================================================
 def test_c1021_c1022_c1023_every_activation_and_capacity_constant_remains_none() -> None:
-    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY is None
+    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     assert cs.REAL_CHUNK_TRANSFER_AUTHORITY is None
     assert cs.REAL_INTERNAL_RECLAIM_AUTHORITY is None
     assert cp.PRODUCTION_CHUNK_MEMBERS is None
     assert cs.INTERNAL_RESERVE_BYTES is None
     assert cs.CHUNK_PEAK_REQUIREMENT_BYTES is None
-    with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
-        ce.require_real_chunk_execution_authority()
+    assert ce.require_real_chunk_execution_authority() == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):
         cs.require_real_chunk_transfer_authority()
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):
@@ -972,8 +975,9 @@ def test_c1024_a15_no_cli_environment_or_configuration_route_reaches_the_capabil
     # A15: an environment value that merely LOOKS like an authority opens nothing.
     monkeypatch.setenv("DISCLOSURE_DRIFT_CHUNKED_F0_AUTHORITY", "granted")
     monkeypatch.setenv("DISCLOSURE_DRIFT_CALIBRATION_PLAN", "granted")
-    with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
-        ce.require_real_chunk_execution_authority()
+    assert ce.require_real_chunk_execution_authority() == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     assert cp.CALIBRATION_CHUNK_CEILING == 34
 
 

@@ -164,7 +164,9 @@ CHUNK_REQUEST_FILENAME: Final = "chunk_request.json"
 #: flag, environment variable, configuration key, plan, receipt or passing test substitutes for
 #: this constant, and a later owner instrument replaces **only** this literal in a reviewed
 #: change.
-REAL_CHUNKED_F0_EXECUTION_AUTHORITY: Final[str | None] = None
+REAL_CHUNKED_F0_EXECUTION_AUTHORITY: Final[str | None] = (
+    "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+)
 
 #: The eleven durable tables an F0 over the governed bulk source writes.
 #:

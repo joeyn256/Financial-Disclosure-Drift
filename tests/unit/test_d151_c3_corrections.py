@@ -1301,14 +1301,17 @@ def test_a26_an_individual_chunk_never_masquerades_as_a_consolidated_f0(tmp_path
 # ==========================================================================
 def test_a27_every_activation_constant_is_still_none() -> None:
     """A27: nothing here opened anything, and every refusal still fires."""
-    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY is None
+    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     assert cs.REAL_CHUNK_TRANSFER_AUTHORITY is None
     assert cs.REAL_INTERNAL_RECLAIM_AUTHORITY is None
     assert cp.PRODUCTION_CHUNK_MEMBERS is None
     assert cs.INTERNAL_RESERVE_BYTES is None
     assert cs.CHUNK_PEAK_REQUIREMENT_BYTES is None
-    with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
-        ce.require_real_chunk_execution_authority()
+    assert ce.require_real_chunk_execution_authority() == (
+        "M3_3_D151_C12_ONE_REAL_30K_DENSE_PREFIX_INTERNAL_NVME_CALIBRATION_AUTHORIZED"
+    )
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):
         cs.require_real_chunk_transfer_authority()
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):

@@ -63,17 +63,14 @@ def pinned_repository(tmp_path: Path) -> Any:
 # ==========================================================================
 def test_c49_c50_every_real_authority_is_closed() -> None:
     """The three constants, and the three refusals."""
-    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY == (
-        "M3_3_D151_C7_ONE_REAL_INTERNAL_NVME_CALIBRATION_CHUNK_AUTHORIZED"
-    )
+    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY is None
     assert cs.REAL_CHUNK_TRANSFER_AUTHORITY is None
     assert cs.REAL_INTERNAL_RECLAIM_AUTHORITY is None
     assert cp.PRODUCTION_CHUNK_MEMBERS is None
     assert cs.INTERNAL_RESERVE_BYTES is None
     assert cs.CHUNK_PEAK_REQUIREMENT_BYTES is None
-    assert ce.require_real_chunk_execution_authority() == (
-        "M3_3_D151_C7_ONE_REAL_INTERNAL_NVME_CALIBRATION_CHUNK_AUTHORIZED"
-    )
+    with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
+        ce.require_real_chunk_execution_authority()
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):
         cs.require_real_chunk_transfer_authority()
     with pytest.raises(cs.ChunkStorageError, match="NOT AUTHORIZED"):

@@ -649,12 +649,9 @@ def test_an_existing_attempt_directory_is_never_adopted(
 # ==========================================================================
 def test_c49_real_chunked_execution_is_closed() -> None:
     """D151-C1 §24: the constant is None and every real entry point refuses."""
-    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY == (
-        "M3_3_D151_C7_ONE_REAL_INTERNAL_NVME_CALIBRATION_CHUNK_AUTHORIZED"
-    )
-    assert ce.require_real_chunk_execution_authority() == (
-        "M3_3_D151_C7_ONE_REAL_INTERNAL_NVME_CALIBRATION_CHUNK_AUTHORIZED"
-    )
+    assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY is None
+    with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
+        ce.require_real_chunk_execution_authority()
 
 
 def test_a41_a42_a_chunk_can_only_be_run_by_starting_a_process(

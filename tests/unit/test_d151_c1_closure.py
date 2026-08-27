@@ -108,7 +108,9 @@ def test_a39_no_command_line_surface_reaches_a_chunk_module() -> None:
         "chunked",
     ):
         assert name not in source, name
-    # And nothing under `src/` outside the C1 modules imports one of them.
+    # And nothing under `src/` outside the chunk modules imports one of them. D151-C13 adds the
+    # two multipass modules to the chunk family; they are chunk modules by construction and are
+    # held to the same closure by the C13 suite.
     package_root = Path(cli.__file__).parent
     importers = []
     for path in sorted(package_root.rglob("*.py")):
@@ -118,6 +120,8 @@ def test_a39_no_command_line_surface_reaches_a_chunk_module() -> None:
             "chunk_execution",
             "chunk_storage",
             "chunk_consolidation",
+            "chunk_multipass",
+            "chunk_tiering",
         }:
             continue
         text = path.read_text(encoding="utf-8")

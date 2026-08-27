@@ -1331,12 +1331,16 @@ def test_a28_no_command_line_surface_reaches_a_chunk_module() -> None:
     ):
         assert name not in source, name
     package_root = Path(cli.__file__).parent
+    # D151-C13 adds the two multipass modules to the chunk family; the C13 suite holds them to
+    # the same closure.
     chunk_modules = {
         "chunk_plan",
         "chunk_evidence",
         "chunk_execution",
         "chunk_storage",
         "chunk_consolidation",
+        "chunk_multipass",
+        "chunk_tiering",
     }
     importers = [
         path.name

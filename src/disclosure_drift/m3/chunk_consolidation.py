@@ -607,11 +607,16 @@ def require_single_pass_plan(plan: ChunkPlan) -> ChunkPlan:
        :data:`~disclosure_drift.m3.chunk_plan.SINGLE_PASS_CHUNK_CAP` chunks is refused with the
        architectural reason -- ahead of the library capability question, which is only asked of
        a partition the architecture admits (:func:`require_attachable`).
-    3. **Is it a single-pass plan at all?** Stated as defence in depth: a calibration-only plan is
-       wider than the cap by construction, so question 2 has already refused it, and this line is
-       reached only if that invariant is ever removed. It is retained so that the consolidator's
-       own source says a calibration-only plan is never consolidated, whatever the plan module
-       says.
+    3. **Is it a single-pass plan at all?** This check is **reachable and load-bearing**, and
+       D151-C11 (MINOR-1) corrected an earlier claim here that it was defence in depth only. The
+       calibration width rule compares a plan's chunk count against the cap the plan **declares**,
+       not against this build's constant, and a declared cap is refused only when it exceeds the
+       constant. A valid, sealed calibration record that declares a lowered cap -- five chunks
+       under a declared cap of three, say -- therefore passes :func:`require_sealed_plan`, passes
+       question 2 (five is within nine) and passes :func:`require_attachable`; **this line is the
+       only thing that refuses it**, and it refuses on the contract. The same line refuses a
+       multipass plan (D151-C13), which is consumed only by the multipass finalizer and never by
+       this single-pass consolidator, although a multipass plan is also always wider than the cap.
 
     Raises:
         ChunkPlanError: the plan is not its sealed self, or fails a coverage rule.
@@ -637,7 +642,9 @@ def require_single_pass_plan(plan: ChunkPlan) -> ChunkPlan:
             f"a plan sealed under contract {plan.contract!r} is never consolidated by this "
             f"single-pass consolidator, which consumes only {CHUNK_PLAN_CONTRACT!r}. A "
             "calibration-only plan exists to execute and measure one chunk; its chunks are "
-            "noncanonical evidence and no world is ever assembled from them"
+            "noncanonical evidence and no world is ever assembled from them. A multipass plan "
+            "is consumed only by the multipass finalizer, whose second level is the one place "
+            "a >9 canonical world is created"
         )
         raise ChunkConsolidationError(message)
     return plan

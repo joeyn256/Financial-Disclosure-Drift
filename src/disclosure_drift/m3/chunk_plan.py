@@ -49,6 +49,18 @@ an accepted ordinary plan keeps its identity byte for byte. A calibration-only p
 to be WIDER than the single-pass cap, so it can never sit inside the width the consolidator
 accepts, and nothing here makes the consolidator able to read more than nine chunks.
 
+**A canonical multipass plan is the third contract, and it is the only one a >9 world is built
+from.** D151-C13 §4 freezes :data:`MULTIPASS_PLAN_CONTRACT`: a deterministic complete-source
+partition of more than :data:`SINGLE_PASS_CHUNK_CAP` and at most :data:`MULTIPASS_CHUNK_CEILING`
+chunks, consumed only through the two-level merge in :mod:`~disclosure_drift.m3.chunk_multipass`.
+It is a different contract rather than a widened calibration plan for the same mechanical
+reasons: the contract is inside every digest, so relabelling a sealed plan in any direction moves
+its identity and is refused; the single-pass consolidator refuses it by width and by contract;
+and a calibration-only plan -- whose chunks are noncanonical evidence -- can never be presented
+to the multipass finalizer, because its digest says what it is. A multipass plan additionally
+records the single-pass cap it was sealed under as **exactly** the cap this build enforces, so a
+lowered declared capacity cannot move the fan-in the merge schedule is derived from.
+
 **Nothing here authorizes anything.** No world is created, no member is decompressed, no
 database is opened, and no process is started. Reading a central directory is a measurement.
 """
@@ -88,6 +100,9 @@ __all__ = [
     "CHUNK_REGION_ORDER",
     "GOVERNED_MEMBER_SUFFIX",
     "MEMBER_ORDER_CONTRACT",
+    "MULTIPASS_CHUNK_CEILING",
+    "MULTIPASS_CHUNK_FLOOR",
+    "MULTIPASS_PLAN_CONTRACT",
     "PRODUCTION_CHUNK_MEMBERS",
     "REGION_PRIMARY",
     "REGION_SHARD",
@@ -99,6 +114,7 @@ __all__ = [
     "ChunkPlanError",
     "build_calibration_chunk_plan",
     "build_chunk_plan",
+    "build_multipass_chunk_plan",
     "canonical_member_sequence",
     "chunk_by_id",
     "chunks_in_region",
@@ -199,8 +215,39 @@ CALIBRATION_PLAN_CONTRACT: Final = "m3.3-chunked-f0-calibration-plan/1"
 #: ceiling is a new owner instrument and a reviewed change, never a larger literal.
 CALIBRATION_CHUNK_CEILING: Final = 34
 
-#: The two plan contracts this build reads. Any other is refused before its digest is checked.
-_PLAN_CONTRACTS: Final[frozenset[str]] = frozenset({CHUNK_PLAN_CONTRACT, CALIBRATION_PLAN_CONTRACT})
+#: The contract of a **canonical multipass** plan -- D151-C13 §4.
+#:
+#: A multipass plan describes a deterministic complete-source partition WIDER than the single-pass
+#: cap, exactly as a calibration-only plan does, and differs from one in what may be built from
+#: it: its chunks are canonical inputs to the two-level merge, and only that merge may create the
+#: final F0 world from them. The contract string is folded into the plan digest, so an ordinary
+#: plan, a calibration-only plan and a multipass plan over the same partition are three distinct
+#: sealed identities and none can be relabelled into another after sealing. It authorizes
+#: nothing: real chunk execution stays closed by
+#: :data:`~disclosure_drift.m3.chunk_execution.REAL_CHUNKED_F0_EXECUTION_AUTHORITY`, and real
+#: multipass consolidation stays closed by its own ``None`` authority in the multipass module.
+MULTIPASS_PLAN_CONTRACT: Final = "m3.3-chunked-f0-multipass-plan/1"
+
+#: The narrowest partition a multipass plan may describe: one chunk more than the single-pass cap.
+#:
+#: A partition the single-pass architecture admits is an ordinary plan and is built as one; a
+#: multipass plan that fits in nine would be a second, slower route to the same world, and it
+#: is refused at construction and on every read.
+MULTIPASS_CHUNK_FLOOR: Final = SINGLE_PASS_CHUNK_CAP + 1
+
+#: The widest partition a multipass plan may describe. **Thirty-four, exactly.**
+#:
+#: The owner-authorized maximum width (D151-C13 §4), and its own literal rather than an alias of
+#: :data:`CALIBRATION_CHUNK_CEILING` so that the two can move independently in later reviewed
+#: changes. It is what keeps the two-level merge schedule at exactly two levels: thirty-four
+#: chunks in two regions group into at most five level-1 intermediates, which is below the
+#: fan-in a single merge attaches. The planner is bounded rather than open-ended.
+MULTIPASS_CHUNK_CEILING: Final = 34
+
+#: The three plan contracts this build reads. Any other is refused before its digest is checked.
+_PLAN_CONTRACTS: Final[frozenset[str]] = frozenset(
+    {CHUNK_PLAN_CONTRACT, CALIBRATION_PLAN_CONTRACT, MULTIPASS_PLAN_CONTRACT}
+)
 
 #: The frozen production chunk size. **Closed** -- D151-C1 §5 and §28.
 #:
@@ -435,10 +482,11 @@ class ChunkPlan:
     all of it, so a single changed bound -- or a raised cap -- produces a different plan rather
     than a compatible one.
 
-    ``contract`` is one of exactly two -- :data:`CHUNK_PLAN_CONTRACT` for a single-pass plan and
-    :data:`CALIBRATION_PLAN_CONTRACT` for a calibration-only one -- and it is inside the digest,
-    which is what makes :attr:`calibration_only` a property of the sealed identity rather than a
-    label a caller could change after the fact.
+    ``contract`` is one of exactly three -- :data:`CHUNK_PLAN_CONTRACT` for a single-pass plan,
+    :data:`CALIBRATION_PLAN_CONTRACT` for a calibration-only one and :data:`MULTIPASS_PLAN_CONTRACT`
+    for a canonical multipass one -- and it is inside the digest, which is what makes
+    :attr:`calibration_only` and :attr:`multipass` properties of the sealed identity rather than
+    labels a caller could change after the fact.
     """
 
     contract: str
@@ -466,6 +514,15 @@ class ChunkPlan:
         set: a plan is calibration-only exactly when its sealed identity says so.
         """
         return self.contract == CALIBRATION_PLAN_CONTRACT
+
+    @property
+    def multipass(self) -> bool:
+        """Whether this plan is sealed under :data:`MULTIPASS_PLAN_CONTRACT` -- D151-C13.
+
+        Derived from the contract the digest folds, for the same reason :attr:`calibration_only`
+        is: the sealed identity says what the plan is, and nothing else does.
+        """
+        return self.contract == MULTIPASS_PLAN_CONTRACT
 
     def as_record(self) -> Mapping[str, object]:
         """The complete plan as a plain mapping, carrying no absolute path."""
@@ -543,8 +600,8 @@ class ChunkPlan:
         if plan.contract not in _PLAN_CONTRACTS:
             message = (
                 f"a chunk plan carrying contract {plan.contract!r} is refused; this build "
-                f"executes {CHUNK_PLAN_CONTRACT!r} and {CALIBRATION_PLAN_CONTRACT!r} and never "
-                "adopts another shape"
+                f"executes {CHUNK_PLAN_CONTRACT!r}, {CALIBRATION_PLAN_CONTRACT!r} and "
+                f"{MULTIPASS_PLAN_CONTRACT!r} and never adopts another shape"
             )
             raise ChunkPlanError(message)
         return require_sealed_plan(plan)
@@ -785,6 +842,54 @@ def build_calibration_chunk_plan(
     )
 
 
+def build_multipass_chunk_plan(
+    *,
+    archive_path: Path,
+    source_instance_id: str,
+    source_observation_id: str,
+    source_id: str,
+    source_sha256: str,
+    source_byte_length: int,
+    chunk_members: int,
+) -> ChunkPlan:
+    """Build one deterministic CANONICAL MULTIPASS chunk plan over one frozen archive -- D151-C13.
+
+    The same partition arithmetic, the same canonical ordering, the same source binding and the
+    same digest as :func:`build_chunk_plan`, sealed under :data:`MULTIPASS_PLAN_CONTRACT`. That one
+    difference is inside the digest, so the result is a distinct authenticated identity that no
+    reader can mistake for a single-pass plan or for a calibration-only plan, and that no caller
+    can turn into either after the fact.
+
+    **What it is for.** A multipass plan describes a partition WIDER than the single-pass cap --
+    more than :data:`SINGLE_PASS_CHUNK_CAP` and at most :data:`MULTIPASS_CHUNK_CEILING` chunks --
+    whose chunks are canonical inputs to the deterministic two-level merge in
+    :mod:`~disclosure_drift.m3.chunk_multipass`. Only that merge's second level may create the
+    final F0 world; the single-pass consolidator refuses the plan by width and by contract. The
+    single-pass cap it records is required to be exactly the cap this build enforces, because the
+    merge schedule's fan-in is derived from it.
+
+    ``chunk_members`` is the caller's, deliberately: :data:`PRODUCTION_CHUNK_MEMBERS` stays
+    ``None`` and nothing here chooses a production size. Nothing here authorizes a real run.
+
+    Raises:
+        ChunkPlanError: the source is not chunkable, ``chunk_members`` is not positive, the
+            archive holds no governed member, the partition fits the single-pass cap or exceeds
+            the multipass ceiling, or the coverage check fails.
+        ArchiveDefenceError: the archive is corrupt, a member name is hostile, or the archive
+            holds more members than the accepted ceiling admits.
+    """
+    return _build_plan(
+        contract=MULTIPASS_PLAN_CONTRACT,
+        archive_path=archive_path,
+        source_instance_id=source_instance_id,
+        source_observation_id=source_observation_id,
+        source_id=source_id,
+        source_sha256=source_sha256,
+        source_byte_length=source_byte_length,
+        chunk_members=chunk_members,
+    )
+
+
 def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
     """Return ``plan``, or refuse a partition that is not one -- D151-C1 §29 C03-C05.
 
@@ -792,7 +897,9 @@ def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
 
     * the partition's width is the one its **contract** admits -- within the single-pass cap for
       an ordinary plan (D151-C3 §11); wider than that cap and at most the calibration ceiling for
-      a calibration-only plan (D151-C10); no width at all for any other contract;
+      a calibration-only plan (D151-C10); wider than that cap, at most the multipass ceiling and
+      sealed under exactly this build's cap for a multipass plan (D151-C13); no width at all for
+      any other contract;
     * chunk identifiers are **unique**;
     * intervals are **ascending** and **contiguous** -- no gap;
     * intervals do not **overlap**;
@@ -907,8 +1014,13 @@ def _require_admissible_width(plan: ChunkPlan) -> None:
     A calibration-only plan must need MORE than that cap -- a partition the single-pass
     architecture admits is an ordinary plan and is built as one, so no calibration-only plan can
     ever sit inside the width the consolidator accepts -- and at most
-    :data:`CALIBRATION_CHUNK_CEILING`. Any other contract is refused: a plan of unknown shape
-    has no width rule, and it gets no benefit of the doubt.
+    :data:`CALIBRATION_CHUNK_CEILING`. A multipass plan (D151-C13) must likewise need more than
+    the single-pass cap and at most :data:`MULTIPASS_CHUNK_CEILING`, and it is additionally held
+    to the **constant** rather than to its own declared cap: a multipass record whose declared
+    single-pass capacity is not exactly :data:`SINGLE_PASS_CHUNK_CAP` is refused, because the
+    merge schedule's fan-in is derived from that value and a lowered declaration would otherwise
+    admit a ten-chunk plan under a cap of three. Any other contract is refused: a plan of unknown
+    shape has no width rule, and it gets no benefit of the doubt.
 
     Raises:
         ChunkPlanError: the width is not the one the contract admits.
@@ -951,9 +1063,41 @@ def _require_admissible_width(plan: ChunkPlan) -> None:
             )
             raise ChunkPlanError(message)
         return
+    if plan.contract == MULTIPASS_PLAN_CONTRACT:
+        if plan.single_pass_chunk_cap != SINGLE_PASS_CHUNK_CAP:
+            message = (
+                f"a multipass chunk plan declares a single-pass cap of "
+                f"{plan.single_pass_chunk_cap} where this build enforces {SINGLE_PASS_CHUNK_CAP}. "
+                "The two-level merge derives its fan-in from that value, so a multipass plan is "
+                "held to the constant exactly -- a lowered declaration is refused as firmly as a "
+                "raised one, never admitted as a narrower plan"
+            )
+            raise ChunkPlanError(message)
+        if plan.chunk_count < MULTIPASS_CHUNK_FLOOR:
+            message = (
+                f"a multipass chunk plan needs {plan.chunk_count} chunks, which the single-pass "
+                f"chunked-F0 architecture admits ({SINGLE_PASS_CHUNK_CAP}). A multipass plan "
+                "exists solely to describe a partition WIDER than the single-pass cap, consumed "
+                "through the two-level merge; a partition that fits is an ordinary plan and is "
+                "built as one. It is refused rather than admitted as a slower route to a world "
+                "the single-pass consolidator already builds"
+            )
+            raise ChunkPlanError(message)
+        if plan.chunk_count > MULTIPASS_CHUNK_CEILING:
+            message = (
+                f"a multipass chunk plan needs {plan.chunk_count} chunks and D151-C13 admits at "
+                f"most MULTIPASS_CHUNK_CEILING = {MULTIPASS_CHUNK_CEILING}: the owner-authorized "
+                "maximum width, and the width at which a two-region partition still groups into "
+                "at most five level-1 intermediates. The planner is bounded rather than "
+                "open-ended; a wider partition needs a new owner instrument and a reviewed "
+                "change, never a larger literal"
+            )
+            raise ChunkPlanError(message)
+        return
     message = (
         f"a chunk plan carrying contract {plan.contract!r} has no width rule in this build; "
-        f"only {CHUNK_PLAN_CONTRACT!r} and {CALIBRATION_PLAN_CONTRACT!r} are executed"
+        f"only {CHUNK_PLAN_CONTRACT!r}, {CALIBRATION_PLAN_CONTRACT!r} and "
+        f"{MULTIPASS_PLAN_CONTRACT!r} are executed"
     )
     raise ChunkPlanError(message)
 

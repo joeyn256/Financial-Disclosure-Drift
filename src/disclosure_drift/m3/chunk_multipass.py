@@ -48,12 +48,25 @@ correction, the sidecar merge with its completeness-digest replay, the accepted 
 the derived F0 outcome and payload all come from :mod:`~disclosure_drift.m3.chunk_consolidation`.
 Nothing here is a second expression of a merge rule.
 
-**Storage admission is load-bearing.** Before a level-1 world or the final world is created, the
-step's projected peak plus the governed reserve plus the transient allowance must be free on the
-internal tier (:mod:`~disclosure_drift.m3.chunk_tiering`). Every owner term is ``None`` in C13 and
-``None`` refuses, so a real multipass consolidation is NOT ADMISSIBLE after this record. No input
-is deleted, spilled or reclaimed by anything here: :data:`REAL_MULTIPASS_F0_AUTHORITY` is ``None``,
-no command-line surface reaches this module, and no environment variable is read.
+**Authority is load-bearing, and it is the first gate on every world-creating path -- D151-C15
+R2.** :func:`require_real_multipass_authority` is the first statement of the orchestrator, of both
+launchers, of both merge bodies and of the child entry point -- ahead of every request document,
+directory, child process, storage-plan record, intermediate and final world. While
+:data:`REAL_MULTIPASS_F0_AUTHORITY` is ``None`` each of them refuses before its first filesystem
+mutation, and a hand-written child request refuses inside the child. Authority is necessary and
+not sufficient: **storage admission is the second gate.** Before a level-1 world or the final
+world is created, the step's projected peak plus the governed reserve plus the transient allowance
+must be free on the internal tier (:mod:`~disclosure_drift.m3.chunk_tiering`). Every owner term is
+``None`` and ``None`` refuses, so an open authority alone admits nothing, and no parameter of any
+production entry substitutes for the owner terms. No input is deleted, spilled or reclaimed by
+anything here, no command-line surface reaches this module, and no environment variable is read.
+
+**The final receipt's four correction counters are whole-F0 -- D151-C15 R1.** The accepted
+single-pass receipt reports the cross-chunk first-witness correction its consolidation applied over
+its plan's chunks. The multipass receipt reports exactly that quantity over ITS plan's chunks,
+derived at level 2 from the retained, authenticated chunk artifacts by the accepted definition
+(:func:`_plan_first_witness_counters`) -- never the stage counts of either level, and never their
+sum -- so the value is a function of the sealed plan and not of the level-1 grouping.
 """
 
 from __future__ import annotations
@@ -114,6 +127,7 @@ from disclosure_drift.m3.chunk_evidence import (
     FINAL_WORLD_RECEIPT_FILENAME,
     ArtifactManifest,
     ChunkEvidenceError,
+    ChunkReceipt,
     ExecutionContract,
     build_artifact_manifest,
     file_sha256,
@@ -246,11 +260,15 @@ STORAGE_PLAN_FILENAME: Final = "storage_plan.json"
 MERGE_FAN_IN: Final = SINGLE_PASS_CHUNK_CAP
 
 #: The governed token authorizing one **real** multipass consolidation. ``None`` -- D151-C13
-#: §40. As with real chunk execution, the closure is structural: no command-line surface reaches
-#: this module, no environment variable or configuration key is read, and the storage terms a
-#: real consolidation would need are ``None`` as well, so a real one refuses before its first
-#: world exists whatever this constant says. A later owner instrument replaces only this literal,
-#: in a reviewed change.
+#: §40, made load-bearing by D151-C15 R2. :func:`require_real_multipass_authority` reads it and is
+#: the FIRST statement of every entry that can create a request document, an attempt directory,
+#: a child process, an intermediate or a final world: :func:`run_multipass_f0`,
+#: :func:`run_group_merge`, :func:`run_final_merge`, :func:`merge_group_body`,
+#: :func:`finalize_multipass_body` and the child entry point. The closure is also structural --
+#: no command-line surface reaches this module, no environment variable or configuration key is
+#: read, and the storage terms a real consolidation would need are ``None`` as well -- but this
+#: constant is what every world-creating path refuses on first. A later owner instrument replaces
+#: only this literal, in a reviewed change; it opens the authority gate and nothing else.
 REAL_MULTIPASS_F0_AUTHORITY: Final[str | None] = None
 
 MULTIPASS_REQUEST_KIND_GROUP: Final = "group"
@@ -804,6 +822,147 @@ def stage_first_witness_corrections(
     return int(summary["contested"]), int(summary["staged"])
 
 
+#: The plan-wide accession-witness table the whole-F0 receipt counters are derived from --
+#: D151-C15 R1. Run-local, ``TEMP``, never an accepted catalog table.
+PLAN_WITNESS_TABLE: Final = "plan_chunk_witnesses"
+
+#: Its ranking: every chunk's canonical accession row, ranked by plan ordinal within its accession.
+PLAN_WITNESS_RANK_TABLE: Final = "plan_witness_rank"
+
+#: The plan-wide copy of every chunk's first-witness ledger. Its name is the ledger table's own,
+#: deliberately: the accepted member-delta reduction reads ``<alias>.chunk_first_witness`` and is
+#: handed the ``temp`` schema as its one alias, so it runs unchanged over the whole plan.
+PLAN_LEDGER_TABLE: Final = "chunk_first_witness"
+
+
+def _plan_first_witness_counters(
+    connection: sqlite3.Connection, chunks: Sequence[ChunkInput]
+) -> tuple[int, int, int, int]:
+    """The final receipt's four correction counters, derived over the plan's chunks -- D151-C15 R1.
+
+    The accepted single-pass receipt reports what its consolidation corrected across ITS chunks:
+    ``first_witness_accessions_corrected`` is the number of accessions whose canonical row appears
+    in more than one chunk world; ``first_witness_rows_staged`` is every observation row the
+    correction staged for them -- the accepted reconstruction over the canonical-earliest chunk's
+    row and the accepted rival rule over each later chunk's local-first witness; and
+    ``evidence_members_corrected`` / ``evidence_delta`` are the accepted member-delta reduction
+    over every chunk's first-witness ledger. The multipass receipt reports exactly those four
+    quantities over the plan's chunks, whatever the level-1 grouping was. They are NOT the level-2
+    stage counts, which omit every correction a group applied internally, and NOT the sum of the
+    two levels' stage counts, which repeats every group winner's back-fill and every member
+    corrected at both levels (D151-C14 §32).
+
+    The derivation reads only retained, authenticated artifacts -- each chunk's
+    ``census_accessions`` rows and its first-witness ledger, attached immutably at most
+    :data:`MERGE_FAN_IN` at a time -- joined to the final world's loaded canonical rows and
+    payloads. The rendering functions are the accepted ones; the row counts are the
+    ``INSERT ... SELECT`` shapes of :func:`stage_first_witness_corrections` with the insert
+    replaced by a count, so what is counted is exactly what one pass over these chunks would have
+    staged; the member reduction is
+    :func:`~disclosure_drift.m3.chunk_consolidation._member_deltas` itself. The statement count is
+    a constant plus two per chunk -- one insert of its accession rows, one of its ledger -- never
+    one per accession or per rival.
+
+    Raises:
+        ChunkMultipassError: the derivation was already run on this connection; a contested
+            accession has no canonical row in the final world; or a rival's parsed record is
+            absent -- refused rather than counted against a row that is not there.
+    """
+    already = connection.execute(
+        "SELECT name FROM temp.sqlite_master WHERE type = 'table' AND name IN (?, ?, ?)",
+        (PLAN_WITNESS_TABLE, PLAN_WITNESS_RANK_TABLE, PLAN_LEDGER_TABLE),
+    ).fetchall()
+    _require(
+        not already,
+        "the whole-F0 counters were already derived on this connection "
+        f"({[str(row['name']) for row in already]} exist); a second derivation is refused",
+    )
+    _register_correction_functions(connection)
+    connection.execute(
+        f"CREATE TEMP TABLE {PLAN_WITNESS_TABLE} ("  # noqa: S608
+        "accession_plain TEXT NOT NULL, parsed_record_id TEXT NOT NULL, "
+        "chunk_ordinal INTEGER NOT NULL)"
+    )
+    connection.execute(
+        f"CREATE TEMP TABLE {PLAN_LEDGER_TABLE} ("  # noqa: S608
+        "native_identity TEXT NOT NULL, member_ordinal INTEGER NOT NULL, "
+        "record_ordinal INTEGER NOT NULL, delta_materialized INTEGER NOT NULL)"
+    )
+    for offset in range(0, len(chunks), MERGE_FAN_IN):
+        batch = chunks[offset : offset + MERGE_FAN_IN]
+        catalogs = _attach_all(connection, [item.catalog_path for item in batch], "pc")
+        try:
+            for alias, item in zip(catalogs, batch, strict=True):
+                connection.execute(
+                    f"INSERT INTO temp.{PLAN_WITNESS_TABLE} "  # noqa: S608
+                    "(accession_plain, parsed_record_id, chunk_ordinal) "
+                    "SELECT accession_plain, parsed_record_id, ? "
+                    f"FROM {alias}.census_accessions",
+                    (item.ordinal,),
+                )
+        finally:
+            _detach_all(connection, catalogs)
+        ledgers = _attach_all(connection, [item.witness_path for item in batch], "pw")
+        try:
+            for alias in ledgers:
+                connection.execute(
+                    f"INSERT INTO temp.{PLAN_LEDGER_TABLE} "  # noqa: S608
+                    "(native_identity, member_ordinal, record_ordinal, delta_materialized) "
+                    "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "
+                    f"FROM {alias}.chunk_first_witness"
+                )
+        finally:
+            _detach_all(connection, ledgers)
+    connection.execute(
+        f"CREATE TEMP TABLE {PLAN_WITNESS_RANK_TABLE} AS "  # noqa: S608
+        "SELECT accession_plain, parsed_record_id, "
+        "ROW_NUMBER() OVER (PARTITION BY accession_plain ORDER BY chunk_ordinal) AS witness_rank, "
+        "COUNT(*) OVER (PARTITION BY accession_plain) AS witnesses "
+        f"FROM temp.{PLAN_WITNESS_TABLE}"
+    )
+    orphaned_winners = connection.execute(
+        f"SELECT COUNT(*) AS n FROM temp.{PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
+        "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
+    ).fetchone()
+    _require(
+        int(orphaned_winners["n"]) == 0,
+        "a contested accession of the plan has no canonical row in the final world; the whole-F0 "
+        "counters are refused rather than derived against a row that is not there",
+    )
+    orphaned_rivals = connection.execute(
+        f"SELECT COUNT(*) AS n FROM temp.{PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
+        "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
+    ).fetchone()
+    _require(
+        int(orphaned_rivals["n"]) == 0,
+        "a chunk's local-first witness has no parsed record in the final world; the whole-F0 "
+        "counters are refused rather than derived from nothing",
+    )
+    contested = connection.execute(
+        f"SELECT COUNT(*) AS n FROM temp.{PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
+        "WHERE witness_rank = 1 AND witnesses > 1"
+    ).fetchone()
+    winner_rows = connection.execute(
+        f"SELECT COUNT(*) AS n FROM temp.{PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
+        f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
+        "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
+        "ELSE printf('%010d', a.registrant_cik_numeric) END, "
+        "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
+        "WHERE w.witness_rank = 1 AND w.witnesses > 1"
+    ).fetchone()
+    rival_rows = connection.execute(
+        f"SELECT COUNT(*) AS n FROM temp.{PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
+        f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
+        "WHERE w.witness_rank > 1"
+    ).fetchone()
+    members, delta = _member_deltas(connection, ("temp",))
+    return int(contested["n"]), int(winner_rows["n"]) + int(rival_rows["n"]), members, delta
+
+
 # --------------------------------------------------------------------------- #
 # The intermediate artifact -- D151-C13 §§8, 9, 27, 28
 # --------------------------------------------------------------------------- #
@@ -1172,6 +1331,7 @@ def resolve_intermediate_inputs(
     intermediates_root: Path,
     internal_root: Path | None = None,
     external_root: Path | None = None,
+    chunk_inputs: Sequence[ChunkInput] | None = None,
 ) -> tuple[IntermediateInput, ...]:
     """Resolve every group of one schedule to exactly one verified intermediate.
 
@@ -1181,11 +1341,12 @@ def resolve_intermediate_inputs(
     exactly the input chunks the schedule assigns that group; every intermediate names the same
     source, the same canonical ordering, the same repository revision and the same normalized
     execution contract; the intervals together cover the source exactly once; and no intermediate
-    directory the schedule does not name is present. When the chunk roots are given, every bound
-    input chunk receipt is re-read from its one authoritative copy and its digest is held to the
-    one the intermediate bound, so an intermediate cannot be laundered onto a different set of
-    chunks and a chunk cannot be swapped under an intermediate. The artifact set is verified
-    byte-exactly at the point of consumption.
+    directory the schedule does not name is present. When the chunk roots are given -- or, since
+    D151-C15, when the caller hands in the plan's chunks already resolved through the accepted
+    single-pass admission -- every bound input chunk receipt is re-read from its one authoritative
+    copy and its digest is held to the one the intermediate bound, so an intermediate cannot be
+    laundered onto a different set of chunks and a chunk cannot be swapped under an intermediate.
+    The artifact set is verified byte-exactly at the point of consumption.
 
     Raises:
         ChunkMultipassError: any of them.
@@ -1260,9 +1421,13 @@ def resolve_intermediate_inputs(
                 f"{field} {expected!r} != {observed!r}" for field, expected, observed in divergence
             ),
         )
-        if internal_root is not None:
+        if chunk_inputs is not None or internal_root is not None:
             _require_bound_chunk_receipts(
-                plan, receipt, internal_root=internal_root, external_root=external_root
+                plan,
+                receipt,
+                internal_root=internal_root,
+                external_root=external_root,
+                chunk_inputs=chunk_inputs,
             )
         verify_artifact_manifest(
             directory, receipt.manifest, exclude=(INTERMEDIATE_RECEIPT_FILENAME,)
@@ -1290,28 +1455,48 @@ def _require_bound_chunk_receipts(
     plan: ChunkPlan,
     receipt: IntermediateReceipt,
     *,
-    internal_root: Path,
-    external_root: Path | None,
+    internal_root: Path | None = None,
+    external_root: Path | None = None,
+    chunk_inputs: Sequence[ChunkInput] | None = None,
 ) -> None:
     """Hold an intermediate's bound input chunk receipts to the chunks on disk -- §9, A12.
 
-    Each input chunk is resolved to its ONE authoritative copy through the accepted placement
-    derivation -- which refuses two copies that disagree, so a chunk present on both tiers is
-    one logical input and never two -- and the digest of the receipt document found there is
-    compared with the one the intermediate bound.
+    Each input chunk is resolved to its ONE authoritative copy -- through the accepted placement
+    derivation when the chunk roots are given, or taken from ``chunk_inputs`` when the caller has
+    already resolved the whole plan through the accepted single-pass admission, which the level-2
+    finalizer does exactly once (D151-C15) -- and the digest of the receipt document found there
+    is compared with the one the intermediate bound. Either route refuses two copies that
+    disagree, so a chunk present on both tiers is one logical input and never two.
     """
+    by_id = None if chunk_inputs is None else {item.chunk_id: item for item in chunk_inputs}
     for chunk_id, bound_sha256, bound_manifest in zip(
         receipt.input_chunk_ids,
         receipt.input_receipt_sha256,
         receipt.input_manifest_digests,
         strict=True,
     ):
-        placement = derive_chunk_placement(
-            plan, chunk_id, internal_root=internal_root, external_root=external_root
-        )
-        directory, _tier = authoritative_input(placement)
+        if by_id is not None:
+            item = by_id.get(chunk_id)
+            if item is None:
+                message = (
+                    f"intermediate {receipt.group_id!r} binds input chunk {chunk_id!r}, which "
+                    "the resolved plan does not carry; refused"
+                )
+                raise ChunkMultipassError(message)
+            directory = item.directory
+            chunk_receipt: ChunkReceipt | None = item.receipt
+        else:
+            if internal_root is None:
+                message = (
+                    "binding input chunk receipts needs the chunk roots or the resolved chunks"
+                )
+                raise ChunkMultipassError(message)
+            placement = derive_chunk_placement(
+                plan, chunk_id, internal_root=internal_root, external_root=external_root
+            )
+            directory, _tier = authoritative_input(placement)
+            chunk_receipt = placement.internal_receipt or placement.external_receipt
         observed, _length = file_sha256(directory / CHUNK_RECEIPT_FILENAME)
-        chunk_receipt = placement.internal_receipt or placement.external_receipt
         _require(
             observed == bound_sha256
             and chunk_receipt is not None
@@ -1765,8 +1950,9 @@ def _merge_group_evidence(
 def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa: PLR0915
     """Merge exactly one level-1 group into one immutable intermediate, receipt LAST -- §§8, 9, 26.
 
-    Every predicate is re-established here, in the process that does the work: the code identity
-    is measured and held to the request FIRST; the plan is re-read, re-sealed and required to be
+    Every predicate is re-established here, in the process that does the work: the real multipass
+    authority is required FIRST (D151-C15 R2), before anything is read or created; the code
+    identity is measured and held to the request; the plan is re-read, re-sealed and required to be
     a multipass plan; the schedule is re-read, re-sealed and re-derived from the plan; every chunk
     of the whole plan is resolved through the accepted single-pass admission and this group's
     inputs are selected from that set and proved to be its contiguous, region-homogeneous
@@ -1785,6 +1971,7 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
         ChunkConsolidationError, ChunkStorageError, ChunkEvidenceError: a chunk input refuses.
         ChunkTieringError: the storage step is not admitted.
     """
+    require_real_multipass_authority()
     repository = _authenticate_running_repository(
         head=request.repository_head_sha, tree=request.repository_tree_sha, label=request.group_id
     )
@@ -1938,11 +2125,13 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
     The sequence is the single-pass consolidator's, over intermediates instead of chunks, with
     the set-based correction performing the additive global loser upgrade at step 8:
 
+    0. the real multipass authority is required FIRST (D151-C15 R2), before anything is read;
     1. the code identity is measured and held to the request; the plan and the schedule are
        re-read, re-sealed and re-derived; the storage terms are read;
-    2. every intermediate is resolved to exactly one verified copy, proved to belong to this
-       plan and this schedule, proved to cover the source exactly once, and its bound input
-       chunk receipts are held to the chunks on disk;
+    2. every chunk of the plan is resolved exactly once through the accepted single-pass
+       admission; every intermediate is resolved to exactly one verified copy, proved to belong
+       to this plan and this schedule, proved to cover the source exactly once, and its bound
+       input chunk receipts are held to those resolved chunks;
     3. the intermediates' repository identity is required to be THIS checkout's, and the seed
        catalog is required by digest to be the one every input copied;
     4. the accepted plan state is derived; the storage step is admitted BEFORE the world exists;
@@ -1950,7 +2139,8 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
     6. every intermediate's catalog is attached immutably; 7. the indexes are dropped;
     8. the reduced parser run, the key-sorted loads, the accepted duplicate-identity pass, the
        SET-BASED global loser upgrade and the observation load run under the accepted containment;
-    9. the two accepted whole-observation derivations run ONCE; 10. the indexes are rebuilt;
+    9. the two accepted whole-observation derivations run ONCE; 10. the indexes are rebuilt, and
+       the four whole-F0 correction counters are derived over the plan's chunks (D151-C15 R1);
     11. the sidecar is merged through the accepted sidecar merge -- cross-group member deltas,
         contiguity, the completeness digest replayed over canonical member order -- BEFORE the
         gate; 12. the accepted D140-R12 gate is applied over the complete derived outcome;
@@ -1963,6 +2153,7 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
         ChunkEvidenceError: a precondition fails.
         SingleSourceCanaryError: the consolidated F0 reached a blocking terminal.
     """
+    require_real_multipass_authority()
     repository = _authenticate_running_repository(
         head=request.repository_head_sha, tree=request.repository_tree_sha, label="final"
     )
@@ -1971,12 +2162,16 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
     requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
-    intermediates = resolve_intermediate_inputs(
+    # The plan's chunks, resolved ONCE through the accepted single-pass admission -- the twelve
+    # refusals and the byte-exact manifest verification -- so that the intermediates are bound to
+    # that resolution and the whole-F0 counters are derived over it (D151-C15 R1).
+    chunks = resolve_chunk_inputs(
         plan,
-        schedule,
-        intermediates_root=Path(request.intermediates_root),
         internal_root=Path(request.internal_root),
         external_root=None if request.external_root is None else Path(request.external_root),
+    )
+    intermediates = resolve_intermediate_inputs(
+        plan, schedule, intermediates_root=Path(request.intermediates_root), chunk_inputs=chunks
     )
     require_attachable(len(intermediates))
     contract = intermediates[0].receipt.execution_contract
@@ -2034,8 +2229,9 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
                             _sorted_bulk_load(connection, table, aliases)
                     _apply_duplicate_identities(connection, reduced)
                 # The additive global loser upgrade -- outside the containment, because it lands
-                # in run-local TEMP tables that are not accepted catalog tables.
-                corrected, staged_rows = stage_first_witness_corrections(connection, aliases)
+                # in run-local TEMP tables that are not accepted catalog tables. Its counts are
+                # this LEVEL's operation counts and are not the receipt's (D151-C15 R1).
+                _l2_corrected, _l2_staged = stage_first_witness_corrections(connection, aliases)
                 with write_containment(connection):
                     _load_accession_observations(connection, aliases)
                     CensusCatalog._candidate_edges(  # noqa: SLF001 - the accepted derivation
@@ -2055,10 +2251,14 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
             counts = table_row_counts(connection)
         finally:
             _detach_all(connection, aliases)
+        # The four whole-F0 correction counters, over the plan's chunks -- D151-C15 R1. Derived
+        # once the intermediates are detached, so the attachment budget is the chunks' alone.
+        plan_counters = _plan_first_witness_counters(connection, chunks)
         # The accepted sidecar merge, over intermediates: the cross-group member deltas, the
         # contiguity of the whole manifest, the completeness digest replayed over canonical
-        # member order, and the source row -- BEFORE the gate, at the accepted position.
-        completeness, manifest_digest, totals, evidence = _merge_sidecar(
+        # member order, and the source row -- BEFORE the gate, at the accepted position. Its
+        # member-delta pair is this LEVEL's and is not the receipt's (D151-C15 R1).
+        completeness, manifest_digest, totals, _level_two_evidence = _merge_sidecar(
             sidecar_path=world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME,
             inputs=cast("Sequence[ChunkInput]", intermediates),
             plan=plan,
@@ -2149,10 +2349,10 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
         completeness_digest=completeness,
         member_manifest_digest=manifest_digest,
         table_row_counts=counts,
-        first_witness_accessions_corrected=corrected,
-        first_witness_rows_staged=staged_rows,
-        evidence_members_corrected=evidence[0],
-        evidence_delta=evidence[1],
+        first_witness_accessions_corrected=plan_counters[0],
+        first_witness_rows_staged=plan_counters[1],
+        evidence_members_corrected=plan_counters[2],
+        evidence_delta=plan_counters[3],
         manifest=manifest,
         completed_at_utc=utc_now(),
         status="complete",
@@ -2166,7 +2366,13 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
 # The process boundary -- runs in the PARENT
 # --------------------------------------------------------------------------- #
 def _child_main(request_path: str) -> int:
-    """The merge child's entry point. Not a command; there is no surface that names it."""
+    """The merge child's entry point. Not a command; there is no surface that names it.
+
+    The real multipass authority is required before the request is even read (D151-C15 R2): a
+    hand-written request handed straight to this bootstrap refuses here, and the body it would
+    have reached requires the same authority again before it creates anything.
+    """
+    require_real_multipass_authority()
     record = _read_json_object(Path(request_path), "multipass merge request")
     kind = str(record.get("kind", ""))
     if kind == MULTIPASS_REQUEST_KIND_GROUP:
@@ -2211,14 +2417,17 @@ def run_group_merge(
 ) -> IntermediateReceipt:
     """Run one level-1 group merge in a FRESH child process, and prove that process ended.
 
-    The predecessor merge's process is dead before this one starts; the merge runs in a process
-    that is not this one; the child exits and its status is inspected; the receipt exists,
-    verifies against its own artifacts and describes this group and attempt.
+    The real multipass authority is required FIRST (D151-C15 R2), before the request document is
+    written and before a process is started; the predecessor merge's process is dead before this
+    one starts; the merge runs in a process that is not this one; the child exits and its status
+    is inspected; the receipt exists, verifies against its own artifacts and describes this group
+    and attempt.
 
     Raises:
-        ChunkMultipassError: the predecessor is alive, the child failed, the child left no
-            receipt, or the receipt does not describe this merge.
+        ChunkMultipassError: the authority is ``None``, the predecessor is alive, the child
+            failed, the child left no receipt, or the receipt does not describe this merge.
     """
+    require_real_multipass_authority()
     if predecessor_pid is not None:
         _require_process_dead(predecessor_pid)
     attempt_root = Path(request.attempt_directory)
@@ -2257,13 +2466,15 @@ def run_final_merge(
 ) -> Mapping[str, object]:
     """Run the level-2 finalization in a FRESH child process, and prove that process ended.
 
-    Returns the final receipt document as read back from the world, verified against the
-    world's own artifacts.
+    The real multipass authority is required FIRST (D151-C15 R2), before the request document is
+    written and before a process is started. Returns the final receipt document as read back from
+    the world, verified against the world's own artifacts.
 
     Raises:
-        ChunkMultipassError: the predecessor is alive, the child failed, or the receipt is absent
-            or does not describe a separate process.
+        ChunkMultipassError: the authority is ``None``, the predecessor is alive, the child
+            failed, or the receipt is absent or does not describe a separate process.
     """
+    require_real_multipass_authority()
     if predecessor_pid is not None:
         _require_process_dead(predecessor_pid)
     world_directory = Path(request.world_directory)
@@ -2324,7 +2535,6 @@ def run_multipass_f0(  # noqa: PLR0915
     operational_catalog: Path,
     multipass_root: Path,
     run_id: str,
-    injected_storage_requirements: MultipassStorageRequirements | None = None,
     external_root: Path | None = None,
     cache_bytes: int | None = None,
     capacity_observations: Sequence[Mapping[str, object]] = (),
@@ -2333,12 +2543,16 @@ def run_multipass_f0(  # noqa: PLR0915
 ) -> MultipassResult:
     """Consolidate a >9-chunk plan: every level-1 group, then level 2, each in its own process.
 
-    **The storage gate is the first thing that can refuse, and in C13 it always does for a real
-    consolidation.** ``injected_storage_requirements`` is the explicit test-only seam: when it is
-    ``None`` the requirements are the owner-frozen terms, every one of which is ``None``, and
+    **Two gates, in this order, before anything is read or created -- D151-C15 R2.** The real
+    multipass authority is required first: while :data:`REAL_MULTIPASS_F0_AUTHORITY` is ``None``
+    this refuses before the storage terms are consulted. Then the storage terms are the
+    owner-frozen ones -- every one of which is ``None`` -- and
     :func:`~disclosure_drift.m3.chunk_tiering.accepted_multipass_storage_requirements` refuses
     before the plan is read from disk, before a chunk is resolved and before any directory is
-    created. There is no environment variable, configuration key or command-line flag behind it.
+    created. Authority is necessary and not sufficient: an open authority with ``None`` storage
+    terms still refuses here, on storage. No parameter of this entry substitutes for either gate;
+    the storage seam D151-C13 carried was removed by D151-C15 §9, and there is no environment
+    variable, configuration key or command-line flag behind either.
 
     Then, in order: the plan is required to be a sealed multipass plan; the executing repository
     is measured; the merge schedule is derived and recorded create-once beside the plan; every
@@ -2349,16 +2563,14 @@ def run_multipass_f0(  # noqa: PLR0915
     process. Nothing is deleted at any point: every chunk and every intermediate is retained.
 
     Raises:
+        ChunkMultipassError: the authority is ``None``, or a multipass precondition fails.
         ChunkTieringError: the storage requirements are not owner-qualified, or a step is not
             admitted.
-        ChunkMultipassError, ChunkPlanError, ChunkConsolidationError, ChunkStorageError,
-            ChunkEvidenceError, RepositoryIdentityError: a precondition fails.
+        ChunkPlanError, ChunkConsolidationError, ChunkStorageError, ChunkEvidenceError,
+            RepositoryIdentityError: a precondition fails.
     """
-    requirements = (
-        accepted_multipass_storage_requirements()
-        if injected_storage_requirements is None
-        else injected_storage_requirements
-    )
+    require_real_multipass_authority()
+    requirements = accepted_multipass_storage_requirements()
     require_multipass_plan(plan)
     repository = require_clean_running_repository()
     schedule = derive_merge_schedule(plan)

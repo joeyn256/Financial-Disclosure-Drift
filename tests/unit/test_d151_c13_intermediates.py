@@ -74,9 +74,40 @@ def multipass_child_bootstrap(root: Path) -> str:
         "from pathlib import Path;"
         "from disclosure_drift.m3 import repository_identity as ri;"
         f"ri.running_repository_identity = lambda: ri.repository_identity_at(Path({str(root)!r}));"
+        # D151-C15 R2: the child requires the real multipass authority before it reads its
+        # request, so a synthetic child is opened here, in test code, exactly as the parent is.
+        "from disclosure_drift.m3 import chunk_multipass as cm;"
+        f"cm.REAL_MULTIPASS_F0_AUTHORITY = {c13.SYNTHETIC_AUTHORITY!r};"
         "from disclosure_drift.m3.chunk_multipass import _child_main;"
         "sys.exit(_child_main(sys.argv[1]))"
     )
+
+
+def committed_literal(module: Any, name: str) -> object:
+    """The value a module-level constant is assigned in the COMMITTED source, read by AST."""
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value is not None
+        ):
+            return ast.literal_eval(node.value)
+    message = f"{name} is not assigned at module level"
+    raise AssertionError(message)
+
+
+def refusal_in_a_fresh_interpreter() -> str:
+    """Call the COMMITTED authority gate in a new process; return the refusal it prints."""
+    program = (
+        "from disclosure_drift.m3.chunk_multipass import require_real_multipass_authority as r;r()"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode != 0
+    return completed.stderr
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +115,7 @@ def _pinned_repository(tmp_path: Path) -> Any:
     """The shared pin, and the same redirect inside every merge child this module spawns."""
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
+    c13.open_synthetic_multipass(patcher)
     patcher.setattr(cm, "_CHILD_BOOTSTRAP", multipass_child_bootstrap(tmp_path / "repo"))
     yield
     patcher.undo()
@@ -512,7 +544,6 @@ def test_r02_a_valid_intermediate_is_reused_and_a_restart_continues_the_recorded
                 operational_catalog=database,
                 multipass_root=multipass_root,
                 run_id="restart",
-                injected_storage_requirements=c13.REQUIREMENTS,
                 observe=events.append,
             )
     groups = cm.derive_merge_schedule(run["plan"]).groups
@@ -526,7 +557,6 @@ def test_r02_a_valid_intermediate_is_reused_and_a_restart_continues_the_recorded
         operational_catalog=database,
         multipass_root=multipass_root,
         run_id="restart",
-        injected_storage_requirements=c13.REQUIREMENTS,
         observe=events.append,
     )
     assert events == ["MERGE_PROCESS_START", "MERGE_PROCESS_EXIT"]
@@ -544,7 +574,6 @@ def test_r02_a_valid_intermediate_is_reused_and_a_restart_continues_the_recorded
             operational_catalog=other_database,
             multipass_root=multipass_root,
             run_id="restart",
-            injected_storage_requirements=c13.REQUIREMENTS,
         )
 
 
@@ -576,7 +605,6 @@ def test_r03_a_completed_intermediate_whose_bytes_moved_is_never_rebuilt_beside(
             operational_catalog=database,
             multipass_root=partial["multipass_root"],
             run_id="stop",
-            injected_storage_requirements=c13.REQUIREMENTS,
         )
     assert len(list((partial["intermediates_root"] / group).glob("attempt-*"))) == 1
     # By contrast, the accepted chunk discovery still swallows an invalid chunk receipt (C8-N1);
@@ -600,7 +628,6 @@ def test_x01_every_merge_runs_in_its_own_process_and_ends_before_the_next(tmp_pa
         operational_catalog=database,
         multipass_root=run["base"] / "orchestrated",
         run_id="processes",
-        injected_storage_requirements=c13.REQUIREMENTS,
         observe=events.append,
     )
     groups = cm.derive_merge_schedule(run["plan"]).groups
@@ -797,7 +824,10 @@ def test_a19_a_calibration_chunk_is_refused_by_plan_digest(tmp_path: Path) -> No
 # Closure: authorities, environment, command line, deletion, transport
 # ==========================================================================
 def test_z01_every_authority_and_every_sizing_constant_is_none() -> None:
-    assert cm.REAL_MULTIPASS_F0_AUTHORITY is None
+    # The COMMITTED literal, read from the source: this module's fixture opens the live attribute
+    # for synthetic execution. The behavioural proof that the committed literal governs every
+    # world-creating entry is test_d151_c15_corrections (D151-C15 R2, closing C14-MINOR-3).
+    assert committed_literal(cm, "REAL_MULTIPASS_F0_AUTHORITY") is None
     assert ce.REAL_CHUNKED_F0_EXECUTION_AUTHORITY is None
     assert cs.REAL_CHUNK_TRANSFER_AUTHORITY is None
     assert cs.REAL_INTERNAL_RECLAIM_AUTHORITY is None
@@ -809,8 +839,7 @@ def test_z01_every_authority_and_every_sizing_constant_is_none() -> None:
     assert ct.MULTIPASS_TRANSIENT_BYTES is None
     assert ct.PRODUCTION_SPILL_POLICY is None
     assert ct.QUALIFIED_EXTERNAL_TIER is None
-    with pytest.raises(cm.ChunkMultipassError, match="NOT AUTHORIZED"):
-        cm.require_real_multipass_authority()
+    assert "NOT AUTHORIZED" in refusal_in_a_fresh_interpreter()
     with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):
         ct.accepted_multipass_storage_requirements()
     with pytest.raises(ce.ChunkExecutionError, match="NOT AUTHORIZED"):
@@ -863,8 +892,8 @@ def test_z02_no_environment_configuration_or_command_line_route(
     assert importers == []
     monkeypatch.setenv("DISCLOSURE_DRIFT_MULTIPASS_AUTHORITY", "granted")
     monkeypatch.setenv("DISCLOSURE_DRIFT_INTERNAL_RESERVE_BYTES", "0")
-    with pytest.raises(cm.ChunkMultipassError, match="NOT AUTHORIZED"):
-        cm.require_real_multipass_authority()
+    # A FRESH interpreter inheriting those variables still refuses on the committed literal.
+    assert "NOT AUTHORIZED" in refusal_in_a_fresh_interpreter()
     with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):
         ct.accepted_multipass_storage_requirements()
 

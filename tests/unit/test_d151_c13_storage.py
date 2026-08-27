@@ -46,6 +46,7 @@ SYNTHETIC_VOLUME = "00000000-0000-0000-0000-0000C1C1C1C1"
 def _pinned_repository(tmp_path: Path) -> Any:
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
+    c13.open_synthetic_multipass(patcher)
     patcher.setattr(cm, "_CHILD_BOOTSTRAP", c13i.multipass_child_bootstrap(tmp_path / "repo"))
     yield
     patcher.undo()
@@ -471,32 +472,49 @@ def test_a22_a_real_consolidation_refuses_before_reading_anything(
     ):
         monkeypatch.setattr(cm, name, _tripwire(name))
     root = run["base"] / "real"
-    with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):
-        cm.run_multipass_f0(
-            plan=run["plan"],
-            internal_root=run["chunk_root"],
-            operational_catalog=database,
-            multipass_root=root,
-            run_id="real",
+    # D151-C15 §12: the authority is OPEN here -- the module fixture opens it for synthetic
+    # execution -- and the storage terms are the REAL ones, every one None. Authority alone
+    # admits nothing: the refusal is on storage, before anything is read or created. The
+    # derivation is restored inside a nested context, so the fixture's own patch of the same
+    # attribute is undone last and nothing leaks past this test.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            cm,
+            "accepted_multipass_storage_requirements",
+            ct.accepted_multipass_storage_requirements,
         )
+        with pytest.raises(ct.ChunkTieringError, match="NOT ADMISSIBLE"):
+            cm.run_multipass_f0(
+                plan=run["plan"],
+                internal_root=run["chunk_root"],
+                operational_catalog=database,
+                multipass_root=root,
+                run_id="real",
+            )
     assert not root.exists()
+    # D151-C15 §9: the storage seam is gone from the production signature; no parameter of the
+    # orchestrator names a storage term.
     signature = inspect.signature(cm.run_multipass_f0)
-    assert signature.parameters["injected_storage_requirements"].default is None
+    assert "injected_storage_requirements" not in signature.parameters
+    assert not any("storage" in name or "requirement" in name for name in signature.parameters)
 
 
 def test_below_the_floor_no_world_is_created(tmp_path: Path) -> None:
     database, _tree, run = c13i.ten_chunk_run(tmp_path)
     starved = _requirements(internal_reserve_bytes=1 << 62)
     root = run["base"] / "starved"
-    with pytest.raises(ct.ChunkTieringError, match="NOT ADMITTED") as refusal:
-        cm.run_multipass_f0(
-            plan=run["plan"],
-            internal_root=run["chunk_root"],
-            operational_catalog=database,
-            multipass_root=root,
-            run_id="starved",
-            injected_storage_requirements=starved,
-        )
+    # The starved terms replace the fixture's synthetic ones inside a nested context (see
+    # test_a22): the same attribute, undone before the fixture's own patch.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cm, "accepted_multipass_storage_requirements", lambda: starved)
+        with pytest.raises(ct.ChunkTieringError, match="NOT ADMITTED") as refusal:
+            cm.run_multipass_f0(
+                plan=run["plan"],
+                internal_root=run["chunk_root"],
+                operational_catalog=database,
+                multipass_root=root,
+                run_id="starved",
+            )
     assert "group-0000" in str(refusal.value)
     assert not (root / "intermediates").exists()
     assert (root / cm.STORAGE_PLAN_FILENAME).is_file()  # the plan is recorded; nothing is built
@@ -576,7 +594,6 @@ def test_a24_an_external_root_is_read_only_and_a_verified_copy_is_one_logical_in
         operational_catalog=database,
         multipass_root=run["base"] / "dual",
         run_id="dual",
-        injected_storage_requirements=c13.REQUIREMENTS,
         external_root=external,
     )
     assert sorted(str(p.relative_to(external)) for p in external.rglob("*")) == external_before
@@ -598,7 +615,6 @@ def test_a24_an_external_root_is_read_only_and_a_verified_copy_is_one_logical_in
             operational_catalog=database,
             multipass_root=run["base"] / "dual-conflict",
             run_id="dual-conflict",
-            injected_storage_requirements=c13.REQUIREMENTS,
             external_root=external,
         )
     # A transfer onto the QUALIFIED volume remains closed, whatever the multipass does.
@@ -624,7 +640,6 @@ def test_nothing_is_deleted_by_a_whole_multipass_consolidation(tmp_path: Path) -
         operational_catalog=database,
         multipass_root=run["base"] / "kept",
         run_id="kept",
-        injected_storage_requirements=c13.REQUIREMENTS,
     )
     after = {
         str(path.relative_to(run["chunk_root"])): path.read_bytes()

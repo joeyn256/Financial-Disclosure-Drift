@@ -19,7 +19,10 @@ the multipass world is compared against it as well, receipt semantics included.
 from __future__ import annotations
 
 import copy
+import json
+import sqlite3
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +54,11 @@ from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
     ChunkEvidenceError,
     read_receipt_document,
 )
-from disclosure_drift.m3.compact_evidence import GOVERNED_ACCESSION_FIELDS  # noqa: E402
+from disclosure_drift.m3.compact_evidence import (  # noqa: E402
+    GOVERNED_ACCESSION_FIELDS,
+    materialized_fields,
+    reconstructed_observations,
+)
 from disclosure_drift.m3.working_catalog import (  # noqa: E402
     PROGRESS_LEDGER_FILENAME,
     WORKING_CATALOG_FILENAME,
@@ -70,6 +77,7 @@ def _pinned_repository(tmp_path: Path) -> Any:
     """The shared pin, through the accepted identity seam -- see ``test_d151_c1_chunk_plan``."""
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
+    c13.open_synthetic_multipass(patcher)
     yield
     patcher.undo()
     c1.unpin_repository()
@@ -160,6 +168,85 @@ def parsed_record_of(world_directory: Path, member_name: str, accession_dashed: 
     return str(row["parsed_record_id"])
 
 
+#: The four correction counters of a final receipt, in contract order.
+CORRECTION_COUNTERS = (
+    "first_witness_accessions_corrected",
+    "first_witness_rows_staged",
+    "evidence_members_corrected",
+    "evidence_delta",
+)
+
+
+def correction_counters(receipt: cc.FinalWorldReceipt) -> tuple[int, int, int, int]:
+    """A final receipt's four correction counters."""
+    return (
+        receipt.first_witness_accessions_corrected,
+        receipt.first_witness_rows_staged,
+        receipt.evidence_members_corrected,
+        receipt.evidence_delta,
+    )
+
+
+def whole_f0_counters(chunk_directories: Sequence[Path]) -> tuple[int, int, int, int]:
+    """The accepted single-pass counter definition, restated in Python over chunk artifacts.
+
+    An INDEPENDENT oracle -- D151-C15 R1: no consolidation primitive, no window function and no
+    merge schedule. A contested accession is one whose canonical row appears in more than one
+    chunk catalog; its staged rows are the accepted reconstruction over the canonical-earliest
+    chunk's row plus the accepted rival rule over every later chunk's local-first witness; the
+    member deltas are every chunk-ledger row that is not first for its identity across every chunk
+    ledger, grouped by member. D151-C15 validated this restatement against the accepted
+    single-pass receipt at every partition it was run on, so a multipass receipt that equals it
+    carries exactly the accepted single-pass semantics over its own plan.
+    """
+    witnesses: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+    payloads: dict[str, str] = {}
+    ledger: dict[str, list[tuple[int, int, int]]] = {}
+    for ordinal, directory in enumerate(chunk_directories):
+        catalog = sqlite3.connect(f"file:{directory / WORKING_CATALOG_FILENAME}?mode=ro", uri=True)
+        catalog.row_factory = sqlite3.Row
+        for row in catalog.execute(
+            "SELECT accession_plain, source_observation_id, parsed_record_id, "
+            "first_observed_at_utc, form_type, filing_date_sec, report_date, "
+            "acceptance_datetime_sec_raw, primary_document_name, "
+            "CASE WHEN registrant_cik_numeric IS NULL THEN NULL "
+            "ELSE printf('%010d', registrant_cik_numeric) END AS registrant_cik_padded "
+            "FROM census_accessions"
+        ):
+            witnesses.setdefault(str(row["accession_plain"]), []).append(
+                (ordinal, str(row["parsed_record_id"]), dict(row))
+            )
+        for row in catalog.execute(
+            "SELECT parsed_record_id, payload_json FROM census_parsed_records"
+        ):
+            payloads[str(row["parsed_record_id"])] = str(row["payload_json"])
+        catalog.close()
+        witness = sqlite3.connect(f"file:{directory / cc._WITNESS_FILENAME}?mode=ro", uri=True)
+        for row in witness.execute(
+            "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "
+            "FROM chunk_first_witness"
+        ):
+            ledger.setdefault(str(row[0]), []).append((int(row[1]), int(row[2]), int(row[3])))
+        witness.close()
+    contested = 0
+    staged = 0
+    for entries in witnesses.values():
+        if len(entries) < 2:
+            continue
+        contested += 1
+        entries.sort(key=lambda entry: entry[0])
+        staged += len(list(reconstructed_observations(entries[0][2])))
+        for _ordinal, parsed_id, _row in entries[1:]:
+            payload = json.loads(payloads[parsed_id])
+            staged += len(materialized_fields(payload, first_witness=False))
+    member_delta: dict[int, int] = {}
+    for rows in ledger.values():
+        rows.sort()
+        for member_ordinal, _record_ordinal, delta in rows[1:]:
+            member_delta[member_ordinal] = member_delta.get(member_ordinal, 0) + delta
+    return contested, staged, len(member_delta), sum(member_delta.values())
+
+
 def _naive_staging(connection: Any, aliases: Any) -> tuple[int, int]:
     """The NAIVE level 2: the intermediates' rows are merged and nothing is corrected."""
     connection.execute(
@@ -224,7 +311,10 @@ def test_o1_a_group_winner_that_loses_globally_is_upgraded_to_a_rival(
                 run_id="o1-naive",
             )
         )
-    assert naive.first_witness_accessions_corrected == 0
+    # The receipt's counter is the WHOLE-F0 one since D151-C15, derived from the chunk artifacts
+    # and not from what this level staged: it still names the one contested accession while the
+    # rows below prove the naive staging left its rival rows out.
+    assert naive.first_witness_accessions_corrected == 1
     loser_parsed = parsed_record_of(
         partial["multipass_root"] / "naive", "CIK0000000010.json", c1.SHARED_ACCESSION
     )
@@ -301,7 +391,9 @@ def _oracle(
             run_id=f"single-{label}",
         )
         eq.assert_equivalent(reference, eq.measure(consolidated.world_directory))
-        _assert_same_final_semantics(consolidated.receipt, result["final"])
+        _assert_same_final_semantics(
+            consolidated.receipt, result["final"], single_run=single, multipass_run=run
+        )
         result["single"] = consolidated
     result["plan"] = plan
     result["run"] = run
@@ -309,9 +401,28 @@ def _oracle(
 
 
 def _assert_same_final_semantics(
-    single: cc.FinalWorldReceipt, multipass: cc.FinalWorldReceipt
+    single: cc.FinalWorldReceipt,
+    multipass: cc.FinalWorldReceipt,
+    *,
+    single_run: dict[str, Any],
+    multipass_run: dict[str, Any],
 ) -> None:
-    """The semantic half of two final receipts, equal; the mechanical half, named."""
+    """Two final receipts over the same source: the semantic fields equal, the rest named.
+
+    The four correction counters are compared EXPLICITLY, as whole-F0 fields (D151-C15 R1, closing
+    C14-MINOR-1): each receipt's four values must be the accepted single-pass definition over its
+    own plan's chunks -- :func:`whole_f0_counters`, which never sees a schedule -- so the multipass
+    receipt reports over its ten-to-thirty-four chunks exactly what the accepted consolidator
+    reports over its own. The two receipts therefore agree whenever the two partitions place every
+    witness of every contested accession in a chunk of its own, and differ exactly when the
+    accepted single-pass partition co-chunks witnesses that the one-member-per-chunk multipass
+    plan separates -- a property of the accepted field, proved on the accepted path in
+    ``test_d151_c15_corrections``, and never concealed here.
+    """
+    expected_single = whole_f0_counters(c13.chunk_directories(single_run))
+    expected_multipass = whole_f0_counters(c13.chunk_directories(multipass_run))
+    assert correction_counters(single) == expected_single
+    assert correction_counters(multipass) == expected_multipass
     for field in (
         "contract",
         "plan_digest",  # differs: two partitions
@@ -520,15 +631,17 @@ def test_the_counters_compose_exactly_across_chunk_group_and_global_boundaries(
     assert final.materialized_field_observations == int(source["materialized_field_observations"])
     assert final.records == int(source["records"])
     level_one_delta = sum(item.evidence_delta for item in result["intermediates"])
-    assert level_one_delta > 0 and final.evidence_delta > 0
-    # Within-chunk, within-group and cross-group deltas are disjoint and sum to the whole.
+    # D151-C15 R1: the receipt's delta is the WHOLE-F0 one -- every chunk-first witness that is
+    # not first in the source, counted once whether its group or the final merge downgraded it.
+    # Here the groups corrected part of it and the final merge the rest, so the level-1 stage
+    # counts are a strict part; the within-chunk materializations plus that one delta are the
+    # monolithic total, and the four counters are the accepted definition over the plan's chunks.
+    assert 0 < level_one_delta < final.evidence_delta
     chunk_materialized = sum(
         receipt.summary.materialized_field_observations for receipt in result["run"]["receipts"]
     )
-    assert (
-        chunk_materialized + level_one_delta + final.evidence_delta
-        == final.materialized_field_observations
-    )
+    assert chunk_materialized + final.evidence_delta == final.materialized_field_observations
+    assert correction_counters(final) == whole_f0_counters(c13.chunk_directories(result["run"]))
 
 
 # ==========================================================================

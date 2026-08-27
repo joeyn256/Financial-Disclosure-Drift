@@ -14,7 +14,11 @@ one shard chunk -- is proved from its region counts to schedule as ``9 / 9 / 9 /
 
 This module also carries the shared in-process drivers every other C13 module uses, beside the
 D151-C1 pin: chunk execution through the accepted chunk body, and the two multipass merge bodies
-called directly. The process-boundary proofs live in ``test_d151_c13_intermediates``.
+called directly. The process-boundary proofs live in ``test_d151_c13_intermediates``. Since
+D151-C15 every world-creating multipass entry requires the real multipass authority FIRST, so the
+drivers run under :func:`open_synthetic_multipass` -- a test-only monkeypatch of the authority
+literal and of the storage-term derivation, applied by each C13 module's fixture; the committed
+literal stays ``None`` and ``test_d151_c15_corrections`` proves every entry refuses against it.
 """
 
 from __future__ import annotations
@@ -65,7 +69,34 @@ REQUIREMENTS = ct.MultipassStorageRequirements(
     internal_reserve_bytes=0, level_one_peak_ratio=1.0, level_two_peak_ratio=1.0, transient_bytes=0
 )
 
+#: The token every SYNTHETIC in-process merge runs under. Test-only, never a production value:
+#: the committed ``REAL_MULTIPASS_F0_AUTHORITY`` is ``None``, and a merge CHILD is opened
+#: separately through its bootstrap (``test_d151_c13_intermediates.multipass_child_bootstrap``).
+SYNTHETIC_AUTHORITY = "synthetic-multipass-authority/test-only"
+
 BATCH = 2
+
+
+def open_synthetic_multipass(
+    patcher: pytest.MonkeyPatch, *, requirements: ct.MultipassStorageRequirements = REQUIREMENTS
+) -> None:
+    """Open the multipass gate for synthetic execution, in THIS process only -- D151-C15 §8.
+
+    Two names are redirected, both in test code and both on the production module: the authority
+    literal, to the synthetic token, and the accepted storage-term derivation, to explicit
+    synthetic terms -- the seam D151-C15 §9 removed from the production signature. Nothing in
+    production reads either redirect, and no production parameter substitutes for them.
+    """
+    patcher.setattr(cm, "REAL_MULTIPASS_F0_AUTHORITY", SYNTHETIC_AUTHORITY)
+    patcher.setattr(cm, "accepted_multipass_storage_requirements", lambda: requirements)
+
+
+def chunk_directories(run: dict[str, Any]) -> list[Path]:
+    """Every chunk attempt directory of one executed run, in plan order."""
+    return [
+        run["chunk_root"] / receipt.chunk_id / f"attempt-{receipt.attempt:03d}"
+        for receipt in run["receipts"]
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +104,7 @@ def _pinned_repository(tmp_path: Path) -> Any:
     """The shared pin, through the accepted identity seam -- see ``test_d151_c1_chunk_plan``."""
     patcher = pytest.MonkeyPatch()
     c1.pin_repository(tmp_path / "repo", patcher)
+    open_synthetic_multipass(patcher)
     yield
     patcher.undo()
     c1.unpin_repository()

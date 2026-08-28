@@ -70,9 +70,16 @@ mismatch before any world, attempt directory or database exists. The orchestrato
 then **each merge child proves it again for itself**: a child that accepted the parent's word, or
 a field in its request, would be trusting a claim it had not measured. That variable is read by
 :mod:`~disclosure_drift.m3.chunk_tiering` alone, from the environment SQLite itself consumes;
-THIS module reads no environment at all, and no other environment, configuration or
-command-line control exists anywhere on this path. Its presence alone is never the proof -- the
-volume identity is.
+THIS module reads no environment at all, and no environment-derived configuration capability
+exists on this path beyond the two exact owner-approved ``SQLITE_TMPDIR`` reads -- that one, and
+the accepted D137-R8 guard's own: the committed audit
+(``tests/unit/test_d151_c13_intermediates.py``, D151-C21 R2) holds every module on the path to a
+finite, enumerated route taxonomy -- ``os.environ`` and its imported, aliased, subscripted and
+reflective spellings, ``os.path`` and ``pathlib`` expansion, ``tempfile``, ``getpass``,
+``shutil.which``, ``ctypes``, ``sys.modules``/``importlib``/``__import__`` indirection and
+environment-printing subprocesses -- and that finite property is what is claimed, not a proof
+against every conceivable side channel. No command-line control reaches this module. Its
+presence alone is never the proof -- the volume identity is.
 
 **The measured binding is durable and remeasured -- D151-C19 R4.** The orchestrator's measured
 :class:`~disclosure_drift.m3.chunk_tiering.SqliteTempBinding` is folded into the sealed storage
@@ -81,6 +88,16 @@ child as the topology the consolidation was admitted on. The child never trusts 
 its own binding first, and then requires the two to agree field for field before any world,
 attempt directory or database exists. A changed ``SQLITE_TMPDIR``, a changed volume, or a forged
 or pre-C19 binding record refuses.
+
+**One seal, one restart comparison -- D151-C21 R4.** The recorded document is verified whole --
+its exact serialized shape and its full ``storage_plan_identity``, attachment-instance fields
+included -- and only then is it compared with the freshly computed plan by
+:meth:`~disclosure_drift.m3.chunk_tiering.MultipassStoragePlan.restart_compatibility`, which
+omits exactly the binding's attach-time identifiers (``st_dev`` and ``diskNsM``). The same
+volume re-attached under a different disk number therefore continues; a changed volume UUID,
+filesystem type or temporary-root inode refuses; and the document is never rewritten. Every child
+is handed the binding its parent measured NOW, not the recorded one, and compares all eight fields
+against its own measurement.
 
 **The two transient allowances are separate -- D151-C17 R5.** Level 2 materializes whole-plan
 temporary state that no level-1 group does, so
@@ -1858,23 +1875,44 @@ def _require_expected_binding(
 
 
 def _record_storage_plan(path: Path, storage_plan: MultipassStoragePlan) -> None:
-    """Write the sealed storage plan once; on restart, require the recorded one to be THIS one.
+    """Write the sealed storage plan once; on restart, require the recorded one to be compatible.
 
-    The recorded document is read back through
-    :meth:`~disclosure_drift.m3.chunk_tiering.MultipassStoragePlan.from_document`, which refuses
-    a superseded ``/1`` contract, a stale identity and an edited record, before its identity is
-    held to the plan this consolidation just computed -- including the measured SQLite temporary
-    binding (C19-R4, R4A). A restart with a different temporary root or volume therefore refuses
-    here, before any child is started.
+    Two questions, in order, and they are different questions (D151-C21 R4):
+
+    1. **Is the recorded document exactly what was sealed?** It is read back through
+       :meth:`~disclosure_drift.m3.chunk_tiering.MultipassStoragePlan.from_document`, which
+       refuses a superseded ``/1`` contract, an unknown contract, a record whose fields do not
+       rebuild, a stale or edited record -- an attachment-instance field edited without
+       resealing included -- and a smuggled field. Every one of its eight binding fields is
+       inside that seal.
+    2. **May this restart continue on it?** The recorded plan and the plan this consolidation
+       just computed are compared by
+       :meth:`~disclosure_drift.m3.chunk_tiering.MultipassStoragePlan.restart_compatibility`:
+       every storage term, every input, and the binding's restart-stable fields -- the temporary
+       root's inode and both volumes' UUID and filesystem type. The three attach-time
+       identifiers (``st_dev``, ``diskNsM``) are the only fields excluded, because the same
+       volume re-attached after a reboot or re-plug legitimately reports new ones. A changed
+       temporary root, a recreated directory, a different volume or a changed term refuses
+       here, before any child is started.
+
+    The document is never rewritten or upgraded in place. The restarting orchestrator carries
+    its OWN fresh measurement forward to every child it launches.
     """
     if path.exists():
         existing = MultipassStoragePlan.from_document(_read_json_object(path, "storage plan"))
+        recorded = existing.restart_compatibility()
+        current = storage_plan.restart_compatibility()
+        differing = sorted(
+            key for key in set(recorded) | set(current) if recorded.get(key) != current.get(key)
+        )
         _require(
-            existing.identity() == storage_plan.identity(),
+            recorded == current,
             f"the storage plan already recorded at {path.name!r} is not the one this "
-            f"consolidation was given (recorded identity {existing.identity()}, this run "
-            f"{storage_plan.identity()}); a restart continues exactly the recorded "
-            "consolidation -- its terms, its inputs and its SQLite temporary binding -- or refuses",
+            f"consolidation was given, by restart compatibility (differing: {differing}; "
+            f"recorded identity {existing.identity()}, this run {storage_plan.identity()}); a "
+            "restart continues exactly the recorded consolidation -- its terms, its inputs and "
+            "the stable identity of its SQLite temporary binding -- or refuses. Attach-time "
+            "device identifiers are sealed in the record and are not what decides this",
         )
         return
     write_once_json(path, dict(storage_plan.as_document()))
@@ -2682,7 +2720,10 @@ def run_multipass_f0(  # noqa: PLR0915
     Then, in order: the plan is required to be a sealed multipass plan; the executing repository
     is measured; the merge schedule is derived and recorded create-once beside the plan; every
     chunk is resolved through the accepted admission and the deterministic storage plan is
-    computed from their authenticated byte lengths and recorded; each level-1 group that already
+    computed from their authenticated byte lengths and recorded -- or, on a restart, verified
+    whole against the recorded document and compared with it by restart compatibility
+    (D151-C21 R4), the fresh measurement being what every child below is handed; each level-1
+    group that already
     carries a valid intermediate is reused, and each that does not is merged in a fresh child
     process that ends before the next begins; then the finalization runs in one more fresh
     process. Nothing is deleted at any point: every chunk and every intermediate is retained.

@@ -11,8 +11,10 @@ the process contract: every level-1 merge and the finalization run in their own 
 process, each proved gone before the next begins.
 
 It also carries the closure proofs for the two new modules: every authority ``None``, no
-environment or configuration route, no command-line reach, no removal capability, no transport,
-and importable without a world.
+environment-derived configuration capability through the finite route taxonomy the audit
+enumerates (D151-C21 R2) beyond the exact owner-approved ``SQLITE_TMPDIR`` reads, no command-line
+reach, exact per-module program and argv allowlists with no removal, shell, network or destructive
+write capability outside them (D151-C21 R3), no transport, and importable without a world.
 """
 
 from __future__ import annotations
@@ -867,62 +869,200 @@ def test_z01_every_authority_and_every_sizing_constant_is_none() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# Environment-access closure by BINDING analysis -- D151-C19 R3 (closing D151-C18 MINOR-2)
+# Environment-derived configuration closure by BINDING analysis -- D151-C19 R3, widened to the
+# owner-defined finite route taxonomy by D151-C21 R2 (closing D151-C20 MINOR-2)
 # --------------------------------------------------------------------------------------------
-#: The names on ``os`` through which a process environment is read or written.
+#: The names on ``os`` (and ``posix``/``nt``) through which a process environment is read or
+#: written.
 ENVIRONMENT_NAMES: frozenset[str] = frozenset(
     {"environ", "environb", "getenv", "getenvb", "putenv", "unsetenv"}
 )
+#: ``os.path`` (``posixpath``/``ntpath``) names that read the environment to expand a path.
+PATH_EXPANSION_NAMES: frozenset[str] = frozenset({"expandvars", "expanduser"})
+#: ``pathlib`` class names whose ``home``/``expanduser`` read the environment.
+PATHLIB_CLASSES: frozenset[str] = frozenset(
+    {"Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath"}
+)
+#: ``pathlib`` method names that read the environment (``HOME``, ``USERPROFILE``).
+PATHLIB_ENVIRONMENT_NAMES: frozenset[str] = frozenset({"home", "expanduser"})
+#: ``tempfile`` names whose result is derived from ``TMPDIR``/``TEMP``/``TMP``.
+TEMPFILE_ENVIRONMENT_NAMES: frozenset[str] = frozenset(
+    {
+        "gettempdir",
+        "gettempdirb",
+        "gettempprefix",
+        "gettempprefixb",
+        "mkdtemp",
+        "mkstemp",
+        "mktemp",
+        "NamedTemporaryFile",
+        "SpooledTemporaryFile",
+        "TemporaryDirectory",
+        "TemporaryFile",
+    }
+)
+#: ``getpass`` names that read ``LOGNAME``/``USER``/``LNAME``/``USERNAME``.
+GETPASS_ENVIRONMENT_NAMES: frozenset[str] = frozenset({"getuser", "getpass"})
+#: ``shutil`` names that read ``PATH`` or ``COLUMNS``/``LINES``.
+SHUTIL_ENVIRONMENT_NAMES: frozenset[str] = frozenset({"which", "get_terminal_size"})
+#: Programs whose output IS the process environment, or configuration derived from it.
+ENVIRONMENT_PROGRAMS: frozenset[str] = frozenset({"printenv", "env", "launchctl", "defaults"})
+#: The subprocess module entries that start a process.
+_SUBPROCESS_ENTRIES: frozenset[str] = frozenset(
+    {"run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"}
+)
+#: Every module whose attributes are an environment route, with the names that are one.
+_ENVIRONMENT_MODULE_NAMES: dict[str, frozenset[str]] = {
+    "os": ENVIRONMENT_NAMES,
+    "posix": ENVIRONMENT_NAMES,
+    "nt": ENVIRONMENT_NAMES,
+    "os.path": PATH_EXPANSION_NAMES,
+    "posixpath": PATH_EXPANSION_NAMES,
+    "ntpath": PATH_EXPANSION_NAMES,
+    "tempfile": TEMPFILE_ENVIRONMENT_NAMES,
+    "getpass": GETPASS_ENVIRONMENT_NAMES,
+    "shutil": SHUTIL_ENVIRONMENT_NAMES,
+}
+#: The module roots whose bindings the audit follows.
+_TRACKED_MODULE_ROOTS: frozenset[str] = frozenset(
+    {
+        "os",
+        "posix",
+        "nt",
+        "posixpath",
+        "ntpath",
+        "tempfile",
+        "getpass",
+        "shutil",
+        "pathlib",
+        "ctypes",
+        "importlib",
+        "subprocess",
+    }
+)
+#: The exact dotted routes the attribute pass recognizes.
+_ENVIRONMENT_ROUTES: frozenset[str] = frozenset(
+    {f"{module}.{name}" for module, names in _ENVIRONMENT_MODULE_NAMES.items() for name in names}
+    | {f"pathlib.Path.{name}" for name in PATHLIB_ENVIRONMENT_NAMES}
+)
+
+#: The finite route taxonomy this audit enumerates -- D151-C21 R2. The closure CLAIMS exactly
+#: this: no audited module reaches the process environment through any of these routes except
+#: the exact owner-approved ``SQLITE_TMPDIR`` reads. It claims nothing about routes outside
+#: this list; a route added to Python, or found missing here, is added by review.
+ENVIRONMENT_ROUTE_TAXONOMY: tuple[str, ...] = (
+    "os.environ / os.environb / os.getenv / os.getenvb / os.putenv / os.unsetenv",
+    "the same names on posix / nt, and any of them imported or aliased",
+    "os.path.expandvars / os.path.expanduser (also posixpath / ntpath)",
+    "pathlib.Path.home / pathlib.Path.expanduser (every pathlib class, any receiver)",
+    "tempfile.gettempdir / gettempdirb / gettempprefix / mk*temp / *TemporaryFile / "
+    "TemporaryDirectory",
+    "getpass.getuser / getpass.getpass",
+    "shutil.which / shutil.get_terminal_size",
+    "ctypes, by any import form (libc getenv is reachable through it)",
+    "sys.modules subscripts, getattr / vars on a tracked module, importlib.import_module, "
+    "__import__",
+    "subprocess env= keyword, or a printenv / env / launchctl / defaults program",
+)
 
 
-def environment_accesses(source: str) -> list[tuple[int, str]]:
-    """Every environment access ``source`` makes, found by what names are BOUND to, not by text.
+def _attribute_chain(node: ast.AST) -> list[str] | None:
+    """``a.b.c`` as ``["a", "b", "c"]`` when it is rooted in a plain name, else ``None``."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return parts[::-1]
 
-    Resolves what ``os`` is bound to (``import os``, ``import os as x``, ``import os.path``,
-    which binds ``os``), what its environment names are bound to (``from os import environ``,
-    ``... as y``, ``from os import *``), and then reports every attribute access through an
-    ``os`` alias, every use of an environment alias, every dynamic import that could bind either
-    later, and every reflective lookup on an ``os`` alias. A text scan for ``environ`` cannot see
-    ``_o.environ`` or ``_e[...]``; this can.
+
+def _subprocess_argv(node: ast.Call) -> ast.expr | None:
+    if node.args:
+        return node.args[0]
+    return next((k.value for k in node.keywords if k.arg == "args"), None)
+
+
+def environment_accesses(source: str) -> list[tuple[int, str]]:  # noqa: PLR0912, PLR0915
+    """Every environment-derived route ``source`` reaches, found by what names are BOUND to.
+
+    Resolves what every tracked module is bound to (``import os``, ``import os as x``,
+    ``import os.path``, ``from os import path as p``, ``from pathlib import Path as P``, ...),
+    what its environment names are bound to (``from os import environ as e``,
+    ``from tempfile import gettempdir``, ...), and then reports every attribute chain through a
+    tracked alias that lands on a route in :data:`ENVIRONMENT_ROUTE_TAXONOMY`, every use of a
+    bound route name, every ``ctypes`` import, every ``sys.modules`` subscript, every reflective
+    lookup on a tracked alias, every dynamic import, every ``.home()`` / ``.expanduser()`` call
+    on any receiver, and every subprocess that is handed an ``env=`` or runs an
+    environment-printing program. A text scan cannot see ``_o.environ``, ``_e[...]`` or
+    ``p.expandvars``; this can.
     """
     tree = ast.parse(source)
-    os_aliases: set[str] = set()
-    environment_aliases: dict[str, str] = {}
+    module_aliases: dict[str, str] = {}
+    name_aliases: dict[str, str] = {}
+    subprocess_aliases: set[str] = set()
+    subprocess_functions: set[str] = set()
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
-                if root == "os":
-                    os_aliases.add(alias.asname or root)
-                if root in {"posix", "nt"}:
+                if root not in _TRACKED_MODULE_ROOTS:
+                    continue
+                bound = alias.asname or root
+                module_aliases[bound] = alias.name if alias.asname else root
+                if root in {"posix", "nt", "ctypes"}:
                     found.append((node.lineno, f"import {alias.name}"))
+                if root == "subprocess":
+                    subprocess_aliases.add(bound)
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             root = module.split(".")[0]
-            if root in {"os", "posix", "nt"}:
-                for alias in node.names:
-                    if alias.name == "*":
+            if root == "ctypes":
+                found.append((node.lineno, f"from {module} import ..."))
+                continue
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if alias.name == "*":
+                    if module in _ENVIRONMENT_MODULE_NAMES or root in {"pathlib", "importlib"}:
                         found.append((node.lineno, f"from {module} import *"))
-                    elif alias.name in ENVIRONMENT_NAMES:
-                        environment_aliases[alias.asname or alias.name] = alias.name
-                        found.append((node.lineno, f"from {module} import {alias.name}"))
-            if root == "importlib":
-                found.extend(
-                    (node.lineno, f"from {module} import {alias.name}")
-                    for alias in node.names
-                    if alias.name in {"import_module", "__import__", "*"}
-                )
+                elif (
+                    module in _ENVIRONMENT_MODULE_NAMES
+                    and alias.name in _ENVIRONMENT_MODULE_NAMES[module]
+                ):
+                    name_aliases[bound] = f"{module}.{alias.name}"
+                    found.append((node.lineno, f"from {module} import {alias.name}"))
+                elif module == "os" and alias.name == "path":
+                    module_aliases[bound] = "os.path"
+                elif module == "pathlib" and alias.name in PATHLIB_CLASSES:
+                    module_aliases[bound] = "pathlib.Path"
+                elif root == "importlib" and alias.name in {"import_module", "__import__"}:
+                    found.append((node.lineno, f"from {module} import {alias.name}"))
+                elif module == "subprocess" and alias.name in _SUBPROCESS_ENTRIES:
+                    subprocess_functions.add(bound)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id in os_aliases and node.attr in ENVIRONMENT_NAMES:
-                found.append((node.lineno, f"{node.value.id}.{node.attr}"))
+        if isinstance(node, ast.Attribute):
+            chain = _attribute_chain(node)
+            if chain is not None and chain[0] in module_aliases:
+                dotted = [module_aliases[chain[0]], *chain[1:]]
+                for stop in range(2, len(dotted) + 1):
+                    candidate = ".".join(dotted[:stop])
+                    if candidate in _ENVIRONMENT_ROUTES:
+                        found.append((node.lineno, candidate))
+                        break
         elif (
             isinstance(node, ast.Name)
-            and node.id in environment_aliases
+            and node.id in name_aliases
             and isinstance(node.ctx, ast.Load)
         ):
-            found.append((node.lineno, f"{node.id} (bound to os.{environment_aliases[node.id]})"))
+            found.append((node.lineno, f"{node.id} (bound to {name_aliases[node.id]})"))
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "modules"
+        ):
+            found.append((node.lineno, "sys.modules[...]"))
         elif isinstance(node, ast.Call):
             func = node.func
             callee = func.id if isinstance(func, ast.Name) else None
@@ -934,15 +1074,32 @@ def environment_accesses(source: str) -> list[tuple[int, str]]:
                 callee in {"getattr", "vars"}
                 and node.args
                 and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in os_aliases
+                and node.args[0].id in module_aliases
             ):
                 found.append((node.lineno, f"{callee}({node.args[0].id}, ...)"))
-        elif (
-            isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Attribute)
-            and node.value.attr == "modules"
-        ):
-            found.append((node.lineno, "sys.modules[...]"))
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in PATHLIB_ENVIRONMENT_NAMES
+                and not node.args
+                and not node.keywords
+            ):
+                found.append((node.lineno, f".{func.attr}()"))
+            is_subprocess = (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in subprocess_aliases
+                and func.attr in _SUBPROCESS_ENTRIES
+            ) or (callee is not None and callee in subprocess_functions)
+            if is_subprocess:
+                if any(keyword.arg == "env" for keyword in node.keywords):
+                    found.append((node.lineno, "subprocess env="))
+                argv = _subprocess_argv(node)
+                if isinstance(argv, ast.List) and argv.elts:
+                    program = argv.elts[0]
+                    if isinstance(program, ast.Constant) and isinstance(program.value, str):
+                        basename = program.value.rsplit("/", 1)[-1]
+                        if basename in ENVIRONMENT_PROGRAMS:
+                            found.append((node.lineno, f"subprocess {basename}"))
     return sorted(set(found))
 
 
@@ -974,28 +1131,35 @@ def permitted_sqlite_tmpdir_reads(source: str, *, function: str) -> set[int]:
     return lines
 
 
+#: The exact owner-approved direct reads -- D151-C21 R2. Nothing else on the audited path.
+PERMITTED_SQLITE_TMPDIR_READS: dict[str, str] = {
+    "chunk_tiering": "require_sqlite_temp_binding",
+    "external_working_root": "require_external_sqlite_tmpdir",
+}
+
+
 def environment_closure_violations(module_name: str, source: str) -> list[tuple[int, str]]:
-    """Every environment access beyond what the accepted design permits -- D151-C19 R3.
+    """Every environment-derived route beyond the accepted reads -- D151-C19 R3, D151-C21 R2.
 
     ``chunk_multipass`` may read nothing. ``chunk_tiering`` may read exactly one thing: the
     governed ``SQLITE_TMPDIR`` value, inside ``require_sqlite_temp_binding``, in the accepted
     shape. ``external_working_root`` -- reached, not new -- may read the same one thing inside
-    the accepted D137-R8 guard. Everything else on the reached chain reads nothing.
+    the accepted D137-R8 guard. Everything else on the reached chain reads nothing, through any
+    route :data:`ENVIRONMENT_ROUTE_TAXONOMY` names. That finite property is the claim.
     """
     accesses = environment_accesses(source)
-    permitted_in = {
-        "chunk_tiering": "require_sqlite_temp_binding",
-        "external_working_root": "require_external_sqlite_tmpdir",
-    }
     stem = module_name.rsplit(".", 1)[-1]
-    if stem in permitted_in:
-        permitted = permitted_sqlite_tmpdir_reads(source, function=permitted_in[stem])
+    if stem in PERMITTED_SQLITE_TMPDIR_READS:
+        permitted = permitted_sqlite_tmpdir_reads(
+            source, function=PERMITTED_SQLITE_TMPDIR_READS[stem]
+        )
         return [item for item in accesses if not (item[1] == "os.environ" and item[0] in permitted)]
     return accesses
 
 
 # --------------------------------------------------------------------------------------------
-# Transitive capability closure of the storage-binding chain -- D151-C19 R5 (C18 INFO-2)
+# Transitive capability closure of the storage-binding chain -- D151-C19 R5 (C18 INFO-2),
+# made exact per module by D151-C21 R3 (closing D151-C20 MINOR-3)
 # --------------------------------------------------------------------------------------------
 #: Where the package lives, for resolving ``disclosure_drift.*`` imports to files.
 _SRC_ROOT = Path(cm.__file__).parents[2]
@@ -1019,11 +1183,20 @@ NETWORK_MODULES: frozenset[str] = frozenset(
         "aiohttp",
     }
 )
+#: Modules that create processes outside ``subprocess``: ``asyncio`` (``create_subprocess_*``),
+#: ``multiprocessing``, ``concurrent`` (``ProcessPoolExecutor``) and ``pty``. None is accepted.
+PROCESS_MODULES: frozenset[str] = frozenset({"asyncio", "multiprocessing", "concurrent", "pty"})
+#: Attribute names that start a process through ``asyncio`` or an event loop.
+ASYNC_PROCESS_NAMES: frozenset[str] = frozenset(
+    {"create_subprocess_exec", "create_subprocess_shell", "subprocess_exec", "subprocess_shell"}
+)
 #: ``shutil`` names that copy, move or delete. ``disk_usage`` is the one measurement allowed.
 DESTRUCTIVE_SHUTIL: frozenset[str] = frozenset(
     {"rmtree", "copy", "copy2", "copyfile", "copytree", "copymode", "copystat", "move", "chown"}
 )
-#: ``os`` names that delete, rename, run a shell, replace the process or signal.
+#: ``os`` names that delete, rename, truncate, change ownership or mode, link, run a shell,
+#: replace or spawn a process, or signal. Every one is forbidden; ``os.open`` is governed
+#: separately by the per-module write allowlist.
 DESTRUCTIVE_OS: frozenset[str] = frozenset(
     {
         "remove",
@@ -1033,8 +1206,21 @@ DESTRUCTIVE_OS: frozenset[str] = frozenset(
         "rename",
         "renames",
         "replace",
+        "truncate",
+        "chmod",
+        "lchmod",
+        "fchmod",
+        "chown",
+        "lchown",
+        "fchown",
+        "chflags",
+        "lchflags",
+        "link",
+        "symlink",
         "system",
         "popen",
+        "posix_spawn",
+        "posix_spawnp",
         "execl",
         "execle",
         "execlp",
@@ -1057,9 +1243,8 @@ DESTRUCTIVE_OS: frozenset[str] = frozenset(
         "killpg",
     }
 )
-_SUBPROCESS_ENTRIES: frozenset[str] = frozenset(
-    {"run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"}
-)
+#: Method names that delete, copy, move, write, rename, truncate or change mode on ANY receiver.
+#: ``.replace(`` is handled by shape (one positional argument, the ``Path.replace`` form).
 _DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
     {
         "rmtree",
@@ -1072,7 +1257,77 @@ _DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
         "removedirs",
         "system",
         "popen",
+        "write_text",
+        "write_bytes",
+        "rename",
+        "truncate",
+        "chmod",
+        "lchmod",
     }
+)
+#: Programs no audited module may launch, whatever their argv -- a fixed absolute path is never
+#: sufficient (D151-C21 R3): removal, mutation, shells, interpreters, network clients, process
+#: control and volume tools.
+FORBIDDEN_PROGRAM_NAMES: frozenset[str] = frozenset(
+    {
+        "rm",
+        "rmdir",
+        "unlink",
+        "mv",
+        "cp",
+        "dd",
+        "shred",
+        "srm",
+        "truncate",
+        "chmod",
+        "chown",
+        "chflags",
+        "ln",
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "csh",
+        "tcsh",
+        "fish",
+        "env",
+        "printenv",
+        "xargs",
+        "osascript",
+        "python",
+        "python3",
+        "perl",
+        "ruby",
+        "curl",
+        "wget",
+        "nc",
+        "ncat",
+        "netcat",
+        "ssh",
+        "scp",
+        "sftp",
+        "rsync",
+        "ftp",
+        "telnet",
+        "open",
+        "launchctl",
+        "kill",
+        "killall",
+        "pkill",
+        "hdiutil",
+        "tar",
+    }
+)
+#: ``os.open`` flag names that create, write, truncate or append.
+WRITE_OPEN_FLAGS: frozenset[str] = frozenset(
+    {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_EXCL"}
+)
+#: ``os`` names that write through an already-open descriptor. Allowed only in a module that
+#: holds an accepted write-open site (the descriptor has to come from somewhere), and forbidden
+#: everywhere else -- D151-C21 R3.
+DESCRIPTOR_WRITE_OS: frozenset[str] = frozenset(
+    {"ftruncate", "write", "writev", "pwrite", "pwritev", "sendfile", "copy_file_range"}
 )
 
 
@@ -1139,143 +1394,126 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
     return constants
 
 
-def capability_violations(source: str) -> list[tuple[int, str]]:
-    """Every forbidden capability ``source`` reaches: network, copy/move/delete, shell, or an
-    unbounded subprocess -- D151-C19 R5.
+def _render_argv_element(element: ast.expr, constants: dict[str, str]) -> str:
+    """One argv element as the allowlist spells it: a constant, a module constant's value,
+    ``<sys.executable>``, ``str(<name>)``, or ``<unbounded>``."""
+    if isinstance(element, ast.Constant):
+        return str(element.value)
+    if isinstance(element, ast.Name):
+        return constants.get(element.id, f"<{element.id}>")
+    if (
+        isinstance(element, ast.Attribute)
+        and isinstance(element.value, ast.Name)
+        and element.value.id == "sys"
+        and element.attr == "executable"
+    ):
+        return "<sys.executable>"
+    if (
+        isinstance(element, ast.Call)
+        and isinstance(element.func, ast.Name)
+        and element.func.id == "str"
+        and len(element.args) == 1
+        and isinstance(element.args[0], ast.Name)
+        and not element.keywords
+    ):
+        return f"str({element.args[0].id})"
+    return "<unbounded>"
 
-    Both ``import`` and ``from ... import`` are inspected. A subprocess call is bounded only when
-    its argument vector is a literal list whose program is a fixed absolute path (a string
-    constant, or a module-level string constant), whose other elements are constants, names or
-    ``str(<name>)``, with no ``shell`` and no unpacking.
-    """
-    tree = ast.parse(source)
-    constants = _module_string_constants(tree)
-    os_aliases: set[str] = set()
-    shutil_aliases: set[str] = set()
+
+def _subprocess_calls(tree: ast.Module) -> list[ast.Call]:
     subprocess_aliases: set[str] = set()
     subprocess_functions: set[str] = set()
-    found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                root = alias.name.split(".")[0]
-                if root in NETWORK_MODULES:
-                    found.append((node.lineno, f"import {alias.name}"))
-                if root == "os":
-                    os_aliases.add(alias.asname or "os")
-                if root == "shutil":
-                    shutil_aliases.add(alias.asname or "shutil")
-                if root == "subprocess":
+                if alias.name.split(".")[0] == "subprocess":
                     subprocess_aliases.add(alias.asname or "subprocess")
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            root = module.split(".")[0]
-            names = [alias.name for alias in node.names]
-            if root in NETWORK_MODULES:
-                found.append((node.lineno, f"from {module} import {', '.join(names)}"))
-            if root == "shutil":
-                found.extend(
-                    (node.lineno, f"from shutil import {name}")
-                    for name in names
-                    if name == "*" or name in DESTRUCTIVE_SHUTIL
-                )
-            if root == "os":
-                found.extend(
-                    (node.lineno, f"from os import {name}")
-                    for name in names
-                    if name == "*" or name in DESTRUCTIVE_OS
-                )
-            if root == "subprocess":
-                for alias in node.names:
-                    if alias.name == "*" or alias.name in _SUBPROCESS_ENTRIES:
-                        subprocess_functions.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "") == "subprocess":
+            for alias in node.names:
+                if alias.name == "*" or alias.name in _SUBPROCESS_ENTRIES:
+                    subprocess_functions.add(alias.asname or alias.name)
+    calls: list[ast.Call] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id in shutil_aliases and node.attr != "disk_usage":
-                found.append((node.lineno, f"shutil.{node.attr}"))
-            if node.value.id in os_aliases and node.attr in DESTRUCTIVE_OS:
-                found.append((node.lineno, f"os.{node.attr}"))
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id in (DESTRUCTIVE_SHUTIL | _DESTRUCTIVE_METHODS):
-            found.append((node.lineno, f"{func.id}("))
-        if isinstance(func, ast.Attribute) and func.attr in _DESTRUCTIVE_METHODS:
-            found.append((node.lineno, f".{func.attr}("))
-        is_subprocess = (
+        if (
             isinstance(func, ast.Attribute)
             and isinstance(func.value, ast.Name)
             and func.value.id in subprocess_aliases
             and func.attr in _SUBPROCESS_ENTRIES
-        ) or (isinstance(func, ast.Name) and func.id in subprocess_functions)
-        if not is_subprocess:
-            continue
-        for keyword in node.keywords:
-            if keyword.arg is None:
-                found.append((node.lineno, "subprocess **kwargs"))
-            if keyword.arg == "shell" and not (
-                isinstance(keyword.value, ast.Constant) and keyword.value.value is False
-            ):
-                found.append((node.lineno, "subprocess shell="))
-        argv = node.args[0] if node.args else None
-        if argv is None:
-            argv = next((k.value for k in node.keywords if k.arg == "args"), None)
-        if not isinstance(argv, ast.List) or not argv.elts:
-            found.append((node.lineno, "subprocess argv is not a literal list"))
-            continue
-        program = argv.elts[0]
-        fixed = (
-            (
-                isinstance(program, ast.Constant)
-                and isinstance(program.value, str)
-                and program.value.startswith("/")
-            )
-            or (isinstance(program, ast.Name) and constants.get(program.id, "").startswith("/"))
-            # the running interpreter's own absolute path: the accepted merge-child launch
-            or (
-                isinstance(program, ast.Attribute)
-                and isinstance(program.value, ast.Name)
-                and program.value.id == "sys"
-                and program.attr == "executable"
-            )
-        )
-        if not fixed:
-            found.append((node.lineno, "subprocess program is not a fixed absolute path"))
-        for element in argv.elts[1:]:
-            bounded = isinstance(element, ast.Constant | ast.Name) or (
-                isinstance(element, ast.Call)
-                and isinstance(element.func, ast.Name)
-                and element.func.id == "str"
-                and len(element.args) == 1
-                and isinstance(element.args[0], ast.Name)
-            )
-            if not bounded:
-                found.append((node.lineno, "subprocess argument is not a bounded element"))
-    return sorted(set(found))
+        ) or (isinstance(func, ast.Name) and func.id in subprocess_functions):
+            calls.append(node)
+    return calls
 
 
-def subprocess_programs(source: str) -> set[str]:
-    """The fixed absolute programs every subprocess call in ``source`` runs."""
+def subprocess_launches(source: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Every subprocess launch in ``source`` as ``(program, argv-shape)`` -- D151-C21 R3.
+
+    The program and every argument are rendered by :func:`_render_argv_element`, so a module
+    string constant is rendered by its VALUE: the merge-child launch pins the exact committed
+    bootstrap text, and a changed entrypoint is a changed launch.
+    """
     tree = ast.parse(source)
     constants = _module_string_constants(tree)
-    programs: set[str] = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "subprocess"
-            and node.args
-            and isinstance(node.args[0], ast.List)
-            and node.args[0].elts
-        ):
-            program = node.args[0].elts[0]
-            if isinstance(program, ast.Constant):
-                programs.add(str(program.value))
-            elif isinstance(program, ast.Name):
-                programs.add(constants.get(program.id, f"<{program.id}>"))
-    return programs
+    launches: list[tuple[str, tuple[str, ...]]] = []
+    for call in _subprocess_calls(tree):
+        argv = _subprocess_argv(call)
+        if not isinstance(argv, ast.List) or not argv.elts:
+            launches.append(("<argv is not a literal list>", ()))
+            continue
+        program = _render_argv_element(argv.elts[0], constants)
+        launches.append(
+            (program, tuple(_render_argv_element(item, constants) for item in argv.elts[1:]))
+        )
+    return launches
 
+
+def _os_open_write_flags(call: ast.Call, os_aliases: set[str]) -> tuple[str, ...] | None:
+    """The sorted write-class ``O_*`` flag names of an ``os.open`` call, or ``None``."""
+    func = call.func
+    if not (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id in os_aliases
+        and func.attr == "open"
+    ):
+        return None
+    flags = call.args[1] if len(call.args) > 1 else None
+    if flags is None:
+        flags = next((k.value for k in call.keywords if k.arg == "flags"), None)
+    names = sorted(
+        {
+            node.attr
+            for node in ast.walk(flags)
+            if isinstance(node, ast.Attribute) and node.attr.startswith("O_")
+        }
+        if flags is not None
+        else set()
+    )
+    if flags is not None and not names:
+        return ("<flags are not O_* names>",)
+    return tuple(names) if any(name in WRITE_OPEN_FLAGS for name in names) else ()
+
+
+def _builtin_open_mode_is_write(call: ast.Call) -> bool:
+    mode: ast.expr | None = call.args[1] if len(call.args) > 1 else None
+    if mode is None:
+        mode = next((k.value for k in call.keywords if k.arg == "mode"), None)
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+        return any(letter in mode.value for letter in "wax+")
+    return True
+
+
+#: The committed merge-child bootstrap, pinned exactly -- D151-C21 R3. The only launch
+#: ``chunk_multipass`` may make is ``[sys.executable, "-c", <this text>, str(request_path)]``.
+MULTIPASS_CHILD_BOOTSTRAP: str = (
+    "import sys;"
+    "from disclosure_drift.m3.chunk_multipass import _child_main;"
+    "sys.exit(_child_main(sys.argv[1]))"
+)
 
 #: The storage-binding chain: what ``chunk_tiering`` reaches for the SQLite temp binding, and
 #: everything those modules reach in turn. Exact -- a new helper joins this list by review.
@@ -1289,10 +1527,207 @@ STORAGE_BINDING_CHAIN: frozenset[str] = frozenset(
     }
 )
 
+#: Every module the capability and environment audits hold to an exact allowlist.
+AUDITED_MODULES: tuple[str, ...] = (
+    "disclosure_drift.m3.chunk_multipass",
+    "disclosure_drift.m3.chunk_tiering",
+    *sorted(STORAGE_BINDING_CHAIN),
+)
 
-def test_z02_no_environment_configuration_or_command_line_route(
+#: The exact subprocess launches each audited module may make -- D151-C21 R3. Program AND argv
+#: shape, re-derived from the committed implementation: read-only system queries with fixed
+#: argv on the binding chain, the one ``sys.executable`` child launch in ``chunk_multipass``
+#: with its exact bootstrap, and nothing at all in ``chunk_tiering``.
+ACCEPTED_SUBPROCESS_LAUNCHES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "disclosure_drift.m3.chunk_multipass": (
+        ("<sys.executable>", ("-c", MULTIPASS_CHILD_BOOTSTRAP, "str(request_path)")),
+    ),
+    "disclosure_drift.m3.chunk_tiering": (),
+    "disclosure_drift.m3.external_working_root": (
+        ("/usr/sbin/diskutil", ("info", "-plist", "str(mount)")),
+    ),
+    "disclosure_drift.m3.canary_runtime": (
+        ("/bin/ps", ("-ww", "-o", "args=", "-p", "str(pid)")),
+        ("/usr/bin/pmset", ("-g", "ps")),
+        ("/usr/sbin/ioreg", ("-r", "-k", "AppleClamshellState", "-d", "4")),
+    ),
+    "disclosure_drift.m3.dock_transport": (
+        (
+            "/usr/sbin/ioreg",
+            ("-a", "-p", "IOService", "-r", "-c", "IOUSBHostDevice", "-l", "-w0"),
+        ),
+    ),
+    "disclosure_drift.errors": (),
+    "disclosure_drift.storage.sqlite": (),
+}
+
+#: The exact write-class ``os.open`` sites each audited module may hold, as sorted flag names,
+#: one entry per site -- D151-C21 R3. ``canary_runtime`` holds the accepted execution-lock file
+#: and pid record (D140); no other audited module opens anything for writing directly -- the
+#: accepted create-once writers live in ``chunk_evidence`` and are reached by call, and the
+#: guarded world creation in ``chunk_multipass`` is governed by the authority-first and
+#: exact-call-site proofs, not by this list.
+ACCEPTED_WRITE_OPENS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "disclosure_drift.m3.canary_runtime": (
+        ("O_CREAT", "O_RDWR"),
+        ("O_CREAT", "O_TRUNC", "O_WRONLY"),
+    ),
+}
+
+
+def capability_violations(  # noqa: PLR0912, PLR0915
+    source: str, *, module: str | None = None
+) -> list[tuple[int, str]]:
+    """Every forbidden capability ``source`` reaches -- D151-C19 R5, exact per module since
+    D151-C21 R3.
+
+    Both ``import`` and ``from ... import`` are inspected. Always forbidden: network modules;
+    process-creating modules (``asyncio``, ``multiprocessing``, ``concurrent``, ``pty``) and
+    ``create_subprocess_*``; ``shutil`` copy/move/delete; the destructive ``os`` names; the
+    destructive methods on any receiver, ``Path.write_text`` / ``write_bytes`` / ``rename`` /
+    ``replace`` / ``truncate`` / ``chmod`` included; a builtin ``open`` in a write, append,
+    exclusive or update mode, or with a non-constant mode; a ``shell=`` that is not literally
+    ``False``; a subprocess whose argv is not a literal list, whose program is not a fixed
+    absolute path, whose program is a forbidden one whatever its path, or whose arguments are
+    not bounded elements. A fixed absolute path alone never establishes safety.
+
+    With ``module`` given, the module's EXACT allowlists apply as well: every subprocess launch
+    must be one of :data:`ACCEPTED_SUBPROCESS_LAUNCHES` for that module (program and argv shape),
+    a module with no accepted launch may not import ``subprocess`` at all, and every write-class
+    ``os.open`` must be one of :data:`ACCEPTED_WRITE_OPENS` for that module, each used once,
+    and a descriptor write (``os.ftruncate``, ``os.write``, ...) may appear only in a module
+    that holds an accepted write-open site.
+    """
+    tree = ast.parse(source)
+    constants = _module_string_constants(tree)
+    os_aliases: set[str] = set()
+    shutil_aliases: set[str] = set()
+    imports_subprocess = False
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in NETWORK_MODULES or root in PROCESS_MODULES:
+                    found.append((node.lineno, f"import {alias.name}"))
+                if root == "os":
+                    os_aliases.add(alias.asname or "os")
+                if root == "shutil":
+                    shutil_aliases.add(alias.asname or "shutil")
+                if root == "subprocess":
+                    imports_subprocess = True
+        elif isinstance(node, ast.ImportFrom):
+            module_name = node.module or ""
+            root = module_name.split(".")[0]
+            names = [alias.name for alias in node.names]
+            if root in NETWORK_MODULES or root in PROCESS_MODULES:
+                found.append((node.lineno, f"from {module_name} import {', '.join(names)}"))
+            if root == "shutil":
+                found.extend(
+                    (node.lineno, f"from shutil import {name}")
+                    for name in names
+                    if name == "*" or name in DESTRUCTIVE_SHUTIL
+                )
+            if root == "os":
+                found.extend(
+                    (node.lineno, f"from os import {name}")
+                    for name in names
+                    if name == "*" or name in DESTRUCTIVE_OS
+                )
+            if root == "subprocess":
+                imports_subprocess = True
+    subprocess_calls = _subprocess_calls(tree)
+    write_opens: list[tuple[int, tuple[str, ...]]] = []
+    descriptor_writes: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in shutil_aliases and node.attr != "disk_usage":
+                found.append((node.lineno, f"shutil.{node.attr}"))
+            if node.value.id in os_aliases and node.attr in DESTRUCTIVE_OS:
+                found.append((node.lineno, f"os.{node.attr}"))
+            if node.value.id in os_aliases and node.attr in DESCRIPTOR_WRITE_OS:
+                descriptor_writes.append((node.lineno, f"os.{node.attr}"))
+            if node.attr in ASYNC_PROCESS_NAMES:
+                found.append((node.lineno, f".{node.attr}"))
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in (DESTRUCTIVE_SHUTIL | _DESTRUCTIVE_METHODS):
+            found.append((node.lineno, f"{func.id}("))
+        if isinstance(func, ast.Attribute) and func.attr in _DESTRUCTIVE_METHODS:
+            found.append((node.lineno, f".{func.attr}("))
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "replace"
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            found.append((node.lineno, ".replace(<target>) -- the Path.replace shape"))
+        if isinstance(func, ast.Name) and func.id == "open" and _builtin_open_mode_is_write(node):
+            found.append((node.lineno, "open( in a write, append, exclusive or unknown mode"))
+        flags = _os_open_write_flags(node, os_aliases)
+        if flags:
+            write_opens.append((node.lineno, flags))
+        if node not in subprocess_calls:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                found.append((node.lineno, "subprocess **kwargs"))
+            if keyword.arg == "shell" and not (
+                isinstance(keyword.value, ast.Constant) and keyword.value.value is False
+            ):
+                found.append((node.lineno, "subprocess shell="))
+        argv = _subprocess_argv(node)
+        if not isinstance(argv, ast.List) or not argv.elts:
+            found.append((node.lineno, "subprocess argv is not a literal list"))
+            continue
+        program = argv.elts[0]
+        rendered = _render_argv_element(program, constants)
+        fixed = rendered == "<sys.executable>" or rendered.startswith("/")
+        if not fixed:
+            found.append((node.lineno, "subprocess program is not a fixed absolute path"))
+        if rendered.rsplit("/", 1)[-1] in FORBIDDEN_PROGRAM_NAMES:
+            found.append((node.lineno, f"subprocess program {rendered!r} is forbidden"))
+        for element in argv.elts[1:]:
+            if _render_argv_element(element, constants) == "<unbounded>":
+                found.append((node.lineno, "subprocess argument is not a bounded element"))
+    if module is not None:
+        allowed = ACCEPTED_SUBPROCESS_LAUNCHES.get(module)
+        if allowed is None:
+            found.append((0, f"{module} is not an audited module and has no allowlist"))
+            allowed = ()
+        for call, launch in zip(subprocess_calls, subprocess_launches(source), strict=True):
+            if launch not in allowed:
+                found.append((call.lineno, f"subprocess launch not allowlisted: {launch!r}"))
+        if not allowed and imports_subprocess:
+            found.append((0, f"{module} imports subprocess and has no accepted program"))
+        remaining = list(ACCEPTED_WRITE_OPENS.get(module, ()))
+        for lineno, flags in write_opens:
+            if flags in remaining:
+                remaining.remove(flags)
+            else:
+                found.append((lineno, f"os.open write site not allowlisted: {flags!r}"))
+        if not ACCEPTED_WRITE_OPENS.get(module):
+            found.extend(
+                (lineno, f"{name} in a module with no accepted write-open site")
+                for lineno, name in descriptor_writes
+            )
+    return sorted(set(found))
+
+
+def subprocess_programs(source: str) -> set[str]:
+    """The fixed programs every subprocess call in ``source`` runs (``<sys.executable>`` for
+    the interpreter's own path)."""
+    return {program for program, _argv in subprocess_launches(source)}
+
+
+def test_z02_no_environment_derived_configuration_capability_beyond_the_accepted_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The finite property D151-C21 R2 defines: through every route
+    :data:`ENVIRONMENT_ROUTE_TAXONOMY` names, no audited module derives configuration from the
+    process environment except the two exact owner-approved ``SQLITE_TMPDIR`` reads; and no
+    command-line surface reaches the multipass modules."""
     from disclosure_drift import cli
 
     cli_source = Path(cli.__file__).read_text(encoding="utf-8")
@@ -1304,11 +1739,14 @@ def test_z02_no_environment_configuration_or_command_line_route(
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         # D151-C19 R3 (closing D151-C18 MINOR-2): the closure is decided by what names are BOUND
         # to, so `from os import environ`, an aliased `os`, a subscript through an alias and
-        # `os.getenv` are all seen. The multipass path reads EXACTLY ONE environment name --
-        # SQLITE_TMPDIR, in chunk_tiering, inside the binding guard, in the accepted D138-R3
-        # shape -- because that is the only environment SQLite itself consults to decide where
-        # it spills. What the invariant always protected is unchanged and re-proved below: no
-        # environment value can GRANT authority or SUPPLY a sizing term.
+        # `os.getenv` are all seen. D151-C21 R2 widened the audited routes to the owner-defined
+        # finite taxonomy (path expansion, pathlib, tempfile, getpass, shutil.which, ctypes,
+        # reflective and dynamic import, environment-printing subprocesses). The multipass path
+        # reads EXACTLY ONE environment name -- SQLITE_TMPDIR, in chunk_tiering, inside the
+        # binding guard, in the accepted D138-R3 shape -- because that is the only environment
+        # SQLite itself consults to decide where it spills. What the invariant always protected
+        # is unchanged and re-proved below: no environment value can GRANT authority or SUPPLY a
+        # sizing term.
         assert environment_closure_violations(module.__name__, source) == [], module.__name__
         assert "DISCLOSURE_DRIFT" not in source, module.__name__
         assert "load_config" not in names, module.__name__
@@ -1320,6 +1758,12 @@ def test_z02_no_environment_configuration_or_command_line_route(
     permitted = permitted_sqlite_tmpdir_reads(tiering, function="require_sqlite_temp_binding")
     assert len(permitted) == 1, permitted
     assert [item[1] for item in environment_accesses(tiering)] == ["os.environ"]
+    # D151-C21 R2: the same finite property over every audited module, with the exact accepted
+    # read sites and nothing else.
+    for name in AUDITED_MODULES:
+        path = module_path(name)
+        assert path is not None, name
+        assert environment_closure_violations(name, path.read_text(encoding="utf-8")) == [], name
     package_root = Path(cli.__file__).parent
     chunk_family = {
         "chunk_plan",
@@ -1419,6 +1863,18 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
         assert capability_violations(reached_source) == [], name
         assert environment_closure_violations(name, reached_source) == [], name
         programs[name] = subprocess_programs(reached_source)
+    # D151-C21 R3 (closing D151-C20 MINOR-3): a fixed absolute path is never sufficient. Every
+    # audited module is held to its EXACT program-and-argv allowlist and its exact write-open
+    # sites: chunk_tiering launches nothing and may not import subprocess; chunk_multipass makes
+    # the one sys.executable launch with the exact committed bootstrap; the chain's inspection
+    # programs keep their accepted fixed read-only argv.
+    for name in AUDITED_MODULES:
+        path = module_path(name)
+        assert path is not None, name
+        audited_source = path.read_text(encoding="utf-8")
+        assert capability_violations(audited_source, module=name) == [], name
+        assert subprocess_launches(audited_source) == list(ACCEPTED_SUBPROCESS_LAUNCHES[name]), name
+    assert committed_literal(cm, "_CHILD_BOOTSTRAP") == MULTIPASS_CHILD_BOOTSTRAP
     assert programs == {
         "disclosure_drift.errors": set(),
         "disclosure_drift.m3.canary_runtime": {"/bin/ps", "/usr/bin/pmset", "/usr/sbin/ioreg"},

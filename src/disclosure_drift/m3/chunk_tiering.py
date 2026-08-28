@@ -79,7 +79,9 @@ __all__ = [
     "MULTIPASS_LEVEL_ONE_PEAK_RATIO",
     "MULTIPASS_LEVEL_TWO_PEAK_RATIO",
     "MULTIPASS_STORAGE_PLAN_CONTRACT",
+    "SQLITE_TEMP_BINDING_ATTACHMENT_FIELDS",
     "SQLITE_TEMP_BINDING_FIELDS",
+    "SQLITE_TEMP_BINDING_STABLE_FIELDS",
     "STORAGE_PLAN_IDENTITY_KEY",
     "SUPERSEDED_STORAGE_PLAN_CONTRACTS",
     "MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES",
@@ -659,6 +661,32 @@ SQLITE_TEMP_BINDING_FIELDS: Final[tuple[str, ...]] = (
     "charged_device_identifier",
 )
 
+#: The binding fields that identify the temporary root and both volumes **stably** across a
+#: detach and re-attach of the same volume -- D151-C21 R4 (closing D151-C20 MINOR-4).
+#:
+#: A volume keeps its Volume UUID and filesystem type across reboots and re-plugs, and a
+#: directory keeps its inode while it exists on that volume; those are the facts a governed
+#: restart may continue on. Every one of them still moves the full document identity: this is a
+#: classification for the restart comparison, never a second seal.
+SQLITE_TEMP_BINDING_STABLE_FIELDS: Final[tuple[str, ...]] = (
+    "temp_root_inode",
+    "temp_volume_uuid",
+    "temp_filesystem_type",
+    "charged_volume_uuid",
+    "charged_filesystem_type",
+)
+
+#: The **attachment-instance** observations -- D151-C21 R4. ``st_dev`` and ``diskNsM`` are
+#: assigned at attach time and legitimately differ after a detach and re-attach of the very same
+#: volume, so they are recorded and sealed (every field moves the document identity, and an
+#: edited record refuses) but they never decide, on their own, that a restart is incompatible.
+#: A merge child still compares all eight fields against the binding its parent measured NOW.
+SQLITE_TEMP_BINDING_ATTACHMENT_FIELDS: Final[tuple[str, ...]] = (
+    "temp_root_device",
+    "temp_device_identifier",
+    "charged_device_identifier",
+)
+
 
 def _measured_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -678,6 +706,13 @@ class SqliteTempBinding:
     both volumes are the accepted D137-R8 identities. The binding RESULT is not a Boolean anyone
     could set: it is the two measured volume identities, which the constructor requires to agree,
     so a record whose volumes differ cannot exist.
+
+    Two classifications of the same eight fields serve two different questions (D151-C21 R4).
+    :meth:`as_record` is the whole measurement and is what the storage-plan document seals and
+    what a merge child is held to. :meth:`stable_record` is the subset that survives a detach
+    and re-attach of the same volume -- :data:`SQLITE_TEMP_BINDING_STABLE_FIELDS` -- and is what
+    a governed restart is compared on; the attachment-instance observations in
+    :data:`SQLITE_TEMP_BINDING_ATTACHMENT_FIELDS` are sealed but do not decide that comparison.
     """
 
     temp_root_device: int
@@ -712,6 +747,14 @@ class SqliteTempBinding:
     def as_record(self) -> Mapping[str, object]:
         """A deterministic rendering that carries **no** absolute path."""
         return {name: getattr(self, name) for name in SQLITE_TEMP_BINDING_FIELDS}
+
+    def stable_record(self) -> Mapping[str, object]:
+        """The restart-stable subset of the measurement -- D151-C21 R4.
+
+        Exactly :data:`SQLITE_TEMP_BINDING_STABLE_FIELDS`, in their recorded order. Never
+        serialized on its own: the document carries :meth:`as_record`, sealed whole.
+        """
+        return {name: getattr(self, name) for name in SQLITE_TEMP_BINDING_STABLE_FIELDS}
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> SqliteTempBinding:
@@ -1232,6 +1275,14 @@ class MultipassStoragePlan:
     reclaimable byte count is zero, its reclaim and transfer authorities are the closed constants,
     and no external tier is qualified. The identity digest folds every number, so a plan quoted
     in a refusal can be traced back to exactly what it was computed from.
+
+    **One seal, one comparison -- D151-C21 R4.** :meth:`identity` seals the whole record,
+    measured SQLite temporary binding included, and is what the persisted document carries and
+    what :meth:`from_document` verifies; every field moves it. :meth:`restart_compatibility` is a
+    separate, in-memory representation that answers a different question -- may a restart
+    continue on this recorded plan? -- and it omits exactly the binding's attachment-instance
+    observations, which legitimately differ after the same volume is detached and re-attached.
+    It is never serialized and is not a contract field.
     """
 
     contract: str
@@ -1264,12 +1315,30 @@ class MultipassStoragePlan:
         return max((step.required_free_bytes for step in self.steps), default=0)
 
     def identity(self) -> str:
-        """A deterministic digest over every term."""
+        """A deterministic digest over every term -- the full seal, binding included."""
         payload = json.dumps(dict(self.as_record()), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def restart_compatibility(self) -> Mapping[str, object]:
+        """What a governed restart must find unchanged -- D151-C21 R4. In memory only.
+
+        Every term of :meth:`as_record` except that the SQLite temporary binding is reduced to
+        its restart-stable fields (:meth:`SqliteTempBinding.stable_record`): the temporary root's
+        inode and both volumes' UUID and filesystem type. The attachment-instance observations
+        -- ``temp_root_device``, ``temp_device_identifier``, ``charged_device_identifier`` -- are
+        the only fields excluded. They stay sealed in the document through :meth:`identity`, and
+        a merge child still compares all eight against the binding its parent measured now.
+
+        Deliberately not a digest and not a document field: the document's one identity remains
+        the full seal, and this representation exists only to be compared, in memory, against the
+        plan a restarting orchestrator has just computed.
+        """
+        record = dict(self.as_record())
+        record["sqlite_temp_binding"] = dict(self.sqlite_temp_binding.stable_record())
+        return record
+
     def as_record(self) -> Mapping[str, object]:
-        """A deterministic rendering."""
+        """A deterministic rendering -- the sealed record, every binding field included."""
         return {
             "contract": self.contract,
             "plan_digest": self.plan_digest,

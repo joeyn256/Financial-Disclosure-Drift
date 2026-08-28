@@ -98,6 +98,7 @@ __all__ = [
     "PRE_F1_MINIMUM_FREE_BYTES",
     "QUALIFIED_EXTERNAL_VOLUME_UUID",
     "SQLITE_TMPDIR_ENV",
+    "SQLITE_TEMP_ROOT_MAX_ENCODED_BYTES",
     "ArchiveProof",
     "CapacityObservation",
     "ExternalCanaryPreflight",
@@ -246,6 +247,26 @@ F2_HARD_FLOOR_FREE_BYTES: Final = 10 * 1024**3
 #: ``DISCLOSURE_DRIFT_*`` variable: it belongs to SQLite, is read here rather than honoured as a
 #: package override, and is never printed.
 SQLITE_TMPDIR_ENV: Final = "SQLITE_TMPDIR"
+
+#: The longest ``SQLITE_TMPDIR`` value, in **encoded bytes**, beneath which SQLite's Unix VFS can
+#: still construct a temporary filename -- D151-C21 R1 (closing D151-C20 MINOR-1).
+#:
+#: SQLite composes every temporary and spill file name as ``<dir>/etilqs_<hex>`` inside a
+#: fixed-size ``mxPathname`` buffer and fails the open with ``SQLITE_ERROR`` when the composed
+#: name does not fit; the directory tests it applies first -- ``stat`` says directory,
+#: ``access(W_OK | X_OK)`` passes -- say nothing about that length, so a root that is perfectly
+#: usable to the operating system can still make the first spilling statement fail
+#: mid-transaction. **Measured on the governed build** (Python 3.12.13, SQLite 3.53.4, the
+#: ``unix`` VFS): a root of `486` encoded bytes spills under the governed directory in every
+#: fresh process, and one of `487` fails with ``OperationalError: SQL logic error`` in every
+#: fresh process, ASCII and multibyte alike. The unit is what ``getenv`` hands the VFS --
+#: ``os.fsencode`` of the raw value -- never a character count: a `414`-character path of `487`
+#: bytes fails exactly as a `487`-character one does.
+#:
+#: This is the limit of the current Unix VFS on the governed build, and it is stated as such.
+#: It is not claimed for every SQLite VFS or every build: a host whose measurement differs
+#: re-measures and freezes its own value in a reviewed change, and never relaxes this one.
+SQLITE_TEMP_ROOT_MAX_ENCODED_BYTES: Final = 486
 
 #: What a directory walk of ``SQLITE_TMPDIR`` can honestly claim -- D140-R7.
 #:
@@ -986,7 +1007,13 @@ def require_usable_sqlite_temp_root(raw: str | None) -> Path:
     * it names an **existing directory**;
     * that directory is **writable and searchable** by this process: ``os.access`` with
       ``W_OK | X_OK``, the same test SQLite performs. The test is by real uid, which a superuser
-      passes regardless; the governed processes never run as root.
+      passes regardless; the governed processes never run as root;
+    * its raw spelling is at most :data:`SQLITE_TEMP_ROOT_MAX_ENCODED_BYTES` **encoded bytes**
+      (D151-C21 R1). A longer root passes every test above and then fails inside the first
+      statement that spills, because the VFS cannot compose a temporary filename beneath it;
+      the count is ``len(os.fsencode(raw))`` -- the bytes ``getenv`` hands the VFS -- so a
+      multibyte path is measured as SQLite measures it, and a symlink is measured by the
+      spelling SQLite will open, never by what it resolves to.
 
     Volume identity is deliberately NOT decided here: each guard compares the candidate's volume
     against its own charged filesystem under the accepted D137-R8 identity semantics.
@@ -1031,6 +1058,16 @@ def require_usable_sqlite_temp_root(raw: str | None) -> Path:
             "SQLite will actually use, so an unusable one is refused"
         )
         raise ExternalWorkingRootError(message)
+    encoded_length = len(os.fsencode(raw))
+    if encoded_length > SQLITE_TEMP_ROOT_MAX_ENCODED_BYTES:
+        message = (
+            f"{SQLITE_TMPDIR_ENV} is {encoded_length} encoded bytes long, above the "
+            f"{SQLITE_TEMP_ROOT_MAX_ENCODED_BYTES}-byte limit beneath which SQLite's Unix VFS can "
+            "construct a temporary filename; the directory passes every usability test and the "
+            "first statement that spills would fail mid-transaction. The limit is counted in "
+            "encoded bytes, never characters, and the root is refused before governed use"
+        )
+        raise ExternalWorkingRootError(message)
     return candidate
 
 
@@ -1063,8 +1100,9 @@ def require_external_sqlite_tmpdir(
     * the variable is **set** and non-blank -- unset means SQLite spills to the operating
       system's temporary directory on the **internal** volume, silently;
     * it is an **absolute** path to an existing directory that this process can write and
-      search, stated without surrounding whitespace -- exactly the candidate SQLite will use
-      (:func:`require_usable_sqlite_temp_root`, C19-R1);
+      search, stated without surrounding whitespace and within the VFS's encoded-byte limit --
+      exactly the candidate SQLite will use (:func:`require_usable_sqlite_temp_root`, C19-R1,
+      C21-R1);
     * it is **outside the immutable D130 archive**;
     * it is on the **same qualified external volume** as the working world.
 

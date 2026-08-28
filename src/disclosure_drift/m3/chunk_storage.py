@@ -31,6 +31,8 @@ as a side effect, and the only verified copy is never the one considered.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -47,16 +49,58 @@ from disclosure_drift.m3.chunk_evidence import (
     ChunkEvidenceError,
     ChunkReceipt,
     build_artifact_manifest,
+    file_sha256,
     read_receipt_document,
     verify_artifact_manifest,
     write_once_json,
 )
 from disclosure_drift.m3.chunk_execution import completed_chunk_receipt
 from disclosure_drift.m3.chunk_plan import ChunkPlan, chunk_by_id
+from disclosure_drift.m3.chunk_transfer import (
+    LEGACY_TRANSFER_RECEIPT_CONTRACT,
+    STATE_RECLAIM_IN_PROGRESS,
+    STATE_RECLAIM_INTENT_DURABLE,
+    STATE_TRANSFER_VERIFIED_RECEIPT_DURABLE,
+    VERIFIED_TRANSFER_RECEIPT_CONTRACT,
+    InstrumentationLedger,
+    ManifestEntry,
+    ReclaimAuthorization,
+    ReclaimRecord,
+    TransferAuthorization,
+    TransferSource,
+    VerifiedTransferReceipt,
+    derive_transfer_state,
+    manifest_record,
+    reclaim_source,
+    recover_transfer,
+    require_count,
+    write_reclaim_intent,
+)
 from disclosure_drift.m3.external_working_root import QUALIFIED_EXTERNAL_VOLUME_UUID
+from disclosure_drift.m3.host_a_ssd_qualification import (
+    HostASsdQualification,
+    LiveTierProvider,
+    canonical_json_bytes,
+    reauthenticate_qualified_tier,
+)
 from disclosure_drift.storage.sqlite import utc_now
 
 __all__ = [
+    "LEGACY_TRANSFER_RECEIPT_CONTRACT",
+    "LEGACY_TRANSFER_RECEIPT_FIELDS",
+    "VERIFIED_TRANSFER_RECEIPT_CONTRACT",
+    "InternalAdmission",
+    "InternalStorageRequirement",
+    "RECLAIM_AUTHORITY_NAME",
+    "TRANSFER_AUTHORITY_NAME",
+    "authorize_chunk_transfer",
+    "authorize_internal_reclaim",
+    "charged_free_bytes",
+    "read_transfer_receipt_view",
+    "reclaim_transferred_chunk",
+    "require_internal_admission",
+    "transfer_completed_chunk",
+    "transfer_source_of",
     "CHUNK_STORAGE_STATES",
     "CHUNK_PEAK_REQUIREMENT_BYTES",
     "INTERNAL_RESERVE_BYTES",
@@ -357,11 +401,26 @@ class TransferReceipt:
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> TransferReceipt:
-        """Rebuild a transfer receipt from its stored mapping.
+        """Rebuild a legacy ``/1`` transfer receipt from its EXACT stored mapping -- D151-C22E-R1.
+
+        The record must carry exactly :data:`LEGACY_TRANSFER_RECEIPT_FIELDS`: a key missing or
+        unexpected -- the verified ``/2`` shape included -- is refused rather than read as a
+        superset. The contract VALUE is validated by every reader that reaches this from a file
+        (:func:`~disclosure_drift.m3.chunk_evidence.read_receipt_document` and
+        :func:`read_transfer_receipt_view`), each of which dispatches on it first.
 
         Raises:
-            ChunkStorageError: a field is absent or is not of the recorded type.
+            ChunkStorageError: the key set is not exact, or a field is not of the recorded type.
         """
+        present = {str(key) for key in record}
+        if present != LEGACY_TRANSFER_RECEIPT_FIELDS:
+            message = (
+                "a legacy transfer receipt is exact; this record is missing "
+                f"{sorted(LEGACY_TRANSFER_RECEIPT_FIELDS - present)} and carries unexpected "
+                f"{sorted(present - LEGACY_TRANSFER_RECEIPT_FIELDS)}; refused rather than read "
+                "as a superset or a subset"
+            )
+            raise ChunkStorageError(message)
         try:
             manifest = record["destination_manifest"]
             if not isinstance(manifest, Mapping):
@@ -549,6 +608,96 @@ class ChunkPlacement:
         }
 
 
+#: The exact key set of the accepted legacy ``/1`` transfer receipt.
+LEGACY_TRANSFER_RECEIPT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "contract",
+        "chunk_id",
+        "plan_digest",
+        "chunk_receipt_manifest_digest",
+        "destination_manifest",
+        "destination_volume_uuid",
+        "objects",
+        "bytes_transferred",
+        "verified_at_utc",
+        "status",
+    }
+)
+
+
+def _view_of_verified(verified: VerifiedTransferReceipt) -> TransferReceipt:
+    """The placement-level view of one exactly parsed ``/2`` receipt. In memory only: it keeps
+    the ``/2`` contract, is never serialized, and never stands in for a ``/1`` document."""
+    return TransferReceipt(
+        contract=verified.contract,
+        chunk_id=verified.chunk_id,
+        plan_digest=verified.plan_digest,
+        chunk_receipt_manifest_digest=verified.source_manifest_digest,
+        destination_manifest=ArtifactManifest.from_record(
+            dict(manifest_record(verified.destination_entries))
+        ),
+        destination_volume_uuid=verified.destination_volume_uuid,
+        objects=verified.objects,
+        bytes_transferred=verified.destination_bytes,
+        verified_at_utc=verified.transfer_completed_at_utc,
+        status=verified.transfer_outcome,
+    )
+
+
+def read_transfer_receipt_view(path: Path) -> TransferReceipt:
+    """One transfer receipt of either accepted version, dispatched on its contract FIRST --
+    D151-C22E-R1.
+
+    The document's ``contract`` selects exactly one exact-shape parser: the legacy ``/1``
+    shape through :meth:`TransferReceipt.from_record`, or the verified ``/2`` shape through the
+    C22 exact parser over a byte-canonical file, rendered as an in-memory view that keeps the
+    ``/2`` contract. There is no shape-based dispatch, no superset acceptance under either
+    version, no fallback from one parser to the other, and nothing is relabelled, resealed or
+    rewritten on disk.
+
+    Raises:
+        ChunkStorageError: the file is a link, absent, not a JSON object, carries a contract
+            this build does not read, or is not exactly the shape its contract names.
+    """
+    if path.is_symlink():
+        message = f"transfer receipt {path.name!r} is a symbolic link and is refused"
+        raise ChunkStorageError(message)
+    if not path.is_file():
+        message = f"no transfer receipt exists at {path.name!r}"
+        raise ChunkStorageError(message)
+    raw = path.read_bytes()
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"transfer receipt {path.name!r} is not decodable JSON and is refused: {exc}"
+        raise ChunkStorageError(message) from exc
+    if not isinstance(decoded, dict):
+        message = f"transfer receipt {path.name!r} is not a JSON object and is refused"
+        raise ChunkStorageError(message)
+    contract = decoded.get("contract")
+    if contract == LEGACY_TRANSFER_RECEIPT_CONTRACT:
+        return TransferReceipt.from_record(decoded)
+    if contract == VERIFIED_TRANSFER_RECEIPT_CONTRACT:
+        if canonical_json_bytes(decoded) != raw:
+            message = (
+                f"verified transfer receipt {path.name!r} is not byte-canonical; an edited or "
+                "re-serialized record is refused"
+            )
+            raise ChunkStorageError(message)
+        try:
+            verified = VerifiedTransferReceipt.from_document(decoded)
+        except DisclosureDriftError as exc:
+            message = f"verified transfer receipt {path.name!r} is refused: {exc}"
+            raise ChunkStorageError(message) from exc
+        return _view_of_verified(verified)
+    message = (
+        f"transfer receipt {path.name!r} carries contract {contract!r}; this build reads exactly "
+        f"{LEGACY_TRANSFER_RECEIPT_CONTRACT!r} or {VERIFIED_TRANSFER_RECEIPT_CONTRACT!r}, each "
+        "with its own exact shape, and never another"
+    )
+    raise ChunkStorageError(message)
+
+
 def _verified_external(
     chunk_id: str, external_root: Path
 ) -> tuple[Path, ChunkReceipt, TransferReceipt] | None:
@@ -558,9 +707,7 @@ def _verified_external(
     transfer_path = directory / TRANSFER_RECEIPT_FILENAME
     if not transfer_path.is_file():
         return None
-    transfer = TransferReceipt.from_record(
-        read_receipt_document(transfer_path, contract=TRANSFER_RECEIPT_CONTRACT)
-    )
+    transfer = read_transfer_receipt_view(transfer_path)
     receipt = ChunkReceipt.from_record(
         read_receipt_document(directory / CHUNK_RECEIPT_FILENAME, contract=CHUNK_RECEIPT_CONTRACT)
     )
@@ -874,3 +1021,284 @@ def internal_free_bytes(path: Path) -> int:
     capability will meet it.
     """
     return shutil.disk_usage(path).free
+
+
+# --------------------------------------------------------------------------- #
+# D151-C22: authority-first gates, the terminal source, dynamic internal admission, and the
+# family-facing verified transfer and governed reclaim -- C22-R3, R4, R5
+# --------------------------------------------------------------------------- #
+#: The names of the two closed constants, recorded in every authorization they grant.
+TRANSFER_AUTHORITY_NAME: Final = "REAL_CHUNK_TRANSFER_AUTHORITY"
+RECLAIM_AUTHORITY_NAME: Final = "REAL_INTERNAL_RECLAIM_AUTHORITY"
+
+
+def authorize_chunk_transfer() -> TransferAuthorization:
+    """The transfer authorization the closed constant grants, or a refusal -- the FIRST gate.
+
+    Raises:
+        ChunkStorageError: :data:`REAL_CHUNK_TRANSFER_AUTHORITY` is ``None``.
+    """
+    return TransferAuthorization(
+        grant=require_real_chunk_transfer_authority(), granted_by=TRANSFER_AUTHORITY_NAME
+    )
+
+
+def authorize_internal_reclaim() -> ReclaimAuthorization:
+    """The reclaim authorization the closed constant grants, or a refusal -- the FIRST gate.
+
+    A transfer receipt, an intent record and eligibility are each necessary for a reclaim and
+    none of them is this: while :data:`REAL_INTERNAL_RECLAIM_AUTHORITY` is ``None`` nothing
+    below this line is ever reached by a production caller.
+
+    Raises:
+        ChunkStorageError: the constant is ``None``.
+    """
+    return ReclaimAuthorization(
+        grant=require_real_internal_reclaim_authority(), granted_by=RECLAIM_AUTHORITY_NAME
+    )
+
+
+def transfer_source_of(chunk_root: Path, chunk_id: str) -> TransferSource:
+    """The terminal immutable source one completed chunk is -- inspection only.
+
+    The one valid terminal receipt is located and verified against its artifacts by the accepted
+    :func:`completed_chunk_receipt`; the manifest, the plan digest and the repository identity
+    come from that receipt, and the receipt's own bytes are hashed so the copy can prove it
+    carried the same terminal record. A chunk without a valid terminal receipt is never a
+    source.
+
+    Raises:
+        ChunkStorageError: the chunk carries no valid terminal receipt.
+        ChunkExecutionError: it carries more than one.
+    """
+    completed = completed_chunk_receipt(chunk_root, chunk_id)
+    if completed is None:
+        message = (
+            f"chunk {chunk_id!r} carries no valid terminal receipt; only a completed, immutable "
+            "chunk is ever a transfer source, and an attempt in progress is never copied"
+        )
+        raise ChunkStorageError(message)
+    receipt, directory = completed
+    receipt_sha256, receipt_bytes = file_sha256(directory / CHUNK_RECEIPT_FILENAME)
+    return TransferSource(
+        chunk_id=chunk_id,
+        plan_digest=receipt.plan_digest,
+        directory=directory,
+        entries=tuple(
+            ManifestEntry(
+                relative_path=entry.relative_path,
+                byte_length=entry.byte_length,
+                sha256=entry.sha256,
+            )
+            for entry in receipt.manifest.entries
+        ),
+        receipt_sha256=receipt_sha256,
+        receipt_bytes=receipt_bytes,
+        repository_head_sha=receipt.repository_head_sha,
+        repository_tree_sha=receipt.repository_tree_sha,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class InternalStorageRequirement:
+    """What the internal tier must hold free before the next world may be created -- C22-R5.
+
+    Five checked non-negative integer terms: the next chunk's projected peak, the level-specific
+    transient allowance, the reserve, the state that must currently stay retained, and the
+    output state the step must be able to write. Never a float, never a Boolean, never absent.
+    """
+
+    next_chunk_peak_bytes: int
+    level_transient_bytes: int
+    reserve_bytes: int
+    retained_state_bytes: int
+    output_state_bytes: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "next_chunk_peak_bytes",
+            "level_transient_bytes",
+            "reserve_bytes",
+            "retained_state_bytes",
+            "output_state_bytes",
+        ):
+            try:
+                require_count(getattr(self, name), name)
+            except DisclosureDriftError as exc:
+                raise ChunkStorageError(str(exc)) from exc
+
+    @property
+    def required_free_bytes(self) -> int:
+        """The whole floor: every term, summed with exact integers."""
+        return (
+            self.next_chunk_peak_bytes
+            + self.level_transient_bytes
+            + self.reserve_bytes
+            + self.retained_state_bytes
+            + self.output_state_bytes
+        )
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "next_chunk_peak_bytes": self.next_chunk_peak_bytes,
+            "level_transient_bytes": self.level_transient_bytes,
+            "reserve_bytes": self.reserve_bytes,
+            "retained_state_bytes": self.retained_state_bytes,
+            "output_state_bytes": self.output_state_bytes,
+            "required_free_bytes": self.required_free_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class InternalAdmission:
+    """One internal admission decision, with every input it was made from."""
+
+    free_bytes: int
+    required_free_bytes: int
+    requirement: InternalStorageRequirement
+    admitted: bool
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "free_bytes": self.free_bytes,
+            "required_free_bytes": self.required_free_bytes,
+            "requirement": dict(self.requirement.as_record()),
+            "admitted": self.admitted,
+        }
+
+
+def charged_free_bytes(path: Path) -> int:
+    """Free bytes on the filesystem that will be charged, measured now, for ``path``'s nearest
+    existing ancestor. A measurement, taken immediately before a world is created and again
+    after every transfer or reclaim; never a remembered value."""
+    return internal_free_bytes(_nearest_existing_path(path))
+
+
+def _nearest_existing_path(path: Path) -> Path:
+    candidate = Path(os.path.realpath(path))
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
+def require_internal_admission(
+    *, free_bytes: int, requirement: InternalStorageRequirement
+) -> InternalAdmission:
+    """Admit the next world onto the internal tier, or refuse BEFORE it exists -- C22-R5.
+
+    ``>=`` at the floor: the floor admits and one byte below refuses. ``free_bytes`` is the
+    measurement :func:`charged_free_bytes` just took on the charged filesystem. ENOSPC is never
+    control flow and nothing is deleted, spilled or cleaned to reach the floor.
+
+    Raises:
+        ChunkStorageError: ``free_bytes`` is not a non-negative integer, or the floor is not met.
+    """
+    try:
+        free = require_count(free_bytes, "free_bytes")
+    except DisclosureDriftError as exc:
+        raise ChunkStorageError(str(exc)) from exc
+    required = requirement.required_free_bytes
+    decision = InternalAdmission(
+        free_bytes=free,
+        required_free_bytes=required,
+        requirement=requirement,
+        admitted=free >= required,
+    )
+    if not decision.admitted:
+        message = (
+            f"the next world is NOT ADMITTED onto the internal tier: {free} bytes free, below "
+            f"the required {required} = {dict(requirement.as_record())}. STOP: nothing is "
+            "created, and nothing is deleted, spilled, reclaimed or cleaned to reach the floor"
+        )
+        raise ChunkStorageError(message)
+    return decision
+
+
+def transfer_completed_chunk(
+    *,
+    chunk_root: Path,
+    chunk_id: str,
+    destination_root: Path,
+    qualification: HostASsdQualification,
+    external_reserve_bytes: int,
+    provider: LiveTierProvider | None = None,
+    telemetry: InstrumentationLedger | None = None,
+) -> VerifiedTransferReceipt:
+    """Copy one completed chunk onto the qualified tier and prove it arrived -- C22-R3.
+
+    In order: the transfer authority (closed: refuses while ``None``); the qualification record
+    must admit a copy and the live tier must reauthenticate against it; the chunk must be a
+    terminal immutable source; then the verified transfer lifecycle, recovering an interrupted
+    earlier attempt from whatever state it left. The internal copy is untouched throughout.
+
+    Raises:
+        ChunkStorageError: no authority, or the chunk is not a completed source.
+        HostASsdQualificationError: the tier does not admit a copy or is not the qualified one.
+        ChunkTransferError: a transfer step refuses.
+    """
+    authorization = authorize_chunk_transfer()
+    observation = reauthenticate_qualified_tier(qualification, destination_root, provider=provider)
+    source = transfer_source_of(chunk_root, chunk_id)
+    return recover_transfer(
+        source=source,
+        destination_root=destination_root,
+        qualification=qualification,
+        observation=observation,
+        authorization=authorization,
+        external_reserve_bytes=external_reserve_bytes,
+        telemetry=telemetry,
+    )
+
+
+def reclaim_transferred_chunk(
+    *,
+    chunk_root: Path,
+    chunk_id: str,
+    destination_root: Path,
+    qualification: HostASsdQualification,
+    provider: LiveTierProvider | None = None,
+    telemetry: InstrumentationLedger | None = None,
+) -> ReclaimRecord:
+    """Reclaim the internal copy of one verified-transferred chunk -- C22-R4.
+
+    The reclaim authority is the FIRST statement and refuses while
+    :data:`REAL_INTERNAL_RECLAIM_AUTHORITY` is ``None``; a verified transfer never implies it.
+    Then the tier is reauthenticated, the terminal source is inspected, a durable intent is
+    written unless one already exists for exactly this receipt, and the exact entries -- or the
+    exact remaining subset on a resumption -- are removed in deterministic order with a
+    completion recorded only after the source is absent.
+
+    Raises:
+        ChunkStorageError: no authority, or the chunk is not a completed source.
+        HostASsdQualificationError: the tier does not admit a reclaim or is not the qualified one.
+        ChunkTransferError: a reclaim step refuses.
+    """
+    authorization = authorize_internal_reclaim()
+    observation = reauthenticate_qualified_tier(qualification, destination_root, provider=provider)
+    source = transfer_source_of(chunk_root, chunk_id)
+    report = derive_transfer_state(
+        destination_root=destination_root, chunk_id=chunk_id, source_directory=source.directory
+    )
+    if report.state == STATE_TRANSFER_VERIFIED_RECEIPT_DURABLE:
+        write_reclaim_intent(
+            source=source,
+            destination_root=destination_root,
+            qualification=qualification,
+            observation=observation,
+        )
+    elif report.state not in (STATE_RECLAIM_INTENT_DURABLE, STATE_RECLAIM_IN_PROGRESS):
+        message = (
+            f"chunk {chunk_id!r} is in transfer state {report.state!r}; a reclaim rests only on "
+            "a verified transfer with a durable receipt, and nothing was deleted"
+        )
+        raise ChunkStorageError(message)
+    return reclaim_source(
+        authorization=authorization,
+        source=source,
+        destination_root=destination_root,
+        qualification=qualification,
+        observation=observation,
+        telemetry=telemetry,
+    )

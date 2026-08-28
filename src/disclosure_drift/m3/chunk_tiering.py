@@ -53,6 +53,7 @@ from disclosure_drift.m3.chunk_storage import (
     STATE_INTERNAL_RECLAIM_ELIGIBLE,
     STATE_INTERNAL_RECLAIMED,
     STATE_TRANSFER_VERIFIED_EXTERNAL,
+    VERIFIED_TRANSFER_RECEIPT_CONTRACT,
     ChunkPlacement,
     TransferReceipt,
     accepted_internal_reserve_bytes,
@@ -64,8 +65,14 @@ from disclosure_drift.m3.external_working_root import (
     VolumeIdentityProvider,
     require_usable_sqlite_temp_root,
 )
+from disclosure_drift.m3.host_a_ssd_qualification import (
+    HostASsdQualification,
+    require_copy_capable,
+)
 
 __all__ = [
+    "external_tier_from_qualification",
+    "reclaim_eligibility_with_tier",
     "ARTIFACT_LIFECYCLE_STATES",
     "LIFECYCLE_EXTERNAL_COPY_IN_PROGRESS",
     "LIFECYCLE_EXTERNAL_COPY_VERIFIED",
@@ -1703,3 +1710,108 @@ def require_sufficient_spill(proposal: SpillProposal) -> SpillProposal:
         )
         raise ChunkTieringError(message)
     return proposal
+
+
+# --------------------------------------------------------------------------- #
+# D151-C22: the qualification record as the tier, and tier-aware eligibility -- R2, R4
+# --------------------------------------------------------------------------- #
+_MIB: Final = 1 << 20
+
+
+def _measured_rate(section: object, key: str) -> int:
+    if not isinstance(section, Mapping):
+        message = "the qualification record carries no measured throughput section; refused"
+        raise ChunkTieringError(message)
+    value = section.get(key)
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        message = f"the qualification record carries no measured {key}; refused"
+        raise ChunkTieringError(message)
+    return int(value * _MIB)
+
+
+def external_tier_from_qualification(
+    qualification: HostASsdQualification, *, qualified_by: str
+) -> ExternalTierQualification:
+    """The external tier one sealed qualification record describes -- C22-R2.
+
+    Every field is a fact the record measured: the stable tier-compatibility identity is the
+    mount identity, the physical reconnect qualification is the round-trip verification, and the
+    sustained rates are the sealed fsync-complete write and post-reconnect read means. A record
+    of class FAIL, or one whose physical reconnect stage did not run, describes no tier at all
+    and refuses here; a COPY_ONLY record describes a copy tier and is never represented as
+    reclaim-capable by anything derived from it.
+
+    Raises:
+        ChunkTieringError: the record does not admit a copy or carries no measured rates.
+    """
+    try:
+        require_copy_capable(qualification)
+    except DisclosureDriftError as exc:
+        message = f"no external tier is derivable from this qualification record: {exc}"
+        raise ChunkTieringError(message) from exc
+    metrics = qualification.document.get("metrics")
+    if not isinstance(metrics, Mapping):
+        message = "the qualification record carries no metrics section; refused"
+        raise ChunkTieringError(message)
+    compat = qualification.stable_tier_compatibility
+    return ExternalTierQualification(
+        volume_identity=compat.volume_uuid,
+        filesystem=compat.filesystem_type,
+        physical_topology=compat.topology_class,
+        mount_identity=qualification.stable_tier_compatibility_identity,
+        writable_capacity_bytes=compat.volume_total_bytes,
+        sustained_copy_bytes_per_second=_measured_rate(
+            metrics.get("write"), "mean_write_fsync_complete_mib_per_s"
+        ),
+        sustained_read_bytes_per_second=_measured_rate(
+            metrics.get("reconnect_readback"), "mean_mib_per_s"
+        ),
+        round_trip_verified=qualification.physical_reconnect_qualified,
+        disconnect_semantics="safe_eject_then_physical_reconnect_reauthenticated",
+        qualified_by=qualified_by,
+    )
+
+
+def reclaim_eligibility_with_tier(
+    placement: ChunkPlacement,
+    *,
+    transfer_record: Mapping[str, object] | None,
+    external_root: Path | None = None,
+    qualification: HostASsdQualification | None,
+) -> ReclaimEligibility:
+    """The accepted eligibility predicate, plus the tier's own proof -- C22-R4.
+
+    Everything :func:`reclaim_eligibility` proves, and additionally that the qualification
+    record admits a reclaim -- class RECLAIM_CAPABLE with a completed physical reconnect
+    qualification -- and that the bindings came from a verified ``/2`` receipt (C22E-R1). A
+    COPY_ONLY or FAIL record, no record, or a legacy ``/1`` receipt makes the copy ineligible
+    whatever else the bindings say. A computation; never an action.
+    """
+    base = reclaim_eligibility(
+        placement, transfer_record=transfer_record, external_root=external_root
+    )
+    proofs = dict(base.proofs)
+    proofs["qualification_reclaim_capable"] = (
+        qualification is not None and qualification.admits_reclaim
+    )
+    # D151-C22E-R1: only bindings taken from a verified /2 receipt may confer eligibility here.
+    # A legacy /1 receipt's bindings, or any mapping that does not name the /2 contract, refuse.
+    proofs["transfer_receipt_is_verified_v2"] = (
+        transfer_record is not None
+        and transfer_record.get("receipt_contract") == VERIFIED_TRANSFER_RECEIPT_CONTRACT
+    )
+    eligible = all(proofs.values())
+    return ReclaimEligibility(
+        chunk_id=base.chunk_id,
+        lifecycle=base.lifecycle,
+        eligible=eligible,
+        reclaim_authority=REAL_INTERNAL_RECLAIM_AUTHORITY,
+        proofs=proofs,
+        detail=(
+            "RECLAIM-ELIGIBLE on a RECLAIM_CAPABLE tier and NOT reclaimed: deletion needs the "
+            "reclaim authority, which is None, a durable intent, and a mechanism this module "
+            "does not hold"
+            if eligible
+            else "not eligible: at least one proof is absent"
+        ),
+    )

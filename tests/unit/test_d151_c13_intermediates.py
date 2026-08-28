@@ -1848,12 +1848,15 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
     # import statement forms, and it distinguishes the accepted bounded capability (a fixed-argv
     # read-only system query) from a forbidden one rather than banning every import.
     assert reached_from(ewr.__name__) == set(STORAGE_BINDING_CHAIN)
+    # D151-C22: chunk_tiering additionally reaches the qualification-record module, which reads
+    # sealed Host-A/SSD qualification records and launches only fixed read-only system queries.
     assert package_imports(tiering_source) == {
         "disclosure_drift.errors",
         "disclosure_drift.m3.external_working_root",
         "disclosure_drift.m3.chunk_evidence",
         "disclosure_drift.m3.chunk_plan",
         "disclosure_drift.m3.chunk_storage",
+        "disclosure_drift.m3.host_a_ssd_qualification",
     }
     programs: dict[str, set[str]] = {}
     for name in sorted(STORAGE_BINDING_CHAIN):

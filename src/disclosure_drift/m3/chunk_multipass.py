@@ -123,7 +123,8 @@ import os
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, cast
@@ -214,6 +215,7 @@ from disclosure_drift.m3.chunk_tiering import (
     require_merge_admission,
     require_sqlite_temp_binding,
 )
+from disclosure_drift.m3.chunk_transfer import InstrumentationLedger
 from disclosure_drift.m3.compact_evidence import (
     COMPACT_EVIDENCE_SIDECAR_FILENAME,
     CompactEvidenceSidecar,
@@ -2691,6 +2693,30 @@ def _write_or_require_same(path: Path, record: Mapping[str, object], label: str)
     write_once_json(path, dict(record))
 
 
+@contextmanager
+def _instrumented(
+    telemetry: InstrumentationLedger | None, *, step: str, wal_path: Path
+) -> Iterator[None]:
+    """Stat-only instrumentation around one child merge -- D151-C22 R6, a nonactivated seam.
+
+    Nothing here opens a database: the ledger watches the child's write-ahead log by ``stat``
+    and the volumes by ``statvfs`` on a thread, and the orchestrator self-reports its own
+    resident size before and after the child so process-exit reclamation is measured. Absent a
+    ledger this is a no-op and the run is byte-for-byte the accepted one.
+    """
+    if telemetry is None:
+        yield
+        return
+    rss_before = process_peak_resident_bytes()
+    telemetry.sample(f"merge_started:{step}", wal_path=wal_path)
+    with telemetry.watch(wal_path=wal_path):
+        yield
+    telemetry.record_child_exit(
+        parent_rss_before=rss_before, parent_rss_after=process_peak_resident_bytes()
+    )
+    telemetry.sample(f"merge_child_exit:{step}", wal_path=wal_path)
+
+
 def run_multipass_f0(  # noqa: PLR0915
     *,
     plan: ChunkPlan,
@@ -2703,6 +2729,7 @@ def run_multipass_f0(  # noqa: PLR0915
     capacity_observations: Sequence[Mapping[str, object]] = (),
     timeout_seconds: float | None = None,
     observe: Callable[[str], None] | None = None,
+    telemetry: InstrumentationLedger | None = None,
 ) -> MultipassResult:
     """Consolidate a >9-chunk plan: every level-1 group, then level 2, each in its own process.
 
@@ -2787,26 +2814,31 @@ def run_multipass_f0(  # noqa: PLR0915
         attempt_directory, attempt = next_intermediate_attempt_directory(
             intermediates_root, group.group_id
         )
-        receipt = run_group_merge(
-            GroupMergeRequest(
-                plan_path=str(plan_path),
-                schedule_path=str(schedule_path),
-                group_id=group.group_id,
-                attempt=attempt,
-                attempt_directory=str(attempt_directory),
-                internal_root=str(internal_root),
-                external_root=None if external_root is None else str(external_root),
-                operational_catalog=str(operational_catalog),
-                cache_bytes=cache_bytes,
-                repository_head_sha=repository.head_sha,
-                repository_tree_sha=repository.tree_sha,
-                storage_requirements=dict(requirements.as_record()),
-                expected_sqlite_temp_binding=dict(binding.as_record()),
-            ),
-            predecessor_pid=previous,
-            timeout_seconds=timeout_seconds,
-            observe=observe,
-        )
+        with _instrumented(
+            telemetry,
+            step=group.group_id,
+            wal_path=attempt_directory / f"{WORKING_CATALOG_FILENAME}-wal",
+        ):
+            receipt = run_group_merge(
+                GroupMergeRequest(
+                    plan_path=str(plan_path),
+                    schedule_path=str(schedule_path),
+                    group_id=group.group_id,
+                    attempt=attempt,
+                    attempt_directory=str(attempt_directory),
+                    internal_root=str(internal_root),
+                    external_root=None if external_root is None else str(external_root),
+                    operational_catalog=str(operational_catalog),
+                    cache_bytes=cache_bytes,
+                    repository_head_sha=repository.head_sha,
+                    repository_tree_sha=repository.tree_sha,
+                    storage_requirements=dict(requirements.as_record()),
+                    expected_sqlite_temp_binding=dict(binding.as_record()),
+                ),
+                predecessor_pid=previous,
+                timeout_seconds=timeout_seconds,
+                observe=observe,
+            )
         previous = receipt.pid
         pids.append(receipt.pid)
         receipts.append(receipt)
@@ -2820,27 +2852,30 @@ def run_multipass_f0(  # noqa: PLR0915
         peak_ratio=requirements.level_two_peak_ratio,
         requirements=requirements,
     )
-    document = run_final_merge(
-        FinalMergeRequest(
-            plan_path=str(plan_path),
-            schedule_path=str(schedule_path),
-            intermediates_root=str(intermediates_root),
-            internal_root=str(internal_root),
-            external_root=None if external_root is None else str(external_root),
-            operational_catalog=str(operational_catalog),
-            world_directory=str(world_directory),
-            run_id=run_id,
-            cache_bytes=cache_bytes,
-            repository_head_sha=repository.head_sha,
-            repository_tree_sha=repository.tree_sha,
-            storage_requirements=dict(requirements.as_record()),
-            expected_sqlite_temp_binding=dict(binding.as_record()),
-            capacity_observations=tuple(dict(item) for item in capacity_observations),
-        ),
-        predecessor_pid=previous,
-        timeout_seconds=timeout_seconds,
-        observe=observe,
-    )
+    with _instrumented(
+        telemetry, step="final", wal_path=world_directory / f"{WORKING_CATALOG_FILENAME}-wal"
+    ):
+        document = run_final_merge(
+            FinalMergeRequest(
+                plan_path=str(plan_path),
+                schedule_path=str(schedule_path),
+                intermediates_root=str(intermediates_root),
+                internal_root=str(internal_root),
+                external_root=None if external_root is None else str(external_root),
+                operational_catalog=str(operational_catalog),
+                world_directory=str(world_directory),
+                run_id=run_id,
+                cache_bytes=cache_bytes,
+                repository_head_sha=repository.head_sha,
+                repository_tree_sha=repository.tree_sha,
+                storage_requirements=dict(requirements.as_record()),
+                expected_sqlite_temp_binding=dict(binding.as_record()),
+                capacity_observations=tuple(dict(item) for item in capacity_observations),
+            ),
+            predecessor_pid=previous,
+            timeout_seconds=timeout_seconds,
+            observe=observe,
+        )
     return MultipassResult(
         world_directory=world_directory,
         receipt=document,

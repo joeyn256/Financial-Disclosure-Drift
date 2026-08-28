@@ -27,6 +27,7 @@ import ast
 import inspect
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,36 @@ REQUIREMENTS = ct.MultipassStorageRequirements(
 #: this repository may depend on the host's real volume layout, and production compares measured
 #: identities either way.
 SYNTHETIC_MERGE_VOLUME = "00000000-0000-0000-0000-00000C170000"
+
+
+#: An inert, shape-valid binding record for requests built only to be refused BEFORE the binding
+#: is consulted (the authority-first proofs run with no temporary root stated). Device and inode
+#: ``0`` name no directory a child could measure, so a body that DID reach the comparison refuses.
+INERT_BINDING_RECORD: dict[str, object] = dict(
+    ct.SqliteTempBinding(
+        temp_root_device=0,
+        temp_root_inode=0,
+        temp_volume_uuid=SYNTHETIC_MERGE_VOLUME,
+        temp_filesystem_type="apfs",
+        temp_device_identifier="disk-synthetic",
+        charged_volume_uuid=SYNTHETIC_MERGE_VOLUME,
+        charged_filesystem_type="apfs",
+        charged_device_identifier="disk-synthetic",
+    ).as_record()
+)
+
+
+def synthetic_expected_binding(charged_path: Path) -> dict[str, object]:
+    """The binding a synthetic request carries -- D151-C19 R4.
+
+    MEASURED now, in this process, through the same provider seam the merge child will use:
+    exactly what ``run_multipass_f0`` does before it writes a request. With no usable temporary
+    root stated the inert record is returned, for requests that exist only to be refused earlier.
+    """
+    try:
+        return dict(ct.require_sqlite_temp_binding(charged_path=charged_path).as_record())
+    except ct.ChunkTieringError:
+        return dict(INERT_BINDING_RECORD)
 
 
 def synthetic_volume_provider(uuid: str = SYNTHETIC_MERGE_VOLUME) -> Any:
@@ -244,6 +275,7 @@ def group_request(
     database: Path,
     requirements: ct.MultipassStorageRequirements = REQUIREMENTS,
     external_root: Path | None = None,
+    expected_binding: Mapping[str, object] | None = None,
 ) -> cm.GroupMergeRequest:
     assert c1.PINNED is not None
     return cm.GroupMergeRequest(
@@ -259,6 +291,11 @@ def group_request(
         repository_head_sha=c1.PINNED.head_sha,
         repository_tree_sha=c1.PINNED.tree_sha,
         storage_requirements=dict(requirements.as_record()),
+        expected_sqlite_temp_binding=(
+            synthetic_expected_binding(attempt_directory)
+            if expected_binding is None
+            else dict(expected_binding)
+        ),
     )
 
 
@@ -272,6 +309,7 @@ def final_request(
     run_id: str = "c13-run",
     requirements: ct.MultipassStorageRequirements = REQUIREMENTS,
     external_root: Path | None = None,
+    expected_binding: Mapping[str, object] | None = None,
 ) -> cm.FinalMergeRequest:
     assert c1.PINNED is not None
     return cm.FinalMergeRequest(
@@ -287,6 +325,11 @@ def final_request(
         repository_head_sha=c1.PINNED.head_sha,
         repository_tree_sha=c1.PINNED.tree_sha,
         storage_requirements=dict(requirements.as_record()),
+        expected_sqlite_temp_binding=(
+            synthetic_expected_binding(world_directory)
+            if expected_binding is None
+            else dict(expected_binding)
+        ),
     )
 
 

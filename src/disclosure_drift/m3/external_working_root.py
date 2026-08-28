@@ -125,6 +125,7 @@ __all__ = [
     "require_mounted_qualified_volume",
     "require_mounted_volume_directory",
     "require_qualified_volume",
+    "require_usable_sqlite_temp_root",
     "verify_d130_archive",
 ]
 
@@ -963,6 +964,76 @@ def observe_capacity(
 # --------------------------------------------------------------------------- #
 # SQLITE_TMPDIR
 # --------------------------------------------------------------------------- #
+def require_usable_sqlite_temp_root(raw: str | None) -> Path:
+    """Return the ``SQLITE_TMPDIR`` candidate exactly as SQLite will use it, or refuse -- C19-R1.
+
+    SQLite's Unix VFS (``unixTempFileDir``) takes ``SQLITE_TMPDIR`` **verbatim** and uses it only
+    when ``stat`` reports a directory **and** ``access(dir, W_OK | X_OK)`` succeeds; on any other
+    reading it falls through -- silently -- to ``TMPDIR``, ``/var/tmp``, ``/usr/tmp``, ``/tmp``
+    and ``.``. A guard that validated a normalized copy of the value, or an existing directory the
+    process could not write to, therefore admitted candidates SQLite itself bypassed (D151-C18
+    MINOR-1, reproduced on a second real volume: a ``chmod 500`` root, a ``chmod 600`` root and
+    values with trailing or leading whitespace all passed BOTH accepted guards while SQLite opened
+    its ``etilqs_*`` spill under the internal ``TMPDIR``).
+
+    So this is the ONE candidate validation both guards share (C19-R2), and it validates the raw
+    string SQLite consumes, never a normalized copy of it:
+
+    * the value is **set** and non-blank;
+    * it is **byte-identical to its stripped form** -- a value that needs ``.strip()`` to become
+      valid is invalid, because SQLite will not strip it;
+    * it is an **absolute** path;
+    * it names an **existing directory**;
+    * that directory is **writable and searchable** by this process: ``os.access`` with
+      ``W_OK | X_OK``, the same test SQLite performs. The test is by real uid, which a superuser
+      passes regardless; the governed processes never run as root.
+
+    Volume identity is deliberately NOT decided here: each guard compares the candidate's volume
+    against its own charged filesystem under the accepted D137-R8 identity semantics.
+
+    Raises:
+        ExternalWorkingRootError: any condition fails. Nothing is created, and nothing is
+            normalized on the caller's behalf.
+    """
+    if raw is None or not raw.strip():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} is not set; SQLite would spill temporary and sort files to the "
+            "operating system's temporary directory, on a volume no capacity model here has "
+            "charged. It is required explicitly"
+        )
+        raise ExternalWorkingRootError(message)
+    if raw != raw.strip():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} carries leading or trailing whitespace; SQLite consumes the raw "
+            "value, would find no such directory, and would fall through to another temporary "
+            "root silently. A value that needs normalizing to become valid is refused, never "
+            "normalized"
+        )
+        raise ExternalWorkingRootError(message)
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} is not an absolute path; a relative temporary root resolves "
+            "against the working directory, which is not a stated location"
+        )
+        raise ExternalWorkingRootError(message)
+    if not candidate.is_dir():
+        message = (
+            f"{SQLITE_TMPDIR_ENV} does not name an existing directory; the temporary root is "
+            "created and verified before launch rather than discovered mid-transaction"
+        )
+        raise ExternalWorkingRootError(message)
+    if not os.access(candidate, os.W_OK | os.X_OK):
+        message = (
+            f"{SQLITE_TMPDIR_ENV} names a directory this process cannot write and search "
+            "(W_OK | X_OK); SQLite performs exactly that access test and, when it fails, falls "
+            "through to the next temporary candidate silently. The governed root must be the one "
+            "SQLite will actually use, so an unusable one is refused"
+        )
+        raise ExternalWorkingRootError(message)
+    return candidate
+
+
 def require_external_sqlite_tmpdir(
     *,
     working_root: Path,
@@ -991,7 +1062,9 @@ def require_external_sqlite_tmpdir(
     * an explicitly supplied mapping **agrees** with the process environment;
     * the variable is **set** and non-blank -- unset means SQLite spills to the operating
       system's temporary directory on the **internal** volume, silently;
-    * it is an **absolute** path to an existing directory;
+    * it is an **absolute** path to an existing directory that this process can write and
+      search, stated without surrounding whitespace -- exactly the candidate SQLite will use
+      (:func:`require_usable_sqlite_temp_root`, C19-R1);
     * it is **outside the immutable D130 archive**;
     * it is on the **same qualified external volume** as the working world.
 
@@ -1012,27 +1085,9 @@ def require_external_sqlite_tmpdir(
                 "disagreement is refused rather than resolved in either direction"
             )
             raise ExternalWorkingRootError(message)
-    raw = consumed
-    if raw is None or not raw.strip():
-        message = (
-            f"{SQLITE_TMPDIR_ENV} is not set; SQLite would spill temporary and sort files to the "
-            "operating system's temporary directory on the internal volume, which the corrected "
-            "canary's capacity model does not cover. It is required explicitly"
-        )
-        raise ExternalWorkingRootError(message)
-    candidate = Path(raw.strip())
-    if not candidate.is_absolute():
-        message = (
-            f"{SQLITE_TMPDIR_ENV} is not an absolute path; a relative temporary root resolves "
-            "against the working directory, which is not a stated external location"
-        )
-        raise ExternalWorkingRootError(message)
-    if not candidate.is_dir():
-        message = (
-            f"{SQLITE_TMPDIR_ENV} does not name an existing directory; the temporary root is "
-            "created and verified before launch rather than discovered mid-transaction"
-        )
-        raise ExternalWorkingRootError(message)
+    # The candidate conditions are the ones SQLite itself applies, shared with the multipass
+    # guard through ONE validator (C19-R1, C19-R2): raw value, no normalization, W_OK | X_OK.
+    candidate = require_usable_sqlite_temp_root(consumed)
     resolved = require_outside_d130_archive(candidate, archive=archive)
     try:
         temp_volume = require_qualified_volume(

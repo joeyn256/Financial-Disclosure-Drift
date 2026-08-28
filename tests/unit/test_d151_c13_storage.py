@@ -423,6 +423,7 @@ def test_t07_the_storage_plan_retains_every_input_and_credits_no_reclaim(tmp_pat
         chunk_bytes_by_id=bytes_by_id,
         seed_catalog_bytes=database.stat().st_size,
         requirements=_requirements(),
+        sqlite_temp_binding=ct.SqliteTempBinding.from_record(c13.INERT_BINDING_RECORD),
     )
     assert storage.contract == ct.MULTIPASS_STORAGE_PLAN_CONTRACT
     assert storage.retained_chunk_bytes == sum(bytes_by_id.values())
@@ -453,6 +454,7 @@ def test_t07_the_storage_plan_retains_every_input_and_credits_no_reclaim(tmp_pat
             chunk_bytes_by_id=bytes_by_id,
             seed_catalog_bytes=0,
             requirements=_requirements(),
+            sqlite_temp_binding=ct.SqliteTempBinding.from_record(c13.INERT_BINDING_RECORD),
         )
 
 

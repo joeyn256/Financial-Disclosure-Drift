@@ -68,9 +68,19 @@ when it points nowhere. :func:`~disclosure_drift.m3.chunk_tiering.require_sqlite
 therefore measures both volume identities through the accepted D137-R8 provider and refuses a
 mismatch before any world, attempt directory or database exists. The orchestrator proves it, and
 then **each merge child proves it again for itself**: a child that accepted the parent's word, or
-a field in its request, would be trusting a claim it had not measured. That variable is the only
-environment this module reads, it is read from the environment SQLite itself consumes, and its
-presence alone is never the proof -- the volume identity is.
+a field in its request, would be trusting a claim it had not measured. That variable is read by
+:mod:`~disclosure_drift.m3.chunk_tiering` alone, from the environment SQLite itself consumes;
+THIS module reads no environment at all, and no other environment, configuration or
+command-line control exists anywhere on this path. Its presence alone is never the proof -- the
+volume identity is.
+
+**The measured binding is durable and remeasured -- D151-C19 R4.** The orchestrator's measured
+:class:`~disclosure_drift.m3.chunk_tiering.SqliteTempBinding` is folded into the sealed storage
+plan (contract ``/2``, written once with the identity that seals it) and handed to every merge
+child as the topology the consolidation was admitted on. The child never trusts it: it measures
+its own binding first, and then requires the two to agree field for field before any world,
+attempt directory or database exists. A changed ``SQLITE_TMPDIR``, a changed volume, or a forged
+or pre-C19 binding record refuses.
 
 **The two transient allowances are separate -- D151-C17 R5.** Level 2 materializes whole-plan
 temporary state that no level-1 group does, so
@@ -180,6 +190,7 @@ from disclosure_drift.m3.chunk_tiering import (
     MergeAdmission,
     MultipassStoragePlan,
     MultipassStorageRequirements,
+    SqliteTempBinding,
     accepted_multipass_storage_requirements,
     merge_step_requirement,
     plan_multipass_storage,
@@ -881,9 +892,12 @@ def _plan_first_witness_counters(
     ``INSERT ... SELECT`` shapes of :func:`stage_first_witness_corrections` with the insert
     replaced by a count, so what is counted is exactly what one pass over these chunks would have
     staged; the member reduction is
-    :func:`~disclosure_drift.m3.chunk_consolidation._member_deltas` itself. The statement count is
-    a constant plus two per chunk -- one insert of its accession rows, one of its ledger -- never
-    one per accession or per rival.
+    :func:`~disclosure_drift.m3.chunk_consolidation._member_deltas` itself. Database interaction
+    scales with the CHUNK COUNT and never with the accession or rival population: no statement is
+    issued per accession or per rival (D151-C8 M2). Under the traced implementation the count is
+    ``11 + 6 * chunks`` -- per chunk, one attach and one detach of its catalog, one attach and one
+    detach of its witness ledger, one insert of its accession rows and one of its ledger rows --
+    and the committed statement-count test holds this prose to the measurement (D151-C19 R6).
 
     Raises:
         ChunkMultipassError: the derivation was already run on this connection; a contested
@@ -1549,6 +1563,7 @@ class GroupMergeRequest:
     repository_head_sha: str
     repository_tree_sha: str
     storage_requirements: Mapping[str, object]
+    expected_sqlite_temp_binding: Mapping[str, object]
     kind: str = MULTIPASS_REQUEST_KIND_GROUP
 
     def as_record(self) -> Mapping[str, object]:
@@ -1567,6 +1582,7 @@ class GroupMergeRequest:
             "repository_head_sha": self.repository_head_sha,
             "repository_tree_sha": self.repository_tree_sha,
             "storage_requirements": dict(self.storage_requirements),
+            "expected_sqlite_temp_binding": dict(self.expected_sqlite_temp_binding),
         }
 
     @classmethod
@@ -1580,8 +1596,12 @@ class GroupMergeRequest:
             cache = record["cache_bytes"]
             external = record["external_root"]
             storage = record["storage_requirements"]
-            if not isinstance(storage, Mapping):
-                message = "a group merge request's storage requirements are not a mapping"
+            expected = record["expected_sqlite_temp_binding"]
+            if not isinstance(storage, Mapping) or not isinstance(expected, Mapping):
+                message = (
+                    "a group merge request's storage requirements or expected temp binding are "
+                    "not mappings"
+                )
                 raise ChunkMultipassError(message)
             return cls(
                 kind=str(record["kind"]),
@@ -1597,6 +1617,7 @@ class GroupMergeRequest:
                 repository_head_sha=str(record["repository_head_sha"]),
                 repository_tree_sha=str(record["repository_tree_sha"]),
                 storage_requirements={str(key): value for key, value in storage.items()},
+                expected_sqlite_temp_binding={str(key): value for key, value in expected.items()},
             )
         except KeyError as exc:
             message = f"a group merge request could not be read as this build writes them: {exc}"
@@ -1619,6 +1640,7 @@ class FinalMergeRequest:
     repository_head_sha: str
     repository_tree_sha: str
     storage_requirements: Mapping[str, object]
+    expected_sqlite_temp_binding: Mapping[str, object]
     capacity_observations: tuple[Mapping[str, object], ...] = ()
     kind: str = MULTIPASS_REQUEST_KIND_FINAL
 
@@ -1638,6 +1660,7 @@ class FinalMergeRequest:
             "repository_head_sha": self.repository_head_sha,
             "repository_tree_sha": self.repository_tree_sha,
             "storage_requirements": dict(self.storage_requirements),
+            "expected_sqlite_temp_binding": dict(self.expected_sqlite_temp_binding),
             "capacity_observations": [dict(item) for item in self.capacity_observations],
         }
 
@@ -1653,8 +1676,15 @@ class FinalMergeRequest:
             external = record["external_root"]
             storage = record["storage_requirements"]
             observations = record["capacity_observations"]
-            if not isinstance(storage, Mapping) or not isinstance(observations, list):
-                message = "a final merge request's storage or observations are not of shape"
+            expected = record["expected_sqlite_temp_binding"]
+            if (
+                not isinstance(storage, Mapping)
+                or not isinstance(observations, list)
+                or not isinstance(expected, Mapping)
+            ):
+                message = (
+                    "a final merge request's storage, binding or observations are not of shape"
+                )
                 raise ChunkMultipassError(message)
             return cls(
                 kind=str(record["kind"]),
@@ -1670,6 +1700,7 @@ class FinalMergeRequest:
                 repository_head_sha=str(record["repository_head_sha"]),
                 repository_tree_sha=str(record["repository_tree_sha"]),
                 storage_requirements={str(key): value for key, value in storage.items()},
+                expected_sqlite_temp_binding={str(key): value for key, value in expected.items()},
                 capacity_observations=tuple(
                     {str(key): value for key, value in item.items()}
                     for item in observations
@@ -1800,6 +1831,53 @@ def _admit_merge_step(
     return require_merge_admission(
         free_bytes=internal_free_bytes(_nearest_existing(target)), requirement=requirement
     )
+
+
+def _require_expected_binding(
+    measured: SqliteTempBinding, expected: Mapping[str, object], *, label: str
+) -> SqliteTempBinding:
+    """Hold THIS process's measured binding to the one the consolidation was admitted on -- C19 §14.
+
+    The request carries the orchestrator's measurement as the expected topology. It is a claim
+    about the past, never a proof about this process: the proof is the measurement this process
+    just took, and the two must agree field for field. A changed ``SQLITE_TMPDIR`` (a different
+    directory identity), a changed volume, a forged record or a pre-C19 record refuses, before
+    any world, attempt directory or database exists. Nothing in the request can assert equality;
+    it can only be contradicted by what was measured.
+    """
+    expected_binding = SqliteTempBinding.from_record(expected)
+    _require(
+        measured == expected_binding,
+        f"merge {label!r} measured a SQLite temporary binding that is not the one this "
+        f"consolidation was admitted on (measured {dict(measured.as_record())}, expected "
+        f"{dict(expected_binding.as_record())}); refused BEFORE any world exists, because a "
+        "child that continued on the parent's word would be trusting a claim it had just "
+        "contradicted",
+    )
+    return measured
+
+
+def _record_storage_plan(path: Path, storage_plan: MultipassStoragePlan) -> None:
+    """Write the sealed storage plan once; on restart, require the recorded one to be THIS one.
+
+    The recorded document is read back through
+    :meth:`~disclosure_drift.m3.chunk_tiering.MultipassStoragePlan.from_document`, which refuses
+    a superseded ``/1`` contract, a stale identity and an edited record, before its identity is
+    held to the plan this consolidation just computed -- including the measured SQLite temporary
+    binding (C19-R4, R4A). A restart with a different temporary root or volume therefore refuses
+    here, before any child is started.
+    """
+    if path.exists():
+        existing = MultipassStoragePlan.from_document(_read_json_object(path, "storage plan"))
+        _require(
+            existing.identity() == storage_plan.identity(),
+            f"the storage plan already recorded at {path.name!r} is not the one this "
+            f"consolidation was given (recorded identity {existing.identity()}, this run "
+            f"{storage_plan.identity()}); a restart continues exactly the recorded "
+            "consolidation -- its terms, its inputs and its SQLite temporary binding -- or refuses",
+        )
+        return
+    write_once_json(path, dict(storage_plan.as_document()))
 
 
 # --------------------------------------------------------------------------- #
@@ -2020,7 +2098,11 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
     # everything expensive. This process proves for ITSELF that SQLite's spill lands on the
     # filesystem the admission below charges; a child that trusted its parent's word would be
     # trusting a claim it had not measured.
-    require_sqlite_temp_binding(charged_path=attempt_root)
+    _require_expected_binding(
+        require_sqlite_temp_binding(charged_path=attempt_root),
+        request.expected_sqlite_temp_binding,
+        label=group.group_id,
+    )
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
     started = utc_now()
@@ -2195,8 +2277,13 @@ def finalize_multipass_body(request: FinalMergeRequest) -> FinalWorldReceipt:  #
     plan, schedule = _read_plan_and_schedule(request.plan_path, request.schedule_path)
     require_chunkable_source(plan.source_id)
     requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
-    # D151-C17 R6, measured in THIS process, before anything is resolved or created.
-    require_sqlite_temp_binding(charged_path=Path(request.world_directory))
+    # D151-C17 R6, measured in THIS process, before anything is resolved or created; C19 §14,
+    # held to the binding the consolidation was admitted on.
+    _require_expected_binding(
+        require_sqlite_temp_binding(charged_path=Path(request.world_directory)),
+        request.expected_sqlite_temp_binding,
+        label="final",
+    )
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
     # The plan's chunks, resolved ONCE through the accepted single-pass admission -- the twelve
@@ -2612,7 +2699,7 @@ def run_multipass_f0(  # noqa: PLR0915
     # D151-C17 R6: where SQLite will spill is settled BEFORE the run root exists. Every merge
     # child re-establishes this for itself; this is the orchestrator refusing early, not the
     # proof any child relies on.
-    require_sqlite_temp_binding(charged_path=multipass_root)
+    binding = require_sqlite_temp_binding(charged_path=multipass_root)
     require_multipass_plan(plan)
     repository = require_clean_running_repository()
     schedule = derive_merge_schedule(plan)
@@ -2630,10 +2717,9 @@ def run_multipass_f0(  # noqa: PLR0915
         chunk_bytes_by_id={item.chunk_id: item.receipt.manifest.total_bytes for item in inputs},
         seed_catalog_bytes=catalog_bytes,
         requirements=requirements,
+        sqlite_temp_binding=binding,
     )
-    _write_or_require_same(
-        multipass_root / STORAGE_PLAN_FILENAME, dict(storage_plan.as_record()), "storage plan"
-    )
+    _record_storage_plan(multipass_root / STORAGE_PLAN_FILENAME, storage_plan)
     intermediates_root = multipass_root / _INTERMEDIATES_DIRECTORY
     by_id = {item.chunk_id: item for item in inputs}
     receipts: list[IntermediateReceipt] = []
@@ -2674,6 +2760,7 @@ def run_multipass_f0(  # noqa: PLR0915
                 repository_head_sha=repository.head_sha,
                 repository_tree_sha=repository.tree_sha,
                 storage_requirements=dict(requirements.as_record()),
+                expected_sqlite_temp_binding=dict(binding.as_record()),
             ),
             predecessor_pid=previous,
             timeout_seconds=timeout_seconds,
@@ -2706,6 +2793,7 @@ def run_multipass_f0(  # noqa: PLR0915
             repository_head_sha=repository.head_sha,
             repository_tree_sha=repository.tree_sha,
             storage_requirements=dict(requirements.as_record()),
+            expected_sqlite_temp_binding=dict(binding.as_record()),
             capacity_observations=tuple(dict(item) for item in capacity_observations),
         ),
         predecessor_pid=previous,

@@ -41,11 +41,10 @@ from disclosure_drift.m3 import chunk_multipass as cm  # noqa: E402
 from disclosure_drift.m3 import chunk_plan as cp  # noqa: E402
 from disclosure_drift.m3 import chunk_storage as cs  # noqa: E402
 from disclosure_drift.m3 import chunk_tiering as ct  # noqa: E402
+from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
 from disclosure_drift.m3 import (
-    dock_transport,  # noqa: E402
     repository_identity,  # noqa: E402
 )
-from disclosure_drift.m3 import external_working_root as ewr  # noqa: E402
 from disclosure_drift.m3.canary_phases import PHASE_F0, read_phase_checkpoint  # noqa: E402
 from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
     CHUNK_PLAN_FILENAME,
@@ -867,6 +866,430 @@ def test_z01_every_authority_and_every_sizing_constant_is_none() -> None:
         cs.require_real_internal_reclaim_authority()
 
 
+# --------------------------------------------------------------------------------------------
+# Environment-access closure by BINDING analysis -- D151-C19 R3 (closing D151-C18 MINOR-2)
+# --------------------------------------------------------------------------------------------
+#: The names on ``os`` through which a process environment is read or written.
+ENVIRONMENT_NAMES: frozenset[str] = frozenset(
+    {"environ", "environb", "getenv", "getenvb", "putenv", "unsetenv"}
+)
+
+
+def environment_accesses(source: str) -> list[tuple[int, str]]:
+    """Every environment access ``source`` makes, found by what names are BOUND to, not by text.
+
+    Resolves what ``os`` is bound to (``import os``, ``import os as x``, ``import os.path``,
+    which binds ``os``), what its environment names are bound to (``from os import environ``,
+    ``... as y``, ``from os import *``), and then reports every attribute access through an
+    ``os`` alias, every use of an environment alias, every dynamic import that could bind either
+    later, and every reflective lookup on an ``os`` alias. A text scan for ``environ`` cannot see
+    ``_o.environ`` or ``_e[...]``; this can.
+    """
+    tree = ast.parse(source)
+    os_aliases: set[str] = set()
+    environment_aliases: dict[str, str] = {}
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root == "os":
+                    os_aliases.add(alias.asname or root)
+                if root in {"posix", "nt"}:
+                    found.append((node.lineno, f"import {alias.name}"))
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            root = module.split(".")[0]
+            if root in {"os", "posix", "nt"}:
+                for alias in node.names:
+                    if alias.name == "*":
+                        found.append((node.lineno, f"from {module} import *"))
+                    elif alias.name in ENVIRONMENT_NAMES:
+                        environment_aliases[alias.asname or alias.name] = alias.name
+                        found.append((node.lineno, f"from {module} import {alias.name}"))
+            if root == "importlib":
+                found.extend(
+                    (node.lineno, f"from {module} import {alias.name}")
+                    for alias in node.names
+                    if alias.name in {"import_module", "__import__", "*"}
+                )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in os_aliases and node.attr in ENVIRONMENT_NAMES:
+                found.append((node.lineno, f"{node.value.id}.{node.attr}"))
+        elif (
+            isinstance(node, ast.Name)
+            and node.id in environment_aliases
+            and isinstance(node.ctx, ast.Load)
+        ):
+            found.append((node.lineno, f"{node.id} (bound to os.{environment_aliases[node.id]})"))
+        elif isinstance(node, ast.Call):
+            func = node.func
+            callee = func.id if isinstance(func, ast.Name) else None
+            if isinstance(func, ast.Attribute) and func.attr == "import_module":
+                found.append((node.lineno, "import_module(...)"))
+            if callee in {"__import__", "import_module"}:
+                found.append((node.lineno, f"{callee}(...)"))
+            if (
+                callee in {"getattr", "vars"}
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in os_aliases
+            ):
+                found.append((node.lineno, f"{callee}({node.args[0].id}, ...)"))
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "modules"
+        ):
+            found.append((node.lineno, "sys.modules[...]"))
+    return sorted(set(found))
+
+
+def permitted_sqlite_tmpdir_reads(source: str, *, function: str) -> set[int]:
+    """Lines inside ``function`` that are EXACTLY ``os.environ.get(SQLITE_TMPDIR_ENV)``.
+
+    One positional ``Name`` argument, no default, no keywords, through the plain ``os`` binding:
+    the accepted D138-R3 shape and nothing looser. A default value, a second argument or an
+    aliased ``os`` is not this read.
+    """
+    lines: set[int] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "get"
+                    and isinstance(call.func.value, ast.Attribute)
+                    and call.func.value.attr == "environ"
+                    and isinstance(call.func.value.value, ast.Name)
+                    and call.func.value.value.id == "os"
+                    and len(call.args) == 1
+                    and isinstance(call.args[0], ast.Name)
+                    and call.args[0].id == "SQLITE_TMPDIR_ENV"
+                    and not call.keywords
+                ):
+                    lines.add(call.lineno)
+    return lines
+
+
+def environment_closure_violations(module_name: str, source: str) -> list[tuple[int, str]]:
+    """Every environment access beyond what the accepted design permits -- D151-C19 R3.
+
+    ``chunk_multipass`` may read nothing. ``chunk_tiering`` may read exactly one thing: the
+    governed ``SQLITE_TMPDIR`` value, inside ``require_sqlite_temp_binding``, in the accepted
+    shape. ``external_working_root`` -- reached, not new -- may read the same one thing inside
+    the accepted D137-R8 guard. Everything else on the reached chain reads nothing.
+    """
+    accesses = environment_accesses(source)
+    permitted_in = {
+        "chunk_tiering": "require_sqlite_temp_binding",
+        "external_working_root": "require_external_sqlite_tmpdir",
+    }
+    stem = module_name.rsplit(".", 1)[-1]
+    if stem in permitted_in:
+        permitted = permitted_sqlite_tmpdir_reads(source, function=permitted_in[stem])
+        return [item for item in accesses if not (item[1] == "os.environ" and item[0] in permitted)]
+    return accesses
+
+
+# --------------------------------------------------------------------------------------------
+# Transitive capability closure of the storage-binding chain -- D151-C19 R5 (C18 INFO-2)
+# --------------------------------------------------------------------------------------------
+#: Where the package lives, for resolving ``disclosure_drift.*`` imports to files.
+_SRC_ROOT = Path(cm.__file__).parents[2]
+
+#: Modules that open a network or transport. An import of any of them, by either statement
+#: form, is a capability the storage-binding chain must not reach.
+NETWORK_MODULES: frozenset[str] = frozenset(
+    {
+        "socket",
+        "ssl",
+        "http",
+        "urllib",
+        "httpx",
+        "requests",
+        "ftplib",
+        "smtplib",
+        "telnetlib",
+        "xmlrpc",
+        "websocket",
+        "websockets",
+        "aiohttp",
+    }
+)
+#: ``shutil`` names that copy, move or delete. ``disk_usage`` is the one measurement allowed.
+DESTRUCTIVE_SHUTIL: frozenset[str] = frozenset(
+    {"rmtree", "copy", "copy2", "copyfile", "copytree", "copymode", "copystat", "move", "chown"}
+)
+#: ``os`` names that delete, rename, run a shell, replace the process or signal.
+DESTRUCTIVE_OS: frozenset[str] = frozenset(
+    {
+        "remove",
+        "unlink",
+        "rmdir",
+        "removedirs",
+        "rename",
+        "renames",
+        "replace",
+        "system",
+        "popen",
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "fork",
+        "forkpty",
+        "kill",
+        "killpg",
+    }
+)
+_SUBPROCESS_ENTRIES: frozenset[str] = frozenset(
+    {"run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"}
+)
+_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
+    {
+        "rmtree",
+        "copyfile",
+        "copytree",
+        "copy2",
+        "move",
+        "unlink",
+        "rmdir",
+        "removedirs",
+        "system",
+        "popen",
+    }
+)
+
+
+def module_path(name: str) -> Path | None:
+    """The file a dotted package module name resolves to, or ``None``."""
+    relative = name.replace(".", "/")
+    for candidate in (_SRC_ROOT / f"{relative}.py", _SRC_ROOT / relative / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def package_imports(source: str) -> set[str]:
+    """The ``disclosure_drift`` modules ``source`` imports by statement, both forms."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names if a.name.startswith("disclosure_drift"))
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "disclosure_drift"
+        ):
+            module = str(node.module)
+            for alias in node.names:
+                submodule = f"{module}.{alias.name}"
+                names.add(submodule if module_path(submodule) is not None else module)
+    return names
+
+
+def reached_from(module_name: str) -> set[str]:
+    """Every package module reached from ``module_name`` by import statements, transitively.
+
+    Statement-level: the ``disclosure_drift.m3`` package ``__init__`` is executed by every
+    ``m3`` import alike and is not a capability this chain adds; what is measured here is what
+    the chain's own statements pull in.
+    """
+    seen: set[str] = set()
+    frontier = [module_name]
+    while frontier:
+        name = frontier.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        path = module_path(name)
+        assert path is not None, name
+        frontier.extend(package_imports(path.read_text(encoding="utf-8")))
+    return seen
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        target = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+        value = getattr(node, "value", None)
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        ):
+            constants[target.id] = value.value
+    return constants
+
+
+def capability_violations(source: str) -> list[tuple[int, str]]:
+    """Every forbidden capability ``source`` reaches: network, copy/move/delete, shell, or an
+    unbounded subprocess -- D151-C19 R5.
+
+    Both ``import`` and ``from ... import`` are inspected. A subprocess call is bounded only when
+    its argument vector is a literal list whose program is a fixed absolute path (a string
+    constant, or a module-level string constant), whose other elements are constants, names or
+    ``str(<name>)``, with no ``shell`` and no unpacking.
+    """
+    tree = ast.parse(source)
+    constants = _module_string_constants(tree)
+    os_aliases: set[str] = set()
+    shutil_aliases: set[str] = set()
+    subprocess_aliases: set[str] = set()
+    subprocess_functions: set[str] = set()
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in NETWORK_MODULES:
+                    found.append((node.lineno, f"import {alias.name}"))
+                if root == "os":
+                    os_aliases.add(alias.asname or "os")
+                if root == "shutil":
+                    shutil_aliases.add(alias.asname or "shutil")
+                if root == "subprocess":
+                    subprocess_aliases.add(alias.asname or "subprocess")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            root = module.split(".")[0]
+            names = [alias.name for alias in node.names]
+            if root in NETWORK_MODULES:
+                found.append((node.lineno, f"from {module} import {', '.join(names)}"))
+            if root == "shutil":
+                found.extend(
+                    (node.lineno, f"from shutil import {name}")
+                    for name in names
+                    if name == "*" or name in DESTRUCTIVE_SHUTIL
+                )
+            if root == "os":
+                found.extend(
+                    (node.lineno, f"from os import {name}")
+                    for name in names
+                    if name == "*" or name in DESTRUCTIVE_OS
+                )
+            if root == "subprocess":
+                for alias in node.names:
+                    if alias.name == "*" or alias.name in _SUBPROCESS_ENTRIES:
+                        subprocess_functions.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in shutil_aliases and node.attr != "disk_usage":
+                found.append((node.lineno, f"shutil.{node.attr}"))
+            if node.value.id in os_aliases and node.attr in DESTRUCTIVE_OS:
+                found.append((node.lineno, f"os.{node.attr}"))
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in (DESTRUCTIVE_SHUTIL | _DESTRUCTIVE_METHODS):
+            found.append((node.lineno, f"{func.id}("))
+        if isinstance(func, ast.Attribute) and func.attr in _DESTRUCTIVE_METHODS:
+            found.append((node.lineno, f".{func.attr}("))
+        is_subprocess = (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in subprocess_aliases
+            and func.attr in _SUBPROCESS_ENTRIES
+        ) or (isinstance(func, ast.Name) and func.id in subprocess_functions)
+        if not is_subprocess:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                found.append((node.lineno, "subprocess **kwargs"))
+            if keyword.arg == "shell" and not (
+                isinstance(keyword.value, ast.Constant) and keyword.value.value is False
+            ):
+                found.append((node.lineno, "subprocess shell="))
+        argv = node.args[0] if node.args else None
+        if argv is None:
+            argv = next((k.value for k in node.keywords if k.arg == "args"), None)
+        if not isinstance(argv, ast.List) or not argv.elts:
+            found.append((node.lineno, "subprocess argv is not a literal list"))
+            continue
+        program = argv.elts[0]
+        fixed = (
+            (
+                isinstance(program, ast.Constant)
+                and isinstance(program.value, str)
+                and program.value.startswith("/")
+            )
+            or (isinstance(program, ast.Name) and constants.get(program.id, "").startswith("/"))
+            # the running interpreter's own absolute path: the accepted merge-child launch
+            or (
+                isinstance(program, ast.Attribute)
+                and isinstance(program.value, ast.Name)
+                and program.value.id == "sys"
+                and program.attr == "executable"
+            )
+        )
+        if not fixed:
+            found.append((node.lineno, "subprocess program is not a fixed absolute path"))
+        for element in argv.elts[1:]:
+            bounded = isinstance(element, ast.Constant | ast.Name) or (
+                isinstance(element, ast.Call)
+                and isinstance(element.func, ast.Name)
+                and element.func.id == "str"
+                and len(element.args) == 1
+                and isinstance(element.args[0], ast.Name)
+            )
+            if not bounded:
+                found.append((node.lineno, "subprocess argument is not a bounded element"))
+    return sorted(set(found))
+
+
+def subprocess_programs(source: str) -> set[str]:
+    """The fixed absolute programs every subprocess call in ``source`` runs."""
+    tree = ast.parse(source)
+    constants = _module_string_constants(tree)
+    programs: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+            and node.args
+            and isinstance(node.args[0], ast.List)
+            and node.args[0].elts
+        ):
+            program = node.args[0].elts[0]
+            if isinstance(program, ast.Constant):
+                programs.add(str(program.value))
+            elif isinstance(program, ast.Name):
+                programs.add(constants.get(program.id, f"<{program.id}>"))
+    return programs
+
+
+#: The storage-binding chain: what ``chunk_tiering`` reaches for the SQLite temp binding, and
+#: everything those modules reach in turn. Exact -- a new helper joins this list by review.
+STORAGE_BINDING_CHAIN: frozenset[str] = frozenset(
+    {
+        "disclosure_drift.m3.external_working_root",
+        "disclosure_drift.m3.canary_runtime",
+        "disclosure_drift.m3.dock_transport",
+        "disclosure_drift.errors",
+        "disclosure_drift.storage.sqlite",
+    }
+)
+
+
 def test_z02_no_environment_configuration_or_command_line_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -879,39 +1302,24 @@ def test_z02_no_environment_configuration_or_command_line_route(
         source = Path(module.__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-        # D151-C17 R6 narrows this invariant rather than dropping it. The multipass path now
-        # reads EXACTLY ONE environment name -- SQLITE_TMPDIR -- because that is the only
-        # environment SQLite itself consults to decide where it spills, and validating any other
-        # mapping would prove nothing (the accepted D138-R3 reasoning). What the invariant always
-        # protected is unchanged and re-proved below: no environment value can GRANT authority or
-        # SUPPLY a sizing term. This read is strictly subtractive -- every outcome of it is a
-        # refusal or a no-op, never an admission.
-        environment_reads = {
-            node.value.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and node.attr == "environ"
-            and isinstance(node.value, ast.Name)
-        }
-        assert environment_reads <= {"os"}, module.__name__
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get"
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "environ"
-            ):
-                argument = node.args[0]
-                assert isinstance(argument, ast.Name), (module.__name__, ast.dump(argument))
-                assert argument.id == "SQLITE_TMPDIR_ENV", (module.__name__, argument.id)
-        assert "getenv" not in names and "getenv" not in attributes, module.__name__
+        # D151-C19 R3 (closing D151-C18 MINOR-2): the closure is decided by what names are BOUND
+        # to, so `from os import environ`, an aliased `os`, a subscript through an alias and
+        # `os.getenv` are all seen. The multipass path reads EXACTLY ONE environment name --
+        # SQLITE_TMPDIR, in chunk_tiering, inside the binding guard, in the accepted D138-R3
+        # shape -- because that is the only environment SQLite itself consults to decide where
+        # it spills. What the invariant always protected is unchanged and re-proved below: no
+        # environment value can GRANT authority or SUPPLY a sizing term.
+        assert environment_closure_violations(module.__name__, source) == [], module.__name__
         assert "DISCLOSURE_DRIFT" not in source, module.__name__
         assert "load_config" not in names, module.__name__
         assert "argparse" not in source, module.__name__
         assert "apply_migrations" not in source, module.__name__
         assert "build_calibration_chunk_plan" not in source, module.__name__
+    assert environment_accesses(Path(cm.__file__).read_text(encoding="utf-8")) == []
+    tiering = Path(ct.__file__).read_text(encoding="utf-8")
+    permitted = permitted_sqlite_tmpdir_reads(tiering, function="require_sqlite_temp_binding")
+    assert len(permitted) == 1, permitted
+    assert [item[1] for item in environment_accesses(tiering)] == ["os.environ"]
     package_root = Path(cli.__file__).parent
     chunk_family = {
         "chunk_plan",
@@ -950,32 +1358,12 @@ def test_z02_no_environment_configuration_or_command_line_route(
 def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
     for module in NEW_MODULES:
         source = Path(module.__file__).read_text(encoding="utf-8")
-        # AST, not substring -- D151-C17. chunk_tiering now DESCRIBES, at length, SQLite
-        # unlinking the spill files it is still writing, because that is the whole reason the
-        # level-2 transient term must be measured as free-space drawdown rather than by a
-        # traversal. A text ban cannot tell that prose from a capability; the call can.
+        # AST, not substring -- D151-C17. chunk_tiering DESCRIBES, at length, SQLite unlinking
+        # the spill files it is still writing, because that is the whole reason the level-2
+        # transient term must be measured as free-space drawdown rather than by a traversal. A
+        # text ban cannot tell that prose from a capability; the call can.
+        assert capability_violations(source) == [], module.__name__
         module_tree = ast.parse(source)
-        invoked = {
-            node.func.attr
-            for node in ast.walk(module_tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        } | {
-            node.func.id
-            for node in ast.walk(module_tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        }
-        for capability in (
-            "rmtree",
-            "remove",
-            "rmdir",
-            "unlink",
-            "move",
-            "copy",
-            "copy2",
-            "copyfile",
-            "copytree",
-        ):
-            assert capability not in invoked, (module.__name__, capability)
         assert "shutil" not in {
             node.value.id
             for node in ast.walk(module_tree)
@@ -986,19 +1374,15 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
             assert f"from {prefix}" not in source
         assert "from disclosure_drift.m3.e0" not in source
         assert "M3_3_E0_EXECUTION_AUTHORITY" not in source
-        tree = ast.parse(source)
-        names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)} | {
-            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        names = {node.attr for node in ast.walk(module_tree) if isinstance(node, ast.Attribute)} | {
+            node.id for node in ast.walk(module_tree) if isinstance(node, ast.Name)
         }
         for needle in ("SecClient", "HttpxTransport", "socket", "urlopen", "create_connection"):
             assert needle not in names, (module.__name__, needle)
     assert "shutil" not in Path(ct.__file__).read_text(encoding="utf-8")
     # D151-C17 R6: chunk_tiering reaches external_working_root, and chunk_multipass still does
-    # not. The ban becomes an allowlist of exactly the accepted D137-R8 volume-identity names,
-    # and the capability claim behind the original ban is PROVED rather than assumed: neither
-    # that module nor the one it pulls in can delete, copy, move, or open a socket. Their only
-    # subprocess use is a fixed-argv, read-only identity query -- which is what measuring a
-    # volume identity IS, and the reason the import exists at all.
+    # not. The ban is an allowlist of exactly the accepted D137-R8 names plus the ONE shared
+    # candidate validator D151-C19 R2 added.
     assert "external_working_root" not in Path(cm.__file__).read_text(encoding="utf-8")
     tiering_source = Path(ct.__file__).read_text(encoding="utf-8")
     imported = {
@@ -1013,53 +1397,40 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
         "ExternalWorkingRootError",
         "VolumeIdentity",
         "VolumeIdentityProvider",
+        "require_usable_sqlite_temp_root",
     }, imported
-    for reached in (ewr, dock_transport):
-        reached_tree = ast.parse(Path(reached.__file__).read_text(encoding="utf-8"))
-        # AST, not substring: both modules DESCRIBE SQLite unlinking its own spill files in
-        # prose, and a text ban cannot tell a comment from a capability. What must be absent is
-        # the call.
-        called = {
-            node.func.attr
-            for node in ast.walk(reached_tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        } | {
-            node.func.id
-            for node in ast.walk(reached_tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        }
-        for capability in (
-            "rmtree",
-            "unlink",
-            "remove",
-            "rmdir",
-            "copy",
-            "copy2",
-            "copytree",
-            "move",
-            "socket",
-            "urlopen",
-            "create_connection",
-        ):
-            assert capability not in called, (reached.__name__, capability)
-        imported_modules = {
-            alias.name.split(".")[0]
-            for node in ast.walk(reached_tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
-        assert not imported_modules & {"socket", "urllib", "http", "httpx", "requests"}
-        # ``shutil`` is reachable in external_working_root, so the claim is proved rather than
-        # asserted by absence: every reference to it is ``disk_usage``, a measurement, exactly as
-        # chunk_storage.internal_free_bytes documents for the same import.
-        shutil_uses = {
-            node.attr
-            for node in ast.walk(reached_tree)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "shutil"
-        }
-        assert shutil_uses <= {"disk_usage"}, (reached.__name__, shutil_uses)
+    # D151-C19 R5 (closing D151-C18 INFO-2): the proof covers the chain ACTUALLY reached --
+    # external_working_root, canary_runtime, dock_transport and the two leaf helpers -- by both
+    # import statement forms, and it distinguishes the accepted bounded capability (a fixed-argv
+    # read-only system query) from a forbidden one rather than banning every import.
+    assert reached_from(ewr.__name__) == set(STORAGE_BINDING_CHAIN)
+    assert package_imports(tiering_source) == {
+        "disclosure_drift.errors",
+        "disclosure_drift.m3.external_working_root",
+        "disclosure_drift.m3.chunk_evidence",
+        "disclosure_drift.m3.chunk_plan",
+        "disclosure_drift.m3.chunk_storage",
+    }
+    programs: dict[str, set[str]] = {}
+    for name in sorted(STORAGE_BINDING_CHAIN):
+        path = module_path(name)
+        assert path is not None, name
+        reached_source = path.read_text(encoding="utf-8")
+        assert capability_violations(reached_source) == [], name
+        assert environment_closure_violations(name, reached_source) == [], name
+        programs[name] = subprocess_programs(reached_source)
+    assert programs == {
+        "disclosure_drift.errors": set(),
+        "disclosure_drift.m3.canary_runtime": {"/bin/ps", "/usr/bin/pmset", "/usr/sbin/ioreg"},
+        "disclosure_drift.m3.dock_transport": {"/usr/sbin/ioreg"},
+        "disclosure_drift.m3.external_working_root": {"/usr/sbin/diskutil"},
+        "disclosure_drift.storage.sqlite": set(),
+    }, programs
+    ewr_source = Path(ewr.__file__).read_text(encoding="utf-8")
+    assert (
+        len(permitted_sqlite_tmpdir_reads(ewr_source, function="require_external_sqlite_tmpdir"))
+        == 1
+    )
 
 
 def test_z04_the_new_modules_are_importable_without_a_world(tmp_path: Path) -> None:

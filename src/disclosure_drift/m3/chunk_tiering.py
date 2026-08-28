@@ -62,6 +62,7 @@ from disclosure_drift.m3.external_working_root import (
     ExternalWorkingRootError,
     VolumeIdentity,
     VolumeIdentityProvider,
+    require_usable_sqlite_temp_root,
 )
 
 __all__ = [
@@ -78,6 +79,9 @@ __all__ = [
     "MULTIPASS_LEVEL_ONE_PEAK_RATIO",
     "MULTIPASS_LEVEL_TWO_PEAK_RATIO",
     "MULTIPASS_STORAGE_PLAN_CONTRACT",
+    "SQLITE_TEMP_BINDING_FIELDS",
+    "STORAGE_PLAN_IDENTITY_KEY",
+    "SUPERSEDED_STORAGE_PLAN_CONTRACTS",
     "MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES",
     "MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES",
     "PRODUCTION_SPILL_POLICY",
@@ -195,8 +199,21 @@ MERGE_LEVELS: Final[tuple[str, ...]] = (MERGE_LEVEL_ONE, MERGE_LEVEL_TWO)
 #: candidate keys are exposed below so their consequences can be analyzed; none is frozen.
 PRODUCTION_SPILL_POLICY: Final[str | None] = None
 
-#: This storage plan's own contract identity, folded into every plan identity.
-MULTIPASS_STORAGE_PLAN_CONTRACT: Final = "m3.3-chunked-f0-multipass-storage-plan/1"
+#: This storage plan's own contract identity, folded into every plan identity. ``/2`` since
+#: D151-C19 R4A: the record durably binds the measured SQLite temporary placement the admission
+#: relied on (:class:`SqliteTempBinding`), and its persisted document carries the identity that
+#: seals it (:data:`STORAGE_PLAN_IDENTITY_KEY`).
+MULTIPASS_STORAGE_PLAN_CONTRACT: Final = "m3.3-chunked-f0-multipass-storage-plan/2"
+
+#: Persisted storage-plan contracts this build refuses to read. A ``/1`` record predates the
+#: durable temp binding; it is never upgraded, defaulted or reinterpreted (C19-R4A). No real
+#: ``/1`` record was ever written: the multipass authority has never been open.
+SUPERSEDED_STORAGE_PLAN_CONTRACTS: Final[tuple[str, ...]] = (
+    "m3.3-chunked-f0-multipass-storage-plan/1",
+)
+
+#: The key under which a persisted storage-plan document carries its own sealed identity.
+STORAGE_PLAN_IDENTITY_KEY: Final = "storage_plan_identity"
 
 
 # --------------------------------------------------------------------------- #
@@ -629,27 +646,101 @@ def require_qualified_external_tier(
 # --------------------------------------------------------------------------- #
 # SQLite temporary placement -- D151-C17 R6, closing D151-C16 MINOR-2
 # --------------------------------------------------------------------------- #
+#: Every field of a :class:`SqliteTempBinding` record, in its recorded order. A record is exact:
+#: a key missing or unexpected -- including the three-field pre-C19 shape -- is refused.
+SQLITE_TEMP_BINDING_FIELDS: Final[tuple[str, ...]] = (
+    "temp_root_device",
+    "temp_root_inode",
+    "temp_volume_uuid",
+    "temp_filesystem_type",
+    "temp_device_identifier",
+    "charged_volume_uuid",
+    "charged_filesystem_type",
+    "charged_device_identifier",
+)
+
+
+def _measured_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        message = f"a SQLite temp binding's {name!r} must be a non-negative integer; got {value!r}"
+        raise ChunkTieringError(message)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SqliteTempBinding:
-    """Measured proof that SQLite's spill lands on the filesystem admission charges."""
+    """Measured proof that SQLite's spill lands on the filesystem admission charges -- C19-R4.
 
-    volume_uuid: str
-    filesystem_type: str
-    device_identifier: str
+    Every field is a measurement taken by the process that holds the record, never a claim
+    handed to it. The temporary root is identified by the device and inode numbers of the
+    directory SQLite will use -- a filesystem identity that carries **no** path, for the reason
+    :meth:`~disclosure_drift.m3.external_working_root.VolumeIdentity.as_record` states -- and
+    both volumes are the accepted D137-R8 identities. The binding RESULT is not a Boolean anyone
+    could set: it is the two measured volume identities, which the constructor requires to agree,
+    so a record whose volumes differ cannot exist.
+    """
+
+    temp_root_device: int
+    temp_root_inode: int
+    temp_volume_uuid: str
+    temp_filesystem_type: str
+    temp_device_identifier: str
+    charged_volume_uuid: str
+    charged_filesystem_type: str
+    charged_device_identifier: str
+
+    def __post_init__(self) -> None:
+        _measured_int(self.temp_root_device, "temp_root_device")
+        _measured_int(self.temp_root_inode, "temp_root_inode")
+        for name in SQLITE_TEMP_BINDING_FIELDS[2:]:
+            if not isinstance(getattr(self, name), str):
+                message = f"a SQLite temp binding's {name!r} must be a string"
+                raise ChunkTieringError(message)
+        for name in ("temp_volume_uuid", "charged_volume_uuid"):
+            if not getattr(self, name).strip():
+                message = (
+                    f"a SQLite temp binding's {name!r} is blank; an unidentified volume is refused"
+                )
+                raise ChunkTieringError(message)
+        if self.temp_volume_uuid.strip().casefold() != self.charged_volume_uuid.strip().casefold():
+            message = (
+                "a SQLite temp binding whose temporary volume differs from its charged volume is "
+                "not a binding; it is refused rather than recorded"
+            )
+            raise ChunkTieringError(message)
 
     def as_record(self) -> Mapping[str, object]:
-        """A deterministic rendering that carries **no** absolute path.
+        """A deterministic rendering that carries **no** absolute path."""
+        return {name: getattr(self, name) for name in SQLITE_TEMP_BINDING_FIELDS}
 
-        The temporary root and the charged directory are both deliberately absent, for the reason
-        :meth:`~disclosure_drift.m3.external_working_root.VolumeIdentity.as_record` states: the
-        volume UUID is the identity the guard decided on, and an operator surface never carries a
-        personal path.
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> SqliteTempBinding:
+        """Rebuild a binding from its exact stored mapping.
+
+        Raises:
+            ChunkTieringError: a key is missing or unexpected, a value is not of the recorded
+                type, or the two volumes disagree.
         """
-        return {
-            "volume_uuid": self.volume_uuid,
-            "filesystem_type": self.filesystem_type,
-            "device_identifier": self.device_identifier,
-        }
+        expected = set(SQLITE_TEMP_BINDING_FIELDS)
+        present = {str(key) for key in record}
+        if present != expected:
+            message = (
+                "a SQLite temp binding record is exact; this one is missing "
+                f"{sorted(expected - present)} and carries unexpected "
+                f"{sorted(present - expected)}. A record of another shape -- including the "
+                "pre-C19 three-field one -- is refused rather than reinterpreted"
+            )
+            raise ChunkTieringError(message)
+        return cls(
+            temp_root_device=_measured_int(record["temp_root_device"], "temp_root_device"),
+            temp_root_inode=_measured_int(record["temp_root_inode"], "temp_root_inode"),
+            temp_volume_uuid=str(record["temp_volume_uuid"]),
+            temp_filesystem_type=str(record["temp_filesystem_type"]),
+            temp_device_identifier=str(record["temp_device_identifier"]),
+            charged_volume_uuid=str(record["charged_volume_uuid"]),
+            charged_filesystem_type=str(record["charged_filesystem_type"]),
+            charged_device_identifier=str(record["charged_device_identifier"]),
+        )
 
 
 def require_sqlite_temp_binding(
@@ -678,13 +769,18 @@ def require_sqlite_temp_binding(
     or writability, and nothing here accepts the presence of an environment variable as proof of
     anything: the variable says where to look, and the volume identity is what decides.
 
-    Five conditions, all fail-closed, in the shape D137-R8 established:
+    The conditions, all fail-closed, in the shape D137-R8 established and corrected by C19-R1:
 
-    * the variable is **set** and non-blank in the environment SQLite itself consumes;
-    * an explicitly supplied ``environ`` **agrees** with that process environment;
-    * the value is an **absolute** path;
-    * it names an **existing directory**;
+    * an explicitly supplied ``environ`` **agrees** with the process environment SQLite consumes;
+    * the raw value is a candidate **SQLite itself will use** -- set, non-blank, free of
+      surrounding whitespace, absolute, an existing directory, writable and searchable -- through
+      :func:`~disclosure_drift.m3.external_working_root.require_usable_sqlite_temp_root`, the
+      ONE validator both guards share (C19-R2);
     * its volume identity **equals** the identity of the filesystem hosting ``charged_path``.
+
+    The returned binding is the whole measurement -- the temporary root's device and inode, both
+    volume identities -- and since C19-R4 it is recorded in the sealed storage plan and handed to
+    every merge child as the topology it must remeasure and match.
 
     ``charged_path`` need not exist yet -- a merge world is identified before it is created --
     so its nearest existing ancestor is measured, which is on the same volume by construction.
@@ -709,28 +805,24 @@ def require_sqlite_temp_binding(
             "is refused rather than resolved in either direction"
         )
         raise ChunkTieringError(message)
-    if consumed is None or not consumed.strip():
+    # The candidate conditions are SQLite's own, shared with the accepted D137-R8 guard through
+    # ONE validator (C19-R1, C19-R2): the raw value, never a normalized copy; W_OK | X_OK.
+    try:
+        candidate = require_usable_sqlite_temp_root(consumed)
+    except ExternalWorkingRootError as exc:
         message = (
-            f"{SQLITE_TMPDIR_ENV} is not set, so SQLite would spill this merge's temporary and "
-            "sorter files to the operating system's temporary directory, on a volume this "
-            "step's storage admission has not charged. A merge world is NOT created: the "
-            "temporary root is stated explicitly and verified, never discovered mid-merge"
+            f"{exc}. A merge world is NOT created: the temporary root is stated explicitly and "
+            "verified as the one SQLite will use, never discovered mid-merge"
         )
-        raise ChunkTieringError(message)
-    candidate = Path(consumed.strip())
-    if not candidate.is_absolute():
+        raise ChunkTieringError(message) from exc
+    try:
+        temp_stat = candidate.stat()
+    except OSError as exc:
         message = (
-            f"{SQLITE_TMPDIR_ENV} is not an absolute path; a relative temporary root resolves "
-            "against the working directory, which is not a stated location, and no merge world "
-            "is created against a temporary root that cannot be identified"
+            f"the {SQLITE_TMPDIR_ENV} temporary root could not be identified "
+            f"({type(exc).__name__}); an identity that cannot be read is refused, never assumed"
         )
-        raise ChunkTieringError(message)
-    if not candidate.is_dir():
-        message = (
-            f"{SQLITE_TMPDIR_ENV} does not name an existing directory; the temporary root is "
-            "created and verified before a merge begins, never mid-transaction"
-        )
-        raise ChunkTieringError(message)
+        raise ChunkTieringError(message) from exc
     resolve = _external.macos_volume_identity if provider is None else provider
     try:
         temp_volume: VolumeIdentity = resolve(candidate)
@@ -751,9 +843,14 @@ def require_sqlite_temp_binding(
         )
         raise ChunkTieringError(message)
     return SqliteTempBinding(
-        volume_uuid=charged_volume.volume_uuid,
-        filesystem_type=charged_volume.filesystem_type,
-        device_identifier=charged_volume.device_identifier,
+        temp_root_device=int(temp_stat.st_dev),
+        temp_root_inode=int(temp_stat.st_ino),
+        temp_volume_uuid=temp_volume.volume_uuid,
+        temp_filesystem_type=temp_volume.filesystem_type,
+        temp_device_identifier=temp_volume.device_identifier,
+        charged_volume_uuid=charged_volume.volume_uuid,
+        charged_filesystem_type=charged_volume.filesystem_type,
+        charged_device_identifier=charged_volume.device_identifier,
     )
 
 
@@ -957,6 +1054,63 @@ class MergeStepRequirement:
             "required_free_bytes": self.required_free_bytes,
         }
 
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> MergeStepRequirement:
+        """Rebuild one step from its exact stored mapping -- C19-R4A.
+
+        Raises:
+            ChunkTieringError: a key is missing or unexpected, a value is not of the recorded
+                type, the level is not a merge level, or the recorded floor is not the sum of
+                its parts.
+        """
+        expected = {
+            "step",
+            "level",
+            "input_bytes",
+            "seed_catalog_bytes",
+            "peak_ratio",
+            "peak_bytes",
+            "reserve_bytes",
+            "transient_bytes",
+            "required_free_bytes",
+        }
+        present = {str(key) for key in record}
+        if present != expected:
+            message = (
+                f"a storage step record is exact; this one is missing {sorted(expected - present)} "
+                f"and carries unexpected {sorted(present - expected)}; refused rather than read"
+            )
+            raise ChunkTieringError(message)
+        level = str(record["level"])
+        if level not in MERGE_LEVELS:
+            message = (
+                f"a storage step record names level {level!r}, not one of {list(MERGE_LEVELS)}"
+            )
+            raise ChunkTieringError(message)
+        ratio = record["peak_ratio"]
+        if isinstance(ratio, bool) or not isinstance(ratio, int | float):
+            message = "a storage step record's peak ratio must be a number"
+            raise ChunkTieringError(message)
+        step = cls(
+            step=str(record["step"]),
+            level=level,
+            input_bytes=_measured_int(record["input_bytes"], "input_bytes"),
+            seed_catalog_bytes=_measured_int(record["seed_catalog_bytes"], "seed_catalog_bytes"),
+            peak_ratio=float(ratio),
+            peak_bytes=_measured_int(record["peak_bytes"], "peak_bytes"),
+            reserve_bytes=_measured_int(record["reserve_bytes"], "reserve_bytes"),
+            transient_bytes=_measured_int(record["transient_bytes"], "transient_bytes"),
+        )
+        if _measured_int(record["required_free_bytes"], "required_free_bytes") != (
+            step.required_free_bytes
+        ):
+            message = (
+                f"a storage step record for {step.step!r} states a floor that is not its peak "
+                "plus reserve plus transient; refused rather than read"
+            )
+            raise ChunkTieringError(message)
+        return step
+
 
 def merge_step_requirement(
     *,
@@ -1087,6 +1241,7 @@ class MultipassStoragePlan:
     chunk_bytes_by_id: Mapping[str, int]
     steps: tuple[MergeStepRequirement, ...]
     requirements: MultipassStorageRequirements
+    sqlite_temp_binding: SqliteTempBinding
     inputs_retained: bool
     reclaimable_bytes: int
     reclaim_authority: str | None
@@ -1125,12 +1280,133 @@ class MultipassStoragePlan:
             "projected_intermediate_bytes": self.projected_intermediate_bytes,
             "steps": [dict(step.as_record()) for step in self.steps],
             "requirements": dict(self.requirements.as_record()),
+            "sqlite_temp_binding": dict(self.sqlite_temp_binding.as_record()),
             "inputs_retained": self.inputs_retained,
             "reclaimable_bytes": self.reclaimable_bytes,
             "reclaim_authority": self.reclaim_authority,
             "transfer_authority": self.transfer_authority,
             "external_tier_qualified": self.external_tier_qualified,
         }
+
+    def as_document(self) -> Mapping[str, object]:
+        """The durable form: the record plus the identity that seals it -- C19-R4A."""
+        return {**dict(self.as_record()), STORAGE_PLAN_IDENTITY_KEY: self.identity()}
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, object]) -> MultipassStoragePlan:
+        """Read a persisted storage plan back, or refuse -- C19-R4A.
+
+        Three refusals, in order: a superseded or unknown contract (a ``/1`` record is never
+        upgraded, defaulted or reinterpreted); a record whose fields do not rebuild; and a
+        record whose sealed identity is not the identity of the fields it accompanies, which is
+        what a relabelled ``/1``, an edited binding or a stale digest all look like.
+
+        Raises:
+            ChunkTieringError: the document is not exactly a sealed current storage plan.
+        """
+        contract = document.get("contract")
+        if contract in SUPERSEDED_STORAGE_PLAN_CONTRACTS:
+            message = (
+                f"the storage plan records the superseded contract {contract!r}; this build reads "
+                f"only {MULTIPASS_STORAGE_PLAN_CONTRACT!r}. There is no automatic upgrade and no "
+                "fallback: a pre-C19 record does not bind the measured SQLite temporary "
+                "placement and is refused at its governed location"
+            )
+            raise ChunkTieringError(message)
+        if contract != MULTIPASS_STORAGE_PLAN_CONTRACT:
+            message = (
+                f"the storage plan records contract {contract!r}, which this build does not "
+                f"write; only {MULTIPASS_STORAGE_PLAN_CONTRACT!r} is read"
+            )
+            raise ChunkTieringError(message)
+        try:
+            requirements = MultipassStorageRequirements.from_record(
+                _mapping_field(document["requirements"], "requirements")
+            )
+            binding = SqliteTempBinding.from_record(
+                _mapping_field(document["sqlite_temp_binding"], "sqlite_temp_binding")
+            )
+            raw_steps = document["steps"]
+            if not isinstance(raw_steps, list):
+                message = "a storage plan's steps must be a list"
+                raise ChunkTieringError(message)
+            steps = tuple(
+                MergeStepRequirement.from_record(_mapping_field(item, "steps"))
+                for item in raw_steps
+            )
+            raw_bytes = _mapping_field(document["chunk_bytes_by_id"], "chunk_bytes_by_id")
+            chunk_bytes_by_id = {
+                str(chunk_id): _measured_int(length, "chunk_bytes_by_id")
+                for chunk_id, length in raw_bytes.items()
+            }
+            rebuilt = cls(
+                contract=str(contract),
+                plan_digest=str(document["plan_digest"]),
+                merge_schedule_digest=str(document["merge_schedule_digest"]),
+                seed_catalog_bytes=_measured_int(
+                    document["seed_catalog_bytes"], "seed_catalog_bytes"
+                ),
+                chunk_bytes_by_id=chunk_bytes_by_id,
+                steps=steps,
+                requirements=requirements,
+                sqlite_temp_binding=binding,
+                inputs_retained=_bool_field(document["inputs_retained"], "inputs_retained"),
+                reclaimable_bytes=_measured_int(document["reclaimable_bytes"], "reclaimable_bytes"),
+                reclaim_authority=_optional_str_field(
+                    document["reclaim_authority"], "reclaim_authority"
+                ),
+                transfer_authority=_optional_str_field(
+                    document["transfer_authority"], "transfer_authority"
+                ),
+                external_tier_qualified=_bool_field(
+                    document["external_tier_qualified"], "external_tier_qualified"
+                ),
+            )
+        except KeyError as exc:
+            message = f"the storage plan is missing {exc}; refused rather than defaulted"
+            raise ChunkTieringError(message) from exc
+        sealed = document.get(STORAGE_PLAN_IDENTITY_KEY)
+        if not isinstance(sealed, str) or sealed != rebuilt.identity():
+            message = (
+                f"the storage plan's recorded identity {sealed!r} is not the identity of the "
+                f"record it accompanies ({rebuilt.identity()}); a relabelled, edited or stale "
+                "record is refused rather than resealed"
+            )
+            raise ChunkTieringError(message)
+        stored = {str(key): value for key, value in document.items()}
+        stored.pop(STORAGE_PLAN_IDENTITY_KEY, None)
+        if _json_normal(stored) != _json_normal(dict(rebuilt.as_record())):
+            message = (
+                "the storage plan carries fields that are not the ones its identity seals; "
+                "refused rather than read past them"
+            )
+            raise ChunkTieringError(message)
+        return rebuilt
+
+
+def _mapping_field(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        message = f"a storage plan's {name!r} must be a mapping"
+        raise ChunkTieringError(message)
+    return {str(key): item for key, item in value.items()}
+
+
+def _bool_field(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        message = f"a storage plan's {name!r} must be a Boolean"
+        raise ChunkTieringError(message)
+    return value
+
+
+def _optional_str_field(value: object, name: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        message = f"a storage plan's {name!r} must be a string or null"
+        raise ChunkTieringError(message)
+    return value
+
+
+def _json_normal(record: Mapping[str, object]) -> object:
+    return json.loads(json.dumps(dict(record), sort_keys=True))
 
 
 def plan_multipass_storage(
@@ -1141,14 +1417,18 @@ def plan_multipass_storage(
     chunk_bytes_by_id: Mapping[str, int],
     seed_catalog_bytes: int,
     requirements: MultipassStorageRequirements,
+    sqlite_temp_binding: SqliteTempBinding,
 ) -> MultipassStoragePlan:
-    """The whole consolidation's storage plan -- D151-C13 §18, §19.
+    """The whole consolidation's storage plan -- D151-C13 §18, §19; C19-R4.
 
     ``groups`` is the merge schedule's level-1 grouping as ``(group_id, chunk_ids)`` in schedule
     order; ``chunk_bytes_by_id`` is every chunk's authenticated artifact byte length. One
     requirement is projected per level-1 group over its own inputs, and one for the final step
     over the projected intermediates. Nothing is credited for reclaim, because nothing may be
-    reclaimed.
+    reclaimed. ``sqlite_temp_binding`` is the binding :func:`require_sqlite_temp_binding`
+    MEASURED for this consolidation's root -- it is required, folded into the identity, and
+    never defaulted, so the sealed plan states which temporary root and which volume the
+    admission relied on.
 
     Raises:
         ChunkTieringError: a group names a chunk with no recorded byte length.
@@ -1190,6 +1470,7 @@ def plan_multipass_storage(
         chunk_bytes_by_id=dict(chunk_bytes_by_id),
         steps=tuple(steps),
         requirements=requirements,
+        sqlite_temp_binding=sqlite_temp_binding,
         inputs_retained=True,
         reclaimable_bytes=0,
         reclaim_authority=REAL_INTERNAL_RECLAIM_AUTHORITY,

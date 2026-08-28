@@ -46,6 +46,8 @@ from disclosure_drift.m3.working_catalog import WORKING_CATALOG_FILENAME  # noqa
 
 OTHER_VOLUME = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"
 MISMATCH = "must be counted by the same capacity model"
+#: A measured-shaped binding for storage plans built without a temporary root -- D151-C19 R4.
+BINDING = ct.SqliteTempBinding.from_record(c13.INERT_BINDING_RECORD)
 SHAPE: dict[str, Any] = {"filings": 2, "share_every": 3, "junk": 4, "unknown": 5, "duplicate": True}
 
 
@@ -104,6 +106,7 @@ def test_c1701_the_level_two_step_states_and_charges_its_own_transient_term() ->
         chunk_bytes_by_id={"chunk-0000": 1000, "chunk-0001": 2000},
         seed_catalog_bytes=50,
         requirements=requirements,
+        sqlite_temp_binding=BINDING,
     )
     by_step = {step.step: step for step in plan.steps}
     assert set(by_step) == {"group-0000", "group-0001", "final"}
@@ -185,6 +188,7 @@ def test_c1705_the_storage_identity_moves_with_either_transient_term() -> None:
             chunk_bytes_by_id={"chunk-0000": 1000},
             seed_catalog_bytes=50,
             requirements=_requirements(**changes),
+            sqlite_temp_binding=BINDING,
         ).identity()
 
     base = identity()
@@ -235,8 +239,12 @@ def test_c1708_the_same_measured_volume_admits(
 ) -> None:
     _open(monkeypatch, tmp_path)
     binding = ct.require_sqlite_temp_binding(charged_path=tmp_path / "not-created-yet")
-    assert binding.volume_uuid == c13.SYNTHETIC_MERGE_VOLUME
-    assert "mount_point" not in dict(binding.as_record())
+    assert binding.charged_volume_uuid == binding.temp_volume_uuid == c13.SYNTHETIC_MERGE_VOLUME
+    record = dict(binding.as_record())
+    assert "mount_point" not in record and str(tmp_path) not in json.dumps(record)
+    # C19-R4: the temporary root is identified by device and inode, never by path.
+    stat = (tmp_path / "sqlite-temp").stat()
+    assert (binding.temp_root_device, binding.temp_root_inode) == (stat.st_dev, stat.st_ino)
 
 
 def test_c1709_a_mismatched_measured_volume_refuses(

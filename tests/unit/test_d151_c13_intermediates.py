@@ -96,6 +96,28 @@ def multipass_child_bootstrap(root: Path) -> str:
     )
 
 
+def calibration_multipass_child_bootstrap(root: Path) -> str:
+    """The CALIBRATION child bootstrap with the accepted identity and volume seams applied inside.
+
+    D151-C27R1 R4: the calibration route opens no production authority -- nothing here sets
+    ``REAL_MULTIPASS_F0_AUTHORITY``, which stays the committed ``None`` in the child as in the
+    parent. Only the two accepted test seams are applied: the pinned repository identity and the
+    synthetic volume-identity provider, exactly as :func:`multipass_child_bootstrap` applies them.
+    """
+    return (
+        "import sys;"
+        "from pathlib import Path;"
+        "from disclosure_drift.m3 import repository_identity as ri;"
+        f"ri.running_repository_identity = lambda: ri.repository_identity_at(Path({str(root)!r}));"
+        "from disclosure_drift.m3 import external_working_root as ewr;"
+        "ewr.macos_volume_identity = lambda path: ewr.VolumeIdentity("
+        f"volume_uuid={c13.SYNTHETIC_MERGE_VOLUME!r}, mount_point=Path('/'), "
+        "filesystem_type='apfs', device_identifier='disk-synthetic');"
+        "from disclosure_drift.m3.chunk_multipass import _calibration_child_main;"
+        "sys.exit(_calibration_child_main(sys.argv[1], sys.argv[2]))"
+    )
+
+
 def committed_literal(module: Any, name: str) -> object:
     """The value a module-level constant is assigned in the COMMITTED source, read by AST."""
     tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
@@ -718,6 +740,12 @@ def test_x03_the_coordinator_has_no_in_process_fallback() -> None:
     assert "SIGSTOP" not in source and "SIGCONT" not in source
     assert "-m disclosure_drift" not in cm._CHILD_BOOTSTRAP
     assert "_child_main" in cm._CHILD_BOOTSTRAP
+    # D151-C27R1: the second, calibration-only launch enters its own bootstrap and never the
+    # production one; it is a separate process boundary, not an in-process fallback.
+    assert "-m disclosure_drift" not in cm._CALIBRATION_CHILD_BOOTSTRAP
+    assert "_calibration_child_main" in cm._CALIBRATION_CHILD_BOOTSTRAP
+    stripped = cm._CALIBRATION_CHILD_BOOTSTRAP.replace("_calibration_child_main(", "")
+    assert "_child_main(" not in stripped
     tree = ast.parse(source)
     spawns = [
         node
@@ -728,11 +756,14 @@ def test_x03_the_coordinator_has_no_in_process_fallback() -> None:
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "subprocess"
     ]
-    assert len(spawns) == 1
-    argv = spawns[0].args[0]
-    assert isinstance(argv, ast.List)
-    executable = argv.elts[0]
-    assert isinstance(executable, ast.Attribute) and executable.attr == "executable"
+    # Exactly two launches since D151-C27R1: the production merge child and the calibration
+    # child, both the interpreter with a fixed bootstrap.
+    assert len(spawns) == 2
+    for spawn in spawns:
+        argv = spawn.args[0]
+        assert isinstance(argv, ast.List)
+        executable = argv.elts[0]
+        assert isinstance(executable, ast.Attribute) and executable.attr == "executable"
 
 
 def test_x04_a_merge_child_measures_its_own_code_identity(tmp_path: Path) -> None:
@@ -1515,6 +1546,17 @@ MULTIPASS_CHILD_BOOTSTRAP: str = (
     "sys.exit(_child_main(sys.argv[1]))"
 )
 
+#: The committed CALIBRATION-child bootstrap, pinned exactly -- D151-C27R1 R4/R5. The only other
+#: launch ``chunk_multipass`` may make is ``[sys.executable, "-c", <this text>, str(request_path),
+#: str(envelope_fd)]``: the request path and the inherited pipe descriptor NUMBER -- never the
+#: envelope itself, which travels through the pipe. Distinct from the production bootstrap, which
+#: keeps its authority-first refusal byte for byte.
+CALIBRATION_MULTIPASS_CHILD_BOOTSTRAP: str = (
+    "import sys;"
+    "from disclosure_drift.m3.chunk_multipass import _calibration_child_main;"
+    "sys.exit(_calibration_child_main(sys.argv[1], sys.argv[2]))"
+)
+
 #: The storage-binding chain: what ``chunk_tiering`` reaches for the SQLite temp binding, and
 #: everything those modules reach in turn. Exact -- a new helper joins this list by review.
 STORAGE_BINDING_CHAIN: frozenset[str] = frozenset(
@@ -1541,6 +1583,10 @@ AUDITED_MODULES: tuple[str, ...] = (
 ACCEPTED_SUBPROCESS_LAUNCHES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "disclosure_drift.m3.chunk_multipass": (
         ("<sys.executable>", ("-c", MULTIPASS_CHILD_BOOTSTRAP, "str(request_path)")),
+        (
+            "<sys.executable>",
+            ("-c", CALIBRATION_MULTIPASS_CHILD_BOOTSTRAP, "str(request_path)", "str(envelope_fd)"),
+        ),
     ),
     "disclosure_drift.m3.chunk_tiering": (),
     "disclosure_drift.m3.external_working_root": (
@@ -1878,6 +1924,10 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
         assert capability_violations(audited_source, module=name) == [], name
         assert subprocess_launches(audited_source) == list(ACCEPTED_SUBPROCESS_LAUNCHES[name]), name
     assert committed_literal(cm, "_CHILD_BOOTSTRAP") == MULTIPASS_CHILD_BOOTSTRAP
+    assert (
+        committed_literal(cm, "_CALIBRATION_CHILD_BOOTSTRAP")
+        == CALIBRATION_MULTIPASS_CHILD_BOOTSTRAP
+    )
     assert programs == {
         "disclosure_drift.errors": set(),
         "disclosure_drift.m3.canary_runtime": {"/bin/ps", "/usr/bin/pmset", "/usr/sbin/ioreg"},

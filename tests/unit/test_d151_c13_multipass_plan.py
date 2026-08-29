@@ -26,6 +26,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import os
 import sys
 from collections.abc import Mapping
 from dataclasses import replace
@@ -1027,3 +1028,68 @@ def test_c24_r2_the_orchestrator_charges_each_step_its_own_level_transient(
     # The sealed storage plan and the run itself are the accepted ones.
     assert result.storage_plan.contract == ct.MULTIPASS_STORAGE_PLAN_CONTRACT
     assert result.receipt["chunks_unchanged"] is True
+
+
+def test_c27r1_r7_the_calibration_final_child_reports_level_two_in_its_own_event(
+    tmp_path: Path,
+) -> None:
+    """D151-C27R1 R7, closing C25-MINOR-1: the FINAL child's admission is child-produced.
+
+    Under level-distinct terms and the COMMITTED production authority (``None`` -- the
+    calibration route opens no production gate), a REAL calibration final child emits its own
+    admission event before its world exists: it reports MERGE_LEVEL_TWO, the level-two sentinel,
+    and ``required == peak + reserve + transient`` using that sentinel, under its own pid, and the
+    result it writes binds that event's identity. The parent never synthesizes it.
+    """
+    import test_d151_c13_intermediates as c13i
+    import test_d151_c27r1_dependency_closed_subset as c27
+
+    with pytest.MonkeyPatch.context() as patcher:
+        # The calibration seams only: the accepted volume provider is already in place from the
+        # module fixture; the calibration child bootstrap gets the pinned repository seam.
+        patcher.setattr(
+            cm,
+            "_CALIBRATION_CHILD_BOOTSTRAP",
+            c13i.calibration_multipass_child_bootstrap(tmp_path / "repo"),
+        )
+        database, tree = c27.small_world(tmp_path)
+        plan = c27.subset_plan(tree, database, prefix=10)
+        run = c27.execute_chunks_in_process(plan, tmp_path / "run", database, tree)
+        partial = c27.prepared_multipass(run)
+        c27.merge_groups_in_process(run, partial, database)
+        request = c27.final_request(run, partial, database, run_id="r7")
+        request_path = partial["multipass_root"] / "final-request.json"
+        write_once_json(request_path, dict(request.as_record()))
+        envelope = c27.issued(
+            plan=plan,
+            role=ce.CALIBRATION_ROLE_FINAL,
+            step_id="final",
+            request_path=request_path,
+            run_id="r7",
+            ledger=partial["ledger"],
+        )
+        completed = c27.spawn_calibration_child(request_path, envelope)
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    event = cm.read_calibration_admission_event(
+        cm.calibration_admission_event_path(
+            partial["ledger"], role="final", step_id="final", attempt=None
+        )
+    )
+    result = cm.read_calibration_subset_result(
+        partial["world_directory"] / cm.CALIBRATION_SUBSET_RESULT_FILENAME
+    )
+    assert event.level == ct.MERGE_LEVEL_TWO
+    assert event.transient_bytes == LEVEL_TWO_TRANSIENT_SENTINEL != LEVEL_ONE_TRANSIENT_SENTINEL
+    assert (
+        event.required_free_bytes == event.peak_bytes + event.reserve_bytes + event.transient_bytes
+    )
+    assert event.required_free_bytes == event.peak_bytes + LEVEL_TWO_TRANSIENT_SENTINEL
+    assert event.child_pid == result.pid and event.child_pid != os.getpid()
+    with pytest.raises(ProcessLookupError):
+        os.kill(event.child_pid, 0)
+    assert result.admission_event_identity == event.event_identity == event.identity()
+    assert dict(result.storage_admission)["level"] == ct.MERGE_LEVEL_TWO
+    assert dict(result.storage_admission)["transient_bytes"] == LEVEL_TWO_TRANSIENT_SENTINEL
+    assert (
+        cm.REAL_MULTIPASS_F0_AUTHORITY == SYNTHETIC_AUTHORITY
+    )  # this module's fixture, unused by the route

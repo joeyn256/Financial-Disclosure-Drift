@@ -113,6 +113,16 @@ its plan's chunks. The multipass receipt reports exactly that quantity over ITS 
 derived at level 2 from the retained, authenticated chunk artifacts by the accepted definition
 (:func:`_plan_first_witness_counters`) -- never the stage counts of either level, and never their
 sum -- so the value is a function of the sealed plan and not of the level-1 grouping.
+
+**The dependency-closed calibration route is separate, envelope-gated and noncanonical --
+D151-C27R1.** Every production entry above keeps its authority-first gate and its exact bootstrap
+byte for byte, and refuses a calibration-subset plan. The calibration route -- one launch shape
+for the chunk, group and final roles, its own bootstrap, its own bodies -- is gated by the
+pipe-delivered :class:`~disclosure_drift.m3.chunk_execution.CalibrationChildEnvelope` instead,
+runs the same accepted merge primitives, and ends in a calibration-subset result rather than a
+canonical terminal: no parser state, no ``parsed`` mark, no F0 checkpoint, no final receipt. Each
+merge child emits its own admission event -- level, transient allowance and arithmetic in its own
+words -- into the ledger its envelope names, after validation and before its world exists.
 """
 
 from __future__ import annotations
@@ -123,6 +133,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -168,10 +179,13 @@ from disclosure_drift.m3.chunk_consolidation import (
     resolve_chunk_inputs,
 )
 from disclosure_drift.m3.chunk_evidence import (
+    CHUNK_DECLARATIONS_FILENAME,
     CHUNK_PLAN_FILENAME,
+    CHUNK_RECEIPT_CONTRACT,
     CHUNK_RECEIPT_FILENAME,
     FINAL_WORLD_RECEIPT_CONTRACT,
     FINAL_WORLD_RECEIPT_FILENAME,
+    PARENT_MAP_FILENAME,
     ArtifactManifest,
     ChunkEvidenceError,
     ChunkReceipt,
@@ -184,16 +198,41 @@ from disclosure_drift.m3.chunk_evidence import (
 )
 from disclosure_drift.m3.chunk_execution import (
     _WITNESS_SCHEMA,
+    CALIBRATION_ROLE_CHUNK,
+    CALIBRATION_ROLE_FINAL,
+    CALIBRATION_ROLE_GROUP,
+    CalibrationChildEnvelope,
+    ChunkExecutionError,
+    ChunkRequest,
     _read_json_object,
     _require_process_dead,
+    completed_chunk_receipt,
+    delivered_calibration_envelope,
+    execute_calibration_subset_chunk_body,
+    issue_calibration_envelope,
+    measured_calibration_binding,
+    merge_parent_map,
+    next_attempt_directory,
+    read_declarations,
+    receive_calibration_envelope,
+    require_calibration_envelope,
+    require_envelope_binding,
+    require_envelope_request,
     table_row_counts,
+    write_once_canonical_json,
 )
 from disclosure_drift.m3.chunk_plan import (
+    CALIBRATION_SUBSET_CLASSIFICATIONS,
     CHUNK_REGION_ORDER,
     MULTIPASS_PLAN_CONTRACT,
+    REGION_PRIMARY,
+    REGION_SHARD,
     SINGLE_PASS_CHUNK_CAP,
+    CalibrationSubsetPlan,
     ChunkBounds,
     ChunkPlan,
+    canonical_json_bytes,
+    require_calibration_subset_plan,
     require_chunkable_source,
     require_sealed_plan,
 )
@@ -205,6 +244,7 @@ from disclosure_drift.m3.chunk_storage import (
 from disclosure_drift.m3.chunk_tiering import (
     MERGE_LEVEL_ONE,
     MERGE_LEVEL_TWO,
+    MERGE_LEVELS,
     MergeAdmission,
     MultipassStoragePlan,
     MultipassStorageRequirements,
@@ -243,6 +283,9 @@ from disclosure_drift.sec.census import _json as _stable_json
 from disclosure_drift.storage.sqlite import transaction, utc_now
 
 __all__ = [
+    "CALIBRATION_ADMISSION_EVENT_KIND",
+    "CALIBRATION_SUBSET_RESULT_CONTRACT",
+    "CALIBRATION_SUBSET_RESULT_FILENAME",
     "INTERMEDIATE_RECEIPT_CONTRACT",
     "INTERMEDIATE_RECEIPT_FILENAME",
     "INTERMEDIATE_WITNESS_FILENAME",
@@ -254,6 +297,9 @@ __all__ = [
     "MULTIPASS_REQUEST_KIND_GROUP",
     "REAL_MULTIPASS_F0_AUTHORITY",
     "STORAGE_PLAN_FILENAME",
+    "CalibrationAdmissionEvent",
+    "CalibrationSubsetMultipassResult",
+    "CalibrationSubsetResult",
     "ChunkMultipassError",
     "FinalMergeRequest",
     "GroupMergeRequest",
@@ -262,22 +308,34 @@ __all__ = [
     "MergeGroup",
     "MergeSchedule",
     "MultipassResult",
+    "calibration_admission_event_path",
     "completed_intermediate_receipt",
+    "derive_calibration_subset_schedule",
     "derive_merge_schedule",
+    "finalize_calibration_subset_body",
     "finalize_multipass_body",
     "group_by_id",
     "group_chunks",
     "intermediate_attempt_directory",
+    "merge_calibration_subset_group_body",
     "merge_group_body",
     "next_intermediate_attempt_directory",
+    "read_calibration_admission_event",
+    "read_calibration_subset_result",
     "require_multipass_plan",
     "require_real_multipass_authority",
     "require_sealed_schedule",
     "resolve_intermediate_inputs",
+    "run_calibration_subset_chunk",
+    "run_calibration_subset_chunks",
+    "run_calibration_subset_final_merge",
+    "run_calibration_subset_group_merge",
+    "run_calibration_subset_multipass",
     "run_final_merge",
     "run_group_merge",
     "run_multipass_f0",
     "select_group_inputs",
+    "stable_binding_identity",
     "stage_first_witness_corrections",
 ]
 
@@ -640,7 +698,13 @@ def require_sealed_schedule(schedule: MergeSchedule, plan: ChunkPlan) -> MergeSc
             f"{schedule.schedule_digest!r}, recomputed {recomputed!r}. Refused rather than repaired"
         )
         raise ChunkMultipassError(message)
-    derived = derive_merge_schedule(plan)
+    # A calibration-subset plan implies its schedule through its own derivation (D151-C27R1);
+    # the dispatch is on the sealed type, and a production plan is derived exactly as before.
+    derived = (
+        derive_calibration_subset_schedule(plan)
+        if isinstance(plan, CalibrationSubsetPlan)
+        else derive_merge_schedule(plan)
+    )
     if derived != schedule:
         message = (
             f"the merge schedule {schedule.schedule_digest[:16]}... is not the schedule plan "
@@ -2879,6 +2943,1610 @@ def run_multipass_f0(  # noqa: PLR0915
     return MultipassResult(
         world_directory=world_directory,
         receipt=document,
+        schedule=schedule,
+        storage_plan=storage_plan,
+        intermediates=tuple(receipts),
+        merge_pids=tuple(pids),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The dependency-closed calibration route -- D151-C27R1
+# --------------------------------------------------------------------------- #
+#: The calibration-subset terminal result's contract -- D151-C27R1 §4. Never a canonical F0
+#: receipt or checkpoint: the accepted final-receipt reader, the F0 checkpoint reader and every
+#: production reader refuse it, and it satisfies no complete-source reader.
+CALIBRATION_SUBSET_RESULT_CONTRACT: Final = "m3.3-chunked-f0-calibration-subset-result/1"
+
+#: The result's fixed filename, written LAST into the calibration final world.
+CALIBRATION_SUBSET_RESULT_FILENAME: Final = "calibration_subset_result.json"
+
+#: The kind every child-produced admission event carries -- D151-C27R1 R7.
+CALIBRATION_ADMISSION_EVENT_KIND: Final = "calibration_merge_admission"
+
+#: The calibration child's bootstrap -- one launch shape for all three roles -- D151-C27R1 R4.
+#: Deliberately separate from :data:`_CHILD_BOOTSTRAP`: the production bootstrap keeps its
+#: authority-first refusal byte for byte, and this one enters :func:`_calibration_child_main`,
+#: whose FIRST statement receives and validates the pipe-delivered envelope.
+_CALIBRATION_CHILD_BOOTSTRAP: Final = (
+    "import sys;"
+    "from disclosure_drift.m3.chunk_multipass import _calibration_child_main;"
+    "sys.exit(_calibration_child_main(sys.argv[1], sys.argv[2]))"
+)
+
+_CALIBRATION_STEP_FINAL: Final = "final"
+
+_ADMISSION_EVENT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "event_kind",
+        "classifications",
+        "run_id",
+        "plan_digest",
+        "role",
+        "step_id",
+        "child_pid",
+        "level",
+        "input_bytes",
+        "seed_catalog_bytes",
+        "peak_bytes",
+        "reserve_bytes",
+        "transient_bytes",
+        "required_free_bytes",
+        "free_before_bytes",
+        "admitted",
+        "sqlite_temp_binding_identity",
+        "envelope_sha256",
+        "monotonic_ns",
+        "event_identity",
+    }
+)
+
+
+def _measured_calibration_binding(charged_path: Path) -> SqliteTempBinding:
+    """The calibration child's own measured binding, through the accepted guard -- C17 R6."""
+    measured = measured_calibration_binding(charged_path)
+    _require(
+        isinstance(measured, SqliteTempBinding),
+        "the calibration binding measurement did not return a SQLite temp binding; refused",
+    )
+    return cast("SqliteTempBinding", measured)
+
+
+def _within(container: Path, candidate: Path) -> bool:
+    """Whether ``candidate`` lies at or beneath ``container``, by resolved path."""
+    return candidate.resolve().is_relative_to(container.resolve())
+
+
+def _stored_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        message = (
+            f"calibration field {field!r} holds {type(value).__name__} where a bool is required"
+        )
+        raise ChunkMultipassError(message)
+    return value
+
+
+def _stored_labels(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or tuple(str(item) for item in value) != (
+        CALIBRATION_SUBSET_CLASSIFICATIONS
+    ):
+        message = (
+            f"calibration field {field!r} must be exactly "
+            f"{list(CALIBRATION_SUBSET_CLASSIFICATIONS)}; refused"
+        )
+        raise ChunkMultipassError(message)
+    return CALIBRATION_SUBSET_CLASSIFICATIONS
+
+
+def _record_identity(record: Mapping[str, object], identity_key: str) -> str:
+    """SHA-256 over the canonical bytes of the whole record without its identity field."""
+    body = {key: value for key, value in record.items() if key != identity_key}
+    return hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+
+
+def stable_binding_identity(binding: SqliteTempBinding) -> str:
+    """The restart-stable identity of a measured SQLite temp binding -- its stable fields only."""
+    return hashlib.sha256(canonical_json_bytes(dict(binding.stable_record()))).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationAdmissionEvent:
+    """One merge child's own record of the admission it ran under -- D151-C27R1 R7.
+
+    Emitted by the child, in the child, AFTER its envelope, request, temp binding and admission
+    were validated and BEFORE any substantive merge work or world directory exists, into the
+    instrumentation ledger the envelope explicitly names. It carries the level the step was
+    charged at and that level's transient allowance, so a level-2 charge is distinguishable from
+    a level-1 one in the child's own words. Create-once: the parent can neither synthesize nor
+    overwrite it, and ``event_identity`` seals the whole record.
+    """
+
+    event_kind: str
+    classifications: tuple[str, ...]
+    run_id: str
+    plan_digest: str
+    role: str
+    step_id: str
+    child_pid: int
+    level: str
+    input_bytes: int
+    seed_catalog_bytes: int
+    peak_bytes: int
+    reserve_bytes: int
+    transient_bytes: int
+    required_free_bytes: int
+    free_before_bytes: int
+    admitted: bool
+    sqlite_temp_binding_identity: str
+    envelope_sha256: str
+    monotonic_ns: int
+    event_identity: str
+
+    def _identity_inputs(self) -> dict[str, object]:
+        return {
+            "event_kind": self.event_kind,
+            "classifications": list(self.classifications),
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "role": self.role,
+            "step_id": self.step_id,
+            "child_pid": self.child_pid,
+            "level": self.level,
+            "input_bytes": self.input_bytes,
+            "seed_catalog_bytes": self.seed_catalog_bytes,
+            "peak_bytes": self.peak_bytes,
+            "reserve_bytes": self.reserve_bytes,
+            "transient_bytes": self.transient_bytes,
+            "required_free_bytes": self.required_free_bytes,
+            "free_before_bytes": self.free_before_bytes,
+            "admitted": self.admitted,
+            "sqlite_temp_binding_identity": self.sqlite_temp_binding_identity,
+            "envelope_sha256": self.envelope_sha256,
+            "monotonic_ns": self.monotonic_ns,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        record = self._identity_inputs()
+        record["event_identity"] = self.event_identity
+        return record
+
+    def identity(self) -> str:
+        """The identity the record implies -- over everything but the identity field."""
+        return _record_identity(self._identity_inputs(), "event_identity")
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationAdmissionEvent:
+        """Rebuild an event from its EXACT mapping and re-derive its identity.
+
+        Raises:
+            ChunkMultipassError: any key is missing or unexpected, a value is of another type,
+                the kind or labels are wrong, the level is not a merge level, the event records a
+                refusal, or the stored identity does not describe the record.
+        """
+        present = {str(key) for key in record}
+        if present != _ADMISSION_EVENT_KEYS:
+            message = (
+                "a calibration admission event is exact; this one is missing "
+                f"{sorted(_ADMISSION_EVENT_KEYS - present)} and carries unexpected "
+                f"{sorted(present - _ADMISSION_EVENT_KEYS)}; refused"
+            )
+            raise ChunkMultipassError(message)
+        event = cls(
+            event_kind=str(record["event_kind"]),
+            classifications=_stored_labels(record["classifications"], "classifications"),
+            run_id=str(record["run_id"]),
+            plan_digest=str(record["plan_digest"]),
+            role=str(record["role"]),
+            step_id=str(record["step_id"]),
+            child_pid=_stored_int(record["child_pid"], "child_pid"),
+            level=str(record["level"]),
+            input_bytes=_stored_int(record["input_bytes"], "input_bytes"),
+            seed_catalog_bytes=_stored_int(record["seed_catalog_bytes"], "seed_catalog_bytes"),
+            peak_bytes=_stored_int(record["peak_bytes"], "peak_bytes"),
+            reserve_bytes=_stored_int(record["reserve_bytes"], "reserve_bytes"),
+            transient_bytes=_stored_int(record["transient_bytes"], "transient_bytes"),
+            required_free_bytes=_stored_int(record["required_free_bytes"], "required_free_bytes"),
+            free_before_bytes=_stored_int(record["free_before_bytes"], "free_before_bytes"),
+            admitted=_stored_bool(record["admitted"], "admitted"),
+            sqlite_temp_binding_identity=str(record["sqlite_temp_binding_identity"]),
+            envelope_sha256=str(record["envelope_sha256"]),
+            monotonic_ns=_stored_int(record["monotonic_ns"], "monotonic_ns"),
+            event_identity=str(record["event_identity"]),
+        )
+        _require(
+            event.event_kind == CALIBRATION_ADMISSION_EVENT_KIND,
+            f"a calibration admission event of kind {event.event_kind!r} is refused",
+        )
+        _require(
+            event.level in MERGE_LEVELS
+            and event.role in (CALIBRATION_ROLE_GROUP, CALIBRATION_ROLE_FINAL),
+            f"a calibration admission event charged at {event.level!r} for role {event.role!r} "
+            "names no merge level or no merge role; refused",
+        )
+        _require(
+            event.admitted
+            and event.required_free_bytes
+            == event.peak_bytes + event.reserve_bytes + event.transient_bytes,
+            "a calibration admission event must record an ADMITTED step whose floor is peak + "
+            "reserve + transient; refused",
+        )
+        _require(
+            event.identity() == event.event_identity,
+            "a calibration admission event's recorded identity does not describe its own "
+            f"contents: recorded {event.event_identity!r}, recomputed {event.identity()!r}",
+        )
+        return event
+
+
+def calibration_admission_event_path(
+    ledger: Path, *, role: str, step_id: str, attempt: int | None
+) -> Path:
+    """Where one merge child's admission event lives inside the instrumentation ledger."""
+    suffix = "" if attempt is None else f"-attempt-{attempt:03d}"
+    return ledger / f"admission-{role}-{step_id}{suffix}.json"
+
+
+def read_calibration_admission_event(path: Path) -> CalibrationAdmissionEvent:
+    """One admission event, read from its canonical bytes, or a refusal.
+
+    Raises:
+        ChunkMultipassError: the file is absent, a link, not canonical, or not an exact event.
+    """
+    _require(not path.is_symlink(), f"event {path.name!r} is a symbolic link and is refused")
+    _require(path.is_file(), f"no calibration admission event exists at {path.name!r}")
+    payload = path.read_bytes()
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"event {path.name!r} is not decodable JSON: {exc}"
+        raise ChunkMultipassError(message) from exc
+    _require(isinstance(decoded, dict), f"event {path.name!r} is not a JSON object")
+    event = CalibrationAdmissionEvent.from_record(cast("Mapping[str, object]", decoded))
+    _require(
+        canonical_json_bytes(event.as_record()) == payload,
+        f"event {path.name!r} is not persisted as its canonical bytes; refused",
+    )
+    return event
+
+
+def _emit_calibration_admission_event(
+    *,
+    envelope: CalibrationChildEnvelope,
+    admission: MergeAdmission,
+    binding: SqliteTempBinding,
+    input_bytes: int,
+    seed_catalog_bytes: int,
+    charged_directory: Path,
+    attempt: int | None,
+) -> CalibrationAdmissionEvent:
+    """Emit THIS child's admission event, create-once, into the ledger the envelope names -- R7.
+
+    Runs after the envelope, request, temp binding and admission were validated and before the
+    charged directory exists. The ledger must exist, be a directory, and lie outside the charged
+    directory. The event carries this process's pid and the SHA-256 of the envelope -- never the
+    envelope itself.
+
+    Raises:
+        ChunkMultipassError: the envelope names no ledger, the ledger is unusable, or the event
+            already exists.
+    """
+    _require(
+        envelope.instrumentation_ledger is not None,
+        f"a calibration {envelope.role!r} child needs an instrumentation ledger in its envelope "
+        "to emit its admission event into; none was supplied and the merge is refused",
+    )
+    ledger = Path(str(envelope.instrumentation_ledger))
+    _require(
+        ledger.is_dir() and not ledger.is_symlink(),
+        "the calibration instrumentation ledger must be an existing directory that is not a link",
+    )
+    _require(
+        not _within(charged_directory, ledger),
+        "the calibration instrumentation ledger must lie outside the directory admission "
+        "charges; an event inside the charged directory would perturb the measurement",
+    )
+    event = CalibrationAdmissionEvent(
+        event_kind=CALIBRATION_ADMISSION_EVENT_KIND,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        run_id=envelope.run_id,
+        plan_digest=envelope.plan_digest,
+        role=envelope.role,
+        step_id=envelope.step_id,
+        child_pid=os.getpid(),
+        level=admission.level,
+        input_bytes=input_bytes,
+        seed_catalog_bytes=seed_catalog_bytes,
+        peak_bytes=admission.peak_bytes,
+        reserve_bytes=admission.reserve_bytes,
+        transient_bytes=admission.transient_bytes,
+        required_free_bytes=admission.required_free_bytes,
+        free_before_bytes=admission.free_bytes,
+        admitted=admission.admitted,
+        sqlite_temp_binding_identity=stable_binding_identity(binding),
+        envelope_sha256=envelope.sha256,
+        monotonic_ns=time.monotonic_ns(),
+        event_identity="",
+    )
+    sealed = replace(event, event_identity=event.identity())
+    path = calibration_admission_event_path(
+        ledger, role=envelope.role, step_id=envelope.step_id, attempt=attempt
+    )
+    try:
+        write_once_canonical_json(path, dict(sealed.as_record()))
+    except ChunkExecutionError as exc:
+        message = f"the calibration admission event could not be emitted: {exc}"
+        raise ChunkMultipassError(message) from exc
+    return sealed
+
+
+_RESULT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "contract",
+        "classifications",
+        "plan_digest",
+        "merge_schedule_digest",
+        "run_id",
+        "source_instance_id",
+        "source_observation_id",
+        "source_sha256",
+        "source_byte_length",
+        "member_order_digest",
+        "selected_member_order_digest",
+        "shard_parent_binding_digest",
+        "primary_prefix_members",
+        "selected_shard_members",
+        "excluded_shard_members",
+        "selected_members",
+        "full_total_members",
+        "repository_head_sha",
+        "repository_tree_sha",
+        "catalog_source_sha256",
+        "execution_contract_identity",
+        "chunk_count",
+        "intermediate_count",
+        "parser_run_id",
+        "run_outcome",
+        "parser_state_after",
+        "world_parser_state",
+        "members",
+        "records",
+        "parsed_records",
+        "quarantined_records",
+        "omitted_field_observations",
+        "materialized_field_observations",
+        "completeness_digest",
+        "member_manifest_digest",
+        "table_row_counts",
+        "first_witness_accessions_corrected",
+        "first_witness_rows_staged",
+        "evidence_members_corrected",
+        "evidence_delta",
+        "storage_admission",
+        "admission_event_identity",
+        "envelope_sha256",
+        "pid",
+        "rss_peak_bytes",
+        "started_at_utc",
+        "completed_at_utc",
+        "manifest",
+        "status",
+        "result_identity",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationSubsetResult:
+    """The calibration-only terminal result of one dependency-closed subset run -- R6.
+
+    Not a canonical F0 receipt, not a checkpoint, not a production input, not a bounded canary:
+    it carries the four labels, both the full and the selected identities, the child's own
+    admission and the identity of the admission event it emitted, and a measured
+    ``world_parser_state`` proving the world was never marked parsed. ``parser_state_after`` is
+    ``chunk_local``: a calibration world claims no source-level terminal.
+    """
+
+    contract: str
+    classifications: tuple[str, ...]
+    plan_digest: str
+    merge_schedule_digest: str
+    run_id: str
+    source_instance_id: str
+    source_observation_id: str
+    source_sha256: str
+    source_byte_length: int
+    member_order_digest: str
+    selected_member_order_digest: str
+    shard_parent_binding_digest: str
+    primary_prefix_members: int
+    selected_shard_members: int
+    excluded_shard_members: int
+    selected_members: int
+    full_total_members: int
+    repository_head_sha: str
+    repository_tree_sha: str
+    catalog_source_sha256: str
+    execution_contract_identity: str
+    chunk_count: int
+    intermediate_count: int
+    parser_run_id: str
+    run_outcome: str
+    parser_state_after: str
+    world_parser_state: str
+    members: int
+    records: int
+    parsed_records: int
+    quarantined_records: int
+    omitted_field_observations: int
+    materialized_field_observations: int
+    completeness_digest: str
+    member_manifest_digest: str
+    table_row_counts: Mapping[str, int]
+    first_witness_accessions_corrected: int
+    first_witness_rows_staged: int
+    evidence_members_corrected: int
+    evidence_delta: int
+    storage_admission: Mapping[str, object]
+    admission_event_identity: str
+    envelope_sha256: str
+    pid: int
+    rss_peak_bytes: int | None
+    started_at_utc: str
+    completed_at_utc: str
+    manifest: ArtifactManifest
+    status: str
+    result_identity: str
+
+    def _identity_inputs(self) -> dict[str, object]:
+        return {
+            "contract": self.contract,
+            "classifications": list(self.classifications),
+            "plan_digest": self.plan_digest,
+            "merge_schedule_digest": self.merge_schedule_digest,
+            "run_id": self.run_id,
+            "source_instance_id": self.source_instance_id,
+            "source_observation_id": self.source_observation_id,
+            "source_sha256": self.source_sha256,
+            "source_byte_length": self.source_byte_length,
+            "member_order_digest": self.member_order_digest,
+            "selected_member_order_digest": self.selected_member_order_digest,
+            "shard_parent_binding_digest": self.shard_parent_binding_digest,
+            "primary_prefix_members": self.primary_prefix_members,
+            "selected_shard_members": self.selected_shard_members,
+            "excluded_shard_members": self.excluded_shard_members,
+            "selected_members": self.selected_members,
+            "full_total_members": self.full_total_members,
+            "repository_head_sha": self.repository_head_sha,
+            "repository_tree_sha": self.repository_tree_sha,
+            "catalog_source_sha256": self.catalog_source_sha256,
+            "execution_contract_identity": self.execution_contract_identity,
+            "chunk_count": self.chunk_count,
+            "intermediate_count": self.intermediate_count,
+            "parser_run_id": self.parser_run_id,
+            "run_outcome": self.run_outcome,
+            "parser_state_after": self.parser_state_after,
+            "world_parser_state": self.world_parser_state,
+            "members": self.members,
+            "records": self.records,
+            "parsed_records": self.parsed_records,
+            "quarantined_records": self.quarantined_records,
+            "omitted_field_observations": self.omitted_field_observations,
+            "materialized_field_observations": self.materialized_field_observations,
+            "completeness_digest": self.completeness_digest,
+            "member_manifest_digest": self.member_manifest_digest,
+            "table_row_counts": dict(sorted(self.table_row_counts.items())),
+            "first_witness_accessions_corrected": self.first_witness_accessions_corrected,
+            "first_witness_rows_staged": self.first_witness_rows_staged,
+            "evidence_members_corrected": self.evidence_members_corrected,
+            "evidence_delta": self.evidence_delta,
+            "storage_admission": dict(self.storage_admission),
+            "admission_event_identity": self.admission_event_identity,
+            "envelope_sha256": self.envelope_sha256,
+            "pid": self.pid,
+            "rss_peak_bytes": self.rss_peak_bytes,
+            "started_at_utc": self.started_at_utc,
+            "completed_at_utc": self.completed_at_utc,
+            "manifest": dict(self.manifest.as_record()),
+            "status": self.status,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        record = self._identity_inputs()
+        record["result_identity"] = self.result_identity
+        return record
+
+    def identity(self) -> str:
+        """The identity the record implies -- over everything but the identity field."""
+        return _record_identity(self._identity_inputs(), "result_identity")
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationSubsetResult:  # noqa: PLR0915
+        """Rebuild a result from its EXACT mapping and re-derive its identity.
+
+        Raises:
+            ChunkMultipassError: the shape, contract, labels, status or identity refuses.
+        """
+        present = {str(key) for key in record}
+        if present != _RESULT_KEYS:
+            message = (
+                "a calibration-subset result is exact; this one is missing "
+                f"{sorted(_RESULT_KEYS - present)} and carries unexpected "
+                f"{sorted(present - _RESULT_KEYS)}; refused"
+            )
+            raise ChunkMultipassError(message)
+        counts = record["table_row_counts"]
+        admission = record["storage_admission"]
+        manifest = record["manifest"]
+        if (
+            not isinstance(counts, Mapping)
+            or not isinstance(admission, Mapping)
+            or not isinstance(manifest, Mapping)
+        ):
+            message = "a calibration-subset result's counts, admission or manifest are not mappings"
+            raise ChunkMultipassError(message)
+        peak = record["rss_peak_bytes"]
+        try:
+            result = cls(
+                contract=str(record["contract"]),
+                classifications=_stored_labels(record["classifications"], "classifications"),
+                plan_digest=str(record["plan_digest"]),
+                merge_schedule_digest=str(record["merge_schedule_digest"]),
+                run_id=str(record["run_id"]),
+                source_instance_id=str(record["source_instance_id"]),
+                source_observation_id=str(record["source_observation_id"]),
+                source_sha256=str(record["source_sha256"]),
+                source_byte_length=_stored_int(record["source_byte_length"], "source_byte_length"),
+                member_order_digest=str(record["member_order_digest"]),
+                selected_member_order_digest=str(record["selected_member_order_digest"]),
+                shard_parent_binding_digest=str(record["shard_parent_binding_digest"]),
+                primary_prefix_members=_stored_int(
+                    record["primary_prefix_members"], "primary_prefix_members"
+                ),
+                selected_shard_members=_stored_int(
+                    record["selected_shard_members"], "selected_shard_members"
+                ),
+                excluded_shard_members=_stored_int(
+                    record["excluded_shard_members"], "excluded_shard_members"
+                ),
+                selected_members=_stored_int(record["selected_members"], "selected_members"),
+                full_total_members=_stored_int(record["full_total_members"], "full_total_members"),
+                repository_head_sha=str(record["repository_head_sha"]),
+                repository_tree_sha=str(record["repository_tree_sha"]),
+                catalog_source_sha256=str(record["catalog_source_sha256"]),
+                execution_contract_identity=str(record["execution_contract_identity"]),
+                chunk_count=_stored_int(record["chunk_count"], "chunk_count"),
+                intermediate_count=_stored_int(record["intermediate_count"], "intermediate_count"),
+                parser_run_id=str(record["parser_run_id"]),
+                run_outcome=str(record["run_outcome"]),
+                parser_state_after=str(record["parser_state_after"]),
+                world_parser_state=str(record["world_parser_state"]),
+                members=_stored_int(record["members"], "members"),
+                records=_stored_int(record["records"], "records"),
+                parsed_records=_stored_int(record["parsed_records"], "parsed_records"),
+                quarantined_records=_stored_int(
+                    record["quarantined_records"], "quarantined_records"
+                ),
+                omitted_field_observations=_stored_int(
+                    record["omitted_field_observations"], "omitted_field_observations"
+                ),
+                materialized_field_observations=_stored_int(
+                    record["materialized_field_observations"], "materialized_field_observations"
+                ),
+                completeness_digest=str(record["completeness_digest"]),
+                member_manifest_digest=str(record["member_manifest_digest"]),
+                table_row_counts={
+                    str(key): _stored_int(value, str(key)) for key, value in counts.items()
+                },
+                first_witness_accessions_corrected=_stored_int(
+                    record["first_witness_accessions_corrected"],
+                    "first_witness_accessions_corrected",
+                ),
+                first_witness_rows_staged=_stored_int(
+                    record["first_witness_rows_staged"], "first_witness_rows_staged"
+                ),
+                evidence_members_corrected=_stored_int(
+                    record["evidence_members_corrected"], "evidence_members_corrected"
+                ),
+                evidence_delta=_stored_int(record["evidence_delta"], "evidence_delta"),
+                storage_admission={str(key): value for key, value in admission.items()},
+                admission_event_identity=str(record["admission_event_identity"]),
+                envelope_sha256=str(record["envelope_sha256"]),
+                pid=_stored_int(record["pid"], "pid"),
+                rss_peak_bytes=None if peak is None else _stored_int(peak, "rss_peak_bytes"),
+                started_at_utc=str(record["started_at_utc"]),
+                completed_at_utc=str(record["completed_at_utc"]),
+                manifest=ArtifactManifest.from_record(manifest),
+                status=str(record["status"]),
+                result_identity=str(record["result_identity"]),
+            )
+        except ChunkEvidenceError as exc:
+            message = f"a calibration-subset result's manifest is refused: {exc}"
+            raise ChunkMultipassError(message) from exc
+        _require(
+            result.contract == CALIBRATION_SUBSET_RESULT_CONTRACT,
+            f"a result carrying contract {result.contract!r} is refused; this reader consumes "
+            f"only {CALIBRATION_SUBSET_RESULT_CONTRACT!r}",
+        )
+        _require(
+            result.status == "complete" and result.parser_state_after == "chunk_local",
+            "a calibration-subset result records a complete run that claims no source-level "
+            "parser state; refused",
+        )
+        _require(
+            result.identity() == result.result_identity,
+            "a calibration-subset result's recorded identity does not describe its own contents: "
+            f"recorded {result.result_identity!r}, recomputed {result.identity()!r}",
+        )
+        return result
+
+
+def read_calibration_subset_result(path: Path) -> CalibrationSubsetResult:
+    """One calibration-subset result, read from its canonical bytes, or a refusal.
+
+    Raises:
+        ChunkMultipassError: the file is absent, a link, not canonical, or not an exact result.
+    """
+    _require(not path.is_symlink(), f"result {path.name!r} is a symbolic link and is refused")
+    _require(
+        path.is_file(),
+        f"no calibration-subset result exists at {path.name!r}; an absent terminal is a refusal",
+    )
+    payload = path.read_bytes()
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"result {path.name!r} is not decodable JSON: {exc}"
+        raise ChunkMultipassError(message) from exc
+    _require(isinstance(decoded, dict), f"result {path.name!r} is not a JSON object")
+    result = CalibrationSubsetResult.from_record(cast("Mapping[str, object]", decoded))
+    _require(
+        canonical_json_bytes(result.as_record()) == payload,
+        f"result {path.name!r} is not persisted as its canonical bytes; refused",
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# The calibration schedule and readers
+# --------------------------------------------------------------------------- #
+def derive_calibration_subset_schedule(plan: ChunkPlan) -> MergeSchedule:
+    """The one merge schedule a sealed calibration-subset plan implies -- the same grouping.
+
+    The grouping arithmetic is :func:`group_chunks`, unchanged, over the subset plan's chunks in
+    selected coordinates: for the C29 target that is exactly 9 / 9 / 9 / 6 primary groups and one
+    one-chunk shard group. The schedule contract and shape are the accepted ones; its
+    ``plan_digest`` binds the subset plan, so no production schedule can be mistaken for it.
+
+    Raises:
+        ChunkPlanError, ChunkMultipassError: the plan is not a sealed subset plan.
+    """
+    require_calibration_subset_plan(plan)
+    groups = group_chunks(plan.chunks, fan_in=MERGE_FAN_IN)
+    _require(
+        len(groups) <= MERGE_FAN_IN,
+        f"the subset plan groups into {len(groups)} level-1 intermediates and one merge attaches "
+        f"{MERGE_FAN_IN}; refused",
+    )
+    schedule = MergeSchedule(
+        contract=MERGE_SCHEDULE_CONTRACT,
+        plan_digest=plan.plan_digest,
+        fan_in=MERGE_FAN_IN,
+        groups=groups,
+        level_two_inputs=tuple(group.group_id for group in groups),
+        schedule_digest="",
+    )
+    return replace(schedule, schedule_digest=_schedule_digest(schedule))
+
+
+def _read_calibration_plan_and_schedule(
+    plan_path: str, schedule_path: str
+) -> tuple[CalibrationSubsetPlan, MergeSchedule]:
+    plan = CalibrationSubsetPlan.from_record(
+        _read_json_object(Path(plan_path), "calibration-subset plan")
+    )
+    schedule = MergeSchedule.from_record(_read_json_object(Path(schedule_path), "merge schedule"))
+    require_sealed_schedule(schedule, plan)
+    return plan, schedule
+
+
+def _write_canonical_or_require_same(path: Path, record: Mapping[str, object], label: str) -> None:
+    """Write a canonical copy once; on restart, require the existing bytes to be identical."""
+    if path.exists():
+        _require(
+            not path.is_symlink() and path.read_bytes() == canonical_json_bytes(record),
+            f"the {label} already recorded at {path.name!r} is not the one this calibration was "
+            "given; a restart continues exactly the recorded calibration or refuses",
+        )
+        return
+    write_once_canonical_json(path, dict(record))
+
+
+# --------------------------------------------------------------------------- #
+# Level 1 -- the calibration group merge, INSIDE its own process
+# --------------------------------------------------------------------------- #
+def merge_calibration_subset_group_body(  # noqa: PLR0915
+    request: GroupMergeRequest, envelope: CalibrationChildEnvelope
+) -> IntermediateReceipt:
+    """Merge one level-1 group of a calibration-subset plan into one intermediate -- D151-C27R1.
+
+    The calibration analogue of the accepted group body, gated by the pipe-delivered envelope
+    instead of the production authority: the envelope for the group role is required FIRST; the
+    code identity is measured; the attempt is create-once; the plan is read through the EXACT
+    subset reader and the schedule re-derived from it; the envelope is held to the plan, group
+    and ceiling; the temp binding is measured and held to the expected one; the inputs are
+    resolved through the accepted admission; the step is admitted; the child's own admission
+    event is emitted; and only then does the attempt directory exist. The merge is the accepted
+    primitive sequence, unchanged, and the receipt is the accepted intermediate receipt.
+    """
+    require_calibration_envelope(envelope, role=CALIBRATION_ROLE_GROUP)
+    repository = _authenticate_running_repository(
+        head=request.repository_head_sha, tree=request.repository_tree_sha, label=request.group_id
+    )
+    attempt_root = Path(request.attempt_directory)
+    _require(
+        not attempt_root.exists(),
+        f"intermediate attempt directory {attempt_root.name!r} already exists; an attempt is "
+        "create-once and a retry builds a new directory beside it",
+    )
+    plan, schedule = _read_calibration_plan_and_schedule(request.plan_path, request.schedule_path)
+    require_chunkable_source(plan.source_id)
+    group = group_by_id(schedule, request.group_id)
+    require_envelope_binding(
+        envelope, plan=plan, role=CALIBRATION_ROLE_GROUP, step_id=group.group_id
+    )
+    requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
+    binding = _require_expected_binding(
+        _measured_calibration_binding(attempt_root),
+        request.expected_sqlite_temp_binding,
+        label=group.group_id,
+    )
+    operational_catalog = Path(request.operational_catalog)
+    catalog_sha256, catalog_bytes = file_digest(operational_catalog)
+    started = utc_now()
+    rss_before = process_peak_resident_bytes()
+    every = resolve_chunk_inputs(
+        plan,
+        internal_root=Path(request.internal_root),
+        external_root=None if request.external_root is None else Path(request.external_root),
+    )
+    inputs = select_group_inputs(every, group)
+    require_attachable(len(inputs))
+    contract = inputs[0].receipt.execution_contract
+    _require_seed_identity(
+        label=group.group_id,
+        repository=repository,
+        recorded_head=inputs[0].receipt.repository_head_sha,
+        recorded_tree=inputs[0].receipt.repository_tree_sha,
+        contract=contract,
+        catalog_sha256=catalog_sha256,
+    )
+    input_bytes = sum(item.receipt.manifest.total_bytes for item in inputs)
+    admission = _admit_merge_step(
+        step=group.group_id,
+        level=MERGE_LEVEL_ONE,
+        target=attempt_root,
+        input_bytes=input_bytes,
+        seed_catalog_bytes=catalog_bytes,
+        peak_ratio=requirements.level_one_peak_ratio,
+        requirements=requirements,
+    )
+    _emit_calibration_admission_event(
+        envelope=envelope,
+        admission=admission,
+        binding=binding,
+        input_bytes=input_bytes,
+        seed_catalog_bytes=catalog_bytes,
+        charged_directory=attempt_root,
+        attempt=request.attempt,
+    )
+    attempt_root.mkdir(mode=_DIRECTORY_MODE, parents=True)
+    with WorkingCatalog(
+        operational_catalog, attempt_root, cache_bytes=request.cache_bytes
+    ) as world:
+        connection = world.connection
+        _require(
+            world.identity.migration_head == contract.migration_head,
+            f"the intermediate was seeded at migration head {world.identity.migration_head} "
+            f"where every input executed at {contract.migration_head}",
+        )
+        world.ledger.begin_source(plan.source_instance_id, plan.source_id)
+        aliases = _attach_all(connection, [item.catalog_path for item in inputs], "k")
+        try:
+            indexes = _deferrable_indexes(connection)
+            for name, _sql in indexes:
+                connection.execute(f"DROP INDEX IF EXISTS {name}")
+            with transaction(connection):
+                with write_containment(connection):
+                    reduced = _reduced_parser_run(connection, aliases, contract=contract)
+                    for table in _LOAD_ORDER:
+                        if table == "census_accession_observations":
+                            continue
+                        if _MERGE_STRATEGY[table] == "keyed_first_last":
+                            _keyed_first_last_load(connection, table, aliases)
+                        else:
+                            _sorted_bulk_load(connection, table, aliases)
+                corrected, staged_rows = stage_first_witness_corrections(connection, aliases)
+                with write_containment(connection):
+                    _load_accession_observations(connection, aliases)
+            for _name, sql in indexes:
+                connection.execute(sql)
+            counts = table_row_counts(connection)
+        finally:
+            _detach_all(connection, aliases)
+    evidence = _merge_group_evidence(
+        attempt_root=attempt_root, inputs=inputs, group=group, plan=plan
+    )
+    for item in inputs:
+        verify_artifact_manifest(
+            item.directory,
+            item.receipt.manifest,
+            exclude=(CHUNK_RECEIPT_FILENAME, "transfer_receipt.json"),
+        )
+    write_once_canonical_json(attempt_root / CHUNK_PLAN_FILENAME, dict(plan.as_record()))
+    write_once_json(attempt_root / MERGE_SCHEDULE_FILENAME, dict(schedule.as_record()))
+    manifest = build_artifact_manifest(attempt_root, exclude=(INTERMEDIATE_RECEIPT_FILENAME,))
+    catalog_entry = next(
+        entry for entry in manifest.entries if entry.relative_path == WORKING_CATALOG_FILENAME
+    )
+    receipt = IntermediateReceipt(
+        contract=INTERMEDIATE_RECEIPT_CONTRACT,
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        group_id=group.group_id,
+        group_ordinal=group.ordinal,
+        region=group.region,
+        start=group.start,
+        end=group.end,
+        input_chunk_ids=tuple(item.chunk_id for item in inputs),
+        input_receipt_sha256=tuple(
+            file_sha256(item.directory / CHUNK_RECEIPT_FILENAME)[0] for item in inputs
+        ),
+        input_manifest_digests=tuple(item.receipt.manifest.digest for item in inputs),
+        chunk_inputs=tuple(dict(item.as_record()) for item in inputs),
+        source_instance_id=plan.source_instance_id,
+        source_observation_id=plan.source_observation_id,
+        source_sha256=plan.source_sha256,
+        source_byte_length=plan.source_byte_length,
+        member_order_digest=plan.member_order_digest,
+        repository_head_sha=repository.head_sha,
+        repository_tree_sha=repository.tree_sha,
+        execution_contract=contract,
+        parser_run_id=reduced.parser_run_id,
+        catalog_sha256=catalog_entry.sha256,
+        table_row_counts=counts,
+        members=evidence.members,
+        records=evidence.records,
+        omitted_field_observations=evidence.omitted,
+        materialized_field_observations=evidence.materialized,
+        member_manifest_digest=evidence.member_manifest_digest,
+        witness_ledger_identity=evidence.witness_ledger_identity,
+        compact_evidence_identity=evidence.compact_evidence_identity,
+        first_witness_accessions_corrected=corrected,
+        first_witness_rows_staged=staged_rows,
+        evidence_members_corrected=evidence.evidence_members_corrected,
+        evidence_delta=evidence.evidence_delta,
+        storage_admission=dict(admission.as_record()),
+        earliest_input_started_at_utc=min(item.receipt.started_at_utc for item in inputs),
+        attempt=request.attempt,
+        pid=os.getpid(),
+        rss_peak_bytes=process_peak_resident_bytes() or rss_before,
+        started_at_utc=started,
+        completed_at_utc=utc_now(),
+        manifest=manifest,
+        status="complete",
+    )
+    # LAST. Nothing is written after this, and nothing that fails before it leaves one.
+    write_once_json(attempt_root / INTERMEDIATE_RECEIPT_FILENAME, dict(receipt.as_record()))
+    return receipt
+
+
+# --------------------------------------------------------------------------- #
+# Level 2 -- the calibration finalization, INSIDE its own process
+# --------------------------------------------------------------------------- #
+def finalize_calibration_subset_body(  # noqa: PLR0915
+    request: FinalMergeRequest, envelope: CalibrationChildEnvelope
+) -> CalibrationSubsetResult:
+    """Build ONE calibration-only world from every intermediate, result LAST -- D151-C27R1 R6.
+
+    The calibration analogue of the accepted finalization, gated by the envelope for the final
+    role and charged at level two, with every canonical terminal deliberately absent: the merge
+    is the accepted primitive sequence and the accepted D140-R12 gate is applied over the derived
+    outcome, but no ``census_plan_sources.parser_state`` is written, the ledger is never marked
+    parsed, no F0 phase checkpoint and no final world receipt exist. The world's parser state is
+    measured after the merge and recorded in the result, which is written under the
+    calibration-subset result contract and satisfies no complete-source reader.
+    """
+    require_calibration_envelope(envelope, role=CALIBRATION_ROLE_FINAL)
+    repository = _authenticate_running_repository(
+        head=request.repository_head_sha,
+        tree=request.repository_tree_sha,
+        label="calibration-final",
+    )
+    plan, schedule = _read_calibration_plan_and_schedule(request.plan_path, request.schedule_path)
+    require_chunkable_source(plan.source_id)
+    require_envelope_binding(
+        envelope,
+        plan=plan,
+        role=CALIBRATION_ROLE_FINAL,
+        step_id=_CALIBRATION_STEP_FINAL,
+        run_id=request.run_id,
+    )
+    requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
+    world_directory = Path(request.world_directory)
+    binding = _require_expected_binding(
+        _measured_calibration_binding(world_directory),
+        request.expected_sqlite_temp_binding,
+        label="calibration-final",
+    )
+    operational_catalog = Path(request.operational_catalog)
+    catalog_sha256, catalog_bytes = file_digest(operational_catalog)
+    chunks = resolve_chunk_inputs(
+        plan,
+        internal_root=Path(request.internal_root),
+        external_root=None if request.external_root is None else Path(request.external_root),
+    )
+    intermediates = resolve_intermediate_inputs(
+        plan, schedule, intermediates_root=Path(request.intermediates_root), chunk_inputs=chunks
+    )
+    require_attachable(len(intermediates))
+    contract = intermediates[0].receipt.execution_contract
+    _require_seed_identity(
+        label="calibration-final",
+        repository=repository,
+        recorded_head=intermediates[0].receipt.repository_head_sha,
+        recorded_tree=intermediates[0].receipt.repository_tree_sha,
+        contract=contract,
+        catalog_sha256=catalog_sha256,
+    )
+    state = _accepted_plan_state(operational_catalog, plan)
+    started_at_utc = min(item.receipt.earliest_input_started_at_utc for item in intermediates)
+    _require(
+        not world_directory.exists(),
+        f"the calibration world {world_directory.name!r} already exists; a world is create-once "
+        "and is never reused, resumed, repaired or overwritten",
+    )
+    input_bytes = sum(item.receipt.manifest.total_bytes for item in intermediates)
+    admission = _admit_merge_step(
+        step=_CALIBRATION_STEP_FINAL,
+        level=MERGE_LEVEL_TWO,
+        target=world_directory,
+        input_bytes=input_bytes,
+        seed_catalog_bytes=catalog_bytes,
+        peak_ratio=requirements.level_two_peak_ratio,
+        requirements=requirements,
+    )
+    event = _emit_calibration_admission_event(
+        envelope=envelope,
+        admission=admission,
+        binding=binding,
+        input_bytes=input_bytes,
+        seed_catalog_bytes=catalog_bytes,
+        charged_directory=world_directory,
+        attempt=None,
+    )
+    world_directory.mkdir(mode=_DIRECTORY_MODE, parents=True)
+    with WorkingCatalog(
+        operational_catalog, world_directory, cache_bytes=request.cache_bytes
+    ) as world:
+        connection = world.connection
+        _require(
+            world.identity.migration_head == contract.migration_head,
+            f"the calibration world was seeded at migration head {world.identity.migration_head} "
+            f"where every input executed at {contract.migration_head}",
+        )
+        world.ledger.begin_source(plan.source_instance_id, plan.source_id)
+        aliases = _attach_all(connection, [item.catalog_path for item in intermediates], "k")
+        try:
+            indexes = _deferrable_indexes(connection)
+            for name, _sql in indexes:
+                connection.execute(f"DROP INDEX IF EXISTS {name}")
+            with transaction(connection):
+                with write_containment(connection):
+                    reduced = _reduced_parser_run(connection, aliases, contract=contract)
+                    for table in _LOAD_ORDER:
+                        if table == "census_accession_observations":
+                            continue
+                        if _MERGE_STRATEGY[table] == "keyed_first_last":
+                            _keyed_first_last_load(connection, table, aliases)
+                        else:
+                            _sorted_bulk_load(connection, table, aliases)
+                    _apply_duplicate_identities(connection, reduced)
+                _l2_corrected, _l2_staged = stage_first_witness_corrections(connection, aliases)
+                with write_containment(connection):
+                    _load_accession_observations(connection, aliases)
+                    CensusCatalog._candidate_edges(  # noqa: SLF001 - the accepted derivation
+                        connection, plan.source_observation_id, kind="company_name"
+                    )
+                    CensusCatalog._candidate_edges(  # noqa: SLF001
+                        connection, plan.source_observation_id, kind="ticker"
+                    )
+                    CensusCatalog._mark_accession_conflicts(connection)  # noqa: SLF001
+                    # Deliberately NO census_plan_sources.parser_state update: a calibration
+                    # world is never marked as a parsed source (R6).
+            for _name, sql in indexes:
+                connection.execute(sql)
+            counts = table_row_counts(connection)
+        finally:
+            _detach_all(connection, aliases)
+        plan_counters = _plan_first_witness_counters(connection, chunks)
+        completeness, manifest_digest, totals, _level_two_evidence = _merge_sidecar(
+            sidecar_path=world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME,
+            inputs=cast("Sequence[ChunkInput]", intermediates),
+            plan=plan,
+            source_id=plan.source_id,
+        )
+        outcome = derived_f0_outcome(
+            plan=plan,
+            state=state,
+            reduced=reduced,
+            members=totals["members"],
+            records=totals["records"],
+            omitted=totals["omitted"],
+            materialized=totals["materialized"],
+            completeness_digest=completeness,
+        )
+        # D140-R12, by the accepted predicate, over the derived outcome. A blocking terminal
+        # leaves a world with no result, exactly as the canonical path leaves one with no receipt.
+        require_f0_success(outcome)
+        state_row = connection.execute(
+            "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
+            (plan.source_instance_id,),
+        ).fetchone()
+        world_parser_state = "" if state_row is None else str(state_row["parser_state"])
+        # Deliberately NO mark_parsed, NO F0 phase checkpoint, NO final world receipt (R6).
+    for item in intermediates:
+        verify_artifact_manifest(
+            item.directory, item.receipt.manifest, exclude=(INTERMEDIATE_RECEIPT_FILENAME,)
+        )
+    manifest = build_artifact_manifest(
+        world_directory, exclude=(CALIBRATION_SUBSET_RESULT_FILENAME,)
+    )
+    result = CalibrationSubsetResult(
+        contract=CALIBRATION_SUBSET_RESULT_CONTRACT,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        run_id=request.run_id,
+        source_instance_id=plan.source_instance_id,
+        source_observation_id=plan.source_observation_id,
+        source_sha256=plan.source_sha256,
+        source_byte_length=plan.source_byte_length,
+        member_order_digest=plan.member_order_digest,
+        selected_member_order_digest=plan.selected_member_order_digest,
+        shard_parent_binding_digest=plan.shard_parent_binding_digest,
+        primary_prefix_members=plan.primary_prefix_members,
+        selected_shard_members=plan.selected_shard_members,
+        excluded_shard_members=plan.excluded_shard_members,
+        selected_members=plan.selected_members,
+        full_total_members=plan.full_total_members,
+        repository_head_sha=repository.head_sha,
+        repository_tree_sha=repository.tree_sha,
+        catalog_source_sha256=contract.catalog_source_sha256,
+        execution_contract_identity=contract.contract_identity,
+        chunk_count=plan.chunk_count,
+        intermediate_count=len(intermediates),
+        parser_run_id=reduced.parser_run_id,
+        run_outcome=reduced.outcome,
+        parser_state_after="chunk_local",
+        world_parser_state=world_parser_state,
+        members=totals["members"],
+        records=totals["records"],
+        parsed_records=reduced.parsed,
+        quarantined_records=reduced.quarantined,
+        omitted_field_observations=totals["omitted"],
+        materialized_field_observations=totals["materialized"],
+        completeness_digest=completeness,
+        member_manifest_digest=manifest_digest,
+        table_row_counts=counts,
+        first_witness_accessions_corrected=plan_counters[0],
+        first_witness_rows_staged=plan_counters[1],
+        evidence_members_corrected=plan_counters[2],
+        evidence_delta=plan_counters[3],
+        storage_admission=dict(admission.as_record()),
+        admission_event_identity=event.event_identity,
+        envelope_sha256=envelope.sha256,
+        pid=os.getpid(),
+        rss_peak_bytes=process_peak_resident_bytes(),
+        started_at_utc=started_at_utc,
+        completed_at_utc=utc_now(),
+        manifest=manifest,
+        status="complete",
+        result_identity="",
+    )
+    sealed = replace(result, result_identity=result.identity())
+    # LAST. A finalization that stopped anywhere above leaves a world with no result.
+    write_once_canonical_json(
+        world_directory / CALIBRATION_SUBSET_RESULT_FILENAME, dict(sealed.as_record())
+    )
+    return sealed
+
+
+# --------------------------------------------------------------------------- #
+# The calibration process boundary -- runs in the PARENT; one launch, three roles
+# --------------------------------------------------------------------------- #
+def _calibration_child_main(request_path: str, envelope_fd: str) -> int:
+    """The calibration child's entry point. Not a command; there is no surface that names it.
+
+    FIRST the pipe-delivered envelope is received and validated -- contract, exact shape, role,
+    parent pid -- then the request document is admitted only if its bytes are the ones the
+    envelope binds, and only then is control handed to the body the envelope's role names, which
+    re-validates the envelope against the plan, step and ceiling before creating anything.
+    """
+    envelope = receive_calibration_envelope(envelope_fd)
+    record = require_envelope_request(envelope, Path(request_path))
+    kind = str(record.get("kind", ""))
+    if envelope.role == CALIBRATION_ROLE_CHUNK and "kind" not in record:
+        execute_calibration_subset_chunk_body(ChunkRequest.from_record(record), envelope)
+        return 0
+    if envelope.role == CALIBRATION_ROLE_GROUP and kind == MULTIPASS_REQUEST_KIND_GROUP:
+        merge_calibration_subset_group_body(GroupMergeRequest.from_record(record), envelope)
+        return 0
+    if envelope.role == CALIBRATION_ROLE_FINAL and kind == MULTIPASS_REQUEST_KIND_FINAL:
+        finalize_calibration_subset_body(FinalMergeRequest.from_record(record), envelope)
+        return 0
+    message = (
+        f"a calibration envelope for role {envelope.role!r} was handed a request of kind "
+        f"{kind or 'chunk'!r}; the two must agree and the child refuses"
+    )
+    raise ChunkMultipassError(message)
+
+
+def _spawn_calibration_child(
+    request_path: Path,
+    envelope: CalibrationChildEnvelope,
+    *,
+    timeout_seconds: float | None,
+    observe: Callable[[str], None] | None,
+) -> None:
+    """Start ONE calibration child with its envelope on an inherited pipe, and prove it ended.
+
+    The envelope's canonical bytes are written into the pipe and the write end closed before
+    the interpreter starts; the child inherits only the read end, whose number -- not its
+    contents -- is the second argument. Nothing about the envelope enters argv, the
+    environment, disk or this process's logs.
+    """
+    if observe is not None:
+        observe("CALIBRATION_PROCESS_START")
+    with delivered_calibration_envelope(envelope) as envelope_fd:
+        completed = subprocess.run(  # noqa: S603 - fixed interpreter, fixed bootstrap, no shell
+            [
+                sys.executable,
+                "-c",
+                _CALIBRATION_CHILD_BOOTSTRAP,
+                str(request_path),
+                str(envelope_fd),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            pass_fds=(envelope_fd,),
+        )
+    if observe is not None:
+        observe("CALIBRATION_PROCESS_EXIT")
+    if completed.returncode != 0:
+        message = (
+            f"calibration child {request_path.name!r} ended with exit status "
+            f"{completed.returncode} and is NOT complete. Nothing was cleaned, deleted or retried "
+            f"in place, and no terminal exists for it. stderr tail: "
+            f"{completed.stderr.strip()[-800:]!r}"
+        )
+        raise ChunkMultipassError(message)
+
+
+def run_calibration_subset_chunk(
+    request: ChunkRequest,
+    *,
+    plan: CalibrationSubsetPlan,
+    run_id: str,
+    predecessor_pid: int | None = None,
+    timeout_seconds: float | None = None,
+    observe: Callable[[str], None] | None = None,
+) -> ChunkReceipt:
+    """Run one calibration-subset chunk in a FRESH child process under a fresh envelope.
+
+    The sealed subset plan is required FIRST; the predecessor is dead; the request is written
+    create-once; the envelope is issued over exactly those bytes; the child runs the calibration
+    chunk body; the receipt exists, verifies, describes this chunk and attempt, binds this plan,
+    names a process that is not this one, and that process is gone.
+
+    Raises:
+        ChunkPlanError: the plan is not a sealed subset plan.
+        ChunkMultipassError, ChunkExecutionError, ChunkEvidenceError: any proof fails.
+    """
+    require_calibration_subset_plan(plan)
+    if predecessor_pid is not None:
+        _require_process_dead(predecessor_pid)
+    attempt_root = Path(request.attempt_directory)
+    attempt_root.parent.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    request_path = attempt_root.parent / f"{request.chunk_id}-{request.attempt:03d}-request.json"
+    write_once_json(request_path, dict(request.as_record()))
+    envelope = issue_calibration_envelope(
+        run_id=run_id,
+        plan=plan,
+        role=CALIBRATION_ROLE_CHUNK,
+        step_id=request.chunk_id,
+        request_path=request_path,
+        instrumentation_ledger=None,
+    )
+    _spawn_calibration_child(
+        request_path, envelope, timeout_seconds=timeout_seconds, observe=observe
+    )
+    receipt = ChunkReceipt.from_record(
+        read_receipt_document(
+            attempt_root / CHUNK_RECEIPT_FILENAME, contract=CHUNK_RECEIPT_CONTRACT
+        )
+    )
+    verify_artifact_manifest(attempt_root, receipt.manifest, exclude=(CHUNK_RECEIPT_FILENAME,))
+    _require(
+        receipt.chunk_id == request.chunk_id and receipt.attempt == request.attempt,
+        f"the receipt in {attempt_root.name!r} describes chunk {receipt.chunk_id!r} attempt "
+        f"{receipt.attempt}, not {request.chunk_id!r} attempt {request.attempt}",
+    )
+    _require(
+        receipt.plan_digest == plan.plan_digest,
+        f"the receipt binds plan {receipt.plan_digest[:16]}..., not the calibration-subset plan "
+        f"{plan.plan_digest[:16]}... this launch ran under",
+    )
+    _require(
+        receipt.pid != os.getpid(),
+        "the chunk receipt records THIS process's pid, so the chunk did not run in a separate "
+        "operating-system process",
+    )
+    _require_process_dead(receipt.pid)
+    return receipt
+
+
+def run_calibration_subset_chunks(
+    plan: CalibrationSubsetPlan,
+    *,
+    plan_path: Path,
+    chunk_root: Path,
+    operational_catalog: Path,
+    data_root: Path,
+    source_instance_id: str,
+    run_id: str,
+    batch_size: int,
+    cache_bytes: int | None = None,
+    timeout_seconds: float | None = None,
+    observe: Callable[[str], None] | None = None,
+) -> tuple[ChunkReceipt, ...]:
+    """Every chunk of a calibration-subset plan, each in its own process, with the region barrier.
+
+    Restart-safe: a chunk that already carries a valid receipt under this plan is reused, never
+    re-executed; the merged parent map is written once when the shard chunk is reached -- after
+    every primary chunk has a terminal -- and required identical on a restart. The measured
+    repository identity of this process is what every request names.
+    """
+    require_calibration_subset_plan(plan)
+    repository = require_clean_running_repository()
+    plan_path.parent.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    _write_canonical_or_require_same(plan_path, plan.as_record(), "calibration-subset plan")
+    chunk_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    receipts: list[ChunkReceipt] = []
+    contributions: list[Mapping[str, set[str]]] = []
+    parent_map_path: Path | None = None
+    previous: int | None = None
+    for bounds in plan.chunks:
+        if bounds.region == REGION_SHARD and parent_map_path is None:
+            merged = merge_parent_map(contributions)
+            parent_map_path = chunk_root / PARENT_MAP_FILENAME
+            _write_or_require_same(
+                parent_map_path,
+                {name: sorted(parents) for name, parents in sorted(merged.items())},
+                "merged parent map",
+            )
+        existing = completed_chunk_receipt(chunk_root, bounds.chunk_id)
+        if existing is not None:
+            receipt, directory = existing
+            _require(
+                receipt.plan_digest == plan.plan_digest,
+                f"chunk {bounds.chunk_id!r} already carries a receipt under plan "
+                f"{receipt.plan_digest[:16]}..., not this calibration-subset plan; refused",
+            )
+        else:
+            directory, attempt = next_attempt_directory(chunk_root, bounds.chunk_id)
+            receipt = run_calibration_subset_chunk(
+                ChunkRequest(
+                    plan_path=str(plan_path),
+                    chunk_id=bounds.chunk_id,
+                    attempt=attempt,
+                    attempt_directory=str(directory),
+                    operational_catalog=str(operational_catalog),
+                    data_root=str(data_root),
+                    source_instance_id=source_instance_id,
+                    batch_size=batch_size,
+                    cache_bytes=cache_bytes,
+                    repository_head_sha=repository.head_sha,
+                    repository_tree_sha=repository.tree_sha,
+                    parent_map_path=None if parent_map_path is None else str(parent_map_path),
+                ),
+                plan=plan,
+                run_id=run_id,
+                predecessor_pid=previous,
+                timeout_seconds=timeout_seconds,
+                observe=observe,
+            )
+            previous = receipt.pid
+        receipts.append(receipt)
+        if bounds.region == REGION_PRIMARY:
+            contributions.append(read_declarations(directory / CHUNK_DECLARATIONS_FILENAME))
+    return tuple(receipts)
+
+
+def run_calibration_subset_group_merge(
+    request: GroupMergeRequest,
+    *,
+    plan: CalibrationSubsetPlan,
+    run_id: str,
+    instrumentation_ledger: Path,
+    predecessor_pid: int | None = None,
+    timeout_seconds: float | None = None,
+    observe: Callable[[str], None] | None = None,
+) -> IntermediateReceipt:
+    """Run one calibration level-1 group merge in a FRESH child process under a fresh envelope.
+
+    Raises:
+        ChunkPlanError: the plan is not a sealed subset plan.
+        ChunkMultipassError, ChunkExecutionError, ChunkEvidenceError: any proof fails.
+    """
+    require_calibration_subset_plan(plan)
+    if predecessor_pid is not None:
+        _require_process_dead(predecessor_pid)
+    attempt_root = Path(request.attempt_directory)
+    attempt_root.parent.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    request_path = attempt_root.parent / f"{request.group_id}-{request.attempt:03d}-request.json"
+    write_once_json(request_path, dict(request.as_record()))
+    envelope = issue_calibration_envelope(
+        run_id=run_id,
+        plan=plan,
+        role=CALIBRATION_ROLE_GROUP,
+        step_id=request.group_id,
+        request_path=request_path,
+        instrumentation_ledger=instrumentation_ledger,
+    )
+    _spawn_calibration_child(
+        request_path, envelope, timeout_seconds=timeout_seconds, observe=observe
+    )
+    receipt = IntermediateReceipt.from_record(
+        read_receipt_document(
+            attempt_root / INTERMEDIATE_RECEIPT_FILENAME, contract=INTERMEDIATE_RECEIPT_CONTRACT
+        )
+    )
+    verify_artifact_manifest(
+        attempt_root, receipt.manifest, exclude=(INTERMEDIATE_RECEIPT_FILENAME,)
+    )
+    _require(
+        receipt.group_id == request.group_id
+        and receipt.attempt == request.attempt
+        and receipt.plan_digest == plan.plan_digest,
+        f"the receipt in {attempt_root.name!r} describes group {receipt.group_id!r} attempt "
+        f"{receipt.attempt} under plan {receipt.plan_digest[:16]}..., not {request.group_id!r} "
+        f"attempt {request.attempt} under {plan.plan_digest[:16]}...",
+    )
+    _require(
+        receipt.pid != os.getpid(),
+        "the intermediate receipt records THIS process's pid, so the merge did not run in a "
+        "separate operating-system process",
+    )
+    _require_process_dead(receipt.pid)
+    return receipt
+
+
+def run_calibration_subset_final_merge(
+    request: FinalMergeRequest,
+    *,
+    plan: CalibrationSubsetPlan,
+    instrumentation_ledger: Path,
+    predecessor_pid: int | None = None,
+    timeout_seconds: float | None = None,
+    observe: Callable[[str], None] | None = None,
+) -> CalibrationSubsetResult:
+    """Run the calibration finalization in a FRESH child process under a fresh envelope.
+
+    Returns the calibration-subset result read back through its exact reader and verified
+    against the world's own artifacts.
+
+    Raises:
+        ChunkPlanError: the plan is not a sealed subset plan.
+        ChunkMultipassError, ChunkExecutionError, ChunkEvidenceError: any proof fails.
+    """
+    require_calibration_subset_plan(plan)
+    if predecessor_pid is not None:
+        _require_process_dead(predecessor_pid)
+    world_directory = Path(request.world_directory)
+    world_directory.parent.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    request_path = world_directory.parent / f"{world_directory.name}-request.json"
+    write_once_json(request_path, dict(request.as_record()))
+    envelope = issue_calibration_envelope(
+        run_id=request.run_id,
+        plan=plan,
+        role=CALIBRATION_ROLE_FINAL,
+        step_id=_CALIBRATION_STEP_FINAL,
+        request_path=request_path,
+        instrumentation_ledger=instrumentation_ledger,
+    )
+    _spawn_calibration_child(
+        request_path, envelope, timeout_seconds=timeout_seconds, observe=observe
+    )
+    result = read_calibration_subset_result(world_directory / CALIBRATION_SUBSET_RESULT_FILENAME)
+    verify_artifact_manifest(
+        world_directory, result.manifest, exclude=(CALIBRATION_SUBSET_RESULT_FILENAME,)
+    )
+    _require(
+        result.plan_digest == plan.plan_digest
+        and result.run_id == request.run_id
+        and result.envelope_sha256 == envelope.sha256,
+        "the calibration-subset result does not describe this plan, run and envelope; refused",
+    )
+    _require(
+        result.pid != os.getpid(),
+        "the calibration-subset result records THIS process's pid, so the finalization did not "
+        "run in a separate operating-system process",
+    )
+    _require_process_dead(result.pid)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationSubsetMultipassResult:
+    """What one calibration-subset consolidation established, and where it put it."""
+
+    world_directory: Path
+    result: CalibrationSubsetResult
+    schedule: MergeSchedule
+    storage_plan: MultipassStoragePlan
+    intermediates: tuple[IntermediateReceipt, ...]
+    merge_pids: tuple[int, ...]
+
+
+def run_calibration_subset_multipass(  # noqa: PLR0915
+    *,
+    plan: CalibrationSubsetPlan,
+    internal_root: Path,
+    operational_catalog: Path,
+    multipass_root: Path,
+    run_id: str,
+    storage_requirements: MultipassStorageRequirements,
+    instrumentation_ledger: Path,
+    external_root: Path | None = None,
+    cache_bytes: int | None = None,
+    timeout_seconds: float | None = None,
+    observe: Callable[[str], None] | None = None,
+) -> CalibrationSubsetMultipassResult:
+    """Consolidate a calibration-subset plan: every level-1 group, then level 2, each in its own
+    process, under fresh envelopes -- D151-C27R1.
+
+    The sealed subset plan is required FIRST. The storage terms are the caller's explicit,
+    typed calibration terms -- never the owner-frozen production terms, which stay ``None`` and
+    are never consulted here. Then, in the accepted order: the SQLite temp binding is measured;
+    the executing repository is measured; the calibration schedule is derived and recorded
+    create-once beside the canonical plan copy; every chunk is resolved through the accepted
+    admission and the deterministic storage plan is recorded or held compatible on a restart;
+    each level-1 group with a valid intermediate under this plan is reused and each other is
+    merged in a fresh child under a fresh envelope, admitted before the child starts; then the
+    finalization runs in one more fresh child. Nothing is deleted at any point.
+    """
+    require_calibration_subset_plan(plan)
+    binding = _measured_calibration_binding(multipass_root)
+    repository = require_clean_running_repository()
+    schedule = derive_calibration_subset_schedule(plan)
+    intermediates_root = multipass_root / _INTERMEDIATES_DIRECTORY
+    world_directory = multipass_root / _FINAL_DIRECTORY
+    _require(
+        not _within(intermediates_root, instrumentation_ledger)
+        and not _within(world_directory, instrumentation_ledger),
+        "the calibration instrumentation ledger must lie outside the intermediates root and the "
+        "final world",
+    )
+    multipass_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    instrumentation_ledger.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    plan_path = multipass_root / CHUNK_PLAN_FILENAME
+    schedule_path = multipass_root / MERGE_SCHEDULE_FILENAME
+    _write_canonical_or_require_same(plan_path, plan.as_record(), "calibration-subset plan")
+    _write_or_require_same(schedule_path, dict(schedule.as_record()), "calibration merge schedule")
+    inputs = resolve_chunk_inputs(plan, internal_root=internal_root, external_root=external_root)
+    _catalog_sha256, catalog_bytes = file_digest(operational_catalog)
+    storage_plan = plan_multipass_storage(
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        groups=[(group.group_id, group.chunk_ids) for group in schedule.groups],
+        chunk_bytes_by_id={item.chunk_id: item.receipt.manifest.total_bytes for item in inputs},
+        seed_catalog_bytes=catalog_bytes,
+        requirements=storage_requirements,
+        sqlite_temp_binding=binding,
+    )
+    _record_storage_plan(multipass_root / STORAGE_PLAN_FILENAME, storage_plan)
+    by_id = {item.chunk_id: item for item in inputs}
+    receipts: list[IntermediateReceipt] = []
+    pids: list[int] = []
+    previous: int | None = None
+    for group in schedule.groups:
+        existing = completed_intermediate_receipt(intermediates_root, group.group_id)
+        if existing is not None:
+            _require(
+                existing[0].plan_digest == plan.plan_digest,
+                f"intermediate {group.group_id!r} already carries a receipt under plan "
+                f"{existing[0].plan_digest[:16]}..., not this calibration-subset plan; refused",
+            )
+            receipts.append(existing[0])
+            continue
+        _admit_merge_step(
+            step=group.group_id,
+            level=MERGE_LEVEL_ONE,
+            target=intermediate_attempt_directory(intermediates_root, group.group_id, 0),
+            input_bytes=sum(
+                by_id[chunk_id].receipt.manifest.total_bytes for chunk_id in group.chunk_ids
+            ),
+            seed_catalog_bytes=catalog_bytes,
+            peak_ratio=storage_requirements.level_one_peak_ratio,
+            requirements=storage_requirements,
+        )
+        attempt_directory, attempt = next_intermediate_attempt_directory(
+            intermediates_root, group.group_id
+        )
+        receipt = run_calibration_subset_group_merge(
+            GroupMergeRequest(
+                plan_path=str(plan_path),
+                schedule_path=str(schedule_path),
+                group_id=group.group_id,
+                attempt=attempt,
+                attempt_directory=str(attempt_directory),
+                internal_root=str(internal_root),
+                external_root=None if external_root is None else str(external_root),
+                operational_catalog=str(operational_catalog),
+                cache_bytes=cache_bytes,
+                repository_head_sha=repository.head_sha,
+                repository_tree_sha=repository.tree_sha,
+                storage_requirements=dict(storage_requirements.as_record()),
+                expected_sqlite_temp_binding=dict(binding.as_record()),
+            ),
+            plan=plan,
+            run_id=run_id,
+            instrumentation_ledger=instrumentation_ledger,
+            predecessor_pid=previous,
+            timeout_seconds=timeout_seconds,
+            observe=observe,
+        )
+        previous = receipt.pid
+        pids.append(receipt.pid)
+        receipts.append(receipt)
+    _admit_merge_step(
+        step=_CALIBRATION_STEP_FINAL,
+        level=MERGE_LEVEL_TWO,
+        target=world_directory,
+        input_bytes=sum(receipt.manifest.total_bytes for receipt in receipts),
+        seed_catalog_bytes=catalog_bytes,
+        peak_ratio=storage_requirements.level_two_peak_ratio,
+        requirements=storage_requirements,
+    )
+    result = run_calibration_subset_final_merge(
+        FinalMergeRequest(
+            plan_path=str(plan_path),
+            schedule_path=str(schedule_path),
+            intermediates_root=str(intermediates_root),
+            internal_root=str(internal_root),
+            external_root=None if external_root is None else str(external_root),
+            operational_catalog=str(operational_catalog),
+            world_directory=str(world_directory),
+            run_id=run_id,
+            cache_bytes=cache_bytes,
+            repository_head_sha=repository.head_sha,
+            repository_tree_sha=repository.tree_sha,
+            storage_requirements=dict(storage_requirements.as_record()),
+            expected_sqlite_temp_binding=dict(binding.as_record()),
+        ),
+        plan=plan,
+        instrumentation_ledger=instrumentation_ledger,
+        predecessor_pid=previous,
+        timeout_seconds=timeout_seconds,
+        observe=observe,
+    )
+    return CalibrationSubsetMultipassResult(
+        world_directory=world_directory,
+        result=result,
         schedule=schedule,
         storage_plan=storage_plan,
         intermediates=tuple(receipts),

@@ -42,16 +42,26 @@ does the work. See :func:`authenticate_running_repository`.
 module, no environment variable is consulted, and :func:`require_real_chunk_execution_authority`
 refuses on every call. A synthetic chunk over a bounded fixture is engineering evidence; it is
 not an authorization and it never becomes one.
+
+**The calibration-subset chunk body is separate and envelope-gated -- D151-C27R1.**
+:func:`execute_calibration_subset_chunk_body` runs the same accepted interval parse
+(:func:`_parse_interval`) under the exact subset plan reader, after an exact-contract,
+exact-role :class:`CalibrationChildEnvelope` delivered through an inherited pipe (never argv,
+never the environment, never disk). The production body, bootstrap and launcher are unchanged and
+refuse a subset plan; the calibration launch itself lives in the multipass module beside the
+other calibration roles.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -77,10 +87,15 @@ from disclosure_drift.m3.chunk_evidence import (
 from disclosure_drift.m3.chunk_plan import (
     REGION_PRIMARY,
     REGION_SHARD,
+    CalibrationSubsetPlan,
     CanonicalMember,
+    ChunkBounds,
     ChunkPlan,
+    canonical_json_bytes,
     chunk_by_id,
+    resolve_calibration_subset_members,
     resolve_chunk_members,
+    selected_member_ceiling,
     verify_source_identity,
 )
 from disclosure_drift.m3.compact_evidence import (
@@ -122,10 +137,16 @@ from disclosure_drift.storage.catalog import CatalogWriter
 from disclosure_drift.storage.sqlite import utc_now
 
 __all__ = [
+    "CALIBRATION_CHILD_ENVELOPE_CONTRACT",
+    "CALIBRATION_ROLES",
+    "CALIBRATION_ROLE_CHUNK",
+    "CALIBRATION_ROLE_FINAL",
+    "CALIBRATION_ROLE_GROUP",
     "CHUNK_EXECUTION_CONTRACT",
     "CHUNK_REQUEST_FILENAME",
     "F0_WRITTEN_TABLES",
     "REAL_CHUNKED_F0_EXECUTION_AUTHORITY",
+    "CalibrationChildEnvelope",
     "ChunkExecutionError",
     "ChunkRequest",
     "attempt_directory",
@@ -133,13 +154,22 @@ __all__ = [
     "chunk_execution_contract",
     "chunk_execution_identity",
     "completed_chunk_receipt",
+    "delivered_calibration_envelope",
+    "execute_calibration_subset_chunk_body",
     "execute_chunk_body",
+    "issue_calibration_envelope",
+    "measured_calibration_binding",
     "merge_parent_map",
     "next_attempt_directory",
     "read_declarations",
+    "receive_calibration_envelope",
+    "require_calibration_envelope",
+    "require_envelope_binding",
+    "require_envelope_request",
     "run_chunk",
     "table_row_counts",
     "require_real_chunk_execution_authority",
+    "write_once_canonical_json",
 ]
 
 
@@ -809,7 +839,24 @@ def authenticate_running_repository(request: ChunkRequest) -> RepositoryIdentity
     return identity
 
 
-def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
+def _require_absent_attempt(request: ChunkRequest) -> Path:
+    """The request's attempt directory, refused if it exists -- an attempt is create-once.
+
+    Raises:
+        ChunkExecutionError: the directory already exists.
+    """
+    attempt_root = Path(request.attempt_directory)
+    if attempt_root.exists():
+        message = (
+            f"chunk attempt directory {attempt_root.name!r} already exists; an attempt is "
+            "create-once. A previous attempt is left exactly as it is and a retry builds a new "
+            "directory beside it -- nothing is reused, repaired, cleaned, or deleted"
+        )
+        raise ChunkExecutionError(message)
+    return attempt_root
+
+
+def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:
     """Parse exactly one chunk's interval, and write its terminal receipt LAST.
 
     Every predicate is re-established here, in the process that will do the work: the code
@@ -829,20 +876,111 @@ def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
     # FIRST, ahead of every read and every write: the child proves which code it is running.
     # An attempt directory that does not yet exist stays that way on a refusal.
     repository = authenticate_running_repository(request)
-    attempt_root = Path(request.attempt_directory)
-    if attempt_root.exists():
-        message = (
-            f"chunk attempt directory {attempt_root.name!r} already exists; an attempt is "
-            "create-once. A previous attempt is left exactly as it is and a retry builds a new "
-            "directory beside it -- nothing is reused, repaired, cleaned, or deleted"
-        )
-        raise ChunkExecutionError(message)
+    attempt_root = _require_absent_attempt(request)
     plan = ChunkPlan.from_record(_read_json_object(Path(request.plan_path), "chunk plan"))
     bounds = chunk_by_id(plan, request.chunk_id)
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, _ = file_digest(operational_catalog)
     tree = DataTree.from_root(Path(request.data_root))
     attempt_root.mkdir(mode=_DIRECTORY_MODE, parents=True)
+    return _parse_interval(
+        request,
+        repository=repository,
+        plan=plan,
+        bounds=bounds,
+        attempt_root=attempt_root,
+        operational_catalog=operational_catalog,
+        catalog_sha256=catalog_sha256,
+        tree=tree,
+    )
+
+
+def execute_calibration_subset_chunk_body(
+    request: ChunkRequest, envelope: CalibrationChildEnvelope
+) -> ChunkReceipt:
+    """Parse exactly one CALIBRATION-SUBSET chunk's interval, receipt LAST -- D151-C27R1.
+
+    The calibration chunk body. Its FIRST statement is the calibration gate -- an exact-contract
+    envelope for the chunk role -- and it then re-establishes every predicate the accepted chunk
+    body establishes, in the same order: the code identity is measured and held to the request,
+    the attempt is create-once, the plan is read through the EXACT subset reader (the three
+    complete-source contracts refuse), the envelope is held to the plan, step and ceiling, and
+    only then does the attempt directory exist. The parse itself is the accepted interval parse:
+    the full universe is rederived from the real source, the dependency closure and the selected
+    order are rederived and authenticated, and this chunk's slice is parsed through the accepted
+    readers, writer and evidence. No caller-carried member list is authoritative (R3).
+
+    Raises:
+        ChunkExecutionError: the envelope, the request or a chunk-level precondition refuses.
+        ChunkPlanError: the plan is not a sealed subset plan, or the source is not its universe.
+        RepositoryIdentityError, OfflineParseError: as for the accepted chunk body.
+    """
+    require_calibration_envelope(envelope, role=CALIBRATION_ROLE_CHUNK)
+    repository = authenticate_running_repository(request)
+    attempt_root = _require_absent_attempt(request)
+    plan = CalibrationSubsetPlan.from_record(
+        _read_json_object(Path(request.plan_path), "calibration-subset plan")
+    )
+    bounds = chunk_by_id(plan, request.chunk_id)
+    require_envelope_binding(
+        envelope, plan=plan, role=CALIBRATION_ROLE_CHUNK, step_id=request.chunk_id
+    )
+    operational_catalog = Path(request.operational_catalog)
+    catalog_sha256, _ = file_digest(operational_catalog)
+    tree = DataTree.from_root(Path(request.data_root))
+    attempt_root.mkdir(mode=_DIRECTORY_MODE, parents=True)
+    return _parse_interval(
+        request,
+        repository=repository,
+        plan=plan,
+        bounds=bounds,
+        attempt_root=attempt_root,
+        operational_catalog=operational_catalog,
+        catalog_sha256=catalog_sha256,
+        tree=tree,
+    )
+
+
+def _resolve_members(
+    plan: ChunkPlan, archive_path: Path, chunk_id: str
+) -> tuple[CanonicalMember, ...]:
+    """This chunk's members, rederived from the archive by the plan's OWN sealed shape.
+
+    A calibration-subset plan rederives the full universe, the dependency closure and the
+    selected order; every other plan rederives the full universe and slices it. The dispatch
+    is on the sealed type, never on a caller flag or a request field.
+    """
+    if isinstance(plan, CalibrationSubsetPlan):
+        return resolve_calibration_subset_members(plan, archive_path, chunk_id)
+    return resolve_chunk_members(plan, archive_path, chunk_id)
+
+
+def _write_plan_copy(attempt_root: Path, plan: ChunkPlan) -> None:
+    """The plan's create-once copy inside the attempt: canonical bytes for a subset plan."""
+    if isinstance(plan, CalibrationSubsetPlan):
+        write_once_canonical_json(attempt_root / CHUNK_PLAN_FILENAME, dict(plan.as_record()))
+        return
+    write_once_json(attempt_root / CHUNK_PLAN_FILENAME, dict(plan.as_record()))
+
+
+def _parse_interval(  # noqa: PLR0915
+    request: ChunkRequest,
+    *,
+    repository: RepositoryIdentity,
+    plan: ChunkPlan,
+    bounds: ChunkBounds,
+    attempt_root: Path,
+    operational_catalog: Path,
+    catalog_sha256: str,
+    tree: DataTree,
+) -> ChunkReceipt:
+    """The accepted interval parse every chunk body runs AFTER its own gates and its mkdir.
+
+    One sequence, stated once: the planned source is re-selected and classified through the
+    accepted selector, the artifact re-authenticated by digest and length, the members
+    rederived from the archive (:func:`_resolve_members`), the interval parsed through the
+    accepted readers, writer and compact evidence, and the receipt written LAST.
+    """
     started = utc_now()
     rss_before = process_peak_resident_bytes()
     migration_head = 0
@@ -885,7 +1023,7 @@ def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
             observed_sha256=bound.logical_sha256 or "",
             observed_byte_length=int(bound.content_size_bytes or 0),
         )
-        members = resolve_chunk_members(plan, archive_path, request.chunk_id)
+        members = _resolve_members(plan, archive_path, request.chunk_id)
         shard_names = frozenset(
             member.member_name for member in _all_shard_members(plan, archive_path)
         )
@@ -968,7 +1106,7 @@ def execute_chunk_body(request: ChunkRequest) -> ChunkReceipt:  # noqa: PLR0915
                 attempt_root / CHUNK_DECLARATIONS_FILENAME,
                 {name: sorted(parents) for name, parents in sorted(declared.items())},
             )
-        write_once_json(attempt_root / CHUNK_PLAN_FILENAME, dict(plan.as_record()))
+        _write_plan_copy(attempt_root, plan)
 
     # Every handle is closed before the manifest is taken: a hash of a database with a live
     # write-ahead log beside it is a hash of a file missing its committed tail.
@@ -1178,3 +1316,393 @@ def run_chunk(
         raise ChunkExecutionError(message)
     _require_process_dead(receipt.pid)
     return receipt
+
+
+# --------------------------------------------------------------------------- #
+# The calibration-subset child envelope -- D151-C27R1 R5
+# --------------------------------------------------------------------------- #
+#: The ephemeral child capability's contract -- D151-C27R1 §4. Its canonical bytes travel through
+#: one inherited pipe and nowhere else: never argv, never the environment, never disk, never a
+#: log, receipt or evidence document. Only its SHA-256 and its nonsecret bindings are recorded.
+CALIBRATION_CHILD_ENVELOPE_CONTRACT: Final = "m3.3-chunked-f0-calibration-subset-child-envelope/1"
+
+#: The three roles a calibration child may be given, and the only three.
+CALIBRATION_ROLE_CHUNK: Final = "chunk"
+CALIBRATION_ROLE_GROUP: Final = "group"
+CALIBRATION_ROLE_FINAL: Final = "final"
+CALIBRATION_ROLES: Final[tuple[str, ...]] = (
+    CALIBRATION_ROLE_CHUNK,
+    CALIBRATION_ROLE_GROUP,
+    CALIBRATION_ROLE_FINAL,
+)
+
+_ENVELOPE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "contract",
+        "run_id",
+        "plan_digest",
+        "selected_member_ceiling",
+        "role",
+        "step_id",
+        "request_sha256",
+        "parent_pid",
+        "nonce",
+        "instrumentation_ledger",
+    }
+)
+
+
+def _hex_digest(value: object, field: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or set(value) - set("0123456789abcdef"):
+        message = f"a calibration envelope's {field!r} is not a SHA-256 hex digest; refused"
+        raise ChunkExecutionError(message)
+    return value
+
+
+def _envelope_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        message = f"a calibration envelope's {field!r} must be a non-negative integer; refused"
+        raise ChunkExecutionError(message)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationChildEnvelope:
+    """One child's exact, one-use, pipe-delivered capability -- D151-C27R1 R5.
+
+    It binds the contract, the run, the plan identity, the selected-member ceiling, the role and
+    step, the SHA-256 of the exact request document the child will read, the parent's pid, a
+    one-use nonce, and the instrumentation ledger a merge child emits its admission event into.
+    It is not durable execution authority: a resumed supervisor issues a fresh one after
+    revalidating the durable plan and the completed receipts.
+    """
+
+    contract: str
+    run_id: str
+    plan_digest: str
+    selected_member_ceiling: int
+    role: str
+    step_id: str
+    request_sha256: str
+    parent_pid: int
+    nonce: str
+    instrumentation_ledger: str | None
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact rendering the pipe carries."""
+        return {
+            "contract": self.contract,
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "selected_member_ceiling": self.selected_member_ceiling,
+            "role": self.role,
+            "step_id": self.step_id,
+            "request_sha256": self.request_sha256,
+            "parent_pid": self.parent_pid,
+            "nonce": self.nonce,
+            "instrumentation_ledger": self.instrumentation_ledger,
+        }
+
+    def canonical_bytes(self) -> bytes:
+        """The canonical bytes -- the only form that crosses the pipe."""
+        return canonical_json_bytes(self.as_record())
+
+    @property
+    def sha256(self) -> str:
+        """The one thing about the envelope that may be recorded."""
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationChildEnvelope:
+        """Rebuild an envelope from its EXACT mapping, refusing any other shape or contract.
+
+        Raises:
+            ChunkExecutionError: a key is missing or unexpected, a value is of another type, the
+                contract is not :data:`CALIBRATION_CHILD_ENVELOPE_CONTRACT`, or the role is not
+                one of :data:`CALIBRATION_ROLES`.
+        """
+        present = {str(key) for key in record}
+        if present != _ENVELOPE_KEYS:
+            message = (
+                "a calibration envelope is exact; this one is missing "
+                f"{sorted(_ENVELOPE_KEYS - present)} and carries unexpected "
+                f"{sorted(present - _ENVELOPE_KEYS)}; refused"
+            )
+            raise ChunkExecutionError(message)
+        ledger = record["instrumentation_ledger"]
+        if ledger is not None and not isinstance(ledger, str):
+            message = "a calibration envelope's instrumentation_ledger must be a path or null"
+            raise ChunkExecutionError(message)
+        for field in ("contract", "run_id", "role", "step_id", "nonce"):
+            if not isinstance(record[field], str) or not str(record[field]):
+                message = f"a calibration envelope's {field!r} must be a non-empty string"
+                raise ChunkExecutionError(message)
+        envelope = cls(
+            contract=str(record["contract"]),
+            run_id=str(record["run_id"]),
+            plan_digest=_hex_digest(record["plan_digest"], "plan_digest"),
+            selected_member_ceiling=_envelope_int(
+                record["selected_member_ceiling"], "selected_member_ceiling"
+            ),
+            role=str(record["role"]),
+            step_id=str(record["step_id"]),
+            request_sha256=_hex_digest(record["request_sha256"], "request_sha256"),
+            parent_pid=_envelope_int(record["parent_pid"], "parent_pid"),
+            nonce=str(record["nonce"]),
+            instrumentation_ledger=None if ledger is None else str(ledger),
+        )
+        if envelope.contract != CALIBRATION_CHILD_ENVELOPE_CONTRACT:
+            message = (
+                f"a calibration envelope carrying contract {envelope.contract!r} is refused; this "
+                f"build reads {CALIBRATION_CHILD_ENVELOPE_CONTRACT!r} and no other shape"
+            )
+            raise ChunkExecutionError(message)
+        if envelope.role not in CALIBRATION_ROLES:
+            message = (
+                f"a calibration envelope names role {envelope.role!r}; the roles are "
+                f"{list(CALIBRATION_ROLES)} and no other is executed"
+            )
+            raise ChunkExecutionError(message)
+        return envelope
+
+
+def issue_calibration_envelope(
+    *,
+    run_id: str,
+    plan: CalibrationSubsetPlan,
+    role: str,
+    step_id: str,
+    request_path: Path,
+    instrumentation_ledger: Path | None,
+) -> CalibrationChildEnvelope:
+    """Issue one fresh envelope, in the supervisor, over the exact request document on disk.
+
+    The request's SHA-256 is taken from the bytes the child will read; the nonce is fresh; the
+    parent pid is this process's. Issued per launch, so a nonce is used once by construction.
+
+    Raises:
+        ChunkExecutionError: the role is not a calibration role, or the request is unreadable.
+    """
+    if role not in CALIBRATION_ROLES:
+        message = f"a calibration envelope cannot be issued for role {role!r}"
+        raise ChunkExecutionError(message)
+    try:
+        request_bytes = request_path.read_bytes()
+    except OSError as exc:
+        message = f"the request document {request_path.name!r} could not be read: {exc}"
+        raise ChunkExecutionError(message) from exc
+    return CalibrationChildEnvelope(
+        contract=CALIBRATION_CHILD_ENVELOPE_CONTRACT,
+        run_id=run_id,
+        plan_digest=plan.plan_digest,
+        selected_member_ceiling=selected_member_ceiling(plan),
+        role=role,
+        step_id=step_id,
+        request_sha256=hashlib.sha256(request_bytes).hexdigest(),
+        parent_pid=os.getpid(),
+        nonce=os.urandom(16).hex(),
+        instrumentation_ledger=(
+            None if instrumentation_ledger is None else str(instrumentation_ledger)
+        ),
+    )
+
+
+@contextmanager
+def delivered_calibration_envelope(envelope: CalibrationChildEnvelope) -> Iterator[int]:
+    """A pipe holding the envelope's canonical bytes; yields the read end for ``pass_fds``.
+
+    The write end is filled and CLOSED before the child is started, so the child reads to end of
+    file and nothing else can ever write into that pipe; the read end is closed in the parent
+    when the launch returns. The bytes never touch argv, the environment or disk.
+    """
+    read_end, write_end = os.pipe()
+    try:
+        with os.fdopen(write_end, "wb") as pipe:
+            pipe.write(envelope.canonical_bytes())
+        yield read_end
+    finally:
+        os.close(read_end)
+
+
+def receive_calibration_envelope(descriptor: int | str) -> CalibrationChildEnvelope:
+    """Read the one envelope this child was handed, from its inherited pipe, and validate it.
+
+    The bytes must be exactly the canonical rendering of an exact-shape envelope under the
+    calibration contract naming a calibration role, and the parent pid it names must be the
+    process that started this one. This is the FIRST thing a calibration child does, before its
+    request is opened and before any world-creating path.
+
+    Raises:
+        ChunkExecutionError: the pipe cannot be read, or the envelope fails any check.
+    """
+    try:
+        number = int(descriptor)
+    except (TypeError, ValueError) as exc:
+        message = "the calibration envelope descriptor is not a pipe number; refused"
+        raise ChunkExecutionError(message) from exc
+    try:
+        with os.fdopen(number, "rb") as pipe:
+            payload = pipe.read()
+    except OSError as exc:
+        message = f"the calibration envelope pipe could not be read: {exc}"
+        raise ChunkExecutionError(message) from exc
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"the calibration envelope is not decodable JSON: {exc}"
+        raise ChunkExecutionError(message) from exc
+    if not isinstance(decoded, dict):
+        message = "the calibration envelope is not a JSON object; refused"
+        raise ChunkExecutionError(message)
+    envelope = CalibrationChildEnvelope.from_record(decoded)
+    if envelope.canonical_bytes() != payload:
+        message = "the calibration envelope was not delivered as its canonical bytes; refused"
+        raise ChunkExecutionError(message)
+    if envelope.parent_pid != os.getppid():
+        message = (
+            f"the calibration envelope names parent pid {envelope.parent_pid} and this process "
+            f"was started by {os.getppid()}; a capability from any other process is refused"
+        )
+        raise ChunkExecutionError(message)
+    return envelope
+
+
+def require_calibration_envelope(
+    envelope: CalibrationChildEnvelope, *, role: str
+) -> CalibrationChildEnvelope:
+    """The calibration bodies' FIRST gate: an exact-contract envelope for exactly this role.
+
+    Raises:
+        ChunkExecutionError: the envelope's contract or role is not the one required.
+    """
+    if envelope.contract != CALIBRATION_CHILD_ENVELOPE_CONTRACT or envelope.role != role:
+        message = (
+            f"a calibration {role!r} body was handed an envelope for role {envelope.role!r} "
+            f"under contract {envelope.contract!r}; refused before anything is read or created"
+        )
+        raise ChunkExecutionError(message)
+    return envelope
+
+
+def require_envelope_request(
+    envelope: CalibrationChildEnvelope, request_path: Path
+) -> Mapping[str, object]:
+    """The request document, admitted only if its bytes are exactly the ones the envelope binds.
+
+    Raises:
+        ChunkExecutionError: the document cannot be read, its digest differs, or it is not a
+            JSON object.
+    """
+    try:
+        payload = request_path.read_bytes()
+    except OSError as exc:
+        message = f"the calibration request {request_path.name!r} could not be read: {exc}"
+        raise ChunkExecutionError(message) from exc
+    observed = hashlib.sha256(payload).hexdigest()
+    if observed != envelope.request_sha256:
+        message = (
+            f"the calibration request {request_path.name!r} digests to {observed!r} where the "
+            f"envelope binds {envelope.request_sha256!r}; a request other than the one the "
+            "supervisor issued the capability over is refused"
+        )
+        raise ChunkExecutionError(message)
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"the calibration request {request_path.name!r} is not decodable JSON: {exc}"
+        raise ChunkExecutionError(message) from exc
+    if not isinstance(decoded, dict):
+        message = f"the calibration request {request_path.name!r} is not a JSON object; refused"
+        raise ChunkExecutionError(message)
+    return decoded
+
+
+def require_envelope_binding(
+    envelope: CalibrationChildEnvelope,
+    *,
+    plan: CalibrationSubsetPlan,
+    role: str,
+    step_id: str,
+    run_id: str | None = None,
+) -> CalibrationChildEnvelope:
+    """Hold the envelope to the plan, role, step, ceiling and run the child actually has.
+
+    Raises:
+        ChunkExecutionError: any binding differs.
+    """
+    ceiling = selected_member_ceiling(plan)
+    checks: tuple[tuple[bool, str], ...] = (
+        (envelope.role == role, f"role {envelope.role!r} where {role!r} is executing"),
+        (envelope.step_id == step_id, f"step {envelope.step_id!r} where {step_id!r} is executing"),
+        (
+            envelope.plan_digest == plan.plan_digest,
+            f"plan {envelope.plan_digest[:16]}... where the plan read is "
+            f"{plan.plan_digest[:16]}...",
+        ),
+        (
+            envelope.selected_member_ceiling == ceiling and plan.selected_members <= ceiling,
+            f"selected-member ceiling {envelope.selected_member_ceiling} where the plan's "
+            f"ceiling is {ceiling} over {plan.selected_members} selected members",
+        ),
+        (
+            run_id is None or envelope.run_id == run_id,
+            f"run {envelope.run_id!r} where the request names {run_id!r}",
+        ),
+    )
+    for condition, problem in checks:
+        if not condition:
+            message = (
+                f"the calibration envelope binds {problem}; the capability does not describe "
+                "this work and the child refuses before anything is created"
+            )
+            raise ChunkExecutionError(message)
+    return envelope
+
+
+def measured_calibration_binding(charged_path: Path) -> object:
+    """THIS calibration child's SQLite temporary binding, measured through the accepted guard.
+
+    Part of the calibration gate family: a calibration child proves for itself, before any
+    world exists, that SQLite's spill lands on the volume its admission charges (D151-C17 R6).
+    The guard is reached exactly as production reaches it -- ``charged_path`` and nothing else,
+    never a provider, an environment mapping, a request field or a claim -- and the accepted
+    :func:`~disclosure_drift.m3.chunk_tiering.require_sqlite_temp_binding` is imported at call
+    time because the tiering module reaches this one through the storage module. The caller
+    compares the measurement with the binding the supervisor admitted on; nothing here asserts
+    equality.
+    """
+    from disclosure_drift.m3.chunk_tiering import (  # noqa: PLC0415 - narrow, call-time
+        require_sqlite_temp_binding,
+    )
+
+    return require_sqlite_temp_binding(charged_path=charged_path)
+
+
+def write_once_canonical_json(path: Path, document: Mapping[str, object]) -> Path:
+    """Write one canonical calibration-subset document exactly once, or refuse -- §4.
+
+    The same ``O_CREAT | O_EXCL`` create-once rule as the accepted
+    :func:`~disclosure_drift.m3.chunk_evidence.write_once_json`, over the canonical bytes
+    (sorted keys, compact separators, no NaN, one trailing newline).
+
+    Raises:
+        ChunkExecutionError: the path already exists or is a symbolic link.
+        ChunkPlanError: the document holds a value JSON cannot carry.
+    """
+    if path.is_symlink():
+        message = f"{path.name!r} exists as a symbolic link and is never written through"
+        raise ChunkExecutionError(message)
+    payload = canonical_json_bytes(document)
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        message = (
+            f"{path.name!r} already exists; a calibration-subset document is create-once and is "
+            "never overwritten, repaired or re-stamped"
+        )
+        raise ChunkExecutionError(message) from exc
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path

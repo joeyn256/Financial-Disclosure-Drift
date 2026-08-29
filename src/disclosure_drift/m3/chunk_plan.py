@@ -61,8 +61,19 @@ to the multipass finalizer, because its digest says what it is. A multipass plan
 records the single-pass cap it was sealed under as **exactly** the cap this build enforces, so a
 lowered declared capacity cannot move the fan-in the merge schedule is derived from.
 
+**A dependency-closed calibration subset is the fourth contract, and it is calibration-only --
+D151-C27R1.** :data:`CALIBRATION_SUBSET_PLAN_CONTRACT` describes a bounded real-source selection:
+a proper primary prefix plus every historical shard whose accepted D129-R5 declaring parent lies
+inside that prefix, derived by ONE read-only scan of the real archive
+(:func:`derive_dependency_closure`). Its chunks are stated in selected coordinates while the full
+canonical universe -- count, region bounds and ordering digest -- stays bound beside the selected
+identities, and every one of them is inside the plan digest. The three complete-source readers
+refuse it, its reader refuses them, and every artifact built from it carries the four
+:data:`CALIBRATION_SUBSET_CLASSIFICATIONS` labels.
+
 **Nothing here authorizes anything.** No world is created, no member is decompressed, no
-database is opened, and no process is started. Reading a central directory is a measurement.
+database is opened, and no process is started. Reading a central directory is a measurement;
+the dependency-resolution scan reads two fields of each primary document and writes nothing.
 """
 
 from __future__ import annotations
@@ -86,18 +97,27 @@ from disclosure_drift.errors import DisclosureDriftError
 # file-versus-descendant collision and reverse descendant-versus-file collision, all of them,
 # once. The payload-level defences -- declared size, expansion ratio, cumulative expansion --
 # stay where they are, in the accepted readers, during chunk execution, where the bytes are.
-from disclosure_drift.m3.offline_parse import _is_historical_shard_member
+from disclosure_drift.m3.offline_parse import (
+    OfflineParseError,
+    _is_historical_shard_member,
+    _primary_document_declarations,
+    _resolve_shard_parent,
+)
 from disclosure_drift.sec.archive import (
     ArchiveDefenceError,
+    iter_members,
     scan_central_directory,
 )
 
 __all__ = [
     "CALIBRATION_CHUNK_CEILING",
     "CALIBRATION_PLAN_CONTRACT",
+    "CALIBRATION_SUBSET_CLASSIFICATIONS",
+    "CALIBRATION_SUBSET_PLAN_CONTRACT",
     "CHUNKABLE_SOURCE_IDS",
     "CHUNK_PLAN_CONTRACT",
     "CHUNK_REGION_ORDER",
+    "DEPENDENCY_CLOSURE_RULE",
     "GOVERNED_MEMBER_SUFFIX",
     "MEMBER_ORDER_CONTRACT",
     "MULTIPASS_CHUNK_CEILING",
@@ -107,24 +127,42 @@ __all__ = [
     "REGION_PRIMARY",
     "REGION_SHARD",
     "RESERVED_ATTACHMENT_HEADROOM",
+    "SHARD_EXCLUSION_CIK_CONFLICT",
+    "SHARD_EXCLUSION_CLASSES",
+    "SHARD_EXCLUSION_MULTIPLE_DECLARERS",
+    "SHARD_EXCLUSION_PARENT_OUTSIDE_PREFIX",
+    "SHARD_EXCLUSION_UNDECLARED",
     "SINGLE_PASS_CHUNK_CAP",
+    "CalibrationSubsetPlan",
+    "CalibrationSubsetTarget",
     "CanonicalMember",
     "ChunkBounds",
     "ChunkPlan",
     "ChunkPlanError",
+    "DependencyClosure",
+    "ShardExclusion",
+    "ShardParentBinding",
     "build_calibration_chunk_plan",
+    "build_calibration_subset_plan",
     "build_chunk_plan",
     "build_multipass_chunk_plan",
+    "canonical_json_bytes",
     "canonical_member_sequence",
     "chunk_by_id",
     "chunks_in_region",
     "compute_member_order_digest",
+    "derive_dependency_closure",
     "partition_regions",
     "production_chunk_members",
+    "require_calibration_subset_plan",
     "require_chunkable_source",
     "require_plan_coverage",
     "require_sealed_plan",
+    "resolve_calibration_subset_members",
     "resolve_chunk_members",
+    "selected_member_ceiling",
+    "selected_member_sequence",
+    "selected_shard_member_order_digest",
     "verify_source_identity",
 ]
 
@@ -1004,6 +1042,9 @@ def require_plan_coverage(plan: ChunkPlan) -> ChunkPlan:
             "partition must cover the source exactly once and is refused rather than extended"
         )
         raise ChunkPlanError(message)
+    if isinstance(plan, CalibrationSubsetPlan):
+        # D151-C27R1: the selection rules, over and above the partition rules above.
+        _require_subset_coverage(plan)
     return plan
 
 
@@ -1094,10 +1135,37 @@ def _require_admissible_width(plan: ChunkPlan) -> None:
             )
             raise ChunkPlanError(message)
         return
+    if plan.contract == CALIBRATION_SUBSET_PLAN_CONTRACT:
+        # D151-C27R1: a subset plan is multipass-shaped -- consumed only by the two-level
+        # calibration merge -- so it is held to the multipass width rule and to this build's
+        # cap exactly, and it must be the subset TYPE, not a base plan wearing the contract.
+        if not isinstance(plan, CalibrationSubsetPlan):
+            message = (
+                f"a plan carrying {CALIBRATION_SUBSET_PLAN_CONTRACT!r} that is not a "
+                "calibration-subset plan record is refused; the contract names a shape"
+            )
+            raise ChunkPlanError(message)
+        if plan.single_pass_chunk_cap != SINGLE_PASS_CHUNK_CAP:
+            message = (
+                f"a calibration-subset plan declares a single-pass cap of "
+                f"{plan.single_pass_chunk_cap} where this build enforces "
+                f"{SINGLE_PASS_CHUNK_CAP}; the merge fan-in derives from it and it is held "
+                "to the constant exactly"
+            )
+            raise ChunkPlanError(message)
+        if not MULTIPASS_CHUNK_FLOOR <= plan.chunk_count <= CALIBRATION_CHUNK_CEILING:
+            message = (
+                f"a calibration-subset plan needs {plan.chunk_count} chunks; D151-C27R1 admits "
+                f"more than {SINGLE_PASS_CHUNK_CAP} and at most CALIBRATION_CHUNK_CEILING = "
+                f"{CALIBRATION_CHUNK_CEILING}, consumed only through the two-level calibration "
+                "merge. The planner is bounded rather than open-ended"
+            )
+            raise ChunkPlanError(message)
+        return
     message = (
         f"a chunk plan carrying contract {plan.contract!r} has no width rule in this build; "
-        f"only {CHUNK_PLAN_CONTRACT!r}, {CALIBRATION_PLAN_CONTRACT!r} and "
-        f"{MULTIPASS_PLAN_CONTRACT!r} are executed"
+        f"only {CHUNK_PLAN_CONTRACT!r}, {CALIBRATION_PLAN_CONTRACT!r}, "
+        f"{MULTIPASS_PLAN_CONTRACT!r} and {CALIBRATION_SUBSET_PLAN_CONTRACT!r} are executed"
     )
     raise ChunkPlanError(message)
 
@@ -1182,3 +1250,817 @@ def resolve_chunk_members(
         )
         raise ChunkPlanError(message)
     return members[bounds.start : bounds.end]
+
+
+# --------------------------------------------------------------------------- #
+# The dependency-closed calibration subset -- D151-C27R1
+# --------------------------------------------------------------------------- #
+#: The contract of a **dependency-closed calibration-subset** plan -- D151-C27R1 §4.
+#:
+#: A subset plan describes a bounded, real-source selection: the first ``primary_prefix_members``
+#: primary documents in canonical order, plus every historical shard whose accepted D129-R5
+#: declaring parent lies inside that prefix. It is a fourth contract rather than a flag on any of
+#: the three complete-source ones, for the mechanical reasons the others give: the contract is
+#: inside the digest, the three complete-source readers refuse it outright, and its own reader
+#: refuses them. Every artifact built from it is calibration-only and noncanonical.
+CALIBRATION_SUBSET_PLAN_CONTRACT: Final = "m3.3-chunked-f0-calibration-subset-plan/1"
+
+#: The four labels every calibration-subset artifact carries -- D151-C27R1 R6. Exact, in order.
+CALIBRATION_SUBSET_CLASSIFICATIONS: Final[tuple[str, ...]] = (
+    "CALIBRATION_ONLY",
+    "NONCANONICAL",
+    "NOT_A_PRODUCTION_INPUT",
+    "NOT_A_BOUNDED_CANARY",
+)
+
+#: The dependency-closure rule a subset plan is derived under, folded into its identity.
+#:
+#: A shard is SELECTED when, over the COMPLETE real archive, exactly one primary document
+#: declares it under ``filings.files`` (the accepted D129-R5 rule, applied verbatim through
+#: :func:`~disclosure_drift.m3.offline_parse._resolve_shard_parent`: the declared parent must
+#: equal the registrant the shard's own name encodes), and that declaring document's full
+#: canonical position lies inside the primary prefix. Every other shard is EXCLUDED under
+#: exactly one of :data:`SHARD_EXCLUSION_CLASSES`. Nothing is inferred from a filename alone, a
+#: same-CIK primary alone, a caller-supplied mapping, or a plan-carried mapping.
+DEPENDENCY_CLOSURE_RULE: Final = "d129-r5-declaring-parent-within-primary-prefix"
+
+#: The declaring parent resolves but sits at or beyond the primary prefix.
+SHARD_EXCLUSION_PARENT_OUTSIDE_PREFIX: Final = "parent_outside_prefix"
+#: No primary document declares the shard at all; its filename binds nothing.
+SHARD_EXCLUSION_UNDECLARED: Final = "undeclared"
+#: More than one distinct declaring registrant, or more than one declaring document.
+SHARD_EXCLUSION_MULTIPLE_DECLARERS: Final = "multiple_declarers"
+#: Exactly one declaring registrant, and it contradicts the registrant the filename encodes.
+SHARD_EXCLUSION_CIK_CONFLICT: Final = "cik_conflict"
+#: Every exclusion class, in the order the plan records them. Exact.
+SHARD_EXCLUSION_CLASSES: Final[tuple[str, ...]] = (
+    SHARD_EXCLUSION_PARENT_OUTSIDE_PREFIX,
+    SHARD_EXCLUSION_UNDECLARED,
+    SHARD_EXCLUSION_MULTIPLE_DECLARERS,
+    SHARD_EXCLUSION_CIK_CONFLICT,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationSubsetTarget:
+    """The two caller-stated numbers a subset plan is built from -- D151-C27R1 R8.
+
+    Carried as a typed record rather than as module constants: an owner packet states the
+    calibration point, the launcher hands it here, and the plan identity folds both numbers.
+    Nothing in this module chooses either.
+    """
+
+    primary_prefix_members: int
+    chunk_members: int
+
+    def __post_init__(self) -> None:
+        for name in ("primary_prefix_members", "chunk_members"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                message = f"a calibration-subset target's {name!r} must be a positive integer"
+                raise ChunkPlanError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class ShardParentBinding:
+    """One SELECTED shard and the accepted declaration that binds it, in full coordinates."""
+
+    shard_canonical_position: int
+    shard_member_name: str
+    shard_archive_ordinal: int
+    parent_member_name: str
+    parent_canonical_position: int
+    parent_registrant_cik_padded: str
+
+    def digest_row(self) -> str:
+        """This binding's line in the shard-parent-binding digest."""
+        return "\x1f".join(
+            (
+                "selected",
+                str(self.shard_canonical_position),
+                self.shard_member_name,
+                str(self.shard_archive_ordinal),
+                self.parent_member_name,
+                str(self.parent_canonical_position),
+                self.parent_registrant_cik_padded,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ShardExclusion:
+    """One EXCLUDED shard, the class it was excluded under, and the evidence for that class."""
+
+    shard_canonical_position: int
+    shard_member_name: str
+    shard_archive_ordinal: int
+    exclusion_class: str
+    declarer_positions: tuple[int, ...]
+    declared_ciks: tuple[str, ...]
+
+    def digest_row(self) -> str:
+        """This exclusion's line in the shard-parent-binding digest."""
+        return "\x1f".join(
+            (
+                "excluded",
+                str(self.shard_canonical_position),
+                self.shard_member_name,
+                str(self.shard_archive_ordinal),
+                self.exclusion_class,
+                ",".join(str(position) for position in self.declarer_positions),
+                ",".join(self.declared_ciks),
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyClosure:
+    """Every shard of the full shard region, classified once under the closure rule.
+
+    ``selected`` and ``excluded`` are each in canonical order, and together they cover the shard
+    region exactly once, so the binding digest proves both that every eligible shard was
+    included and that every ineligible shard was excluded -- D151-C27R1 §5.
+    """
+
+    rule: str
+    primary_prefix_members: int
+    full_primary_members: int
+    full_shard_members: int
+    selected: tuple[ShardParentBinding, ...]
+    excluded: tuple[ShardExclusion, ...]
+
+    def excluded_by_class(self) -> Mapping[str, int]:
+        """How many shards each exclusion class holds. Every class is present, zero included."""
+        counts = dict.fromkeys(SHARD_EXCLUSION_CLASSES, 0)
+        for item in self.excluded:
+            counts[item.exclusion_class] += 1
+        return counts
+
+    def binding_digest(self) -> str:
+        """The shard-parent-binding digest over every selected AND excluded shard, in order."""
+        rows = sorted(
+            [(item.shard_canonical_position, item.digest_row()) for item in self.selected]
+            + [(item.shard_canonical_position, item.digest_row()) for item in self.excluded]
+        )
+        digest = hashlib.sha256()
+        for part in (
+            self.rule,
+            str(self.primary_prefix_members),
+            str(self.full_primary_members),
+            str(self.full_shard_members),
+        ):
+            digest.update(part.encode("utf-8"))
+            digest.update(b"\x1e")
+        for _position, row in rows:
+            digest.update(row.encode("utf-8"))
+            digest.update(b"\x1e")
+        return digest.hexdigest()
+
+
+def _require_proper_prefix(primary_prefix_members: int, full_primary_members: int) -> None:
+    if not 0 < primary_prefix_members < full_primary_members:
+        message = (
+            f"a calibration subset selects a PROPER primary prefix; got {primary_prefix_members} "
+            f"of {full_primary_members} primary members. A prefix that is the whole primary "
+            "region is a complete-source plan and is built as one, never as a subset"
+        )
+        raise ChunkPlanError(message)
+
+
+def derive_dependency_closure(
+    archive_path: Path,
+    members: Sequence[CanonicalMember],
+    *,
+    primary_prefix_members: int,
+) -> DependencyClosure:
+    """Classify every shard of the archive under the closure rule -- D151-C27R1 R1.
+
+    **One deterministic read-only scan of the real archive**, reading only the two fields the
+    accepted D129-R5 rule depends on: each primary document's own registrant and the overflow
+    names it declares under ``filings.files``, extracted by the accepted
+    :func:`~disclosure_drift.m3.offline_parse._primary_document_declarations` and bounded exactly
+    as :func:`~disclosure_drift.m3.offline_parse._declare_shard_parents` bounds them -- a
+    declaration naming a member the archive does not carry binds nothing. The verdict for every
+    shard is then the accepted :func:`~disclosure_drift.m3.offline_parse._resolve_shard_parent`,
+    called rather than restated. The scan covers the WHOLE archive, not the prefix: a second
+    declarer beyond the prefix is what makes a shard ineligible, and only a complete scan can see
+    it. No derived archive is created, no observation altered, no catalog written, no chunk
+    parsed and no world created.
+
+    ``members`` is the canonical sequence the caller already derived from the central directory;
+    the traversal here is required to visit exactly that population.
+
+    Raises:
+        ChunkPlanError: the prefix is not a proper prefix of the primary region, or the traversal
+            visits a population other than ``members``.
+        ArchiveDefenceError: the archive is refused by the accepted archive defences.
+        OfflineParseError: a member name is shard-shaped only beneath a directory prefix.
+    """
+    primaries = [member for member in members if member.region == REGION_PRIMARY]
+    shards = [member for member in members if member.region == REGION_SHARD]
+    _require_proper_prefix(primary_prefix_members, len(primaries))
+    primary_by_name = {member.member_name: member for member in primaries}
+    shard_names = frozenset(member.member_name for member in shards)
+    declared_ciks: dict[str, set[str]] = {}
+    declarers: dict[str, set[tuple[int, str, str]]] = {}
+    visited = 0
+    for archive_member in iter_members(archive_path, name_suffix=GOVERNED_MEMBER_SUFFIX):
+        visited += 1
+        name = archive_member.name
+        if _is_historical_shard_member(name):
+            if name not in shard_names:
+                message = (
+                    f"the dependency-resolution scan met shard {name!r}, which the canonical "
+                    "member sequence does not carry; the two populations must be one"
+                )
+                raise ChunkPlanError(message)
+            continue
+        primary = primary_by_name.get(name)
+        if primary is None:
+            message = (
+                f"the dependency-resolution scan met primary {name!r}, which the canonical "
+                "member sequence does not carry; the two populations must be one"
+            )
+            raise ChunkPlanError(message)
+        padded, declarations = _primary_document_declarations(archive_member.payload)
+        if padded is None:
+            continue
+        for declaration in declarations:
+            if declaration not in shard_names:
+                # Bounded exactly as the accepted fold bounds it.
+                continue
+            declared_ciks.setdefault(declaration, set()).add(padded)
+            declarers.setdefault(declaration, set()).add(
+                (primary.canonical_position, primary.member_name, padded)
+            )
+    if visited != len(members):
+        message = (
+            f"the dependency-resolution scan visited {visited} governed members where the "
+            f"canonical sequence holds {len(members)}; the two populations must be one"
+        )
+        raise ChunkPlanError(message)
+    selected: list[ShardParentBinding] = []
+    excluded: list[ShardExclusion] = []
+    for shard in shards:
+        name = shard.member_name
+        parents = declared_ciks.get(name, set())
+        rows = sorted(declarers.get(name, set()))
+        evidence = (tuple(row[0] for row in rows), tuple(sorted(parents)))
+        try:
+            resolved = _resolve_shard_parent(name, declared_ciks)
+        except OfflineParseError:
+            if not parents:
+                excluded.append(_exclusion(shard, SHARD_EXCLUSION_UNDECLARED, evidence))
+            elif len(parents) > 1:
+                excluded.append(_exclusion(shard, SHARD_EXCLUSION_MULTIPLE_DECLARERS, evidence))
+            else:
+                excluded.append(_exclusion(shard, SHARD_EXCLUSION_CIK_CONFLICT, evidence))
+            continue
+        if len(rows) != 1:
+            excluded.append(_exclusion(shard, SHARD_EXCLUSION_MULTIPLE_DECLARERS, evidence))
+            continue
+        parent_position, parent_name, parent_cik = rows[0]
+        if parent_cik != resolved:  # pragma: no cover - a single declarer IS the resolved one
+            message = f"shard {name!r} resolved to {resolved!r} but its declarer is {parent_cik!r}"
+            raise ChunkPlanError(message)
+        if parent_position >= primary_prefix_members:
+            excluded.append(_exclusion(shard, SHARD_EXCLUSION_PARENT_OUTSIDE_PREFIX, evidence))
+            continue
+        selected.append(
+            ShardParentBinding(
+                shard_canonical_position=shard.canonical_position,
+                shard_member_name=name,
+                shard_archive_ordinal=shard.archive_ordinal,
+                parent_member_name=parent_name,
+                parent_canonical_position=parent_position,
+                parent_registrant_cik_padded=resolved,
+            )
+        )
+    return DependencyClosure(
+        rule=DEPENDENCY_CLOSURE_RULE,
+        primary_prefix_members=primary_prefix_members,
+        full_primary_members=len(primaries),
+        full_shard_members=len(shards),
+        selected=tuple(selected),
+        excluded=tuple(excluded),
+    )
+
+
+def _exclusion(
+    shard: CanonicalMember,
+    exclusion_class: str,
+    evidence: tuple[tuple[int, ...], tuple[str, ...]],
+) -> ShardExclusion:
+    """One exclusion row: the shard, the class, and the declarer positions and CIKs seen."""
+    positions, ciks = evidence
+    return ShardExclusion(
+        shard_canonical_position=shard.canonical_position,
+        shard_member_name=shard.member_name,
+        shard_archive_ordinal=shard.archive_ordinal,
+        exclusion_class=exclusion_class,
+        declarer_positions=positions,
+        declared_ciks=ciks,
+    )
+
+
+def selected_shard_member_order_digest(
+    members: Sequence[CanonicalMember], closure: DependencyClosure
+) -> str:
+    """The selected shards' ordering digest, over their FULL canonical positions -- R2."""
+    chosen: list[CanonicalMember] = []
+    for binding in closure.selected:
+        member = members[binding.shard_canonical_position]
+        if member.member_name != binding.shard_member_name or member.region != REGION_SHARD:
+            message = (
+                f"binding for {binding.shard_member_name!r} names full position "
+                f"{binding.shard_canonical_position}, which holds {member.member_name!r}"
+            )
+            raise ChunkPlanError(message)
+        chosen.append(member)
+    return compute_member_order_digest(chosen)
+
+
+def selected_member_sequence(
+    members: Sequence[CanonicalMember], closure: DependencyClosure
+) -> tuple[CanonicalMember, ...]:
+    """The complete selected sequence, in SELECTED coordinates.
+
+    The primary prefix keeps its full positions -- a prefix is its own coordinate system -- and
+    every selected shard follows it, renumbered contiguously in canonical order. Archive ordinal,
+    name and region are carried unchanged, so a selected member is still exactly one real member
+    of the real archive; only the position a chunk interval is stated in is the selected one.
+    """
+    prefix = closure.primary_prefix_members
+    selected = list(members[:prefix])
+    if any(member.region != REGION_PRIMARY for member in selected):
+        message = "the primary prefix is not wholly primary; the canonical order is broken"
+        raise ChunkPlanError(message)
+    for binding in closure.selected:
+        member = members[binding.shard_canonical_position]
+        selected.append(
+            CanonicalMember(
+                canonical_position=len(selected),
+                archive_ordinal=member.archive_ordinal,
+                member_name=member.member_name,
+                region=REGION_SHARD,
+            )
+        )
+    return tuple(selected)
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationSubsetPlan(ChunkPlan):
+    """A sealed dependency-closed calibration-subset plan -- D151-C27R1.
+
+    The inherited fields keep their meanings, with one coordinate rule stated once:
+    ``member_order_digest`` is the FULL canonical ordering's digest, while ``total_members``,
+    ``primary_members``, ``shard_members`` and every chunk interval are stated in SELECTED
+    coordinates (:func:`selected_member_sequence`). The full universe and the selection are both
+    bound -- full counts, full digest, the closure rule, the selected and parent-binding digests,
+    the selected counts -- and every one of them is inside ``plan_digest``. Selected identities
+    supplement the full ones and never replace them (R2).
+    """
+
+    primary_prefix_members: int
+    full_total_members: int
+    full_primary_members: int
+    full_shard_members: int
+    dependency_closure_rule: str
+    selected_shard_members: int
+    excluded_shard_members: int
+    excluded_shards_by_class: Mapping[str, int]
+    selected_shard_member_order_digest: str
+    shard_parent_binding_digest: str
+    selected_member_order_digest: str
+    selected_members: int
+    classifications: tuple[str, ...]
+
+    @property
+    def calibration_subset(self) -> bool:
+        """Whether this plan is sealed under :data:`CALIBRATION_SUBSET_PLAN_CONTRACT`."""
+        return self.contract == CALIBRATION_SUBSET_PLAN_CONTRACT
+
+    def _digest_inputs(self) -> Mapping[str, object]:
+        """Every inherited digest input plus every subset field -- nothing is outside the seal."""
+        inputs = dict(ChunkPlan._digest_inputs(self))  # noqa: SLF001 - the plan's own inputs
+        inputs.update(
+            {
+                "primary_prefix_members": self.primary_prefix_members,
+                "full_total_members": self.full_total_members,
+                "full_primary_members": self.full_primary_members,
+                "full_shard_members": self.full_shard_members,
+                "dependency_closure_rule": self.dependency_closure_rule,
+                "selected_shard_members": self.selected_shard_members,
+                "excluded_shard_members": self.excluded_shard_members,
+                "excluded_shards_by_class": dict(sorted(self.excluded_shards_by_class.items())),
+                "selected_shard_member_order_digest": self.selected_shard_member_order_digest,
+                "shard_parent_binding_digest": self.shard_parent_binding_digest,
+                "selected_member_order_digest": self.selected_member_order_digest,
+                "selected_members": self.selected_members,
+                "classifications": list(self.classifications),
+            }
+        )
+        return inputs
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationSubsetPlan:
+        """Rebuild a subset plan from its EXACT stored mapping and re-derive its digest.
+
+        Exact shape: a missing key, an unexpected key, a value of another type, any of the three
+        complete-source contracts, or a digest that does not describe the record refuses.
+
+        Raises:
+            ChunkPlanError: any of them.
+        """
+        present = {str(key) for key in record}
+        if present != _CALIBRATION_SUBSET_RECORD_KEYS:
+            message = (
+                "a calibration-subset plan record is exact; this one is missing "
+                f"{sorted(_CALIBRATION_SUBSET_RECORD_KEYS - present)} and carries unexpected "
+                f"{sorted(present - _CALIBRATION_SUBSET_RECORD_KEYS)}; refused rather than read"
+            )
+            raise ChunkPlanError(message)
+        raw_chunks = record["chunks"]
+        if not isinstance(raw_chunks, Sequence) or isinstance(raw_chunks, str | bytes):
+            message = "a calibration-subset plan's 'chunks' field is not a sequence; refused"
+            raise ChunkPlanError(message)
+        raw_labels = record["classifications"]
+        if not isinstance(raw_labels, Sequence) or isinstance(raw_labels, str | bytes):
+            message = "a calibration-subset plan's 'classifications' is not a sequence; refused"
+            raise ChunkPlanError(message)
+        raw_by_class = record["excluded_shards_by_class"]
+        if not isinstance(raw_by_class, Mapping):
+            message = "a calibration-subset plan's 'excluded_shards_by_class' is not a mapping"
+            raise ChunkPlanError(message)
+        chunks = tuple(
+            ChunkBounds.from_record(item) for item in raw_chunks if isinstance(item, Mapping)
+        )
+        if len(chunks) != len(raw_chunks):
+            message = "a calibration-subset plan carries a chunk entry that is not a mapping"
+            raise ChunkPlanError(message)
+        plan = cls(
+            contract=str(record["contract"]),
+            member_order_contract=str(record["member_order_contract"]),
+            source_instance_id=str(record["source_instance_id"]),
+            source_observation_id=str(record["source_observation_id"]),
+            source_id=str(record["source_id"]),
+            source_sha256=str(record["source_sha256"]),
+            source_byte_length=_stored_int(record["source_byte_length"], "source_byte_length"),
+            member_order_digest=str(record["member_order_digest"]),
+            total_members=_stored_int(record["total_members"], "total_members"),
+            primary_members=_stored_int(record["primary_members"], "primary_members"),
+            shard_members=_stored_int(record["shard_members"], "shard_members"),
+            chunk_members=_stored_int(record["chunk_members"], "chunk_members"),
+            chunk_count=_stored_int(record["chunk_count"], "chunk_count"),
+            single_pass_chunk_cap=_stored_int(
+                record["single_pass_chunk_cap"], "single_pass_chunk_cap"
+            ),
+            chunks=chunks,
+            plan_digest=str(record["plan_digest"]),
+            primary_prefix_members=_stored_int(
+                record["primary_prefix_members"], "primary_prefix_members"
+            ),
+            full_total_members=_stored_int(record["full_total_members"], "full_total_members"),
+            full_primary_members=_stored_int(
+                record["full_primary_members"], "full_primary_members"
+            ),
+            full_shard_members=_stored_int(record["full_shard_members"], "full_shard_members"),
+            dependency_closure_rule=str(record["dependency_closure_rule"]),
+            selected_shard_members=_stored_int(
+                record["selected_shard_members"], "selected_shard_members"
+            ),
+            excluded_shard_members=_stored_int(
+                record["excluded_shard_members"], "excluded_shard_members"
+            ),
+            excluded_shards_by_class={
+                str(key): _stored_int(value, f"excluded_shards_by_class[{key}]")
+                for key, value in raw_by_class.items()
+            },
+            selected_shard_member_order_digest=str(record["selected_shard_member_order_digest"]),
+            shard_parent_binding_digest=str(record["shard_parent_binding_digest"]),
+            selected_member_order_digest=str(record["selected_member_order_digest"]),
+            selected_members=_stored_int(record["selected_members"], "selected_members"),
+            classifications=tuple(str(item) for item in raw_labels),
+        )
+        return require_calibration_subset_plan(plan)
+
+
+#: The exact key set of a persisted subset plan record: the inherited digest inputs, the subset
+#: fields, and the digest itself.
+_CALIBRATION_SUBSET_RECORD_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "contract",
+        "member_order_contract",
+        "source_instance_id",
+        "source_observation_id",
+        "source_id",
+        "source_sha256",
+        "source_byte_length",
+        "member_order_digest",
+        "total_members",
+        "primary_members",
+        "shard_members",
+        "chunk_members",
+        "chunk_count",
+        "single_pass_chunk_cap",
+        "chunks",
+        "plan_digest",
+        "primary_prefix_members",
+        "full_total_members",
+        "full_primary_members",
+        "full_shard_members",
+        "dependency_closure_rule",
+        "selected_shard_members",
+        "excluded_shard_members",
+        "excluded_shards_by_class",
+        "selected_shard_member_order_digest",
+        "shard_parent_binding_digest",
+        "selected_member_order_digest",
+        "selected_members",
+        "classifications",
+    }
+)
+
+
+def require_calibration_subset_plan(plan: ChunkPlan) -> CalibrationSubsetPlan:
+    """Return ``plan`` only if it is a sealed calibration-subset plan.
+
+    Raises:
+        ChunkPlanError: the plan is not its sealed self, or is not a subset plan.
+    """
+    require_sealed_plan(plan)
+    if not isinstance(plan, CalibrationSubsetPlan) or not plan.calibration_subset:
+        message = (
+            f"a plan sealed under contract {plan.contract!r} is not a calibration-subset plan; "
+            f"this reader consumes only {CALIBRATION_SUBSET_PLAN_CONTRACT!r} and never adopts "
+            "the ordinary, calibration-only or multipass contract"
+        )
+        raise ChunkPlanError(message)
+    return plan
+
+
+def _require_hex_digest(value: str, field: str) -> None:
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        message = f"a calibration-subset plan's {field!r} is not a SHA-256 hex digest; refused"
+        raise ChunkPlanError(message)
+
+
+def _require_subset_coverage(plan: CalibrationSubsetPlan) -> None:
+    """The subset-specific coverage rules, over and above the inherited partition rules."""
+    _require_proper_prefix(plan.primary_prefix_members, plan.full_primary_members)
+    checks: tuple[tuple[bool, str], ...] = (
+        (
+            plan.full_total_members == plan.full_primary_members + plan.full_shard_members,
+            "the full region counts do not sum to the full member count",
+        ),
+        (
+            plan.primary_members == plan.primary_prefix_members,
+            "the selected primary count is not the primary prefix",
+        ),
+        (
+            plan.selected_shard_members >= 1 and plan.shard_members == plan.selected_shard_members,
+            "the selected shard count must be at least one and equal the shard region count",
+        ),
+        (
+            plan.selected_shard_members + plan.excluded_shard_members == plan.full_shard_members,
+            "selected and excluded shards do not sum to the full shard count",
+        ),
+        (
+            set(plan.excluded_shards_by_class) == set(SHARD_EXCLUSION_CLASSES)
+            and all(
+                not isinstance(value, bool) and isinstance(value, int) and value >= 0
+                for value in plan.excluded_shards_by_class.values()
+            )
+            and sum(plan.excluded_shards_by_class.values()) == plan.excluded_shard_members,
+            "the per-class exclusion counts are not exactly the four classes summing to the "
+            "excluded shard count",
+        ),
+        (
+            plan.selected_members == plan.primary_prefix_members + plan.selected_shard_members
+            and plan.total_members == plan.selected_members,
+            "the selected member count is not prefix plus selected shards, or is not the total",
+        ),
+        (
+            plan.dependency_closure_rule == DEPENDENCY_CLOSURE_RULE,
+            f"the closure rule is not {DEPENDENCY_CLOSURE_RULE!r}",
+        ),
+        (
+            plan.classifications == CALIBRATION_SUBSET_CLASSIFICATIONS,
+            f"the classifications are not exactly {list(CALIBRATION_SUBSET_CLASSIFICATIONS)}",
+        ),
+        (
+            len(chunks_in_region(plan, REGION_SHARD)) == 1,
+            "a subset plan carries exactly ONE shard chunk holding the complete selected "
+            "shard sequence",
+        ),
+    )
+    for condition, problem in checks:
+        if not condition:
+            message = f"a calibration-subset plan is refused: {problem}"
+            raise ChunkPlanError(message)
+    for field in (
+        "member_order_digest",
+        "selected_shard_member_order_digest",
+        "shard_parent_binding_digest",
+        "selected_member_order_digest",
+    ):
+        _require_hex_digest(getattr(plan, field), field)
+
+
+def selected_member_ceiling(plan: CalibrationSubsetPlan) -> int:
+    """The most members a subset plan over this source could select: prefix plus every shard."""
+    return plan.primary_prefix_members + plan.full_shard_members
+
+
+def build_calibration_subset_plan(
+    *,
+    archive_path: Path,
+    source_instance_id: str,
+    source_observation_id: str,
+    source_id: str,
+    source_sha256: str,
+    source_byte_length: int,
+    target: CalibrationSubsetTarget,
+) -> CalibrationSubsetPlan:
+    """Build one dependency-closed calibration-subset plan over one frozen archive -- D151-C27R1.
+
+    The full canonical ordering is derived from the central directory exactly as every other
+    builder derives it and bound by its digest; the dependency closure is then derived by the
+    one read-only scan :func:`derive_dependency_closure` makes; the selected sequence is the
+    prefix plus the selected shards; the primary prefix is partitioned by the accepted
+    :func:`partition_regions` arithmetic and the selected shards form exactly ONE chunk, whatever
+    their number. The plan identity folds every full and selected identity. Nothing here
+    authorizes anything.
+
+    Raises:
+        ChunkPlanError: the source is not chunkable, the target is not a proper prefix, no shard
+            is selected, or a coverage rule fails.
+        ArchiveDefenceError: the archive is corrupt or hostile.
+    """
+    require_chunkable_source(source_id)
+    if source_byte_length < 0:
+        message = f"a chunk plan needs a non-negative source byte length; got {source_byte_length}"
+        raise ChunkPlanError(message)
+    members = canonical_member_sequence(archive_path)
+    if not members:
+        message = (
+            f"archive {archive_path.name} holds no governed {GOVERNED_MEMBER_SUFFIX} member; a "
+            "calibration-subset plan over an empty population is refused"
+        )
+        raise ChunkPlanError(message)
+    closure = derive_dependency_closure(
+        archive_path, members, primary_prefix_members=target.primary_prefix_members
+    )
+    if not closure.selected:
+        message = (
+            f"no shard is dependency-closed by the primary prefix [0, "
+            f"{target.primary_prefix_members}); a subset plan with no shard chunk is refused"
+        )
+        raise ChunkPlanError(message)
+    selected = selected_member_sequence(members, closure)
+    # The primary prefix is cut by the accepted partition arithmetic; the selected shards are
+    # ONE chunk holding the complete dependency-closed sequence, whatever its length (§5).
+    primary_bounds = partition_regions(
+        primary_members=closure.primary_prefix_members,
+        shard_members=0,
+        chunk_members=target.chunk_members,
+    )
+    bounds = (
+        *primary_bounds,
+        ChunkBounds(
+            chunk_id=f"chunk-{len(primary_bounds):04d}",
+            region=REGION_SHARD,
+            start=closure.primary_prefix_members,
+            end=closure.primary_prefix_members + len(closure.selected),
+        ),
+    )
+    plan = CalibrationSubsetPlan(
+        contract=CALIBRATION_SUBSET_PLAN_CONTRACT,
+        member_order_contract=MEMBER_ORDER_CONTRACT,
+        source_instance_id=source_instance_id,
+        source_observation_id=source_observation_id,
+        source_id=source_id,
+        source_sha256=source_sha256,
+        source_byte_length=source_byte_length,
+        member_order_digest=compute_member_order_digest(members),
+        total_members=len(selected),
+        primary_members=closure.primary_prefix_members,
+        shard_members=len(closure.selected),
+        chunk_members=target.chunk_members,
+        chunk_count=len(bounds),
+        single_pass_chunk_cap=SINGLE_PASS_CHUNK_CAP,
+        chunks=bounds,
+        plan_digest="",
+        primary_prefix_members=closure.primary_prefix_members,
+        full_total_members=len(members),
+        full_primary_members=closure.full_primary_members,
+        full_shard_members=closure.full_shard_members,
+        dependency_closure_rule=closure.rule,
+        selected_shard_members=len(closure.selected),
+        excluded_shard_members=len(closure.excluded),
+        excluded_shards_by_class=closure.excluded_by_class(),
+        selected_shard_member_order_digest=selected_shard_member_order_digest(members, closure),
+        shard_parent_binding_digest=closure.binding_digest(),
+        selected_member_order_digest=compute_member_order_digest(selected),
+        selected_members=len(selected),
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+    )
+    sealed = replace(plan, plan_digest=_plan_digest(plan))
+    return require_calibration_subset_plan(sealed)
+
+
+def resolve_calibration_subset_members(
+    plan: CalibrationSubsetPlan, archive_path: Path, chunk_id: str
+) -> tuple[CanonicalMember, ...]:
+    """The exact members one subset chunk consumes, rederived from the REAL source -- R3.
+
+    In order: the full canonical universe is rederived from the central directory and held to
+    the plan's full digest and full counts; the dependency closure is rederived by the same
+    read-only scan the builder made and held to the plan's parent-binding digest, selected-shard
+    digest and every count; the selected sequence is rebuilt and held to the selected digest and
+    count; and only then is this chunk's interval sliced from it. No caller-carried member list
+    is consulted at any point.
+
+    Raises:
+        ChunkPlanError: the chunk is not in the plan, or any identity differs.
+    """
+    bounds = chunk_by_id(plan, chunk_id)
+    members = canonical_member_sequence(archive_path)
+    observed = compute_member_order_digest(members)
+    if observed != plan.member_order_digest:
+        message = (
+            f"the archive's FULL canonical member ordering digest is {observed!r} where the "
+            f"calibration-subset plan records {plan.member_order_digest!r}: the source this "
+            "chunk was given is not the universe the plan selects from. Refused; nothing created"
+        )
+        raise ChunkPlanError(message)
+    counts = (
+        len(members),
+        sum(1 for member in members if member.region == REGION_PRIMARY),
+        sum(1 for member in members if member.region == REGION_SHARD),
+    )
+    if counts != (plan.full_total_members, plan.full_primary_members, plan.full_shard_members):
+        message = (
+            f"the archive holds {counts} (total, primary, shard) governed members where the "
+            f"calibration-subset plan records ({plan.full_total_members}, "
+            f"{plan.full_primary_members}, {plan.full_shard_members})"
+        )
+        raise ChunkPlanError(message)
+    closure = derive_dependency_closure(
+        archive_path, members, primary_prefix_members=plan.primary_prefix_members
+    )
+    binding = closure.binding_digest()
+    if binding != plan.shard_parent_binding_digest:
+        message = (
+            f"the rederived shard-parent binding digest is {binding!r} where the plan records "
+            f"{plan.shard_parent_binding_digest!r}; the dependency closure is not the one the "
+            "plan was sealed over. Refused; nothing created"
+        )
+        raise ChunkPlanError(message)
+    if (len(closure.selected), len(closure.excluded)) != (
+        plan.selected_shard_members,
+        plan.excluded_shard_members,
+    ) or closure.excluded_by_class() != dict(plan.excluded_shards_by_class):
+        message = (
+            f"the rederived closure selects {len(closure.selected)} and excludes "
+            f"{len(closure.excluded)} shards ({closure.excluded_by_class()}) where the plan "
+            f"records {plan.selected_shard_members} / {plan.excluded_shard_members} "
+            f"({dict(plan.excluded_shards_by_class)})"
+        )
+        raise ChunkPlanError(message)
+    shard_digest = selected_shard_member_order_digest(members, closure)
+    if shard_digest != plan.selected_shard_member_order_digest:
+        message = (
+            f"the rederived selected-shard ordering digest is {shard_digest!r} where the plan "
+            f"records {plan.selected_shard_member_order_digest!r}"
+        )
+        raise ChunkPlanError(message)
+    selected = selected_member_sequence(members, closure)
+    selected_digest = compute_member_order_digest(selected)
+    if selected_digest != plan.selected_member_order_digest or len(selected) != plan.total_members:
+        message = (
+            f"the rederived selected member ordering is {selected_digest!r} over {len(selected)} "
+            f"members where the plan records {plan.selected_member_order_digest!r} over "
+            f"{plan.total_members}"
+        )
+        raise ChunkPlanError(message)
+    return selected[bounds.start : bounds.end]
+
+
+def canonical_json_bytes(document: Mapping[str, object]) -> bytes:
+    """The one persisted rendering of a calibration-subset document -- D151-C27R1 §4.
+
+    UTF-8, sorted keys, compact separators, no NaN or Infinity, one trailing newline. A value
+    JSON cannot carry is refused rather than coerced through ``default=``.
+
+    Raises:
+        ChunkPlanError: the document holds a value JSON cannot represent.
+    """
+    try:
+        rendered = json.dumps(
+            document, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=False
+        )
+    except (TypeError, ValueError) as exc:
+        message = f"a calibration-subset document holds a value JSON cannot carry: {exc}"
+        raise ChunkPlanError(message) from exc
+    return rendered.encode("utf-8") + b"\n"

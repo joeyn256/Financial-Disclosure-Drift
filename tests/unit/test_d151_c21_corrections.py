@@ -594,8 +594,23 @@ def test_c2111_the_committed_child_launch_is_pinned_exactly() -> None:
         "<sys.executable>",
         ("-c", c13i.MULTIPASS_CHILD_BOOTSTRAP, "str(request_path)"),
     )
-    assert c13i.subprocess_launches(source) == [expected]
+    # D151-C27R1: the second exact launch is the calibration child -- its own bootstrap, the
+    # request path and the pipe descriptor NUMBER. The production launch is unchanged.
+    calibration = (
+        "<sys.executable>",
+        (
+            "-c",
+            c13i.CALIBRATION_MULTIPASS_CHILD_BOOTSTRAP,
+            "str(request_path)",
+            "str(envelope_fd)",
+        ),
+    )
+    assert c13i.subprocess_launches(source) == [expected, calibration]
     assert c13i.committed_literal(cm, "_CHILD_BOOTSTRAP") == c13i.MULTIPASS_CHILD_BOOTSTRAP
+    assert (
+        c13i.committed_literal(cm, "_CALIBRATION_CHILD_BOOTSTRAP")
+        == c13i.CALIBRATION_MULTIPASS_CHILD_BOOTSTRAP
+    )
     assert c13i.MULTIPASS_CHILD_BOOTSTRAP == (
         "import sys;from disclosure_drift.m3.chunk_multipass import _child_main;"
         "sys.exit(_child_main(sys.argv[1]))"

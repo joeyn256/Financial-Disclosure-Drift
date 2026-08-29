@@ -53,6 +53,7 @@ import test_d151_c13_multipass_semantics as sem  # noqa: E402
 import test_d151_c13_set_based_correction as sbc  # noqa: E402
 
 from disclosure_drift.m3 import chunk_consolidation as cc  # noqa: E402
+from disclosure_drift.m3 import chunk_execution as ce  # noqa: E402
 from disclosure_drift.m3 import chunk_multipass as cm  # noqa: E402
 from disclosure_drift.m3 import chunk_tiering as ct  # noqa: E402
 from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
@@ -430,6 +431,107 @@ def test_c1527_the_committed_literal_is_none_and_every_entry_opens_with_the_gate
         and call.func.id == "require_real_multipass_authority"
     }
     assert callers == set(WORLD_CREATING_ENTRIES)
+
+
+# ==========================================================================
+# D151-C27R1: the separate calibration entries open with THEIR gate, never the production one
+# ==========================================================================
+CALIBRATION_BODIES = ("merge_calibration_subset_group_body", "finalize_calibration_subset_body")
+CALIBRATION_LAUNCHERS = (
+    "run_calibration_subset_chunk",
+    "run_calibration_subset_chunks",
+    "run_calibration_subset_group_merge",
+    "run_calibration_subset_final_merge",
+    "run_calibration_subset_multipass",
+)
+
+
+def test_c27r1_the_calibration_entries_have_their_own_first_gate_and_leave_c1527_intact() -> None:
+    """R4: the production gate's caller set is exactly WORLD_CREATING_ENTRIES -- the calibration
+    route adds NO caller -- and every calibration entry opens with its own gate: the child entry
+    receives the pipe envelope, each body requires an exact-role envelope, each launcher requires
+    a sealed calibration-subset plan. All of it precedes every read and every mkdir."""
+    tree = ast.parse(Path(cm.__file__).read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    callers = {
+        node.name
+        for node in functions.values()
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "require_real_multipass_authority"
+    }
+    assert callers == set(WORLD_CREATING_ENTRIES)
+    assert not callers & (
+        set(CALIBRATION_BODIES) | set(CALIBRATION_LAUNCHERS) | {"_calibration_child_main"}
+    )
+
+    def first_callee(name: str) -> str:
+        body = functions[name].body
+        first = body[1] if isinstance(body[0], ast.Expr) else body[0]  # past the docstring
+        value = first.value if isinstance(first, ast.Expr | ast.Assign) else None
+        assert isinstance(value, ast.Call) and isinstance(value.func, ast.Name), name
+        return value.func.id
+
+    assert first_callee("_calibration_child_main") == "receive_calibration_envelope"
+    for name in CALIBRATION_BODIES:
+        assert first_callee(name) == "require_calibration_envelope", name
+    for name in CALIBRATION_LAUNCHERS:
+        assert first_callee(name) == "require_calibration_subset_plan", name
+    # Behaviourally, with the COMMITTED literal: a subset plan handed to a production entry is
+    # refused on the authority, and a wrong-role envelope handed to a calibration body is refused
+    # on the envelope -- in both cases before anything is read.
+    assert cm.REAL_MULTIPASS_F0_AUTHORITY is None
+    with pytest.raises(cm.ChunkMultipassError, match=AUTHORITY_REFUSAL):
+        cm._child_main("/nonexistent/c27r1-request.json")
+    envelope = ce.CalibrationChildEnvelope(
+        contract=ce.CALIBRATION_CHILD_ENVELOPE_CONTRACT,
+        run_id="c27r1",
+        plan_digest="ab" * 32,
+        selected_member_ceiling=1,
+        role=ce.CALIBRATION_ROLE_CHUNK,
+        step_id="chunk-0000",
+        request_sha256="cd" * 32,
+        parent_pid=1,
+        nonce="ef" * 16,
+        instrumentation_ledger=None,
+    )
+    request = cm.GroupMergeRequest(
+        plan_path="/nonexistent/plan.json",
+        schedule_path="/nonexistent/schedule.json",
+        group_id="group-0000",
+        attempt=0,
+        attempt_directory="/nonexistent/attempt",
+        internal_root="/nonexistent/chunks",
+        external_root=None,
+        operational_catalog="/nonexistent/catalog.sqlite3",
+        cache_bytes=None,
+        repository_head_sha="a" * 40,
+        repository_tree_sha="b" * 40,
+        storage_requirements=dict(c13.REQUIREMENTS.as_record()),
+        expected_sqlite_temp_binding=dict(c13.INERT_BINDING_RECORD),
+    )
+    with pytest.raises(ce.ChunkExecutionError, match="refused before anything is read"):
+        cm.merge_calibration_subset_group_body(request, envelope)
+    with pytest.raises(ce.ChunkExecutionError, match="refused before anything is read"):
+        cm.finalize_calibration_subset_body(
+            cm.FinalMergeRequest(
+                plan_path="/nonexistent/plan.json",
+                schedule_path="/nonexistent/schedule.json",
+                intermediates_root="/nonexistent/intermediates",
+                internal_root="/nonexistent/chunks",
+                external_root=None,
+                operational_catalog="/nonexistent/catalog.sqlite3",
+                world_directory="/nonexistent/final",
+                run_id="c27r1",
+                cache_bytes=None,
+                repository_head_sha="a" * 40,
+                repository_tree_sha="b" * 40,
+                storage_requirements=dict(c13.REQUIREMENTS.as_record()),
+                expected_sqlite_temp_binding=dict(c13.INERT_BINDING_RECORD),
+            ),
+            envelope,
+        )
 
 
 # ==========================================================================

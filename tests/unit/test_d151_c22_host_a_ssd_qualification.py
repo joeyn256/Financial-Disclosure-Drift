@@ -330,6 +330,71 @@ def test_an_absent_physical_reconnect_qualification_admits_nothing() -> None:
         q.require_copy_capable(partial)
 
 
+def test_c24_r1_reconnect_status_is_an_independent_conjunct() -> None:
+    """D151-C24-R1, closing C23-MINOR-3: the reconnect status decides on its own.
+
+    The records above move the status and the four reconnect predicates together, so every one
+    of them would still refuse if ``physical_reconnect_qualified`` stopped consulting the status
+    at all. This record separates them: it is the admitted RECLAIM_CAPABLE record in every
+    field -- all four reconnect predicates True, the reconnect read-back rate present -- except
+    that the checkpoint the operator acknowledges never completed. A record may claim the
+    reconnect happened in every derived predicate; only the checkpoint says that it did.
+    """
+    document = qualification_document(klass=q.CLASS_RECLAIM_CAPABLE)
+    document["reconnect_checkpoint"] = {"status": "not_run"}
+    hostile = q.HostASsdQualification.from_document(seal(document))
+
+    # Everything except the checkpoint says the stage ran, and the record is exactly shaped,
+    # correctly sealed and parsed: the refusal below is not a stale seal or a malformed file.
+    assert hostile.reconnect_status == "not_run"
+    assert hostile.qualification_class == q.CLASS_RECLAIM_CAPABLE
+    assert [
+        hostile.predicates[name]
+        for name in (
+            "reconnect_stable_identity_unchanged",
+            "reconnect_manifest_exact",
+            "reconnect_topology_direct",
+            "reconnect_readback_at_least_250_mib_s",
+        )
+    ] == [True, True, True, True]
+    metrics = hostile.document["metrics"]
+    assert isinstance(metrics, dict)
+    assert metrics["reconnect_readback"] == {"mean_mib_per_s": 585.0}
+    assert hostile.qualification_identity == q.sealed_identity(
+        hostile.document, identity_key=q.QUALIFICATION_IDENTITY_KEY
+    )
+    assert (
+        hostile.stable_tier_compatibility_identity == hostile.stable_tier_compatibility.identity()
+    )
+
+    # And it still admits nothing.
+    assert hostile.physical_reconnect_qualified is False
+    assert hostile.admits_verified_copy is False
+    assert hostile.admits_reclaim is False
+    with pytest.raises(q.HostASsdQualificationError, match="physical reconnect"):
+        q.require_copy_capable(hostile)
+    with pytest.raises(q.HostASsdQualificationError, match="physical reconnect"):
+        q.require_reclaim_capable(hostile)
+    with pytest.raises(q.HostASsdQualificationError, match="physical reconnect"):
+        q.reauthenticate_qualified_tier(hostile, Path("/"), provider=lambda _p: 1 / 0)
+
+    # The control that isolates the cause: the same document with the checkpoint restored --
+    # nothing else edited -- parses, qualifies and admits a reclaim.
+    document["reconnect_checkpoint"] = {"status": q.RECONNECT_COMPLETED}
+    admitted = q.HostASsdQualification.from_document(seal(document))
+    assert admitted.physical_reconnect_qualified is True
+    assert q.require_reclaim_capable(admitted) is admitted
+    assert {
+        key: value
+        for key, value in admitted.document.items()
+        if key not in ("reconnect_checkpoint", q.QUALIFICATION_IDENTITY_KEY)
+    } == {
+        key: value
+        for key, value in hostile.document.items()
+        if key not in ("reconnect_checkpoint", q.QUALIFICATION_IDENTITY_KEY)
+    }
+
+
 def test_copy_only_admits_a_copy_and_never_a_reclaim() -> None:
     record = qualification(klass=q.CLASS_COPY_ONLY)
     assert record.admits_verified_copy and not record.admits_reclaim

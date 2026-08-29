@@ -75,6 +75,23 @@ REQUIREMENTS = ct.MultipassStorageRequirements(
     level_two_transient_bytes=0,
 )
 
+#: Two distinct, nonzero, TEST-ONLY transient sentinels -- D151-C24-R2. :data:`REQUIREMENTS`
+#: charges both levels zero, which is right for every proof that is not about the levels but
+#: makes the two indistinguishable: the orchestrator could charge a level-1 group at level 2, or
+#: the finalization at level 1, and no assertion would move. These two do move. They are not
+#: production values and appear nowhere in production source; the production terms stay ``None``.
+LEVEL_ONE_TRANSIENT_SENTINEL = 1_048_576
+LEVEL_TWO_TRANSIENT_SENTINEL = 3_145_728
+
+#: The same synthetic terms as :data:`REQUIREMENTS` except that the two levels are told apart.
+LEVEL_DISTINCT_REQUIREMENTS = ct.MultipassStorageRequirements(
+    internal_reserve_bytes=0,
+    level_one_peak_ratio=1.0,
+    level_two_peak_ratio=1.0,
+    level_one_transient_bytes=LEVEL_ONE_TRANSIENT_SENTINEL,
+    level_two_transient_bytes=LEVEL_TWO_TRANSIENT_SENTINEL,
+)
+
 #: The one volume identity every synthetic merge measures for both its world and its SQLite
 #: temporary root -- D151-C17 §15. Substituting the provider is THE accepted seam; no test in
 #: this repository may depend on the host's real volume layout, and production compares measured
@@ -916,3 +933,97 @@ def test_c11_minor_1_the_multipass_analogue_is_closed_at_the_plan_level(tmp_path
     plan = multipass_plan(tree, database, chunk_members=1)
     with pytest.raises(cp.ChunkPlanError, match="held to the constant"):
         cp.ChunkPlan.from_record(_resealed(plan, single_pass_chunk_cap=3))
+
+
+# ==========================================================================
+# D151-C24-R2: the orchestrator charges every step at its own level -- C23-MINOR-4
+# ==========================================================================
+def test_c24_r2_the_orchestrator_charges_each_step_its_own_level_transient(
+    tmp_path: Path,
+) -> None:
+    """D151-C24-R2, closing C23-MINOR-4: the level argument is load-bearing at every call site.
+
+    ``MultipassStorageRequirements.transient_for`` has no fallback between levels, and
+    ``test_d151_c17_storage_binding`` holds that pure selector to it. What was unheld is the
+    orchestrator's own choice of which level to name for which step: every full-run fixture in
+    this repository charges both levels zero, so swapping the two arguments changed nothing any
+    committed assertion could see. This run tells the levels apart and reads back the admission
+    the production gate itself returned for every step the orchestrator took -- each level-1
+    group, then the level-2 finalization -- and the children's durable record of their own.
+    """
+    assert LEVEL_ONE_TRANSIENT_SENTINEL != LEVEL_TWO_TRANSIENT_SENTINEL
+    assert LEVEL_ONE_TRANSIENT_SENTINEL > 0
+    assert LEVEL_TWO_TRANSIENT_SENTINEL > 0
+    assert (
+        LEVEL_DISTINCT_REQUIREMENTS.transient_for(ct.MERGE_LEVEL_ONE)
+        == LEVEL_ONE_TRANSIENT_SENTINEL
+    )
+    assert (
+        LEVEL_DISTINCT_REQUIREMENTS.transient_for(ct.MERGE_LEVEL_TWO)
+        == LEVEL_TWO_TRANSIENT_SENTINEL
+    )
+
+    # Imported here, not at module scope: test_d151_c13_intermediates imports THIS module, and
+    # its accepted child bootstrap is the one seam that opens a merge child.
+    import test_d151_c13_intermediates as c13i
+
+    database, tree = world(tmp_path, members=9, shards=1, filings=2)
+    plan = multipass_plan(tree, database, chunk_members=1)
+    run = execute_in_process(plan, tmp_path / "run", database, tree)
+
+    taken: list[ct.MergeAdmission] = []
+    admit = cm._admit_merge_step
+
+    def recording(**terms: Any) -> ct.MergeAdmission:
+        """Delegate to the production gate and keep the admission it returned."""
+        admission = admit(**terms)
+        taken.append(admission)
+        return admission
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(
+            cm, "accepted_multipass_storage_requirements", lambda: LEVEL_DISTINCT_REQUIREMENTS
+        )
+        patcher.setattr(cm, "_CHILD_BOOTSTRAP", c13i.multipass_child_bootstrap(tmp_path / "repo"))
+        patcher.setattr(cm, "_admit_merge_step", recording)
+        result = cm.run_multipass_f0(
+            plan=run["plan"],
+            internal_root=run["chunk_root"],
+            operational_catalog=database,
+            multipass_root=tmp_path / "multipass",
+            run_id="c24-r2",
+        )
+
+    groups = [group.group_id for group in result.schedule.groups]
+    assert len(groups) >= 2, groups
+    assert [admission.step for admission in taken] == [*groups, "final"]
+
+    for admission in taken[:-1]:
+        assert admission.level == ct.MERGE_LEVEL_ONE, admission.step
+        assert admission.transient_bytes == LEVEL_ONE_TRANSIENT_SENTINEL, admission.step
+        assert admission.admitted is True, admission.step
+        assert admission.required_free_bytes == (
+            admission.peak_bytes + admission.reserve_bytes + admission.transient_bytes
+        ), admission.step
+
+    final = taken[-1]
+    assert final.step == "final"
+    assert final.level == ct.MERGE_LEVEL_TWO
+    assert final.transient_bytes == LEVEL_TWO_TRANSIENT_SENTINEL
+    assert final.admitted is True
+    assert final.required_free_bytes == (
+        final.peak_bytes + final.reserve_bytes + final.transient_bytes
+    )
+
+    # Each merge child charged its own group at level one and recorded it durably, under the
+    # same terms the parent admitted it on.
+    assert [receipt.group_id for receipt in result.intermediates] == groups
+    for receipt in result.intermediates:
+        recorded = dict(receipt.storage_admission)
+        assert recorded["step"] == receipt.group_id
+        assert recorded["level"] == ct.MERGE_LEVEL_ONE, receipt.group_id
+        assert recorded["transient_bytes"] == LEVEL_ONE_TRANSIENT_SENTINEL, receipt.group_id
+
+    # The sealed storage plan and the run itself are the accepted ones.
+    assert result.storage_plan.contract == ct.MULTIPASS_STORAGE_PLAN_CONTRACT
+    assert result.receipt["chunks_unchanged"] is True

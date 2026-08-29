@@ -310,9 +310,51 @@ def group_request(
     return request, directory
 
 
+def retain_in_process(run: dict[str, Any], partial: dict[str, Any], run_id: str) -> Path:
+    """D151-C29R1: the retained witnesses and group checkpoints the calibration final consumes,
+    written in THIS process for the run the final names, once every intermediate exists.
+
+    Idempotent: an existing witness or checkpoint is re-read by the writer's own reader and
+    left alone; nothing is deleted here -- these drivers retain every chunk world.
+    """
+    plan, schedule = run["plan"], partial["schedule"]
+    retained = cm.calibration_retained_root(partial["intermediates_root"])
+    retained.mkdir(exist_ok=True)
+    for group in schedule.groups:
+        for chunk_id in group.chunk_ids:
+            if cm.completed_calibration_chunk_witness(retained, chunk_id) is None:
+                cm.write_calibration_chunk_witness(
+                    plan,
+                    schedule,
+                    chunk_id=chunk_id,
+                    run_id=run_id,
+                    chunk_root=run["chunk_root"],
+                    retained_root=retained,
+                )
+        if not cm.calibration_group_checkpoint_path(retained, group.group_id).exists():
+            cm.write_calibration_group_checkpoint(
+                plan,
+                schedule,
+                group_id=group.group_id,
+                run_id=run_id,
+                chunk_root=run["chunk_root"],
+                retained_root=retained,
+                intermediates_root=partial["intermediates_root"],
+            )
+    return retained
+
+
 def final_request(
     run: dict[str, Any], partial: dict[str, Any], database: Path, run_id: str = "c27r1"
 ) -> cm.FinalMergeRequest:
+    # D151-C29R1: a final presupposes every group's lifecycle records for the run it names.
+    # They are written only when a final is possible at all -- every intermediate exists -- so
+    # a request built only to be refused earlier leaves nothing behind.
+    if all(
+        cm.completed_intermediate_receipt(partial["intermediates_root"], group.group_id) is not None
+        for group in partial["schedule"].groups
+    ):
+        retain_in_process(run, partial, run_id)
     return c13.final_request(
         run,
         schedule_path=partial["schedule_path"],

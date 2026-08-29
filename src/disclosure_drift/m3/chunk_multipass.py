@@ -123,6 +123,24 @@ runs the same accepted merge primitives, and ends in a calibration-subset result
 canonical terminal: no parser state, no ``parsed`` mark, no F0 checkpoint, no final receipt. Each
 merge child emits its own admission event -- level, transient allowance and arithmetic in its own
 words -- into the ledger its envelope names, after validation and before its world exists.
+
+**The calibration route is retention-aware -- D151-C29R1.** A calibration level-1 group resolves
+and verifies only ITS scheduled chunks (:func:`~disclosure_drift.m3.chunk_consolidation.
+resolve_contiguous_chunk_inputs`), so no other group's bulky chunk world is required or opened.
+After a chunk's terminal authenticates, the orchestrator writes its **retained witness**
+(:data:`CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT`): the exact two-table projection the
+whole-F0 counters are derived from, a primary chunk's declarations copy, and a sealed record
+binding the chunk receipt, its manifest, the plan, the schedule and the source. After the
+group's intermediate authenticates, a create-once **group checkpoint** binds chunk receipt,
+witness and intermediate, and only then -- and only under an explicit
+:class:`CalibrationDeletionGrant` naming the group -- are that group's chunk worlds
+exact-deleted through the accepted exact-entry primitive, never a tree removal, with a
+create-once deletion record written after every source is absent. The calibration final then
+consumes the five intermediates, every retained witness and every checkpoint, and derives the
+four whole-F0 counters by :func:`_plan_first_witness_counters` over the witnesses under the
+SAME statements it runs over chunk worlds. Every production entry, body, launcher, bootstrap
+and authority gate above is untouched; the production reclaim authority stays ``None`` and no
+calibration deletion is, or can confer, a production reclaim.
 """
 
 from __future__ import annotations
@@ -138,7 +156,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Protocol, cast
 
 from disclosure_drift.errors import DisclosureDriftError
 from disclosure_drift.m3.canary_phases import (
@@ -177,6 +195,7 @@ from disclosure_drift.m3.chunk_consolidation import (
     derived_f0_payload,
     require_attachable,
     resolve_chunk_inputs,
+    resolve_contiguous_chunk_inputs,
 )
 from disclosure_drift.m3.chunk_evidence import (
     CHUNK_DECLARATIONS_FILENAME,
@@ -232,6 +251,7 @@ from disclosure_drift.m3.chunk_plan import (
     ChunkBounds,
     ChunkPlan,
     canonical_json_bytes,
+    chunk_by_id,
     require_calibration_subset_plan,
     require_chunkable_source,
     require_sealed_plan,
@@ -255,7 +275,12 @@ from disclosure_drift.m3.chunk_tiering import (
     require_merge_admission,
     require_sqlite_temp_binding,
 )
-from disclosure_drift.m3.chunk_transfer import InstrumentationLedger
+from disclosure_drift.m3.chunk_transfer import (
+    ChunkTransferError,
+    InstrumentationLedger,
+    _remove_exact_entries,
+    _walk_files,
+)
 from disclosure_drift.m3.compact_evidence import (
     COMPACT_EVIDENCE_SIDECAR_FILENAME,
     CompactEvidenceSidecar,
@@ -284,6 +309,11 @@ from disclosure_drift.storage.sqlite import transaction, utc_now
 
 __all__ = [
     "CALIBRATION_ADMISSION_EVENT_KIND",
+    "CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT",
+    "CALIBRATION_GROUP_CHECKPOINT_EVENT_KIND",
+    "CALIBRATION_GROUP_DELETION_EVENT_KIND",
+    "CALIBRATION_RETAINED_PAYLOAD_FILENAME",
+    "CALIBRATION_RETAINED_WITNESS_FILENAME",
     "CALIBRATION_SUBSET_RESULT_CONTRACT",
     "CALIBRATION_SUBSET_RESULT_FILENAME",
     "INTERMEDIATE_RECEIPT_CONTRACT",
@@ -298,6 +328,11 @@ __all__ = [
     "REAL_MULTIPASS_F0_AUTHORITY",
     "STORAGE_PLAN_FILENAME",
     "CalibrationAdmissionEvent",
+    "CalibrationChunkExecution",
+    "CalibrationChunkWitness",
+    "CalibrationDeletionGrant",
+    "CalibrationGroupCheckpoint",
+    "CalibrationGroupDeletion",
     "CalibrationSubsetMultipassResult",
     "CalibrationSubsetResult",
     "ChunkMultipassError",
@@ -308,8 +343,16 @@ __all__ = [
     "MergeGroup",
     "MergeSchedule",
     "MultipassResult",
+    "PlanWitnessSource",
+    "RetainedWitnessInput",
     "calibration_admission_event_path",
+    "calibration_group_checkpoint_path",
+    "calibration_group_deletion_path",
+    "calibration_retained_root",
+    "calibration_witness_attempt_directory",
+    "completed_calibration_chunk_witness",
     "completed_intermediate_receipt",
+    "delete_calibration_group_chunk_worlds",
     "derive_calibration_subset_schedule",
     "derive_merge_schedule",
     "finalize_calibration_subset_body",
@@ -319,12 +362,18 @@ __all__ = [
     "intermediate_attempt_directory",
     "merge_calibration_subset_group_body",
     "merge_group_body",
+    "next_calibration_witness_attempt_directory",
     "next_intermediate_attempt_directory",
     "read_calibration_admission_event",
+    "read_calibration_chunk_witness",
+    "read_calibration_group_checkpoint",
+    "read_calibration_group_deletion",
     "read_calibration_subset_result",
     "require_multipass_plan",
     "require_real_multipass_authority",
     "require_sealed_schedule",
+    "resolve_calibration_chunk_witnesses",
+    "resolve_calibration_group_checkpoints",
     "resolve_intermediate_inputs",
     "run_calibration_subset_chunk",
     "run_calibration_subset_chunks",
@@ -337,6 +386,8 @@ __all__ = [
     "select_group_inputs",
     "stable_binding_identity",
     "stage_first_witness_corrections",
+    "write_calibration_chunk_witness",
+    "write_calibration_group_checkpoint",
 ]
 
 
@@ -951,8 +1002,30 @@ PLAN_WITNESS_RANK_TABLE: Final = "plan_witness_rank"
 PLAN_LEDGER_TABLE: Final = "chunk_first_witness"
 
 
+class PlanWitnessSource(Protocol):
+    """What the whole-F0 counter derivation reads from one chunk -- D151-C29R1.
+
+    Its plan ordinal, a database holding its ``census_accessions`` rows and a database holding
+    its ``chunk_first_witness`` ledger: the chunk artifacts themselves
+    (:class:`~disclosure_drift.m3.chunk_consolidation.ChunkInput`) or, on the retention-aware
+    calibration route, their exact retained projection (:class:`RetainedWitnessInput`).
+    """
+
+    @property
+    def ordinal(self) -> int:
+        """The chunk's plan ordinal -- the ranking key."""
+
+    @property
+    def catalog_path(self) -> Path:
+        """A database holding this chunk's ``census_accessions`` rows."""
+
+    @property
+    def witness_path(self) -> Path:
+        """A database holding this chunk's ``chunk_first_witness`` ledger."""
+
+
 def _plan_first_witness_counters(
-    connection: sqlite3.Connection, chunks: Sequence[ChunkInput]
+    connection: sqlite3.Connection, chunks: Sequence[PlanWitnessSource]
 ) -> tuple[int, int, int, int]:
     """The final receipt's four correction counters, derived over the plan's chunks -- D151-C15 R1.
 
@@ -981,6 +1054,11 @@ def _plan_first_witness_counters(
     ``11 + 6 * chunks`` -- per chunk, one attach and one detach of its catalog, one attach and one
     detach of its witness ledger, one insert of its accession rows and one of its ledger rows --
     and the committed statement-count test holds this prose to the measurement (D151-C19 R6).
+
+    Since D151-C29R1 each item is a :class:`PlanWitnessSource`: a chunk world or its exact
+    retained projection, whose payload carries the same two tables under the same names. The
+    retention-aware calibration final therefore runs these SAME statements over the witnesses
+    after the chunk worlds are gone; nothing below distinguishes the two.
 
     Raises:
         ChunkMultipassError: the derivation was already run on this connection; a contested
@@ -3664,6 +3742,1901 @@ def _write_canonical_or_require_same(path: Path, record: Mapping[str, object], l
 
 
 # --------------------------------------------------------------------------- #
+# The retention-aware calibration lifecycle -- D151-C29R1
+# --------------------------------------------------------------------------- #
+#: The retained per-chunk witness's contract -- D151-C29R1 §6, the ONE persisted contract the
+#: retention correction adds. A witness is the SMALLEST exact representation of what the
+#: calibration finalization consumes from a chunk after level one: the two-column
+#: ``census_accessions`` projection and the first-witness ledger the whole-F0 counters are
+#: derived from (:func:`_plan_first_witness_counters`), the primary chunk's declarations the shard
+#: chunk's parent map is merged from, and a sealed record binding the chunk's terminal receipt,
+#: its manifest, the plan, the schedule, the source and the payload. It is not a chunk receipt --
+#: the chunk-receipt reader refuses it by contract -- and no production finalizer consumes it.
+CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT: Final = (
+    "m3.3-chunked-f0-calibration-chunk-retained-witness/1"
+)
+
+#: The witness record's fixed filename. Written LAST, inside the witness attempt directory.
+CALIBRATION_RETAINED_WITNESS_FILENAME: Final = "chunk_retained_witness.json"
+
+#: The witness payload: a run-local SQLite file holding exactly the two projected tables and a
+#: meta table saying what it is. Never a catalog, never a migration, never a production input.
+CALIBRATION_RETAINED_PAYLOAD_FILENAME: Final = "retained_witness.sqlite3"
+
+#: The two per-group lifecycle records -- D151-C29R1 §7 -- modelled on the C27R1 admission-event
+#: precedent: an ``event_kind``, an exact key set and an identity seal, persisted as canonical
+#: bytes create-once. The checkpoint binds chunk receipt <-> retained witness <-> intermediate and
+#: is what makes a chunk world deletable; the deletion record is written only after every source
+#: directory is absent. Neither is a production reclaim record and neither can confer one.
+CALIBRATION_GROUP_CHECKPOINT_EVENT_KIND: Final = "calibration_group_checkpoint"
+CALIBRATION_GROUP_DELETION_EVENT_KIND: Final = "calibration_group_deletion"
+
+#: Where a calibration multipass keeps its retained artifacts, beside ``intermediates`` and
+#: ``final`` under the multipass root -- a convention of the root's layout, like those two, so
+#: the reused request contracts keep their exact C27R1 shape. The final child derives it from
+#: ``intermediates_root`` and verifies everything it finds there.
+_RETAINED_DIRECTORY: Final = "retained"
+_CHECKPOINT_SUFFIX: Final = "-checkpoint.json"
+_DELETION_SUFFIX: Final = "-deletion.json"
+
+#: The payload schema. The two table names are the ACCEPTED ones deliberately: the whole-F0
+#: counter derivation reads ``<alias>.census_accessions`` and ``<alias>.chunk_first_witness``
+#: and runs over a retained payload under exactly the same statements it runs over a chunk world.
+_RETAINED_PAYLOAD_SCHEMA: Final = """
+CREATE TABLE census_accessions (
+    accession_plain     TEXT PRIMARY KEY,
+    parsed_record_id    TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE chunk_first_witness (
+    native_identity     TEXT PRIMARY KEY,
+    member_ordinal      INTEGER NOT NULL,
+    record_ordinal      INTEGER NOT NULL,
+    delta_materialized  INTEGER NOT NULL CHECK (delta_materialized >= 0)
+) STRICT;
+
+CREATE TABLE retained_witness_meta (
+    key                 TEXT PRIMARY KEY,
+    value               TEXT NOT NULL
+) STRICT;
+"""
+
+_WITNESS_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "contract",
+        "classifications",
+        "run_id",
+        "plan_digest",
+        "merge_schedule_digest",
+        "chunk_id",
+        "chunk_ordinal",
+        "region",
+        "start",
+        "end",
+        "member_order_digest",
+        "selected_member_order_digest",
+        "shard_parent_binding_digest",
+        "source_instance_id",
+        "source_observation_id",
+        "source_sha256",
+        "source_byte_length",
+        "chunk_attempt",
+        "chunk_receipt_sha256",
+        "chunk_manifest_digest",
+        "chunk_manifest_total_bytes",
+        "chunk_execution_identity",
+        "execution_contract_identity",
+        "repository_head_sha",
+        "repository_tree_sha",
+        "chunk_started_at_utc",
+        "chunk_completed_at_utc",
+        "payload_filename",
+        "payload_sha256",
+        "payload_byte_length",
+        "accession_rows",
+        "ledger_rows",
+        "semantic_payload_identity",
+        "declarations_sha256",
+        "declarations_byte_length",
+        "witness_attempt",
+        "pid",
+        "written_at_utc",
+        "witness_identity",
+    }
+)
+
+_CHECKPOINT_CHUNK_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "chunk_id",
+        "ordinal",
+        "attempt",
+        "receipt_sha256",
+        "manifest",
+        "witness_attempt",
+        "witness_identity",
+        "payload_sha256",
+    }
+)
+
+_CHECKPOINT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "event_kind",
+        "classifications",
+        "run_id",
+        "plan_digest",
+        "merge_schedule_digest",
+        "group_id",
+        "group_ordinal",
+        "region",
+        "start",
+        "end",
+        "chunks",
+        "intermediate_attempt",
+        "intermediate_receipt_sha256",
+        "intermediate_manifest_digest",
+        "intermediate_catalog_sha256",
+        "pid",
+        "written_at_utc",
+        "checkpoint_identity",
+    }
+)
+
+_DELETION_CHUNK_KEYS: Final[frozenset[str]] = frozenset(
+    {"chunk_id", "attempt", "entries", "entries_deleted", "resumed"}
+)
+
+_DELETION_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "event_kind",
+        "classifications",
+        "run_id",
+        "plan_digest",
+        "merge_schedule_digest",
+        "group_id",
+        "grant_identity",
+        "checkpoint_identity",
+        "chunks",
+        "free_before_bytes",
+        "free_after_bytes",
+        "freed_bytes",
+        "expected_freed_bytes",
+        "sources_absent",
+        "pid",
+        "completed_at_utc",
+        "deletion_identity",
+    }
+)
+
+
+def _hex64(value: object, field: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or set(value) - set("0123456789abcdef"):
+        message = f"calibration field {field!r} is not a SHA-256 hex digest; refused"
+        raise ChunkMultipassError(message)
+    return value
+
+
+def _exact_keys(record: Mapping[str, object], expected: frozenset[str], label: str) -> None:
+    present = {str(key) for key in record}
+    if present != expected:
+        message = (
+            f"a {label} is exact; this one is missing {sorted(expected - present)} and carries "
+            f"unexpected {sorted(present - expected)}; refused"
+        )
+        raise ChunkMultipassError(message)
+
+
+def _decoded_canonical_object(path: Path, label: str) -> tuple[Mapping[str, object], bytes]:
+    _require(not path.is_symlink(), f"{label} {path.name!r} is a symbolic link and is refused")
+    _require(path.is_file(), f"no {label} exists at {path.name!r}; an absent record is a refusal")
+    payload = path.read_bytes()
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        message = f"{label} {path.name!r} is not decodable JSON: {exc}"
+        raise ChunkMultipassError(message) from exc
+    _require(isinstance(decoded, dict), f"{label} {path.name!r} is not a JSON object")
+    return cast("Mapping[str, object]", decoded), payload
+
+
+def calibration_retained_root(intermediates_root: Path) -> Path:
+    """Where a calibration multipass keeps its retained witnesses and lifecycle records.
+
+    The sibling of the intermediates root named ``retained`` -- the multipass root's layout,
+    which the orchestrator lays down and the final child derives from the one root path its
+    unchanged request carries.
+    """
+    return intermediates_root.parent / _RETAINED_DIRECTORY
+
+
+def calibration_witness_attempt_directory(retained_root: Path, chunk_id: str, attempt: int) -> Path:
+    """Where one attempt at one chunk's retained witness lives. Create-once, never reused."""
+    return retained_root / chunk_id / f"attempt-{attempt:03d}"
+
+
+def calibration_group_checkpoint_path(retained_root: Path, group_id: str) -> Path:
+    """Where one group's create-once checkpoint record lives."""
+    return retained_root / f"{group_id}{_CHECKPOINT_SUFFIX}"
+
+
+def calibration_group_deletion_path(retained_root: Path, group_id: str) -> Path:
+    """Where one group's create-once deletion-complete record lives."""
+    return retained_root / f"{group_id}{_DELETION_SUFFIX}"
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationChunkWitness:
+    """One chunk's retained witness record -- D151-C29R1 §6.
+
+    Sealed by ``witness_identity`` over every other field. It binds the run, the subset plan and
+    the schedule it will be consumed under, the chunk (identity, plan ordinal, kind and
+    selected-coordinate interval), the full canonical ordering and the selected ordering, the
+    source artifact, the chunk's authenticated terminal receipt (the SHA-256 of the receipt
+    document as found in its one authoritative copy, the manifest digest and byte total, the
+    execution identity, the contract identity and the repository the chunk ran under), and the
+    exact retained payload (its bytes, its row counts and its content identity) plus the
+    declarations copy a primary chunk carries. Written only after the chunk's terminal receipt
+    verified against its artifacts, and never by a chunk child.
+    """
+
+    contract: str
+    classifications: tuple[str, ...]
+    run_id: str
+    plan_digest: str
+    merge_schedule_digest: str
+    chunk_id: str
+    chunk_ordinal: int
+    region: str
+    start: int
+    end: int
+    member_order_digest: str
+    selected_member_order_digest: str
+    shard_parent_binding_digest: str
+    source_instance_id: str
+    source_observation_id: str
+    source_sha256: str
+    source_byte_length: int
+    chunk_attempt: int
+    chunk_receipt_sha256: str
+    chunk_manifest_digest: str
+    chunk_manifest_total_bytes: int
+    chunk_execution_identity: str
+    execution_contract_identity: str
+    repository_head_sha: str
+    repository_tree_sha: str
+    chunk_started_at_utc: str
+    chunk_completed_at_utc: str
+    payload_filename: str
+    payload_sha256: str
+    payload_byte_length: int
+    accession_rows: int
+    ledger_rows: int
+    semantic_payload_identity: str
+    declarations_sha256: str | None
+    declarations_byte_length: int | None
+    witness_attempt: int
+    pid: int
+    written_at_utc: str
+    witness_identity: str
+
+    def _identity_inputs(self) -> dict[str, object]:
+        return {
+            "contract": self.contract,
+            "classifications": list(self.classifications),
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "merge_schedule_digest": self.merge_schedule_digest,
+            "chunk_id": self.chunk_id,
+            "chunk_ordinal": self.chunk_ordinal,
+            "region": self.region,
+            "start": self.start,
+            "end": self.end,
+            "member_order_digest": self.member_order_digest,
+            "selected_member_order_digest": self.selected_member_order_digest,
+            "shard_parent_binding_digest": self.shard_parent_binding_digest,
+            "source_instance_id": self.source_instance_id,
+            "source_observation_id": self.source_observation_id,
+            "source_sha256": self.source_sha256,
+            "source_byte_length": self.source_byte_length,
+            "chunk_attempt": self.chunk_attempt,
+            "chunk_receipt_sha256": self.chunk_receipt_sha256,
+            "chunk_manifest_digest": self.chunk_manifest_digest,
+            "chunk_manifest_total_bytes": self.chunk_manifest_total_bytes,
+            "chunk_execution_identity": self.chunk_execution_identity,
+            "execution_contract_identity": self.execution_contract_identity,
+            "repository_head_sha": self.repository_head_sha,
+            "repository_tree_sha": self.repository_tree_sha,
+            "chunk_started_at_utc": self.chunk_started_at_utc,
+            "chunk_completed_at_utc": self.chunk_completed_at_utc,
+            "payload_filename": self.payload_filename,
+            "payload_sha256": self.payload_sha256,
+            "payload_byte_length": self.payload_byte_length,
+            "accession_rows": self.accession_rows,
+            "ledger_rows": self.ledger_rows,
+            "semantic_payload_identity": self.semantic_payload_identity,
+            "declarations_sha256": self.declarations_sha256,
+            "declarations_byte_length": self.declarations_byte_length,
+            "witness_attempt": self.witness_attempt,
+            "pid": self.pid,
+            "written_at_utc": self.written_at_utc,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        record = self._identity_inputs()
+        record["witness_identity"] = self.witness_identity
+        return record
+
+    def identity(self) -> str:
+        """The identity the record implies -- over everything but the identity field."""
+        return _record_identity(self._identity_inputs(), "witness_identity")
+
+    def meta_rows(self) -> tuple[tuple[str, str], ...]:
+        """What the payload's own meta table must say, so the payload says what it is."""
+        return (
+            ("contract", self.contract),
+            ("run_id", self.run_id),
+            ("plan_digest", self.plan_digest),
+            ("chunk_id", self.chunk_id),
+            ("chunk_receipt_sha256", self.chunk_receipt_sha256),
+        )
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationChunkWitness:  # noqa: PLR0915
+        """Rebuild a witness from its EXACT mapping and re-derive its identity.
+
+        Raises:
+            ChunkMultipassError: the shape, contract, labels, region, interval, digests,
+                declarations consistency or identity refuses.
+        """
+        _exact_keys(record, _WITNESS_KEYS, "calibration retained witness")
+        declarations_sha256 = record["declarations_sha256"]
+        declarations_length = record["declarations_byte_length"]
+        witness = cls(
+            contract=str(record["contract"]),
+            classifications=_stored_labels(record["classifications"], "classifications"),
+            run_id=str(record["run_id"]),
+            plan_digest=_hex64(record["plan_digest"], "plan_digest"),
+            merge_schedule_digest=_hex64(record["merge_schedule_digest"], "merge_schedule_digest"),
+            chunk_id=str(record["chunk_id"]),
+            chunk_ordinal=_stored_int(record["chunk_ordinal"], "chunk_ordinal"),
+            region=str(record["region"]),
+            start=_stored_int(record["start"], "start"),
+            end=_stored_int(record["end"], "end"),
+            member_order_digest=_hex64(record["member_order_digest"], "member_order_digest"),
+            selected_member_order_digest=_hex64(
+                record["selected_member_order_digest"], "selected_member_order_digest"
+            ),
+            shard_parent_binding_digest=_hex64(
+                record["shard_parent_binding_digest"], "shard_parent_binding_digest"
+            ),
+            source_instance_id=str(record["source_instance_id"]),
+            source_observation_id=str(record["source_observation_id"]),
+            source_sha256=str(record["source_sha256"]),
+            source_byte_length=_stored_int(record["source_byte_length"], "source_byte_length"),
+            chunk_attempt=_stored_int(record["chunk_attempt"], "chunk_attempt"),
+            chunk_receipt_sha256=_hex64(record["chunk_receipt_sha256"], "chunk_receipt_sha256"),
+            chunk_manifest_digest=_hex64(record["chunk_manifest_digest"], "chunk_manifest_digest"),
+            chunk_manifest_total_bytes=_stored_int(
+                record["chunk_manifest_total_bytes"], "chunk_manifest_total_bytes"
+            ),
+            chunk_execution_identity=str(record["chunk_execution_identity"]),
+            execution_contract_identity=str(record["execution_contract_identity"]),
+            repository_head_sha=str(record["repository_head_sha"]),
+            repository_tree_sha=str(record["repository_tree_sha"]),
+            chunk_started_at_utc=str(record["chunk_started_at_utc"]),
+            chunk_completed_at_utc=str(record["chunk_completed_at_utc"]),
+            payload_filename=str(record["payload_filename"]),
+            payload_sha256=_hex64(record["payload_sha256"], "payload_sha256"),
+            payload_byte_length=_stored_int(record["payload_byte_length"], "payload_byte_length"),
+            accession_rows=_stored_int(record["accession_rows"], "accession_rows"),
+            ledger_rows=_stored_int(record["ledger_rows"], "ledger_rows"),
+            semantic_payload_identity=_hex64(
+                record["semantic_payload_identity"], "semantic_payload_identity"
+            ),
+            declarations_sha256=(
+                None
+                if declarations_sha256 is None
+                else _hex64(declarations_sha256, "declarations_sha256")
+            ),
+            declarations_byte_length=(
+                None
+                if declarations_length is None
+                else _stored_int(declarations_length, "declarations_byte_length")
+            ),
+            witness_attempt=_stored_int(record["witness_attempt"], "witness_attempt"),
+            pid=_stored_int(record["pid"], "pid"),
+            written_at_utc=str(record["written_at_utc"]),
+            witness_identity=str(record["witness_identity"]),
+        )
+        _require(
+            witness.contract == CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT,
+            f"a retained witness carrying contract {witness.contract!r} is refused; this reader "
+            f"consumes only {CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT!r}",
+        )
+        _require(
+            witness.region in CHUNK_REGION_ORDER and 0 <= witness.start < witness.end,
+            f"a retained witness for chunk {witness.chunk_id!r} names region {witness.region!r} "
+            f"over [{witness.start}, {witness.end}); refused",
+        )
+        _require(
+            witness.payload_filename == CALIBRATION_RETAINED_PAYLOAD_FILENAME,
+            f"a retained witness names payload {witness.payload_filename!r}; refused",
+        )
+        primary = witness.region == REGION_PRIMARY
+        _require(
+            (witness.declarations_sha256 is not None) == primary
+            and (witness.declarations_byte_length is not None) == primary,
+            f"a retained witness for {witness.region} chunk {witness.chunk_id!r} must carry a "
+            "declarations copy exactly when the chunk is a primary chunk; refused",
+        )
+        _require(
+            witness.identity() == witness.witness_identity,
+            "a retained witness's recorded identity does not describe its own contents: "
+            f"recorded {witness.witness_identity!r}, recomputed {witness.identity()!r}",
+        )
+        return witness
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedWitnessInput:
+    """One validated retained witness, resolved to its one verified attempt directory.
+
+    The final's counter source for a chunk whose world is gone: ``catalog_path`` and
+    ``witness_path`` both name the payload, whose ``census_accessions`` and
+    ``chunk_first_witness`` tables are the exact projections the accepted derivation reads.
+    """
+
+    chunk_id: str
+    ordinal: int
+    region: str
+    start: int
+    end: int
+    directory: Path
+    witness: CalibrationChunkWitness
+
+    @property
+    def payload_path(self) -> Path:
+        """The retained payload database."""
+        return self.directory / CALIBRATION_RETAINED_PAYLOAD_FILENAME
+
+    @property
+    def catalog_path(self) -> Path:
+        """Where the derivation reads this chunk's ``census_accessions`` projection."""
+        return self.payload_path
+
+    @property
+    def witness_path(self) -> Path:
+        """Where the derivation reads this chunk's ``chunk_first_witness`` ledger."""
+        return self.payload_path
+
+    @property
+    def declarations_path(self) -> Path:
+        """The primary chunk's retained declarations copy."""
+        return self.directory / CHUNK_DECLARATIONS_FILENAME
+
+
+def _witness_attempt_directories(retained_root: Path, chunk_id: str) -> list[Path]:
+    parent = retained_root / chunk_id
+    if not parent.is_dir() or parent.is_symlink():
+        return []
+    return sorted(path for path in parent.iterdir() if path.is_dir() and not path.is_symlink())
+
+
+def _retained_payload_identity(
+    connection: sqlite3.Connection, catalog_alias: str, ledger_alias: str, *, chunk_id: str
+) -> tuple[str, int, int]:
+    """The content identity of one chunk's two projections, in a fixed order, and both row
+    counts -- computed the same way from a chunk world and from its retained copy."""
+    digest = hashlib.sha256()
+    digest.update(f"{CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT}\x1f{chunk_id}".encode())
+    digest.update(b"\x1e")
+    accession_rows = 0
+    for row in connection.execute(
+        "SELECT accession_plain, parsed_record_id "  # noqa: S608 - alias is ours
+        f"FROM {catalog_alias}.census_accessions ORDER BY accession_plain"
+    ):
+        digest.update("\x1f".join((str(row[0]), str(row[1]))).encode("utf-8"))
+        digest.update(b"\x1e")
+        accession_rows += 1
+    digest.update(b"\x1d")
+    ledger_rows = 0
+    for row in connection.execute(
+        "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "  # noqa: S608
+        f"FROM {ledger_alias}.chunk_first_witness ORDER BY native_identity"
+    ):
+        digest.update(
+            "\x1f".join((str(row[0]), str(row[1]), str(row[2]), str(row[3]))).encode("utf-8")
+        )
+        digest.update(b"\x1e")
+        ledger_rows += 1
+    return digest.hexdigest(), accession_rows, ledger_rows
+
+
+def _verify_retained_witness_files(
+    directory: Path, witness: CalibrationChunkWitness, *, deep: bool
+) -> None:
+    """Hold a witness directory to its record: exact file set, payload bytes, declarations
+    bytes, the payload's own meta rows and row counts, and -- when ``deep`` -- the payload's
+    recomputed content identity."""
+    expected = {CALIBRATION_RETAINED_WITNESS_FILENAME, witness.payload_filename}
+    if witness.region == REGION_PRIMARY:
+        expected.add(CHUNK_DECLARATIONS_FILENAME)
+    present: set[str] = set()
+    for path in directory.iterdir():
+        _require(
+            not path.is_symlink() and path.is_file(),
+            f"retained witness {witness.chunk_id!r} holds {path.name!r}, which is not a regular "
+            "file; refused",
+        )
+        present.add(path.name)
+    _require(
+        present == expected,
+        f"retained witness {witness.chunk_id!r} holds unexpected {sorted(present - expected)} "
+        f"and lacks {sorted(expected - present)}; an inexact witness directory is refused",
+    )
+    sha256, length = file_sha256(directory / witness.payload_filename)
+    _require(
+        sha256 == witness.payload_sha256 and length == witness.payload_byte_length,
+        f"retained witness {witness.chunk_id!r} payload digests to {sha256}/{length} where the "
+        f"record seals {witness.payload_sha256}/{witness.payload_byte_length}; a changed payload "
+        "is refused rather than re-read",
+    )
+    if witness.region == REGION_PRIMARY:
+        sha256, length = file_sha256(directory / CHUNK_DECLARATIONS_FILENAME)
+        _require(
+            sha256 == witness.declarations_sha256 and length == witness.declarations_byte_length,
+            f"retained witness {witness.chunk_id!r} declarations copy digests to {sha256} where "
+            f"the record seals {witness.declarations_sha256}; refused",
+        )
+    payload = directory / witness.payload_filename
+    connection = sqlite3.connect(f"file:{payload.resolve()}?immutable=1", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        meta = tuple(
+            (str(row["key"]), str(row["value"]))
+            for row in connection.execute(
+                "SELECT key, value FROM retained_witness_meta ORDER BY key"
+            )
+        )
+        _require(
+            meta == tuple(sorted(witness.meta_rows())),
+            f"retained witness {witness.chunk_id!r} payload describes {dict(meta)} where the "
+            f"record binds {dict(witness.meta_rows())}; refused",
+        )
+        accessions = connection.execute("SELECT COUNT(*) AS n FROM census_accessions").fetchone()
+        ledger = connection.execute("SELECT COUNT(*) AS n FROM chunk_first_witness").fetchone()
+        _require(
+            (int(accessions["n"]), int(ledger["n"]))
+            == (witness.accession_rows, witness.ledger_rows),
+            f"retained witness {witness.chunk_id!r} payload holds {accessions['n']} accession "
+            f"rows and {ledger['n']} ledger rows where the record seals {witness.accession_rows} "
+            f"and {witness.ledger_rows}; refused",
+        )
+        if deep:
+            identity, _rows, _ledger_rows = _retained_payload_identity(
+                connection, "main", "main", chunk_id=witness.chunk_id
+            )
+            _require(
+                identity == witness.semantic_payload_identity,
+                f"retained witness {witness.chunk_id!r} payload content identity is "
+                f"{identity!r} where the record seals {witness.semantic_payload_identity!r}; "
+                "a stale or resealed payload is refused",
+            )
+    finally:
+        connection.close()
+
+
+def read_calibration_chunk_witness(
+    directory: Path, *, deep: bool = False
+) -> CalibrationChunkWitness:
+    """One retained witness, read from its canonical bytes and held to its files, or a refusal.
+
+    ``deep`` additionally recomputes the payload's content identity row by row -- the
+    independent re-read the pre-deletion checkpoint performs; the final holds the payload to its
+    sealed bytes and the record to its seal and to the checkpoint that bound it.
+
+    Raises:
+        ChunkMultipassError: the record is absent, a link, not canonical, not an exact witness,
+            or the directory does not hold exactly what the record seals.
+    """
+    decoded, payload = _decoded_canonical_object(
+        directory / CALIBRATION_RETAINED_WITNESS_FILENAME, "calibration retained witness"
+    )
+    witness = CalibrationChunkWitness.from_record(decoded)
+    _require(
+        canonical_json_bytes(witness.as_record()) == payload,
+        f"retained witness {witness.chunk_id!r} is not persisted as its canonical bytes; refused",
+    )
+    _verify_retained_witness_files(directory, witness, deep=deep)
+    return witness
+
+
+def completed_calibration_chunk_witness(
+    retained_root: Path, chunk_id: str
+) -> tuple[CalibrationChunkWitness, Path] | None:
+    """The one valid retained witness this chunk carries, or ``None``.
+
+    Every attempt directory is inspected; one with no record never completed and is skipped; one
+    WITH a record is verified and a record that fails to verify is a loud refusal, never "never
+    ran" (the intermediate rule, D151-C13 §27). Two valid witnesses are ambiguous and refused.
+
+    Raises:
+        ChunkMultipassError: a present record does not verify, describes another chunk, or more
+            than one attempt carries a valid record.
+    """
+    found: list[tuple[CalibrationChunkWitness, Path]] = []
+    for directory in _witness_attempt_directories(retained_root, chunk_id):
+        if not (directory / CALIBRATION_RETAINED_WITNESS_FILENAME).is_file():
+            continue
+        try:
+            witness = read_calibration_chunk_witness(directory)
+        except ChunkMultipassError as exc:
+            message = (
+                f"retained witness {chunk_id!r} attempt {directory.name!r} carries a record that "
+                f"does not verify: {exc}. A changed witness is a changed artifact, not an attempt "
+                "that never ran; the calibration STOPS rather than rebuilding beside it"
+            )
+            raise ChunkMultipassError(message) from exc
+        _require(
+            witness.chunk_id == chunk_id,
+            f"retained witness attempt {directory.name!r} under {chunk_id!r} describes chunk "
+            f"{witness.chunk_id!r}; refused",
+        )
+        found.append((witness, directory))
+    if len(found) > 1:
+        message = (
+            f"chunk {chunk_id!r} carries {len(found)} valid retained witnesses, in "
+            f"{[path.name for _, path in found]}. Duplicate authority is refused rather than "
+            "resolved"
+        )
+        raise ChunkMultipassError(message)
+    return found[0] if found else None
+
+
+def next_calibration_witness_attempt_directory(
+    retained_root: Path, chunk_id: str
+) -> tuple[Path, int]:
+    """The lowest unused witness attempt directory for one chunk, and its ordinal.
+
+    Raises:
+        ChunkMultipassError: the chunk already carries a valid witness -- a completed witness is
+            immutable and is reused, never rewritten -- or a present record does not verify.
+    """
+    existing = completed_calibration_chunk_witness(retained_root, chunk_id)
+    if existing is not None:
+        message = (
+            f"chunk {chunk_id!r} already carries a valid retained witness (attempt "
+            f"{existing[0].witness_attempt}); a witness is create-once and is never rewritten"
+        )
+        raise ChunkMultipassError(message)
+    attempt = 0
+    while calibration_witness_attempt_directory(retained_root, chunk_id, attempt).exists():
+        attempt += 1
+    return calibration_witness_attempt_directory(retained_root, chunk_id, attempt), attempt
+
+
+def write_calibration_chunk_witness(
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    *,
+    chunk_id: str,
+    run_id: str,
+    chunk_root: Path,
+    retained_root: Path,
+    external_root: Path | None = None,
+) -> tuple[CalibrationChunkWitness, Path]:
+    """Write one chunk's retained witness, create-once, after its terminal authenticated -- §6.
+
+    In order: the sealed subset plan and schedule are required; the chunk is resolved through
+    the accepted admission (a chunk with no verified terminal receipt refuses here, so a witness
+    is never written before the chunk is terminal); the payload is built by attaching the chunk
+    world immutably and copying exactly the two projected tables in a fixed order; the content
+    identity is computed from the SOURCE and from the COPY and the two must agree; a primary
+    chunk's declarations are re-serialized through the accepted writer and held byte-identical to
+    the chunk's manifested entry; the sealed record is written LAST; and the witness is then
+    independently re-read, deep, before it is returned.
+
+    Raises:
+        ChunkMultipassError: the chunk already carries a witness, the copy is not exact, or the
+            re-read refuses.
+        ChunkPlanError, ChunkConsolidationError, ChunkStorageError, ChunkEvidenceError: the
+            chunk is not an authenticated terminal member of this plan.
+    """
+    require_calibration_subset_plan(plan)
+    require_sealed_schedule(schedule, plan)
+    (chunk,) = resolve_contiguous_chunk_inputs(
+        plan, (chunk_id,), internal_root=chunk_root, external_root=external_root
+    )
+    attempt_directory, attempt = next_calibration_witness_attempt_directory(retained_root, chunk_id)
+    receipt_sha256, _receipt_length = file_sha256(chunk.directory / CHUNK_RECEIPT_FILENAME)
+    attempt_directory.mkdir(mode=_DIRECTORY_MODE, parents=True)
+    payload_path = attempt_directory / CALIBRATION_RETAINED_PAYLOAD_FILENAME
+    connection = sqlite3.connect(payload_path, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.executescript(_RETAINED_PAYLOAD_SCHEMA)
+        catalogs = _attach_all(connection, [chunk.catalog_path], "pc")
+        ledgers = _attach_all(connection, [chunk.witness_path], "pw")
+        try:
+            connection.execute(
+                "INSERT INTO main.census_accessions (accession_plain, parsed_record_id) "  # noqa: S608
+                f"SELECT accession_plain, parsed_record_id FROM {catalogs[0]}.census_accessions "
+                "ORDER BY accession_plain"
+            )
+            connection.execute(
+                "INSERT INTO main.chunk_first_witness (native_identity, member_ordinal, "  # noqa: S608
+                "record_ordinal, delta_materialized) "
+                "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "
+                f"FROM {ledgers[0]}.chunk_first_witness ORDER BY native_identity"
+            )
+            source_identity, source_rows, source_ledger = _retained_payload_identity(
+                connection, catalogs[0], ledgers[0], chunk_id=chunk_id
+            )
+            copy_identity, accession_rows, ledger_rows = _retained_payload_identity(
+                connection, "main", "main", chunk_id=chunk_id
+            )
+            _require(
+                (copy_identity, accession_rows, ledger_rows)
+                == (source_identity, source_rows, source_ledger),
+                f"the retained payload of chunk {chunk_id!r} is not an exact copy of the chunk's "
+                "projections; nothing is sealed over an inexact copy",
+            )
+        finally:
+            _detach_all(connection, ledgers)
+            _detach_all(connection, catalogs)
+        connection.executemany(
+            "INSERT INTO main.retained_witness_meta (key, value) VALUES (?, ?)",
+            [
+                ("contract", CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT),
+                ("run_id", run_id),
+                ("plan_digest", plan.plan_digest),
+                ("chunk_id", chunk_id),
+                ("chunk_receipt_sha256", receipt_sha256),
+            ],
+        )
+    finally:
+        connection.close()
+    declarations_sha256: str | None = None
+    declarations_length: int | None = None
+    if chunk.region == REGION_PRIMARY:
+        entry = next(
+            item
+            for item in chunk.receipt.manifest.entries
+            if item.relative_path == CHUNK_DECLARATIONS_FILENAME
+        )
+        declared = read_declarations(chunk.directory / CHUNK_DECLARATIONS_FILENAME)
+        write_once_json(
+            attempt_directory / CHUNK_DECLARATIONS_FILENAME,
+            {name: sorted(parents) for name, parents in sorted(declared.items())},
+        )
+        declarations_sha256, declarations_length = file_sha256(
+            attempt_directory / CHUNK_DECLARATIONS_FILENAME
+        )
+        _require(
+            declarations_sha256 == entry.sha256 and declarations_length == entry.byte_length,
+            f"the retained declarations copy of chunk {chunk_id!r} is not byte-identical to the "
+            "chunk's manifested declarations; refused",
+        )
+    payload_sha256, payload_length = file_sha256(payload_path)
+    witness = CalibrationChunkWitness(
+        contract=CALIBRATION_CHUNK_RETAINED_WITNESS_CONTRACT,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        run_id=run_id,
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        chunk_id=chunk_id,
+        chunk_ordinal=chunk.ordinal,
+        region=chunk.region,
+        start=chunk.start,
+        end=chunk.end,
+        member_order_digest=plan.member_order_digest,
+        selected_member_order_digest=plan.selected_member_order_digest,
+        shard_parent_binding_digest=plan.shard_parent_binding_digest,
+        source_instance_id=plan.source_instance_id,
+        source_observation_id=plan.source_observation_id,
+        source_sha256=plan.source_sha256,
+        source_byte_length=plan.source_byte_length,
+        chunk_attempt=chunk.receipt.attempt,
+        chunk_receipt_sha256=receipt_sha256,
+        chunk_manifest_digest=chunk.receipt.manifest.digest,
+        chunk_manifest_total_bytes=chunk.receipt.manifest.total_bytes,
+        chunk_execution_identity=chunk.receipt.execution_identity,
+        execution_contract_identity=chunk.receipt.execution_contract.contract_identity,
+        repository_head_sha=chunk.receipt.repository_head_sha,
+        repository_tree_sha=chunk.receipt.repository_tree_sha,
+        chunk_started_at_utc=chunk.receipt.started_at_utc,
+        chunk_completed_at_utc=chunk.receipt.completed_at_utc,
+        payload_filename=CALIBRATION_RETAINED_PAYLOAD_FILENAME,
+        payload_sha256=payload_sha256,
+        payload_byte_length=payload_length,
+        accession_rows=accession_rows,
+        ledger_rows=ledger_rows,
+        semantic_payload_identity=copy_identity,
+        declarations_sha256=declarations_sha256,
+        declarations_byte_length=declarations_length,
+        witness_attempt=attempt,
+        pid=os.getpid(),
+        written_at_utc=utc_now(),
+        witness_identity="",
+    )
+    sealed = replace(witness, witness_identity=witness.identity())
+    # LAST. A witness that stopped anywhere above leaves an attempt with no record.
+    write_once_canonical_json(
+        attempt_directory / CALIBRATION_RETAINED_WITNESS_FILENAME, dict(sealed.as_record())
+    )
+    reread = read_calibration_chunk_witness(attempt_directory, deep=True)
+    _require(
+        reread == sealed,
+        f"the retained witness of chunk {chunk_id!r} did not re-read as what was sealed; refused",
+    )
+    return sealed, attempt_directory
+
+
+def _require_witness_binds_plan(
+    witness: CalibrationChunkWitness,
+    *,
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    run_id: str,
+    ordinal: int,
+    bounds: ChunkBounds,
+) -> None:
+    _require(
+        witness.run_id == run_id
+        and witness.plan_digest == plan.plan_digest
+        and witness.merge_schedule_digest == schedule.schedule_digest,
+        f"retained witness {witness.chunk_id!r} binds run {witness.run_id!r} / plan "
+        f"{witness.plan_digest[:16]}... / schedule {witness.merge_schedule_digest[:16]}... "
+        f"where this calibration is run {run_id!r} / plan {plan.plan_digest[:16]}... / "
+        f"schedule {schedule.schedule_digest[:16]}...; a witness of another run is never admitted",
+    )
+    _require(
+        (witness.chunk_id, witness.chunk_ordinal, witness.region, witness.start, witness.end)
+        == (bounds.chunk_id, ordinal, bounds.region, bounds.start, bounds.end),
+        f"retained witness {witness.chunk_id!r} records ordinal {witness.chunk_ordinal} "
+        f"{witness.region}[{witness.start}, {witness.end}) where the plan assigns ordinal "
+        f"{ordinal} {bounds.region}[{bounds.start}, {bounds.end}) to {bounds.chunk_id!r}",
+    )
+    _require(
+        witness.member_order_digest == plan.member_order_digest
+        and witness.selected_member_order_digest == plan.selected_member_order_digest
+        and witness.shard_parent_binding_digest == plan.shard_parent_binding_digest
+        and witness.source_instance_id == plan.source_instance_id
+        and witness.source_observation_id == plan.source_observation_id
+        and witness.source_sha256 == plan.source_sha256
+        and witness.source_byte_length == plan.source_byte_length,
+        f"retained witness {witness.chunk_id!r} names a source, observation, artifact or "
+        "ordering the plan does not",
+    )
+
+
+def _require_witness_matches_chunk(
+    witness: CalibrationChunkWitness, receipt: ChunkReceipt, directory: Path
+) -> None:
+    """Hold an existing witness to the chunk world beside it, while that world still exists."""
+    observed, _length = file_sha256(directory / CHUNK_RECEIPT_FILENAME)
+    _require(
+        observed == witness.chunk_receipt_sha256
+        and receipt.manifest.digest == witness.chunk_manifest_digest
+        and receipt.attempt == witness.chunk_attempt
+        and receipt.execution_identity == witness.chunk_execution_identity,
+        f"retained witness {witness.chunk_id!r} binds receipt {witness.chunk_receipt_sha256[:16]}"
+        f"... attempt {witness.chunk_attempt} and the chunk's one authoritative copy now carries "
+        f"receipt {observed[:16]}... attempt {receipt.attempt}; a witness is never admitted "
+        "beside a chunk other than the one it was taken from",
+    )
+
+
+def _refuse_foreign_retained_entries(
+    plan: CalibrationSubsetPlan, schedule: MergeSchedule, retained_root: Path
+) -> None:
+    if not retained_root.is_dir():
+        return
+    known_directories = {bounds.chunk_id for bounds in plan.chunks}
+    known_files = {
+        calibration_group_checkpoint_path(retained_root, g.group_id).name for g in schedule.groups
+    }
+    known_files |= {
+        calibration_group_deletion_path(retained_root, g.group_id).name for g in schedule.groups
+    }
+    foreign = sorted(
+        path.name
+        for path in retained_root.iterdir()
+        if path.is_symlink()
+        or (path.is_dir() and path.name not in known_directories)
+        or (path.is_file() and path.name not in known_files)
+        or not (path.is_dir() or path.is_file())
+    )
+    _require(
+        not foreign,
+        f"{len(foreign)} entry/entries are present under the retained root that this plan and "
+        f"schedule do not name: {foreign[:8]}. An extra witness or record belongs to some other "
+        "run, and a finalizer that ignored it would be choosing between two answers silently",
+    )
+
+
+def resolve_calibration_chunk_witnesses(
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    *,
+    run_id: str,
+    retained_root: Path,
+) -> tuple[RetainedWitnessInput, ...]:
+    """Resolve every chunk of the plan to exactly one verified retained witness -- P3, P5.
+
+    Every witness must belong to ONE execution of ONE schedule of ONE plan under ONE run, proved
+    rather than assumed: the record binds this run, plan and schedule, names exactly the chunk,
+    ordinal, kind and selected interval the plan assigns, names the plan's source and both
+    orderings; the intervals together cover the selected members exactly once; every witness
+    names the same repository revision and the same execution contract identity; the payload's
+    bytes and the declarations copy are held to the seal; and nothing the plan and schedule do
+    not name is present under the retained root. No chunk world is opened or required.
+
+    Raises:
+        ChunkMultipassError: any of them.
+    """
+    _refuse_foreign_retained_entries(plan, schedule, retained_root)
+    inputs: list[RetainedWitnessInput] = []
+    head: str | None = None
+    tree: str | None = None
+    contract_identity: str | None = None
+    cursor = 0
+    for ordinal, bounds in enumerate(plan.chunks):
+        found = completed_calibration_chunk_witness(retained_root, bounds.chunk_id)
+        _require(
+            found is not None,
+            f"chunk {bounds.chunk_id!r} has no valid retained witness. A missing witness is "
+            "never treated as empty, skipped, reconstructed or re-derived from a chunk world",
+        )
+        assert found is not None  # noqa: S101 - narrowed by the refusal above
+        witness, directory = found
+        _require_witness_binds_plan(
+            witness, plan=plan, schedule=schedule, run_id=run_id, ordinal=ordinal, bounds=bounds
+        )
+        _require(
+            witness.start == cursor,
+            f"retained witness {bounds.chunk_id!r} starts at {witness.start} where {cursor} was "
+            "required: the admitted witnesses leave a gap or overlap",
+        )
+        if head is None:
+            head, tree = witness.repository_head_sha, witness.repository_tree_sha
+            contract_identity = witness.execution_contract_identity
+        _require(
+            witness.repository_head_sha == head
+            and witness.repository_tree_sha == tree
+            and witness.execution_contract_identity == contract_identity,
+            f"retained witness {bounds.chunk_id!r} was taken from a chunk that executed under "
+            f"{witness.repository_head_sha}/{witness.repository_tree_sha} with contract "
+            f"{witness.execution_contract_identity[:16]}... where an earlier chunk executed "
+            f"under {head}/{tree} with {str(contract_identity)[:16]}...",
+        )
+        inputs.append(
+            RetainedWitnessInput(
+                chunk_id=bounds.chunk_id,
+                ordinal=ordinal,
+                region=bounds.region,
+                start=bounds.start,
+                end=bounds.end,
+                directory=directory,
+                witness=witness,
+            )
+        )
+        cursor = witness.end
+    _require(
+        cursor == plan.total_members,
+        f"the admitted witnesses cover [0, {cursor}) of {plan.total_members} selected members",
+    )
+    return tuple(inputs)
+
+
+# --------------------------------------------------------------------------- #
+# The group checkpoint -- what makes a chunk world deletable (§7)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CheckpointChunkBinding:
+    """One chunk inside a group checkpoint: its receipt, its exact manifest, its witness."""
+
+    chunk_id: str
+    ordinal: int
+    attempt: int
+    receipt_sha256: str
+    manifest: ArtifactManifest
+    witness_attempt: int
+    witness_identity: str
+    payload_sha256: str
+
+    @property
+    def entries(self) -> tuple[str, ...]:
+        """Every object the chunk world holds: the manifested set plus the receipt, sorted."""
+        return tuple(
+            sorted(
+                [*(entry.relative_path for entry in self.manifest.entries), CHUNK_RECEIPT_FILENAME]
+            )
+        )
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        return {
+            "chunk_id": self.chunk_id,
+            "ordinal": self.ordinal,
+            "attempt": self.attempt,
+            "receipt_sha256": self.receipt_sha256,
+            "manifest": dict(self.manifest.as_record()),
+            "witness_attempt": self.witness_attempt,
+            "witness_identity": self.witness_identity,
+            "payload_sha256": self.payload_sha256,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CheckpointChunkBinding:
+        """Rebuild one binding from its EXACT mapping.
+
+        Raises:
+            ChunkMultipassError: the shape or a field refuses.
+        """
+        _exact_keys(record, _CHECKPOINT_CHUNK_KEYS, "checkpoint chunk binding")
+        manifest = record["manifest"]
+        _require(
+            isinstance(manifest, Mapping), "a checkpoint chunk binding's manifest is not a mapping"
+        )
+        try:
+            rebuilt = ArtifactManifest.from_record(cast("Mapping[str, object]", manifest))
+        except ChunkEvidenceError as exc:
+            message = f"a checkpoint chunk binding's manifest is refused: {exc}"
+            raise ChunkMultipassError(message) from exc
+        return cls(
+            chunk_id=str(record["chunk_id"]),
+            ordinal=_stored_int(record["ordinal"], "ordinal"),
+            attempt=_stored_int(record["attempt"], "attempt"),
+            receipt_sha256=_hex64(record["receipt_sha256"], "receipt_sha256"),
+            manifest=rebuilt,
+            witness_attempt=_stored_int(record["witness_attempt"], "witness_attempt"),
+            witness_identity=_hex64(record["witness_identity"], "witness_identity"),
+            payload_sha256=_hex64(record["payload_sha256"], "payload_sha256"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationGroupCheckpoint:
+    """One group's create-once checkpoint -- §7 step 4: chunk receipt, witness, intermediate.
+
+    Written by the orchestrator only after every chunk of the group is terminal and verified,
+    every witness has been independently re-read (deep), and the group's intermediate is terminal
+    and bound to exactly those chunk receipts. Sealed by ``checkpoint_identity``.
+    """
+
+    event_kind: str
+    classifications: tuple[str, ...]
+    run_id: str
+    plan_digest: str
+    merge_schedule_digest: str
+    group_id: str
+    group_ordinal: int
+    region: str
+    start: int
+    end: int
+    chunks: tuple[CheckpointChunkBinding, ...]
+    intermediate_attempt: int
+    intermediate_receipt_sha256: str
+    intermediate_manifest_digest: str
+    intermediate_catalog_sha256: str
+    pid: int
+    written_at_utc: str
+    checkpoint_identity: str
+
+    def _identity_inputs(self) -> dict[str, object]:
+        return {
+            "event_kind": self.event_kind,
+            "classifications": list(self.classifications),
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "merge_schedule_digest": self.merge_schedule_digest,
+            "group_id": self.group_id,
+            "group_ordinal": self.group_ordinal,
+            "region": self.region,
+            "start": self.start,
+            "end": self.end,
+            "chunks": [dict(item.as_record()) for item in self.chunks],
+            "intermediate_attempt": self.intermediate_attempt,
+            "intermediate_receipt_sha256": self.intermediate_receipt_sha256,
+            "intermediate_manifest_digest": self.intermediate_manifest_digest,
+            "intermediate_catalog_sha256": self.intermediate_catalog_sha256,
+            "pid": self.pid,
+            "written_at_utc": self.written_at_utc,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        record = self._identity_inputs()
+        record["checkpoint_identity"] = self.checkpoint_identity
+        return record
+
+    def identity(self) -> str:
+        """The identity the record implies -- over everything but the identity field."""
+        return _record_identity(self._identity_inputs(), "checkpoint_identity")
+
+    @property
+    def chunk_ids(self) -> tuple[str, ...]:
+        """The bound chunks, in group order."""
+        return tuple(item.chunk_id for item in self.chunks)
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationGroupCheckpoint:
+        """Rebuild a checkpoint from its EXACT mapping and re-derive its identity.
+
+        Raises:
+            ChunkMultipassError: the shape, kind, labels, bindings or identity refuses.
+        """
+        _exact_keys(record, _CHECKPOINT_KEYS, "calibration group checkpoint")
+        chunks = record["chunks"]
+        _require(
+            isinstance(chunks, list) and bool(chunks),
+            "a calibration group checkpoint's chunks must be a non-empty list",
+        )
+        checkpoint = cls(
+            event_kind=str(record["event_kind"]),
+            classifications=_stored_labels(record["classifications"], "classifications"),
+            run_id=str(record["run_id"]),
+            plan_digest=_hex64(record["plan_digest"], "plan_digest"),
+            merge_schedule_digest=_hex64(record["merge_schedule_digest"], "merge_schedule_digest"),
+            group_id=str(record["group_id"]),
+            group_ordinal=_stored_int(record["group_ordinal"], "group_ordinal"),
+            region=str(record["region"]),
+            start=_stored_int(record["start"], "start"),
+            end=_stored_int(record["end"], "end"),
+            chunks=tuple(
+                CheckpointChunkBinding.from_record(
+                    cast("Mapping[str, object]", item) if isinstance(item, Mapping) else {}
+                )
+                for item in cast("list[object]", chunks)
+            ),
+            intermediate_attempt=_stored_int(
+                record["intermediate_attempt"], "intermediate_attempt"
+            ),
+            intermediate_receipt_sha256=_hex64(
+                record["intermediate_receipt_sha256"], "intermediate_receipt_sha256"
+            ),
+            intermediate_manifest_digest=_hex64(
+                record["intermediate_manifest_digest"], "intermediate_manifest_digest"
+            ),
+            intermediate_catalog_sha256=_hex64(
+                record["intermediate_catalog_sha256"], "intermediate_catalog_sha256"
+            ),
+            pid=_stored_int(record["pid"], "pid"),
+            written_at_utc=str(record["written_at_utc"]),
+            checkpoint_identity=str(record["checkpoint_identity"]),
+        )
+        _require(
+            checkpoint.event_kind == CALIBRATION_GROUP_CHECKPOINT_EVENT_KIND,
+            f"a calibration group checkpoint of kind {checkpoint.event_kind!r} is refused",
+        )
+        _require(
+            len({item.chunk_id for item in checkpoint.chunks}) == len(checkpoint.chunks),
+            "a calibration group checkpoint repeats a chunk; refused",
+        )
+        _require(
+            checkpoint.identity() == checkpoint.checkpoint_identity,
+            "a calibration group checkpoint's recorded identity does not describe its own "
+            f"contents: recorded {checkpoint.checkpoint_identity!r}, recomputed "
+            f"{checkpoint.identity()!r}",
+        )
+        return checkpoint
+
+
+def read_calibration_group_checkpoint(path: Path) -> CalibrationGroupCheckpoint:
+    """One group checkpoint, read from its canonical bytes, or a refusal.
+
+    Raises:
+        ChunkMultipassError: the file is absent, a link, not canonical, or not an exact record.
+    """
+    decoded, payload = _decoded_canonical_object(path, "calibration group checkpoint")
+    checkpoint = CalibrationGroupCheckpoint.from_record(decoded)
+    _require(
+        canonical_json_bytes(checkpoint.as_record()) == payload,
+        f"checkpoint {path.name!r} is not persisted as its canonical bytes; refused",
+    )
+    return checkpoint
+
+
+def _require_checkpoint_binds_group(
+    checkpoint: CalibrationGroupCheckpoint,
+    *,
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    group: MergeGroup,
+    run_id: str,
+) -> None:
+    _require(
+        checkpoint.run_id == run_id
+        and checkpoint.plan_digest == plan.plan_digest
+        and checkpoint.merge_schedule_digest == schedule.schedule_digest,
+        f"checkpoint {checkpoint.group_id!r} binds run {checkpoint.run_id!r} / plan "
+        f"{checkpoint.plan_digest[:16]}... / schedule {checkpoint.merge_schedule_digest[:16]}"
+        f"... where this calibration is run {run_id!r} / plan {plan.plan_digest[:16]}... / "
+        f"schedule {schedule.schedule_digest[:16]}...; refused",
+    )
+    _require(
+        (
+            checkpoint.group_id,
+            checkpoint.group_ordinal,
+            checkpoint.region,
+            checkpoint.start,
+            checkpoint.end,
+        )
+        == (group.group_id, group.ordinal, group.region, group.start, group.end)
+        and checkpoint.chunk_ids == group.chunk_ids,
+        f"checkpoint {checkpoint.group_id!r} records ordinal {checkpoint.group_ordinal} "
+        f"{checkpoint.region}[{checkpoint.start}, {checkpoint.end}) over "
+        f"{list(checkpoint.chunk_ids)} where the schedule assigns ordinal {group.ordinal} "
+        f"{group.region}[{group.start}, {group.end}) over {list(group.chunk_ids)}",
+    )
+
+
+def _require_checkpoint_binds_witnesses(
+    checkpoint: CalibrationGroupCheckpoint, witnesses: Mapping[str, CalibrationChunkWitness]
+) -> None:
+    for binding in checkpoint.chunks:
+        witness = witnesses.get(binding.chunk_id)
+        _require(
+            witness is not None,
+            f"checkpoint {checkpoint.group_id!r} binds chunk {binding.chunk_id!r}, which carries "
+            "no retained witness; refused",
+        )
+        assert witness is not None  # noqa: S101 - narrowed above
+        _require(
+            witness.witness_identity == binding.witness_identity
+            and witness.witness_attempt == binding.witness_attempt
+            and witness.payload_sha256 == binding.payload_sha256
+            and witness.chunk_receipt_sha256 == binding.receipt_sha256
+            and witness.chunk_manifest_digest == binding.manifest.digest
+            and witness.chunk_attempt == binding.attempt
+            and witness.chunk_ordinal == binding.ordinal,
+            f"checkpoint {checkpoint.group_id!r} bound chunk {binding.chunk_id!r} by witness "
+            f"{binding.witness_identity[:16]}... over receipt {binding.receipt_sha256[:16]}... "
+            f"and the retained witness present now is {witness.witness_identity[:16]}... over "
+            f"receipt {witness.chunk_receipt_sha256[:16]}...; a resealed or substituted witness "
+            "is refused",
+        )
+
+
+def _require_checkpoint_binds_intermediate(
+    checkpoint: CalibrationGroupCheckpoint, receipt: IntermediateReceipt, directory: Path
+) -> None:
+    observed, _length = file_sha256(directory / INTERMEDIATE_RECEIPT_FILENAME)
+    _require(
+        observed == checkpoint.intermediate_receipt_sha256
+        and receipt.manifest.digest == checkpoint.intermediate_manifest_digest
+        and receipt.catalog_sha256 == checkpoint.intermediate_catalog_sha256
+        and receipt.attempt == checkpoint.intermediate_attempt,
+        f"checkpoint {checkpoint.group_id!r} binds intermediate receipt "
+        f"{checkpoint.intermediate_receipt_sha256[:16]}... attempt "
+        f"{checkpoint.intermediate_attempt} and the intermediate present now carries receipt "
+        f"{observed[:16]}... attempt {receipt.attempt}; refused",
+    )
+
+
+def _require_intermediate_binds_chunks(
+    receipt: IntermediateReceipt, group: MergeGroup, inputs: Sequence[ChunkInput]
+) -> tuple[str, ...]:
+    """The intermediate's bound receipt digests, held to the chunk worlds present now."""
+    _require(
+        receipt.input_chunk_ids == group.chunk_ids
+        and tuple(item.chunk_id for item in inputs) == group.chunk_ids,
+        f"intermediate {receipt.group_id!r} was merged from {list(receipt.input_chunk_ids)} "
+        f"where the schedule assigns {list(group.chunk_ids)}; refused",
+    )
+    observed: list[str] = []
+    for item, bound_sha256, bound_manifest in zip(
+        inputs, receipt.input_receipt_sha256, receipt.input_manifest_digests, strict=True
+    ):
+        sha256, _length = file_sha256(item.directory / CHUNK_RECEIPT_FILENAME)
+        _require(
+            sha256 == bound_sha256 and item.receipt.manifest.digest == bound_manifest,
+            f"intermediate {receipt.group_id!r} bound input chunk {item.chunk_id!r} by receipt "
+            f"digest {bound_sha256!r} and the chunk's one authoritative copy now carries "
+            f"{sha256!r}; an intermediate is never checkpointed over inputs other than the ones "
+            "it was merged from",
+        )
+        observed.append(sha256)
+    return tuple(observed)
+
+
+def write_calibration_group_checkpoint(
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    *,
+    group_id: str,
+    run_id: str,
+    chunk_root: Path,
+    retained_root: Path,
+    intermediates_root: Path,
+    external_root: Path | None = None,
+) -> CalibrationGroupCheckpoint:
+    """Write one group's checkpoint, create-once, after chunk + witness + intermediate -- §7.
+
+    In order: the sealed plan and schedule; the group; no checkpoint yet; this group's chunk
+    worlds resolved through the accepted admission (terminal, verified, this plan); every chunk's
+    retained witness independently re-read DEEP and held to the chunk beside it; the group's
+    intermediate terminal, verified, and bound to exactly these chunk receipts; then the record.
+    Nothing here deletes anything.
+
+    Raises:
+        ChunkMultipassError, ChunkPlanError, ChunkConsolidationError, ChunkStorageError,
+        ChunkEvidenceError: any proof fails.
+    """
+    require_calibration_subset_plan(plan)
+    require_sealed_schedule(schedule, plan)
+    group = group_by_id(schedule, group_id)
+    path = calibration_group_checkpoint_path(retained_root, group_id)
+    _require(
+        not path.exists() and not path.is_symlink(),
+        f"group {group_id!r} already carries a checkpoint; a checkpoint is create-once",
+    )
+    inputs = resolve_contiguous_chunk_inputs(
+        plan, group.chunk_ids, internal_root=chunk_root, external_root=external_root
+    )
+    bindings: list[CheckpointChunkBinding] = []
+    for item in inputs:
+        found = completed_calibration_chunk_witness(retained_root, item.chunk_id)
+        _require(
+            found is not None,
+            f"chunk {item.chunk_id!r} carries no retained witness; a checkpoint is never written "
+            "-- and a chunk world is never deletable -- without one",
+        )
+        assert found is not None  # noqa: S101 - narrowed above
+        witness, directory = found
+        read_calibration_chunk_witness(directory, deep=True)
+        _require_witness_binds_plan(
+            witness,
+            plan=plan,
+            schedule=schedule,
+            run_id=run_id,
+            ordinal=item.ordinal,
+            bounds=chunk_by_id(plan, item.chunk_id),
+        )
+        _require_witness_matches_chunk(witness, item.receipt, item.directory)
+        bindings.append(
+            CheckpointChunkBinding(
+                chunk_id=item.chunk_id,
+                ordinal=item.ordinal,
+                attempt=item.receipt.attempt,
+                receipt_sha256=witness.chunk_receipt_sha256,
+                manifest=item.receipt.manifest,
+                witness_attempt=witness.witness_attempt,
+                witness_identity=witness.witness_identity,
+                payload_sha256=witness.payload_sha256,
+            )
+        )
+    found_intermediate = completed_intermediate_receipt(intermediates_root, group_id)
+    _require(
+        found_intermediate is not None,
+        f"group {group_id!r} carries no valid intermediate; a checkpoint is never written -- and "
+        "a chunk world is never deletable -- before its level-one intermediate is terminal",
+    )
+    assert found_intermediate is not None  # noqa: S101 - narrowed above
+    receipt, directory = found_intermediate
+    _require(
+        receipt.plan_digest == plan.plan_digest
+        and receipt.merge_schedule_digest == schedule.schedule_digest
+        and (receipt.group_ordinal, receipt.region, receipt.start, receipt.end)
+        == (group.ordinal, group.region, group.start, group.end),
+        f"intermediate {group_id!r} does not describe this plan, schedule and group; refused",
+    )
+    _require_intermediate_binds_chunks(receipt, group, inputs)
+    intermediate_sha256, _length = file_sha256(directory / INTERMEDIATE_RECEIPT_FILENAME)
+    checkpoint = CalibrationGroupCheckpoint(
+        event_kind=CALIBRATION_GROUP_CHECKPOINT_EVENT_KIND,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        run_id=run_id,
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        group_id=group.group_id,
+        group_ordinal=group.ordinal,
+        region=group.region,
+        start=group.start,
+        end=group.end,
+        chunks=tuple(bindings),
+        intermediate_attempt=receipt.attempt,
+        intermediate_receipt_sha256=intermediate_sha256,
+        intermediate_manifest_digest=receipt.manifest.digest,
+        intermediate_catalog_sha256=receipt.catalog_sha256,
+        pid=os.getpid(),
+        written_at_utc=utc_now(),
+        checkpoint_identity="",
+    )
+    sealed = replace(checkpoint, checkpoint_identity=checkpoint.identity())
+    try:
+        write_once_canonical_json(path, dict(sealed.as_record()))
+    except ChunkExecutionError as exc:
+        message = f"the calibration group checkpoint could not be written: {exc}"
+        raise ChunkMultipassError(message) from exc
+    return sealed
+
+
+def resolve_calibration_group_checkpoints(
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    *,
+    run_id: str,
+    retained_root: Path,
+    witnesses: Sequence[RetainedWitnessInput],
+) -> tuple[CalibrationGroupCheckpoint, ...]:
+    """Every group's checkpoint, each binding this run, plan, schedule and group, and each of
+    its chunk bindings held to the resolved witness -- identity, attempt, payload, receipt.
+
+    Raises:
+        ChunkMultipassError: a checkpoint is absent, does not verify, or binds other witnesses.
+    """
+    by_id = {item.chunk_id: item.witness for item in witnesses}
+    checkpoints: list[CalibrationGroupCheckpoint] = []
+    for group in schedule.groups:
+        checkpoint = read_calibration_group_checkpoint(
+            calibration_group_checkpoint_path(retained_root, group.group_id)
+        )
+        _require_checkpoint_binds_group(
+            checkpoint, plan=plan, schedule=schedule, group=group, run_id=run_id
+        )
+        _require_checkpoint_binds_witnesses(checkpoint, by_id)
+        checkpoints.append(checkpoint)
+    return tuple(checkpoints)
+
+
+def _require_witness_bound_intermediates(
+    intermediates: Sequence[IntermediateInput],
+    witnesses: Sequence[RetainedWitnessInput],
+    checkpoints: Sequence[CalibrationGroupCheckpoint],
+) -> None:
+    """Hold every intermediate to its bound chunk receipts THROUGH the witnesses and checkpoints
+    -- the retention-aware form of :func:`_require_bound_chunk_receipts`, which needs no chunk
+    world: the digest an intermediate bound must be the digest its chunk's witness sealed and
+    the digest the group checkpoint bound beside that witness and beside this intermediate."""
+    by_chunk = {item.chunk_id: item.witness for item in witnesses}
+    by_group = {item.group_id: item for item in checkpoints}
+    for intermediate in intermediates:
+        receipt = intermediate.receipt
+        checkpoint = by_group.get(intermediate.group_id)
+        _require(
+            checkpoint is not None,
+            f"intermediate {intermediate.group_id!r} has no checkpoint; refused",
+        )
+        assert checkpoint is not None  # noqa: S101 - narrowed above
+        _require_checkpoint_binds_intermediate(checkpoint, receipt, intermediate.directory)
+        bound_by_id = {item.chunk_id: item for item in checkpoint.chunks}
+        for chunk_id, bound_sha256, bound_manifest in zip(
+            receipt.input_chunk_ids,
+            receipt.input_receipt_sha256,
+            receipt.input_manifest_digests,
+            strict=True,
+        ):
+            witness = by_chunk.get(chunk_id)
+            binding = bound_by_id.get(chunk_id)
+            _require(
+                witness is not None and binding is not None,
+                f"intermediate {intermediate.group_id!r} binds input chunk {chunk_id!r}, which "
+                "the resolved witnesses or the checkpoint do not carry; refused",
+            )
+            assert witness is not None and binding is not None  # noqa: S101 - narrowed above
+            _require(
+                witness.chunk_receipt_sha256 == bound_sha256
+                and witness.chunk_manifest_digest == bound_manifest
+                and binding.receipt_sha256 == bound_sha256
+                and binding.manifest.digest == bound_manifest,
+                f"intermediate {intermediate.group_id!r} bound input chunk {chunk_id!r} by "
+                f"receipt digest {bound_sha256!r} and manifest {bound_manifest!r}, and the "
+                f"chunk's retained witness seals receipt {witness.chunk_receipt_sha256!r}. An "
+                "intermediate is never admitted over inputs other than the ones it was merged "
+                "from",
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Exact calibration deletion -- grant FIRST, then the checkpoint, then the accepted primitive
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CalibrationDeletionGrant:
+    """An explicit, typed calibration deletion grant -- §7, the first effective gate.
+
+    Not an authority: it is a caller-constructed statement that THIS run of THIS plan under THIS
+    schedule may exact-delete the chunk worlds of exactly ``group_ids`` after their checkpoints
+    exist. No production reclaim, transfer or execution authority is read, opened or implied by
+    it, and no production path constructs one.
+    """
+
+    run_id: str
+    plan_digest: str
+    merge_schedule_digest: str
+    group_ids: tuple[str, ...]
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "merge_schedule_digest": self.merge_schedule_digest,
+            "group_ids": list(self.group_ids),
+        }
+
+    def identity(self) -> str:
+        """A digest over the grant, recorded by every deletion it admitted."""
+        return hashlib.sha256(canonical_json_bytes(self.as_record())).hexdigest()
+
+
+def _require_calibration_deletion_grant(
+    grant: object, *, run_id: str, plan_digest: str, merge_schedule_digest: str, group_id: str
+) -> CalibrationDeletionGrant:
+    if not isinstance(grant, CalibrationDeletionGrant):
+        message = (
+            "a calibration deletion removes a chunk world only under an explicit "
+            "CalibrationDeletionGrant; none was supplied. A checkpoint, a witness, an intermediate "
+            "and a completed run are each necessary and none of them is this"
+        )
+        raise ChunkMultipassError(message)
+    _require(
+        grant.run_id == run_id
+        and grant.plan_digest == plan_digest
+        and grant.merge_schedule_digest == merge_schedule_digest
+        and group_id in grant.group_ids,
+        f"the calibration deletion grant names run {grant.run_id!r} / plan "
+        f"{grant.plan_digest[:16]}... / schedule {grant.merge_schedule_digest[:16]}... over "
+        f"groups {list(grant.group_ids)}, and this deletion is run {run_id!r} / plan "
+        f"{plan_digest[:16]}... / schedule {merge_schedule_digest[:16]}... group {group_id!r}; "
+        "nothing is deleted",
+    )
+    return grant
+
+
+@dataclass(frozen=True, slots=True)
+class DeletedChunkWorld:
+    """One chunk world's exact deletion, as the deletion record carries it."""
+
+    chunk_id: str
+    attempt: int
+    entries: tuple[str, ...]
+    entries_deleted: int
+    resumed: bool
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        return {
+            "chunk_id": self.chunk_id,
+            "attempt": self.attempt,
+            "entries": list(self.entries),
+            "entries_deleted": self.entries_deleted,
+            "resumed": self.resumed,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> DeletedChunkWorld:
+        """Rebuild one deleted world from its EXACT mapping.
+
+        Raises:
+            ChunkMultipassError: the shape or a field refuses.
+        """
+        _exact_keys(record, _DELETION_CHUNK_KEYS, "deleted chunk world")
+        return cls(
+            chunk_id=str(record["chunk_id"]),
+            attempt=_stored_int(record["attempt"], "attempt"),
+            entries=_stored_strings(record["entries"], "entries"),
+            entries_deleted=_stored_int(record["entries_deleted"], "entries_deleted"),
+            resumed=_stored_bool(record["resumed"], "resumed"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationGroupDeletion:
+    """One group's create-once deletion-complete record -- §7. Never a production reclaim."""
+
+    event_kind: str
+    classifications: tuple[str, ...]
+    run_id: str
+    plan_digest: str
+    merge_schedule_digest: str
+    group_id: str
+    grant_identity: str
+    checkpoint_identity: str
+    chunks: tuple[DeletedChunkWorld, ...]
+    free_before_bytes: int
+    free_after_bytes: int
+    freed_bytes: int
+    expected_freed_bytes: int
+    sources_absent: bool
+    pid: int
+    completed_at_utc: str
+    deletion_identity: str
+
+    def _identity_inputs(self) -> dict[str, object]:
+        return {
+            "event_kind": self.event_kind,
+            "classifications": list(self.classifications),
+            "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
+            "merge_schedule_digest": self.merge_schedule_digest,
+            "group_id": self.group_id,
+            "grant_identity": self.grant_identity,
+            "checkpoint_identity": self.checkpoint_identity,
+            "chunks": [dict(item.as_record()) for item in self.chunks],
+            "free_before_bytes": self.free_before_bytes,
+            "free_after_bytes": self.free_after_bytes,
+            "freed_bytes": self.freed_bytes,
+            "expected_freed_bytes": self.expected_freed_bytes,
+            "sources_absent": self.sources_absent,
+            "pid": self.pid,
+            "completed_at_utc": self.completed_at_utc,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        record = self._identity_inputs()
+        record["deletion_identity"] = self.deletion_identity
+        return record
+
+    def identity(self) -> str:
+        """The identity the record implies -- over everything but the identity field."""
+        return _record_identity(self._identity_inputs(), "deletion_identity")
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> CalibrationGroupDeletion:
+        """Rebuild a deletion record from its EXACT mapping and re-derive its identity.
+
+        Raises:
+            ChunkMultipassError: the shape, kind, labels, completion or identity refuses.
+        """
+        _exact_keys(record, _DELETION_KEYS, "calibration group deletion")
+        chunks = record["chunks"]
+        _require(
+            isinstance(chunks, list) and bool(chunks),
+            "a calibration group deletion's chunks must be a non-empty list",
+        )
+        deletion = cls(
+            event_kind=str(record["event_kind"]),
+            classifications=_stored_labels(record["classifications"], "classifications"),
+            run_id=str(record["run_id"]),
+            plan_digest=_hex64(record["plan_digest"], "plan_digest"),
+            merge_schedule_digest=_hex64(record["merge_schedule_digest"], "merge_schedule_digest"),
+            group_id=str(record["group_id"]),
+            grant_identity=_hex64(record["grant_identity"], "grant_identity"),
+            checkpoint_identity=_hex64(record["checkpoint_identity"], "checkpoint_identity"),
+            chunks=tuple(
+                DeletedChunkWorld.from_record(
+                    cast("Mapping[str, object]", item) if isinstance(item, Mapping) else {}
+                )
+                for item in cast("list[object]", chunks)
+            ),
+            free_before_bytes=_stored_int(record["free_before_bytes"], "free_before_bytes"),
+            free_after_bytes=_stored_int(record["free_after_bytes"], "free_after_bytes"),
+            freed_bytes=_stored_int(record["freed_bytes"], "freed_bytes"),
+            expected_freed_bytes=_stored_int(
+                record["expected_freed_bytes"], "expected_freed_bytes"
+            ),
+            sources_absent=_stored_bool(record["sources_absent"], "sources_absent"),
+            pid=_stored_int(record["pid"], "pid"),
+            completed_at_utc=str(record["completed_at_utc"]),
+            deletion_identity=str(record["deletion_identity"]),
+        )
+        _require(
+            deletion.event_kind == CALIBRATION_GROUP_DELETION_EVENT_KIND
+            and deletion.sources_absent,
+            f"a calibration group deletion of kind {deletion.event_kind!r} that does not record "
+            "every source absent is refused",
+        )
+        _require(
+            deletion.identity() == deletion.deletion_identity,
+            "a calibration group deletion's recorded identity does not describe its own "
+            f"contents: recorded {deletion.deletion_identity!r}, recomputed "
+            f"{deletion.identity()!r}",
+        )
+        return deletion
+
+
+def read_calibration_group_deletion(path: Path) -> CalibrationGroupDeletion:
+    """One group deletion record, read from its canonical bytes, or a refusal.
+
+    Raises:
+        ChunkMultipassError: the file is absent, a link, not canonical, or not an exact record.
+    """
+    decoded, payload = _decoded_canonical_object(path, "calibration group deletion")
+    deletion = CalibrationGroupDeletion.from_record(decoded)
+    _require(
+        canonical_json_bytes(deletion.as_record()) == payload,
+        f"deletion record {path.name!r} is not persisted as its canonical bytes; refused",
+    )
+    return deletion
+
+
+def _validate_chunk_world_for_deletion(
+    directory: Path, binding: CheckpointChunkBinding
+) -> tuple[tuple[str, ...], bool]:
+    """Hold one chunk world to its checkpoint binding BEFORE anything is deleted.
+
+    Returns the entries still present and whether this is a resumption. The present set must be
+    exactly the checkpoint's entry list, or -- after an interrupted exact deletion, which removes
+    entries in sorted order -- exactly a trailing suffix of it; every present object is re-hashed
+    against the manifest (the receipt against the bound receipt digest). Anything else refuses.
+    """
+    entries = binding.entries
+    if not directory.exists() and not directory.is_symlink():
+        return (), True
+    _require(
+        directory.is_dir() and not directory.is_symlink(),
+        f"chunk world {binding.chunk_id!r} attempt {binding.attempt} is not a directory; refused",
+    )
+    try:
+        present = tuple(_walk_files(directory))
+    except ChunkTransferError as exc:
+        message = f"chunk world {binding.chunk_id!r} cannot be walked for deletion: {exc}"
+        raise ChunkMultipassError(message) from exc
+    unexpected = sorted(set(present) - set(entries))
+    _require(
+        not unexpected,
+        f"chunk world {binding.chunk_id!r} holds objects outside its checkpointed manifest: "
+        f"{unexpected[:8]}; nothing is deleted and no recursive removal exists here",
+    )
+    already_gone = len(entries) - len(present)
+    _require(
+        present == entries[already_gone:],
+        f"chunk world {binding.chunk_id!r} holds {list(present)[:8]} where an interrupted exact "
+        f"deletion would have left {list(entries[already_gone:])[:8]}; a partial world that is "
+        "not the remainder of an exact deletion is refused rather than finished",
+    )
+    recorded = {entry.relative_path: entry for entry in binding.manifest.entries}
+    for relative in present:
+        sha256, length = file_sha256(directory / relative)
+        if relative == CHUNK_RECEIPT_FILENAME:
+            _require(
+                sha256 == binding.receipt_sha256,
+                f"chunk world {binding.chunk_id!r} receipt digests to {sha256} where the "
+                f"checkpoint bound {binding.receipt_sha256}; nothing is deleted",
+            )
+            continue
+        entry = recorded[relative]
+        _require(
+            sha256 == entry.sha256 and length == entry.byte_length,
+            f"chunk world {binding.chunk_id!r} object {relative!r} does not match the "
+            "checkpointed manifest; a changed world is refused rather than deleted",
+        )
+    return present, already_gone > 0
+
+
+def delete_calibration_group_chunk_worlds(
+    grant: object,
+    *,
+    plan: CalibrationSubsetPlan,
+    schedule: MergeSchedule,
+    group_id: str,
+    run_id: str,
+    chunk_root: Path,
+    retained_root: Path,
+    intermediates_root: Path,
+) -> CalibrationGroupDeletion:
+    """Exact-delete one group's chunk worlds, grant FIRST, after the checkpoint -- §7.
+
+    The explicit deletion grant is the first effective gate. Then, in order: the sealed plan and
+    schedule; the group; the group's checkpoint (read, sealed, bound to this run, plan, schedule
+    and group); no completed deletion yet; every retained witness durable -- re-read, held to its
+    seal and to the checkpoint's binding; the intermediate durable -- terminal, verified, held to
+    the checkpoint; then EVERY chunk world validated against its checkpointed manifest before the
+    first deletion. Only then is free space measured and each attempt directory removed through
+    the accepted exact-entry primitive -- never a tree removal, never an unlisted object -- and
+    the completion record is written only after every source directory is absent.
+
+    Raises:
+        ChunkMultipassError: any refusal. Nothing is deleted on a refusal before the first
+            deletion; a refusal after it leaves the exact remaining subset for a resumption under
+            the same grant.
+    """
+    admitted = _require_calibration_deletion_grant(
+        grant,
+        run_id=run_id,
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        group_id=group_id,
+    )
+    require_calibration_subset_plan(plan)
+    require_sealed_schedule(schedule, plan)
+    group = group_by_id(schedule, group_id)
+    checkpoint = read_calibration_group_checkpoint(
+        calibration_group_checkpoint_path(retained_root, group_id)
+    )
+    _require_checkpoint_binds_group(
+        checkpoint, plan=plan, schedule=schedule, group=group, run_id=run_id
+    )
+    completion_path = calibration_group_deletion_path(retained_root, group_id)
+    _require(
+        not completion_path.exists() and not completion_path.is_symlink(),
+        f"group {group_id!r} already records a completed deletion; refused",
+    )
+    witnesses: dict[str, CalibrationChunkWitness] = {}
+    for binding in checkpoint.chunks:
+        found = completed_calibration_chunk_witness(retained_root, binding.chunk_id)
+        _require(
+            found is not None,
+            f"chunk {binding.chunk_id!r} carries no durable retained witness; nothing is deleted",
+        )
+        assert found is not None  # noqa: S101 - narrowed above
+        witnesses[binding.chunk_id] = found[0]
+    _require_checkpoint_binds_witnesses(checkpoint, witnesses)
+    found_intermediate = completed_intermediate_receipt(intermediates_root, group_id)
+    _require(
+        found_intermediate is not None,
+        f"group {group_id!r} carries no valid intermediate; nothing is deleted",
+    )
+    assert found_intermediate is not None  # noqa: S101 - narrowed above
+    _require_checkpoint_binds_intermediate(checkpoint, found_intermediate[0], found_intermediate[1])
+    # Every world validated BEFORE the first deletion.
+    worlds: list[tuple[Path, CheckpointChunkBinding, tuple[str, ...], bool]] = []
+    for binding in checkpoint.chunks:
+        directory = chunk_root / binding.chunk_id / f"attempt-{binding.attempt:03d}"
+        present, resumed = _validate_chunk_world_for_deletion(directory, binding)
+        worlds.append((directory, binding, present, resumed))
+    free_before = internal_free_bytes(chunk_root)
+    expected_freed = 0
+    deleted: list[DeletedChunkWorld] = []
+    for directory, binding, present, resumed in worlds:
+        expected_freed += sum((directory / relative).stat().st_size for relative in present)
+        removed = 0
+        if present:
+            try:
+                removed = _remove_exact_entries(directory, list(binding.entries))
+            except ChunkTransferError as exc:
+                message = f"the exact deletion of chunk world {binding.chunk_id!r} refused: {exc}"
+                raise ChunkMultipassError(message) from exc
+        _require(
+            not directory.exists() and not directory.is_symlink(),
+            f"chunk world {binding.chunk_id!r} still exists after its exact deletion",
+        )
+        deleted.append(
+            DeletedChunkWorld(
+                chunk_id=binding.chunk_id,
+                attempt=binding.attempt,
+                entries=binding.entries,
+                entries_deleted=removed,
+                resumed=resumed,
+            )
+        )
+    free_after = internal_free_bytes(chunk_root)
+    record = CalibrationGroupDeletion(
+        event_kind=CALIBRATION_GROUP_DELETION_EVENT_KIND,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        run_id=run_id,
+        plan_digest=plan.plan_digest,
+        merge_schedule_digest=schedule.schedule_digest,
+        group_id=group_id,
+        grant_identity=admitted.identity(),
+        checkpoint_identity=checkpoint.checkpoint_identity,
+        chunks=tuple(deleted),
+        free_before_bytes=free_before,
+        free_after_bytes=free_after,
+        freed_bytes=free_after - free_before,
+        expected_freed_bytes=expected_freed,
+        sources_absent=True,
+        pid=os.getpid(),
+        completed_at_utc=utc_now(),
+        deletion_identity="",
+    )
+    sealed = replace(record, deletion_identity=record.identity())
+    try:
+        write_once_canonical_json(completion_path, dict(sealed.as_record()))
+    except ChunkExecutionError as exc:
+        message = f"the calibration group deletion record could not be written: {exc}"
+        raise ChunkMultipassError(message) from exc
+    return sealed
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationChunkExecution:
+    """What the retention-aware lifecycle needs to run a calibration chunk child itself -- P8.
+
+    Supplied by the caller when the orchestrator is to parse each group's chunks before merging
+    that group (so no more than one group's bulky worlds need exist at once); absent, every chunk
+    of the plan must already be terminal or already witnessed-and-deleted.
+    """
+
+    data_root: Path
+    source_instance_id: str
+    batch_size: int
+
+
+# --------------------------------------------------------------------------- #
 # Level 1 -- the calibration group merge, INSIDE its own process
 # --------------------------------------------------------------------------- #
 def merge_calibration_subset_group_body(  # noqa: PLR0915
@@ -3675,10 +5648,12 @@ def merge_calibration_subset_group_body(  # noqa: PLR0915
     instead of the production authority: the envelope for the group role is required FIRST; the
     code identity is measured; the attempt is create-once; the plan is read through the EXACT
     subset reader and the schedule re-derived from it; the envelope is held to the plan, group
-    and ceiling; the temp binding is measured and held to the expected one; the inputs are
-    resolved through the accepted admission; the step is admitted; the child's own admission
-    event is emitted; and only then does the attempt directory exist. The merge is the accepted
-    primitive sequence, unchanged, and the receipt is the accepted intermediate receipt.
+    and ceiling; the temp binding is measured and held to the expected one; THIS group's inputs
+    -- and only this group's, so no other group's bulky chunk world is required or opened
+    (D151-C29R1 P2) -- are resolved through the accepted admission; the step is admitted; the
+    child's own admission event is emitted; and only then does the attempt directory exist.
+    The merge is the accepted primitive sequence, unchanged, and the receipt is the accepted
+    intermediate receipt.
     """
     require_calibration_envelope(envelope, role=CALIBRATION_ROLE_GROUP)
     repository = _authenticate_running_repository(
@@ -3706,12 +5681,16 @@ def merge_calibration_subset_group_body(  # noqa: PLR0915
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
     started = utc_now()
     rss_before = process_peak_resident_bytes()
-    every = resolve_chunk_inputs(
-        plan,
-        internal_root=Path(request.internal_root),
-        external_root=None if request.external_root is None else Path(request.external_root),
+    # D151-C29R1 P2: this group's chunks, and only this group's, through the accepted admission.
+    inputs = select_group_inputs(
+        resolve_contiguous_chunk_inputs(
+            plan,
+            group.chunk_ids,
+            internal_root=Path(request.internal_root),
+            external_root=None if request.external_root is None else Path(request.external_root),
+        ),
+        group,
     )
-    inputs = select_group_inputs(every, group)
     require_attachable(len(inputs))
     contract = inputs[0].receipt.execution_contract
     _require_seed_identity(
@@ -3857,6 +5836,12 @@ def finalize_calibration_subset_body(  # noqa: PLR0915
     parsed, no F0 phase checkpoint and no final world receipt exist. The world's parser state is
     measured after the merge and recorded in the result, which is written under the
     calibration-subset result contract and satisfies no complete-source reader.
+
+    Retention-aware since D151-C29R1: the final consumes the five authenticated intermediates,
+    one authenticated retained witness per planned chunk and every group checkpoint, and it
+    resolves no chunk world -- the whole-F0 counters are derived over the witnesses' exact
+    projections under the unchanged derivation, so a run whose chunk worlds were exact-deleted
+    group by group reproduces the retain-everything result semantic for semantic.
     """
     require_calibration_envelope(envelope, role=CALIBRATION_ROLE_FINAL)
     repository = _authenticate_running_repository(
@@ -3882,14 +5867,20 @@ def finalize_calibration_subset_body(  # noqa: PLR0915
     )
     operational_catalog = Path(request.operational_catalog)
     catalog_sha256, catalog_bytes = file_digest(operational_catalog)
-    chunks = resolve_chunk_inputs(
-        plan,
-        internal_root=Path(request.internal_root),
-        external_root=None if request.external_root is None else Path(request.external_root),
+    # D151-C29R1 P5: no chunk world is resolved or opened. The plan's chunks are represented by
+    # their retained witnesses, every group by its checkpoint, and each intermediate is bound to
+    # its input chunk receipts THROUGH the witnesses and the checkpoints.
+    retained_root = calibration_retained_root(Path(request.intermediates_root))
+    witnesses = resolve_calibration_chunk_witnesses(
+        plan, schedule, run_id=request.run_id, retained_root=retained_root
+    )
+    checkpoints = resolve_calibration_group_checkpoints(
+        plan, schedule, run_id=request.run_id, retained_root=retained_root, witnesses=witnesses
     )
     intermediates = resolve_intermediate_inputs(
-        plan, schedule, intermediates_root=Path(request.intermediates_root), chunk_inputs=chunks
+        plan, schedule, intermediates_root=Path(request.intermediates_root)
     )
+    _require_witness_bound_intermediates(intermediates, witnesses, checkpoints)
     require_attachable(len(intermediates))
     contract = intermediates[0].receipt.execution_contract
     _require_seed_identity(
@@ -3970,7 +5961,7 @@ def finalize_calibration_subset_body(  # noqa: PLR0915
             counts = table_row_counts(connection)
         finally:
             _detach_all(connection, aliases)
-        plan_counters = _plan_first_witness_counters(connection, chunks)
+        plan_counters = _plan_first_witness_counters(connection, witnesses)
         completeness, manifest_digest, totals, _level_two_evidence = _merge_sidecar(
             sidecar_path=world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME,
             inputs=cast("Sequence[ChunkInput]", intermediates),
@@ -4400,6 +6391,319 @@ class CalibrationSubsetMultipassResult:
     storage_plan: MultipassStoragePlan
     intermediates: tuple[IntermediateReceipt, ...]
     merge_pids: tuple[int, ...]
+    witnesses: tuple[CalibrationChunkWitness, ...] = ()
+    checkpoints: tuple[CalibrationGroupCheckpoint, ...] = ()
+    deletions: tuple[CalibrationGroupDeletion | None, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _GroupOutcome:
+    receipt: IntermediateReceipt
+    witnesses: tuple[CalibrationChunkWitness, ...]
+    checkpoint: CalibrationGroupCheckpoint
+    deletion: CalibrationGroupDeletion | None
+    pids: tuple[int, ...]
+    previous: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CalibrationLifecycle:
+    """The retention-aware lifecycle of one calibration multipass, group by group -- P8.
+
+    For each level-1 group in schedule order: every chunk of the group is terminal (reused,
+    or parsed now in a fresh child when a :class:`CalibrationChunkExecution` was supplied);
+    every chunk carries a retained witness (written now, after the terminal authenticated, or
+    re-read and held to the chunk beside it); the group's intermediate is terminal (reused, or
+    merged now in a fresh child over exactly this group's chunks); the group's checkpoint binds
+    chunk receipt, witness and intermediate (written now, or re-read and held to all three); and
+    only then, only under an explicit grant naming the group, are the group's chunk worlds
+    exact-deleted. A group that already records a completed deletion is never re-parsed: its
+    witnesses stand in for its worlds, and nothing here opens a world that is gone.
+    """
+
+    plan: CalibrationSubsetPlan
+    schedule: MergeSchedule
+    run_id: str
+    chunk_root: Path
+    retained_root: Path
+    intermediates_root: Path
+    plan_path: Path
+    schedule_path: Path
+    operational_catalog: Path
+    catalog_bytes: int
+    storage_requirements: MultipassStorageRequirements
+    binding: SqliteTempBinding
+    repository: RepositoryIdentity
+    instrumentation_ledger: Path
+    chunk_execution: CalibrationChunkExecution | None
+    deletion_grant: CalibrationDeletionGrant | None
+    external_root: Path | None
+    cache_bytes: int | None
+    timeout_seconds: float | None
+    observe: Callable[[str], None] | None
+
+    def _grant_covers(self, group: MergeGroup) -> bool:
+        return self.deletion_grant is not None and group.group_id in self.deletion_grant.group_ids
+
+    def _existing_deletion(self, group: MergeGroup) -> CalibrationGroupDeletion | None:
+        path = calibration_group_deletion_path(self.retained_root, group.group_id)
+        if not path.exists() and not path.is_symlink():
+            return None
+        deletion = read_calibration_group_deletion(path)
+        _require(
+            deletion.run_id == self.run_id
+            and deletion.plan_digest == self.plan.plan_digest
+            and deletion.merge_schedule_digest == self.schedule.schedule_digest
+            and deletion.group_id == group.group_id
+            and tuple(item.chunk_id for item in deletion.chunks) == group.chunk_ids,
+            f"group {group.group_id!r} records a deletion of another run, plan, schedule or "
+            "group; refused",
+        )
+        return deletion
+
+    def _existing_checkpoint(self, group: MergeGroup) -> CalibrationGroupCheckpoint | None:
+        path = calibration_group_checkpoint_path(self.retained_root, group.group_id)
+        if not path.exists() and not path.is_symlink():
+            return None
+        checkpoint = read_calibration_group_checkpoint(path)
+        _require_checkpoint_binds_group(
+            checkpoint, plan=self.plan, schedule=self.schedule, group=group, run_id=self.run_id
+        )
+        return checkpoint
+
+    def _ensure_parent_map(self) -> Path:
+        """The merged parent map the shard chunk consumes, from every primary chunk's RETAINED
+        declarations copy -- a deleted primary world contributes through its witness."""
+        contributions: list[Mapping[str, set[str]]] = []
+        for bounds in self.plan.chunks:
+            if bounds.region != REGION_PRIMARY:
+                continue
+            found = completed_calibration_chunk_witness(self.retained_root, bounds.chunk_id)
+            _require(
+                found is not None,
+                f"the shard chunk needs every primary chunk's retained declarations and chunk "
+                f"{bounds.chunk_id!r} carries no witness; refused",
+            )
+            assert found is not None  # noqa: S101 - narrowed above
+            contributions.append(read_declarations(found[1] / CHUNK_DECLARATIONS_FILENAME))
+        merged = merge_parent_map(contributions)
+        path = self.chunk_root / PARENT_MAP_FILENAME
+        _write_or_require_same(
+            path,
+            {name: sorted(parents) for name, parents in sorted(merged.items())},
+            "merged parent map",
+        )
+        return path
+
+    def _run_chunk(self, bounds: ChunkBounds, previous: int | None) -> ChunkReceipt:
+        execution = self.chunk_execution
+        _require(
+            execution is not None,
+            f"chunk {bounds.chunk_id!r} has no terminal receipt and no retained witness, and no "
+            "chunk execution was supplied; nothing here parses a chunk on its own",
+        )
+        assert execution is not None  # noqa: S101 - narrowed above
+        parent_map_path = self._ensure_parent_map() if bounds.region == REGION_SHARD else None
+        directory, attempt = next_attempt_directory(self.chunk_root, bounds.chunk_id)
+        return run_calibration_subset_chunk(
+            ChunkRequest(
+                plan_path=str(self.plan_path),
+                chunk_id=bounds.chunk_id,
+                attempt=attempt,
+                attempt_directory=str(directory),
+                operational_catalog=str(self.operational_catalog),
+                data_root=str(execution.data_root),
+                source_instance_id=execution.source_instance_id,
+                batch_size=execution.batch_size,
+                cache_bytes=self.cache_bytes,
+                repository_head_sha=self.repository.head_sha,
+                repository_tree_sha=self.repository.tree_sha,
+                parent_map_path=None if parent_map_path is None else str(parent_map_path),
+            ),
+            plan=self.plan,
+            run_id=self.run_id,
+            predecessor_pid=previous,
+            timeout_seconds=self.timeout_seconds,
+            observe=self.observe,
+        )
+
+    def _ensure_chunk(
+        self,
+        bounds: ChunkBounds,
+        *,
+        deletion: CalibrationGroupDeletion | None,
+        checkpoint: CalibrationGroupCheckpoint | None,
+        group: MergeGroup,
+        previous: int | None,
+    ) -> tuple[CalibrationChunkWitness, int | None]:
+        found = completed_calibration_chunk_witness(self.retained_root, bounds.chunk_id)
+        if deletion is not None:
+            _require(
+                found is not None,
+                f"group {group.group_id!r} records a completed deletion and chunk "
+                f"{bounds.chunk_id!r} carries no retained witness; refused",
+            )
+            assert found is not None  # noqa: S101 - narrowed above
+            return found[0], previous
+        existing = completed_chunk_receipt(self.chunk_root, bounds.chunk_id)
+        if existing is None and found is not None:
+            _require(
+                checkpoint is not None and self._grant_covers(group),
+                f"chunk {bounds.chunk_id!r} carries a retained witness but no chunk world, and "
+                "its group carries no checkpoint or no deletion grant names it; an interrupted "
+                "deletion is resumed only under the grant that admitted it, and nothing here "
+                "re-parses a chunk beside its witness",
+            )
+            return found[0], previous
+        if existing is None:
+            receipt = self._run_chunk(bounds, previous)
+            previous = receipt.pid
+            directory = self.chunk_root / bounds.chunk_id / f"attempt-{receipt.attempt:03d}"
+        else:
+            receipt, directory = existing
+            _require(
+                receipt.plan_digest == self.plan.plan_digest,
+                f"chunk {bounds.chunk_id!r} already carries a receipt under plan "
+                f"{receipt.plan_digest[:16]}..., not this calibration-subset plan; refused",
+            )
+        if found is None:
+            witness, _witness_directory = write_calibration_chunk_witness(
+                self.plan,
+                self.schedule,
+                chunk_id=bounds.chunk_id,
+                run_id=self.run_id,
+                chunk_root=self.chunk_root,
+                retained_root=self.retained_root,
+                external_root=self.external_root,
+            )
+            return witness, previous
+        witness = found[0]
+        _require_witness_binds_plan(
+            witness,
+            plan=self.plan,
+            schedule=self.schedule,
+            run_id=self.run_id,
+            ordinal=self.plan.chunks.index(bounds),
+            bounds=bounds,
+        )
+        _require_witness_matches_chunk(witness, receipt, directory)
+        return witness, previous
+
+    def _merge_group(
+        self, group: MergeGroup, witnesses: Sequence[CalibrationChunkWitness], previous: int | None
+    ) -> IntermediateReceipt:
+        _admit_merge_step(
+            step=group.group_id,
+            level=MERGE_LEVEL_ONE,
+            target=intermediate_attempt_directory(self.intermediates_root, group.group_id, 0),
+            input_bytes=sum(item.chunk_manifest_total_bytes for item in witnesses),
+            seed_catalog_bytes=self.catalog_bytes,
+            peak_ratio=self.storage_requirements.level_one_peak_ratio,
+            requirements=self.storage_requirements,
+        )
+        attempt_directory, attempt = next_intermediate_attempt_directory(
+            self.intermediates_root, group.group_id
+        )
+        return run_calibration_subset_group_merge(
+            GroupMergeRequest(
+                plan_path=str(self.plan_path),
+                schedule_path=str(self.schedule_path),
+                group_id=group.group_id,
+                attempt=attempt,
+                attempt_directory=str(attempt_directory),
+                internal_root=str(self.chunk_root),
+                external_root=None if self.external_root is None else str(self.external_root),
+                operational_catalog=str(self.operational_catalog),
+                cache_bytes=self.cache_bytes,
+                repository_head_sha=self.repository.head_sha,
+                repository_tree_sha=self.repository.tree_sha,
+                storage_requirements=dict(self.storage_requirements.as_record()),
+                expected_sqlite_temp_binding=dict(self.binding.as_record()),
+            ),
+            plan=self.plan,
+            run_id=self.run_id,
+            instrumentation_ledger=self.instrumentation_ledger,
+            predecessor_pid=previous,
+            timeout_seconds=self.timeout_seconds,
+            observe=self.observe,
+        )
+
+    def ensure_group(self, group: MergeGroup, previous: int | None) -> _GroupOutcome:
+        """Bring one group to its checkpointed -- and, under a grant, deleted -- state."""
+        deletion = self._existing_deletion(group)
+        checkpoint = self._existing_checkpoint(group)
+        _require(
+            deletion is None or checkpoint is not None,
+            f"group {group.group_id!r} records a completed deletion without a checkpoint; refused",
+        )
+        pids: list[int] = []
+        witnesses: list[CalibrationChunkWitness] = []
+        for chunk_id in group.chunk_ids:
+            before = previous
+            witness, previous = self._ensure_chunk(
+                chunk_by_id(self.plan, chunk_id),
+                deletion=deletion,
+                checkpoint=checkpoint,
+                group=group,
+                previous=previous,
+            )
+            if previous is not None and previous != before:
+                pids.append(previous)
+            witnesses.append(witness)
+        existing = completed_intermediate_receipt(self.intermediates_root, group.group_id)
+        if existing is not None:
+            receipt = existing[0]
+            _require(
+                receipt.plan_digest == self.plan.plan_digest,
+                f"intermediate {group.group_id!r} already carries a receipt under plan "
+                f"{receipt.plan_digest[:16]}..., not this calibration-subset plan; refused",
+            )
+        else:
+            _require(
+                deletion is None and checkpoint is None,
+                f"group {group.group_id!r} carries a checkpoint or deletion record but no "
+                "intermediate; refused",
+            )
+            receipt = self._merge_group(group, witnesses, previous)
+            previous = receipt.pid
+            pids.append(receipt.pid)
+        if checkpoint is None:
+            checkpoint = write_calibration_group_checkpoint(
+                self.plan,
+                self.schedule,
+                group_id=group.group_id,
+                run_id=self.run_id,
+                chunk_root=self.chunk_root,
+                retained_root=self.retained_root,
+                intermediates_root=self.intermediates_root,
+                external_root=self.external_root,
+            )
+        else:
+            _require_checkpoint_binds_witnesses(
+                checkpoint, {item.chunk_id: item for item in witnesses}
+            )
+            found = completed_intermediate_receipt(self.intermediates_root, group.group_id)
+            assert found is not None  # noqa: S101 - established above
+            _require_checkpoint_binds_intermediate(checkpoint, found[0], found[1])
+        if deletion is None and self._grant_covers(group):
+            deletion = delete_calibration_group_chunk_worlds(
+                self.deletion_grant,
+                plan=self.plan,
+                schedule=self.schedule,
+                group_id=group.group_id,
+                run_id=self.run_id,
+                chunk_root=self.chunk_root,
+                retained_root=self.retained_root,
+                intermediates_root=self.intermediates_root,
+            )
+        return _GroupOutcome(
+            receipt=receipt,
+            witnesses=tuple(witnesses),
+            checkpoint=checkpoint,
+            deletion=deletion,
+            pids=tuple(pids),
+            previous=previous,
+        )
 
 
 def run_calibration_subset_multipass(  # noqa: PLR0915
@@ -4415,19 +6719,24 @@ def run_calibration_subset_multipass(  # noqa: PLR0915
     cache_bytes: int | None = None,
     timeout_seconds: float | None = None,
     observe: Callable[[str], None] | None = None,
+    chunk_execution: CalibrationChunkExecution | None = None,
+    deletion_grant: CalibrationDeletionGrant | None = None,
 ) -> CalibrationSubsetMultipassResult:
-    """Consolidate a calibration-subset plan: every level-1 group, then level 2, each in its own
-    process, under fresh envelopes -- D151-C27R1.
+    """Consolidate a calibration-subset plan, retention-aware: group by group, each level-1
+    group parsed (when asked), witnessed, merged, checkpointed and -- under an explicit grant --
+    exact-deleted before the next group's bulky worlds need exist; then level 2 over the five
+    intermediates and every retained witness -- D151-C27R1, made retention-aware by D151-C29R1.
 
     The sealed subset plan is required FIRST. The storage terms are the caller's explicit,
     typed calibration terms -- never the owner-frozen production terms, which stay ``None`` and
     are never consulted here. Then, in the accepted order: the SQLite temp binding is measured;
     the executing repository is measured; the calibration schedule is derived and recorded
-    create-once beside the canonical plan copy; every chunk is resolved through the accepted
-    admission and the deterministic storage plan is recorded or held compatible on a restart;
-    each level-1 group with a valid intermediate under this plan is reused and each other is
-    merged in a fresh child under a fresh envelope, admitted before the child starts; then the
-    finalization runs in one more fresh child. Nothing is deleted at any point.
+    create-once beside the canonical plan copy; each group is brought to its checkpointed state
+    (:class:`_CalibrationLifecycle`) in a chain of fresh children under fresh envelopes; the
+    deterministic storage plan is computed from the witnesses' authenticated chunk byte lengths
+    and recorded, or held compatible on a restart; and the finalization runs in one more fresh
+    child over the intermediates and the witnesses alone. Nothing is deleted without a grant, and
+    nothing a grant admits is deleted before its checkpoint exists.
     """
     require_calibration_subset_plan(plan)
     binding = _measured_calibration_binding(multipass_root)
@@ -4435,84 +6744,69 @@ def run_calibration_subset_multipass(  # noqa: PLR0915
     schedule = derive_calibration_subset_schedule(plan)
     intermediates_root = multipass_root / _INTERMEDIATES_DIRECTORY
     world_directory = multipass_root / _FINAL_DIRECTORY
+    retained_root = calibration_retained_root(intermediates_root)
     _require(
         not _within(intermediates_root, instrumentation_ledger)
-        and not _within(world_directory, instrumentation_ledger),
-        "the calibration instrumentation ledger must lie outside the intermediates root and the "
-        "final world",
+        and not _within(world_directory, instrumentation_ledger)
+        and not _within(retained_root, instrumentation_ledger),
+        "the calibration instrumentation ledger must lie outside the intermediates root, the "
+        "retained root and the final world",
     )
     multipass_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
     instrumentation_ledger.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    retained_root.mkdir(mode=_DIRECTORY_MODE, exist_ok=True)
     plan_path = multipass_root / CHUNK_PLAN_FILENAME
     schedule_path = multipass_root / MERGE_SCHEDULE_FILENAME
     _write_canonical_or_require_same(plan_path, plan.as_record(), "calibration-subset plan")
     _write_or_require_same(schedule_path, dict(schedule.as_record()), "calibration merge schedule")
-    inputs = resolve_chunk_inputs(plan, internal_root=internal_root, external_root=external_root)
+    _refuse_foreign_retained_entries(plan, schedule, retained_root)
     _catalog_sha256, catalog_bytes = file_digest(operational_catalog)
+    lifecycle = _CalibrationLifecycle(
+        plan=plan,
+        schedule=schedule,
+        run_id=run_id,
+        chunk_root=internal_root,
+        retained_root=retained_root,
+        intermediates_root=intermediates_root,
+        plan_path=plan_path,
+        schedule_path=schedule_path,
+        operational_catalog=operational_catalog,
+        catalog_bytes=catalog_bytes,
+        storage_requirements=storage_requirements,
+        binding=binding,
+        repository=repository,
+        instrumentation_ledger=instrumentation_ledger,
+        chunk_execution=chunk_execution,
+        deletion_grant=deletion_grant,
+        external_root=external_root,
+        cache_bytes=cache_bytes,
+        timeout_seconds=timeout_seconds,
+        observe=observe,
+    )
+    receipts: list[IntermediateReceipt] = []
+    witnesses: list[CalibrationChunkWitness] = []
+    checkpoints: list[CalibrationGroupCheckpoint] = []
+    deletions: list[CalibrationGroupDeletion | None] = []
+    pids: list[int] = []
+    previous: int | None = None
+    for group in schedule.groups:
+        outcome = lifecycle.ensure_group(group, previous)
+        previous = outcome.previous
+        pids.extend(outcome.pids)
+        receipts.append(outcome.receipt)
+        witnesses.extend(outcome.witnesses)
+        checkpoints.append(outcome.checkpoint)
+        deletions.append(outcome.deletion)
     storage_plan = plan_multipass_storage(
         plan_digest=plan.plan_digest,
         merge_schedule_digest=schedule.schedule_digest,
         groups=[(group.group_id, group.chunk_ids) for group in schedule.groups],
-        chunk_bytes_by_id={item.chunk_id: item.receipt.manifest.total_bytes for item in inputs},
+        chunk_bytes_by_id={item.chunk_id: item.chunk_manifest_total_bytes for item in witnesses},
         seed_catalog_bytes=catalog_bytes,
         requirements=storage_requirements,
         sqlite_temp_binding=binding,
     )
     _record_storage_plan(multipass_root / STORAGE_PLAN_FILENAME, storage_plan)
-    by_id = {item.chunk_id: item for item in inputs}
-    receipts: list[IntermediateReceipt] = []
-    pids: list[int] = []
-    previous: int | None = None
-    for group in schedule.groups:
-        existing = completed_intermediate_receipt(intermediates_root, group.group_id)
-        if existing is not None:
-            _require(
-                existing[0].plan_digest == plan.plan_digest,
-                f"intermediate {group.group_id!r} already carries a receipt under plan "
-                f"{existing[0].plan_digest[:16]}..., not this calibration-subset plan; refused",
-            )
-            receipts.append(existing[0])
-            continue
-        _admit_merge_step(
-            step=group.group_id,
-            level=MERGE_LEVEL_ONE,
-            target=intermediate_attempt_directory(intermediates_root, group.group_id, 0),
-            input_bytes=sum(
-                by_id[chunk_id].receipt.manifest.total_bytes for chunk_id in group.chunk_ids
-            ),
-            seed_catalog_bytes=catalog_bytes,
-            peak_ratio=storage_requirements.level_one_peak_ratio,
-            requirements=storage_requirements,
-        )
-        attempt_directory, attempt = next_intermediate_attempt_directory(
-            intermediates_root, group.group_id
-        )
-        receipt = run_calibration_subset_group_merge(
-            GroupMergeRequest(
-                plan_path=str(plan_path),
-                schedule_path=str(schedule_path),
-                group_id=group.group_id,
-                attempt=attempt,
-                attempt_directory=str(attempt_directory),
-                internal_root=str(internal_root),
-                external_root=None if external_root is None else str(external_root),
-                operational_catalog=str(operational_catalog),
-                cache_bytes=cache_bytes,
-                repository_head_sha=repository.head_sha,
-                repository_tree_sha=repository.tree_sha,
-                storage_requirements=dict(storage_requirements.as_record()),
-                expected_sqlite_temp_binding=dict(binding.as_record()),
-            ),
-            plan=plan,
-            run_id=run_id,
-            instrumentation_ledger=instrumentation_ledger,
-            predecessor_pid=previous,
-            timeout_seconds=timeout_seconds,
-            observe=observe,
-        )
-        previous = receipt.pid
-        pids.append(receipt.pid)
-        receipts.append(receipt)
     _admit_merge_step(
         step=_CALIBRATION_STEP_FINAL,
         level=MERGE_LEVEL_TWO,
@@ -4551,4 +6845,7 @@ def run_calibration_subset_multipass(  # noqa: PLR0915
         storage_plan=storage_plan,
         intermediates=tuple(receipts),
         merge_pids=tuple(pids),
+        witnesses=tuple(witnesses),
+        checkpoints=tuple(checkpoints),
+        deletions=tuple(deletions),
     )

@@ -85,6 +85,7 @@ from disclosure_drift.m3.chunk_execution import F0_WRITTEN_TABLES, table_row_cou
 from disclosure_drift.m3.chunk_plan import (
     CHUNK_PLAN_CONTRACT,
     SINGLE_PASS_CHUNK_CAP,
+    ChunkBounds,
     ChunkPlan,
     require_chunkable_source,
     require_sealed_plan,
@@ -92,6 +93,7 @@ from disclosure_drift.m3.chunk_plan import (
 from disclosure_drift.m3.chunk_storage import (
     ChunkPlacement,
     authoritative_input,
+    derive_chunk_placement,
     derive_placements,
 )
 from disclosure_drift.m3.compact_evidence import (
@@ -153,6 +155,7 @@ __all__ = [
     "require_attachable",
     "require_single_pass_plan",
     "resolve_chunk_inputs",
+    "resolve_contiguous_chunk_inputs",
     "world_logical_digest",
 ]
 
@@ -308,12 +311,94 @@ def resolve_chunk_inputs(
         else tuple(placements)
     )
     _refuse_foreign_chunk_directories(plan, internal_root, external_root)
+    inputs = _admit_chunk_inputs(plan, tuple(enumerate(plan.chunks)), resolved, cursor=0)
+    cursor = inputs[-1].end if inputs else 0
+    # Defence in depth, and stated as such: the per-chunk comparison above already requires each
+    # receipt's interval to be exactly the plan's, and the plan itself has passed the coverage
+    # check, so this cannot fail while both of those hold. It is retained because it states the
+    # invariant the loop is maintaining, and because a future change to either of the checks
+    # above should have to walk past it.
+    _require(
+        cursor == plan.total_members,
+        f"the admitted chunks cover [0, {cursor}) of {plan.total_members} governed members",
+    )
+    return inputs
+
+
+def resolve_contiguous_chunk_inputs(
+    plan: ChunkPlan,
+    chunk_ids: Sequence[str],
+    *,
+    internal_root: Path,
+    external_root: Path | None = None,
+) -> tuple[ChunkInput, ...]:
+    """Resolve exactly one contiguous run of a plan's chunks -- the calibration group-local
+    admission, D151-C29R1 P2.
+
+    The retention-aware calibration route merges a level-1 group after the chunk worlds of EARLIER
+    groups have been exact-deleted and before the chunk worlds of LATER groups exist, so it cannot
+    resolve the whole plan; it resolves the group's own chunks and nothing else. Every per-chunk
+    refusal is :func:`resolve_chunk_inputs`'s own, reached through the one shared admission
+    (:func:`_admit_chunk_inputs`) rather than restated: a missing chunk, two receipts, disagreeing
+    tiers, another plan digest, ordering, artifact, instance or observation, a shifted bound, a
+    repository or execution contract that moved between chunks, and a foreign chunk directory
+    anywhere under either root. What differs is only the coverage predicate: the named chunks must
+    be a contiguous run of the plan in plan order, and they must cover exactly their own interval.
+    No production consolidator calls this; the single-pass and multipass finals keep resolving the
+    whole plan.
+
+    Raises:
+        ChunkConsolidationError: the run is empty, repeats a chunk, names a chunk the plan does
+            not, is not contiguous in plan order, or any per-chunk admission refuses.
+        ChunkStorageError: a placement refuses.
+        ChunkEvidenceError: a receipt or manifest refuses.
+    """
+    wanted = tuple(chunk_ids)
+    _require(
+        bool(wanted) and len(set(wanted)) == len(wanted),
+        f"a contiguous chunk run must name at least one chunk exactly once; got {list(wanted)}",
+    )
+    ordinal_by_id = {bounds.chunk_id: ordinal for ordinal, bounds in enumerate(plan.chunks)}
+    unknown = [chunk_id for chunk_id in wanted if chunk_id not in ordinal_by_id]
+    _require(
+        not unknown,
+        f"a contiguous chunk run names chunks the plan does not carry: {unknown}; refused",
+    )
+    ordinals = [ordinal_by_id[chunk_id] for chunk_id in wanted]
+    _require(
+        ordinals == list(range(ordinals[0], ordinals[0] + len(ordinals))),
+        f"chunks {list(wanted)} are not one contiguous run of the plan in plan order (ordinals "
+        f"{ordinals}); a group-local admission never reorders or skips a chunk",
+    )
+    _refuse_foreign_chunk_directories(plan, internal_root, external_root)
+    indexed = tuple((ordinal, plan.chunks[ordinal]) for ordinal in ordinals)
+    placements = tuple(
+        derive_chunk_placement(
+            plan, chunk_id, internal_root=internal_root, external_root=external_root
+        )
+        for chunk_id in wanted
+    )
+    return _admit_chunk_inputs(plan, indexed, placements, cursor=indexed[0][1].start)
+
+
+def _admit_chunk_inputs(
+    plan: ChunkPlan,
+    indexed: Sequence[tuple[int, ChunkBounds]],
+    placements: Sequence[ChunkPlacement],
+    *,
+    cursor: int,
+) -> tuple[ChunkInput, ...]:
+    """The one per-chunk admission -- every refusal :func:`resolve_chunk_inputs` documents, over
+    ``indexed`` plan chunks (plan ordinal, bounds) and their placements, from ``cursor``.
+
+    Shared, since D151-C29R1, by the whole-plan resolver and the contiguous-run resolver; the
+    loop is the accepted one and is stated once.
+    """
     inputs: list[ChunkInput] = []
     head: str | None = None
     tree: str | None = None
     contract: ExecutionContract | None = None
-    cursor = 0
-    for ordinal, (bounds, placement) in enumerate(zip(plan.chunks, resolved, strict=True)):
+    for (ordinal, bounds), placement in zip(indexed, placements, strict=True):
         directory, tier = authoritative_input(placement)
         receipt = placement.internal_receipt or placement.external_receipt
         if receipt is None:  # pragma: no cover - authoritative_input already refused
@@ -405,15 +490,6 @@ def resolve_chunk_inputs(
             )
         )
         cursor = receipt.end
-    # Defence in depth, and stated as such: the per-chunk comparison above already requires each
-    # receipt's interval to be exactly the plan's, and the plan itself has passed the coverage
-    # check, so this cannot fail while both of those hold. It is retained because it states the
-    # invariant the loop is maintaining, and because a future change to either of the checks
-    # above should have to walk past it.
-    _require(
-        cursor == plan.total_members,
-        f"the admitted chunks cover [0, {cursor}) of {plan.total_members} governed members",
-    )
     return tuple(inputs)
 
 

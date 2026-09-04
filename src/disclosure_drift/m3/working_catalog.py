@@ -58,7 +58,10 @@ __all__ = [
     "WorkingCatalog",
     "WorkingCatalogError",
     "WorkingCatalogIdentity",
+    "checkpoint_main_truncate",
+    "normalized_wal_bytes",
     "promote_working_catalog",
+    "promote_world_directory",
 ]
 
 
@@ -789,3 +792,135 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+# --------------------------------------------------------------------------- #
+# D151-C31R2-R19A-C2: the durable-stage successor's three world-level primitives
+# --------------------------------------------------------------------------- #
+#: The exact checkpoint statement every successor stage boundary issues, and the only one.
+#: ``main.`` is deliberate: an unqualified ``wal_checkpoint`` acts on every attached database,
+#: and a stage boundary is a statement about the world catalog alone -- the attachments are
+#: immutable inputs that carry no log of their own and were detached before this runs.
+MAIN_WAL_CHECKPOINT_TRUNCATE: Final = "PRAGMA main.wal_checkpoint(TRUNCATE)"
+
+
+def checkpoint_main_truncate(connection: sqlite3.Connection) -> tuple[int, int, int]:
+    """Fold the world catalog's write-ahead log into its main file and truncate the log.
+
+    The successor stage boundary -- D151-C31R2-R19A-C2 §30 steps 10-12. Two prerequisites are
+    required rather than assumed: no transaction is active (a checkpoint inside one would leave
+    the frames it cannot yet fold) and no database is attached (``main.`` names the world alone,
+    and an attachment present here would mean the stage's DETACH order was wrong). The result is
+    held to the exact success tuple ``(busy, log_frames, checkpointed) == (0, 0, 0)``: after a
+    TRUNCATE checkpoint SQLite reports the log as zero frames, so anything else means a frame
+    was not folded -- a blocked checkpoint reports ``busy = 1``, a PASSIVE one reports the
+    frames it left behind -- and is refused rather than read as partial progress.
+
+    Raises:
+        WorkingCatalogError: a transaction is active, a database is attached, or the checkpoint
+            did not report the exact success tuple.
+    """
+    if connection.in_transaction:
+        message = (
+            "a stage checkpoint is issued only after COMMIT; a transaction is still active and "
+            "the checkpoint is refused rather than taken over frames it could not fold"
+        )
+        raise WorkingCatalogError(message)
+    attached = [
+        str(row["name"])
+        for row in connection.execute("PRAGMA database_list")
+        if str(row["name"]) not in {"main", "temp"}
+    ]
+    if attached:
+        message = (
+            f"a stage checkpoint is issued only after every input is detached; {attached} are "
+            "still attached and the checkpoint is refused"
+        )
+        raise WorkingCatalogError(message)
+    row = connection.execute(MAIN_WAL_CHECKPOINT_TRUNCATE).fetchone()
+    result = (int(row[0]), int(row[1]), int(row[2]))
+    if result != (0, 0, 0):
+        message = (
+            f"{MAIN_WAL_CHECKPOINT_TRUNCATE} reported (busy, log_frames, checkpointed) = "
+            f"{result}; a stage boundary requires exactly (0, 0, 0) -- every frame folded and "
+            "the log truncated -- and anything else is refused rather than read as progress"
+        )
+        raise WorkingCatalogError(message)
+    return result
+
+
+def normalized_wal_bytes(catalog_path: Path) -> int:
+    """The post-checkpoint write-ahead log length, normalized -- D151-C31R2-R19A-C2 §30 step 13.
+
+    An absent log and a zero-length log are the same clean boundary and both normalize to
+    ``0``. A nonzero log after a TRUNCATE checkpoint is a refusal: it means a frame was written
+    after the checkpoint, and a stage receipt that bound ``0`` over it would be a lie.
+
+    Raises:
+        WorkingCatalogError: the log path is a symbolic link, is not a regular file, or is
+            nonzero.
+    """
+    wal = catalog_path.with_name(catalog_path.name + "-wal")
+    if wal.is_symlink():
+        message = f"{wal.name!r} is a symbolic link; a world's write-ahead log is never a link"
+        raise WorkingCatalogError(message)
+    if not os.path.lexists(wal):
+        return 0
+    if not wal.is_file():
+        message = f"{wal.name!r} exists and is not a regular file; refused"
+        raise WorkingCatalogError(message)
+    length = wal.stat().st_size
+    if length != 0:
+        message = (
+            f"the write-ahead log {wal.name!r} holds {length} bytes after the stage checkpoint; "
+            "a stage boundary normalizes only an absent or zero-length log to 0, and a nonzero "
+            "log is refused rather than bound as clean"
+        )
+        raise WorkingCatalogError(message)
+    return 0
+
+
+def promote_world_directory(attempt: Path, canonical: Path) -> None:
+    """Promote a complete initialization attempt to the absent canonical world path, atomically.
+
+    D151-C31R2-R19A-C2 §28. The attempt directory was built beside its destination on the same
+    filesystem, so the promotion is one ``rename`` of a directory onto a name that does not
+    exist -- which POSIX makes atomic: a crash leaves either the attempt where it was or the
+    canonical world complete, never a half-moved tree. Before the rename every regular file
+    inside the attempt and the attempt directory itself are fsynced, so the bytes the rename
+    exposes under the canonical name are durable; after it the canonical world's parent
+    directory is fsynced, so the rename itself survives a crash rather than merely being
+    visible to the running kernel.
+
+    Nothing is ever overwritten: an existing canonical path -- a directory, a file, a link, or
+    anything at all -- refuses before the rename, and a directory that is missing, is a link or
+    lies in another directory refuses as well.
+
+    Raises:
+        WorkingCatalogError: the attempt is not a real directory beside the canonical path, or
+            the canonical path already exists.
+    """
+    if attempt.is_symlink() or not attempt.is_dir():
+        message = (
+            f"initialization attempt {attempt.name!r} is not a real directory and is never promoted"
+        )
+        raise WorkingCatalogError(message)
+    if attempt.parent != canonical.parent:
+        message = (
+            "a world is promoted by one rename inside one directory so it is atomic; "
+            f"{attempt.parent} and {canonical.parent} are different"
+        )
+        raise WorkingCatalogError(message)
+    if os.path.lexists(canonical):
+        message = (
+            f"the canonical world {canonical.name!r} already exists; a canonical world is "
+            "create-once and is NEVER overwritten by a later attempt -- the attempt is left "
+            "exactly where it is"
+        )
+        raise WorkingCatalogError(message)
+    for dirpath, _dirnames, filenames in os.walk(attempt):
+        for name in sorted(filenames):
+            _fsync_file(Path(dirpath) / name)
+    _fsync_directory(attempt)
+    attempt.rename(canonical)
+    _fsync_directory(canonical.parent)

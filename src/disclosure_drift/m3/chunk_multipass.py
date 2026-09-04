@@ -141,6 +141,17 @@ four whole-F0 counters by :func:`_plan_first_witness_counters` over the witnesse
 SAME statements it runs over chunk worlds. Every production entry, body, launcher, bootstrap
 and authority gate above is untouched; the production reclaim authority stays ``None`` and no
 calibration deletion is, or can confer, a production reclaim.
+
+**The durable Level-Two stage spine is a separate, successor-only route -- D151-C31R2-R19A-C2.**
+The accepted finalizers above run one transaction over the whole merge; the failed C31R2 final
+proved that shape cannot be checkpointed, resumed or attributed. The successor route at the end
+of this module -- :func:`run_successor_multipass_final` (production, authority first) and
+:func:`run_successor_calibration_final` (calibration, sealed plan first) -- runs the same
+accepted merge primitives as one transaction PER STAGE, commits each stage's applied-unit row
+with its semantic writes, issues an exact ``PRAGMA main.wal_checkpoint(TRUNCATE)`` and publishes
+an immutable receipt, so a restart classifies committed evidence rather than guessing. Its six
+persistent ``m3_l2_*`` relations replace the legacy TEMP ones on that route only; every legacy
+body, gate, bootstrap and TEMP relation above is byte for byte what it was.
 """
 
 from __future__ import annotations
@@ -149,6 +160,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -156,14 +168,30 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import Final, NoReturn, Protocol, cast
 
+import disclosure_drift.m3.canary_phases as _canary_phases_module
+import disclosure_drift.m3.chunk_consolidation as _chunk_consolidation_module
+import disclosure_drift.m3.chunk_evidence as _chunk_evidence_module
+import disclosure_drift.m3.chunk_execution as _chunk_execution_module
+import disclosure_drift.m3.chunk_plan as _chunk_plan_module
+import disclosure_drift.m3.chunk_storage as _chunk_storage_module
+import disclosure_drift.m3.chunk_tiering as _chunk_tiering_module
+import disclosure_drift.m3.compact_evidence as _compact_evidence_module
+import disclosure_drift.m3.offline_parse as _offline_parse_module
+import disclosure_drift.m3.repository_identity as _repository_identity_module
+import disclosure_drift.m3.single_source_canary as _single_source_canary_module
+import disclosure_drift.m3.working_catalog as _working_catalog_module
+import disclosure_drift.sec.census as _census_module
+import disclosure_drift.storage.catalog as _storage_catalog_module
+import disclosure_drift.storage.sqlite as _storage_sqlite_module
 from disclosure_drift.errors import DisclosureDriftError
 from disclosure_drift.m3.canary_phases import (
     PHASE_F0,
     PHASE_RESTART_CONTRACT,
     PHASE_STATUS_COMPLETE,
     PhaseCheckpoint,
+    read_phase_checkpoint,
     write_phase_checkpoint,
 )
 from disclosure_drift.m3.canary_runtime import process_peak_resident_bytes
@@ -178,9 +206,11 @@ from disclosure_drift.m3.chunk_consolidation import (
     ChunkInput,
     FinalWorldReceipt,
     _accepted_plan_state,
+    _AcceptedPlanState,
     _apply_duplicate_identities,
     _attach_all,
     _columns,
+    _deferrable_index_records,
     _deferrable_indexes,
     _detach_all,
     _keyed_first_last_load,
@@ -189,6 +219,7 @@ from disclosure_drift.m3.chunk_consolidation import (
     _merge_sidecar,
     _nearest_existing,
     _reduced_parser_run,
+    _ReducedRun,
     _sorted_bulk_load,
     _union_all,
     derived_f0_outcome,
@@ -205,6 +236,7 @@ from disclosure_drift.m3.chunk_evidence import (
     FINAL_WORLD_RECEIPT_CONTRACT,
     FINAL_WORLD_RECEIPT_FILENAME,
     PARENT_MAP_FILENAME,
+    ArtifactEntry,
     ArtifactManifest,
     ChunkEvidenceError,
     ChunkReceipt,
@@ -287,7 +319,7 @@ from disclosure_drift.m3.compact_evidence import (
     materialized_fields,
     reconstructed_observations,
 )
-from disclosure_drift.m3.offline_parse import write_containment
+from disclosure_drift.m3.offline_parse import SingleSourceOutcome, write_containment
 from disclosure_drift.m3.repository_identity import (
     RepositoryIdentity,
     require_clean_running_repository,
@@ -300,12 +332,17 @@ from disclosure_drift.m3.working_catalog import (
     PROGRESS_LEDGER_FILENAME,
     WORKING_CATALOG_FILENAME,
     RunProgressLedger,
+    SourceProgress,
     WorkingCatalog,
+    cache_size_pragma,
+    checkpoint_main_truncate,
     file_digest,
+    normalized_wal_bytes,
+    promote_world_directory,
 )
 from disclosure_drift.sec.census import CensusCatalog, _stable_id
 from disclosure_drift.sec.census import _json as _stable_json
-from disclosure_drift.storage.sqlite import transaction, utc_now
+from disclosure_drift.storage.sqlite import connect, transaction, utc_now
 
 __all__ = [
     "CALIBRATION_ADMISSION_EVENT_KIND",
@@ -316,9 +353,25 @@ __all__ = [
     "CALIBRATION_RETAINED_WITNESS_FILENAME",
     "CALIBRATION_SUBSET_RESULT_CONTRACT",
     "CALIBRATION_SUBSET_RESULT_FILENAME",
+    "DEFAULT_SYNTHETIC_CACHE_BYTES",
+    "EXPECTED_DEFERRED_INDEX_NAMES",
+    "GOVERNED_INTERMEDIATE_MANIFEST_NAMES",
     "INTERMEDIATE_RECEIPT_CONTRACT",
     "INTERMEDIATE_RECEIPT_FILENAME",
     "INTERMEDIATE_WITNESS_FILENAME",
+    "L2_APPLIED_UNIT_CONTRACT",
+    "L2_APPLIED_UNITS_TABLE",
+    "L2_CONNECTION_STATE_CONTRACT",
+    "L2_CONTROL_TABLES",
+    "L2_CROSS_STORE_BINDING_CONTRACT",
+    "L2_CROSS_STORE_BINDINGS_TABLE",
+    "L2_DEFERRED_INDEX_SET_CONTRACT",
+    "L2_DEFERRED_INDEXES_TABLE",
+    "L2_PERSISTENT_RELATIONS",
+    "L2_STAGE_ADMISSION_CONTRACT",
+    "L2_STAGE_PLAN_CONTRACT",
+    "L2_STAGE_PLAN_TABLE",
+    "L2_STAGE_RECEIPT_CONTRACT",
     "MERGE_FAN_IN",
     "MERGE_SCHEDULE_CONTRACT",
     "MERGE_SCHEDULE_FILENAME",
@@ -327,6 +380,11 @@ __all__ = [
     "MULTIPASS_REQUEST_KIND_GROUP",
     "REAL_MULTIPASS_F0_AUTHORITY",
     "STORAGE_PLAN_FILENAME",
+    "SUCCESSOR_REQUEST_KIND_FINAL",
+    "SUCCESSOR_ROUTE_CALIBRATION",
+    "SUCCESSOR_ROUTE_PRODUCTION",
+    "SUCCESSOR_ROUTES",
+    "AppliedUnit",
     "CalibrationAdmissionEvent",
     "CalibrationChunkExecution",
     "CalibrationChunkWitness",
@@ -338,13 +396,20 @@ __all__ = [
     "ChunkMultipassError",
     "FinalMergeRequest",
     "GroupMergeRequest",
+    "GroupRequestProvenance",
     "IntermediateInput",
     "IntermediateReceipt",
+    "L2Stage",
+    "L2StagePlan",
     "MergeGroup",
     "MergeSchedule",
     "MultipassResult",
     "PlanWitnessSource",
     "RetainedWitnessInput",
+    "SuccessorConnectionState",
+    "SuccessorFinalRequest",
+    "SuccessorRunOutcome",
+    "ToolManifest",
     "calibration_admission_event_path",
     "calibration_group_checkpoint_path",
     "calibration_group_deletion_path",
@@ -369,9 +434,11 @@ __all__ = [
     "read_calibration_group_checkpoint",
     "read_calibration_group_deletion",
     "read_calibration_subset_result",
+    "read_stage_receipt",
     "require_multipass_plan",
     "require_real_multipass_authority",
     "require_sealed_schedule",
+    "require_successor_cache_bytes",
     "resolve_calibration_chunk_witnesses",
     "resolve_calibration_group_checkpoints",
     "resolve_intermediate_inputs",
@@ -383,9 +450,13 @@ __all__ = [
     "run_final_merge",
     "run_group_merge",
     "run_multipass_f0",
+    "run_successor_calibration_final",
+    "run_successor_multipass_final",
     "select_group_inputs",
     "stable_binding_identity",
     "stage_first_witness_corrections",
+    "stage_receipt_path",
+    "successor_stage_graph",
     "write_calibration_chunk_witness",
     "write_calibration_group_checkpoint",
 ]
@@ -6077,6 +6148,11 @@ def _calibration_child_main(request_path: str, envelope_fd: str) -> int:
     if envelope.role == CALIBRATION_ROLE_FINAL and kind == MULTIPASS_REQUEST_KIND_FINAL:
         finalize_calibration_subset_body(FinalMergeRequest.from_record(record), envelope)
         return 0
+    if envelope.role == CALIBRATION_ROLE_FINAL and kind == SUCCESSOR_REQUEST_KIND_FINAL:
+        # D151-C31R2-R19A-C2: the successor calibration final, under the SAME received envelope
+        # and the same final role; its body requires that role FIRST and re-seals the plan.
+        _successor_calibration_final_body(SuccessorFinalRequest.from_record(record), envelope)
+        return 0
     message = (
         f"a calibration envelope for role {envelope.role!r} was handed a request of kind "
         f"{kind or 'chunk'!r}; the two must agree and the child refuses"
@@ -6849,3 +6925,4020 @@ def run_calibration_subset_multipass(  # noqa: PLR0915
         checkpoints=tuple(checkpoints),
         deletions=tuple(deletions),
     )
+
+
+# --------------------------------------------------------------------------- #
+# The durable Level-Two stage / restart spine -- D151-C31R2-R19A-C2
+# --------------------------------------------------------------------------- #
+# Everything below this line is the successor-only spine accepted R18 designed and the R19A-C2
+# packet family authorized. It changes no legacy body above: the accepted finalizers keep their
+# one-transaction shape, their TEMP relations and their gates byte for byte, and the successor
+# reaches the accepted merge primitives by call. What is new is durability: every stage is one
+# transaction on the world catalog that commits its semantic writes and its applied-unit row
+# together, followed by an exact ``PRAGMA main.wal_checkpoint(TRUNCATE)`` and an immutable
+# external receipt, so a restart classifies committed evidence rather than guessing from a
+# directory listing, a WAL length or an exit status.
+
+#: The successor StagePlan's contract.
+L2_STAGE_PLAN_CONTRACT: Final = "m3.3-chunked-f0-l2-stage-plan/1"
+
+#: One applied unit -- the row that commits with the semantic writes it describes.
+L2_APPLIED_UNIT_CONTRACT: Final = "m3.3-chunked-f0-l2-applied-unit/1"
+
+#: One stage's immutable external receipt, published after COMMIT and checkpoint.
+L2_STAGE_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-l2-stage-receipt/1"
+
+#: One binding of a second store (sidecar, run progress, checkpoint, result) into the catalog.
+L2_CROSS_STORE_BINDING_CONTRACT: Final = "m3.3-chunked-f0-l2-cross-store-binding/1"
+
+#: The persisted deferred-index set: exact DDL captured in the same transaction as the DROP.
+L2_DEFERRED_INDEX_SET_CONTRACT: Final = "m3.3-chunked-f0-l2-deferred-index-set/1"
+
+#: The pre-world storage admission record, create-once and consumed immediately.
+L2_STAGE_ADMISSION_CONTRACT: Final = "m3.3-chunked-f0-l2-stage-admission/1"
+
+#: The reconstructed connection state every successor connection is held to.
+L2_CONNECTION_STATE_CONTRACT: Final = "m3.3-chunked-f0-l2-connection-state/1"
+
+#: The request kind a successor final carries; refused by :func:`_child_main` and by every
+#: legacy reader, and dispatched by the calibration child only under the final role.
+SUCCESSOR_REQUEST_KIND_FINAL: Final = "successor-final"
+
+#: The two successor routes. A route is a property of the request, of the StagePlan and of the
+#: process-local proof, and the three must agree.
+SUCCESSOR_ROUTE_PRODUCTION: Final = "production"
+SUCCESSOR_ROUTE_CALIBRATION: Final = "calibration"
+SUCCESSOR_ROUTES: Final[tuple[str, ...]] = (SUCCESSOR_ROUTE_PRODUCTION, SUCCESSOR_ROUTE_CALIBRATION)
+
+#: The calibration envelope step the successor final is issued under.
+_SUCCESSOR_CALIBRATION_STEP: Final = "successor-final"
+
+#: The successor control tables inside ``working_catalog.sqlite3`` -- run-local, successor-only,
+#: never migration-managed, never business tables, never inside a row count or logical digest.
+L2_STAGE_PLAN_TABLE: Final = "m3_l2_stage_plan"
+L2_APPLIED_UNITS_TABLE: Final = "m3_l2_applied_units"
+L2_CROSS_STORE_BINDINGS_TABLE: Final = "m3_l2_cross_store_bindings"
+L2_DEFERRED_INDEXES_TABLE: Final = "m3_l2_deferred_indexes"
+L2_CONTROL_TABLES: Final[tuple[str, ...]] = (
+    L2_STAGE_PLAN_TABLE,
+    L2_APPLIED_UNITS_TABLE,
+    L2_CROSS_STORE_BINDINGS_TABLE,
+    L2_DEFERRED_INDEXES_TABLE,
+)
+
+#: The six successor persistent internal semantic relations: the durable counterparts of the
+#: six legacy TEMP relations, charged as world-volume growth rather than SQLITE_TMPDIR spill.
+L2_WITNESS_RANK_TABLE: Final = "m3_l2_chunk_witness_rank"
+L2_CORRECTIONS_TABLE: Final = "m3_l2_chunk_observation_corrections"
+L2_PLAN_WITNESS_TABLE: Final = "m3_l2_plan_chunk_witnesses"
+L2_PLAN_WITNESS_RANK_TABLE: Final = "m3_l2_plan_witness_rank"
+L2_PLAN_LEDGER_TABLE: Final = "m3_l2_chunk_first_witness"
+L2_MEMBER_DELTA_TABLE: Final = "m3_l2_chunk_member_delta"
+L2_PERSISTENT_RELATIONS: Final[tuple[str, ...]] = (
+    L2_WITNESS_RANK_TABLE,
+    L2_CORRECTIONS_TABLE,
+    L2_PLAN_WITNESS_TABLE,
+    L2_PLAN_WITNESS_RANK_TABLE,
+    L2_PLAN_LEDGER_TABLE,
+    L2_MEMBER_DELTA_TABLE,
+)
+
+#: The five declared secondary indexes the successor captures, drops and rebuilds -- exact.
+EXPECTED_DEFERRED_INDEX_NAMES: Final[tuple[str, ...]] = (
+    "idx_census_parsed_identity",
+    "idx_census_parsed_observation",
+    "idx_census_registrant_history",
+    "idx_census_structural_state",
+    "idx_census_structural_untrustworthy",
+)
+
+#: The exact governed manifest membership of one level-1 intermediate -- D151-R19A-C5-R1. The
+#: accepted intermediate receipt's manifest is the sole authority; these six names are what an
+#: authentic manifest holds, in canonical filename order, and nothing else is a member.
+GOVERNED_INTERMEDIATE_MANIFEST_NAMES: Final[tuple[str, ...]] = (
+    CHUNK_PLAN_FILENAME,
+    COMPACT_EVIDENCE_SIDECAR_FILENAME,
+    INTERMEDIATE_WITNESS_FILENAME,
+    MERGE_SCHEDULE_FILENAME,
+    PROGRESS_LEDGER_FILENAME,
+    WORKING_CATALOG_FILENAME,
+)
+
+#: The successor stage identifiers, in graph order. Route-specific terminal stages are named by
+#: their route suffix; the two routes never share a terminal stage identifier.
+_STAGE_INITIALIZE: Final = "S0"
+_STAGE_CAPTURE_DROP_INDEXES: Final = "S1"
+_STAGE_REDUCED_PARSER_RUN: Final = "S2"
+_STAGE_WITNESS_RANK: Final = "S11"
+_STAGE_CORRECTIONS: Final = "S12"
+_STAGE_ACCESSION_OBSERVATIONS: Final = "S13"
+_STAGE_EDGES_AND_CONFLICTS: Final = "S14"
+_STAGE_PARSER_STATE: Final = "S15P"
+_STAGE_COUNTERS_FINALIZE: Final = "S17C"
+_STAGE_SIDECAR: Final = "S18"
+_STAGE_OUTCOME: Final = "S19"
+_STAGE_MARK_PARSED: Final = "S20P"
+_STAGE_REAUTHENTICATE_PRODUCTION: Final = "S21P"
+_STAGE_F0_CHECKPOINT: Final = "S22P"
+_STAGE_FINAL_RECEIPT: Final = "S23P"
+_STAGE_REAUTHENTICATE_CALIBRATION: Final = "S20C"
+_STAGE_CALIBRATION_RESULT: Final = "S21C"
+
+#: The table stages S3..S10 in the accepted foreign-key load order, minus the observation table
+#: (S13, loaded after the corrections) -- each its own transaction, checkpoint and receipt.
+_TABLE_STAGES: Final[tuple[tuple[str, str], ...]] = (
+    ("S3", "census_parsed_records"),
+    ("S4", "census_quarantined_records"),
+    ("S5", "census_structural_observations"),
+    ("S6", "census_registrants"),
+    ("S7", "census_registrant_observations"),
+    ("S8", "census_accessions"),
+    ("S9", "census_historical_references"),
+    ("S10", "census_malformed_historical_references"),
+)
+
+_KIND_INITIALIZE: Final = "initialize_and_promote_world"
+_KIND_CAPTURE_DROP: Final = "capture_and_drop_deferred_indexes"
+_KIND_REDUCED_RUN: Final = "reduced_parser_run"
+_KIND_TABLE_LOAD: Final = "table_load"
+_KIND_WITNESS_RANK: Final = "chunk_witness_rank"
+_KIND_CORRECTIONS: Final = "observation_corrections"
+_KIND_OBSERVATION_LOAD: Final = "accession_observations"
+_KIND_EDGES: Final = "candidate_edges_and_accession_conflicts"
+_KIND_PARSER_STATE: Final = "parser_state"
+_KIND_INDEX_REBUILD: Final = "deferred_index_rebuild"
+_KIND_COUNTER_CATALOG: Final = "counter_catalog_batch"
+_KIND_COUNTER_LEDGER: Final = "counter_ledger_batch"
+_KIND_COUNTERS_FINALIZE: Final = "plan_witness_rank_finalize"
+_KIND_SIDECAR: Final = "sidecar_merge"
+_KIND_OUTCOME: Final = "derive_outcome_and_require_f0_success"
+_KIND_MARK_PARSED: Final = "mark_parsed"
+_KIND_REAUTHENTICATE: Final = "reauthenticate_intermediates_and_selected_requests"
+_KIND_F0_CHECKPOINT: Final = "publish_f0_checkpoint"
+_KIND_FINAL_RECEIPT: Final = "final_production_receipt_last"
+_KIND_CALIBRATION_RESULT: Final = "calibration_subset_result_last"
+
+_ATTACH_NONE: Final = "none"
+_ATTACH_INTERMEDIATES: Final = "intermediates"
+_ATTACH_CATALOG_BATCH: Final = "catalog_batch"
+_ATTACH_LEDGER_BATCH: Final = "ledger_batch"
+
+#: The at-most-nine attachment bound the engine asserts itself, never leaving it to SQLite.
+_MAX_STAGE_ATTACHMENTS: Final = SINGLE_PASS_CHUNK_CAP
+
+#: The default page-cache budget a synthetic successor StagePlan carries in this repository's
+#: tests. Not a production value: the successor refuses a plan without an explicit budget.
+DEFAULT_SYNTHETIC_CACHE_BYTES: Final = 8_388_608
+
+_BINDING_SIDECAR: Final = "sidecar"
+_BINDING_MARK_PARSED: Final = "mark_parsed"
+_BINDING_REAUTHENTICATION: Final = "intermediate_reauthentication"
+_BINDING_F0_CHECKPOINT: Final = "f0_checkpoint"
+_BINDING_RESULT_READY: Final = "result_ready"
+
+_WAL_ABSENT: Final = "WAL_ABSENT"
+_WAL_ZERO: Final = "WAL_ZERO"
+_WAL_NONZERO: Final = "WAL_NONZERO"
+
+#: A refusal text both derivation guards share -- the legacy TEMP guard and the successor's
+#: applied-unit guard -- so a reader of either refusal recognizes the same rule.
+_ALREADY_DERIVED: Final = "already derived on this connection"
+
+_STAGE_CONFLICT: Final = "STAGE_CONFLICT"
+_STAGE_COMMITTED_RECEIPT_PENDING: Final = "STAGE_COMMITTED_RECEIPT_PENDING"
+_STAGE_COMPLETE: Final = "STAGE_COMPLETE"
+
+
+def _stage_conflict(detail: str) -> NoReturn:
+    """Raise a terminal successor conflict: nothing is repaired, reinitialized or retried."""
+    message = (
+        f"{_STAGE_CONFLICT}: {detail}. A successor conflict is terminal: nothing here repairs, "
+        "reinitializes, deletes, checkpoints or re-executes anything"
+    )
+    raise ChunkMultipassError(message)
+
+
+def require_successor_cache_bytes(value: object) -> int:
+    """The successor's page-cache budget, or a refusal -- D151-C31R2-R19A-C2 §40.
+
+    ``type(value) is int`` deliberately, not ``isinstance``: ``bool`` is an ``int`` subclass and
+    ``True`` is never a byte count. Missing, ``None``, a float, zero, a negative value and a
+    value that is not a whole number of kibibytes are each refused independently -- the failed
+    run passed ``null`` and silently ran a 35 GiB merge on SQLite's 2 MiB default, which is
+    exactly the silence a required field exists to end.
+
+    Raises:
+        ChunkMultipassError: the value is not a positive integer multiple of 1024.
+    """
+    if value is None:
+        message = (
+            "a successor StagePlan requires cache_bytes; None is a REFUSAL, never SQLite's "
+            "default page cache"
+        )
+        raise ChunkMultipassError(message)
+    if type(value) is not int:
+        message = (
+            f"a successor StagePlan's cache_bytes must be an int, not {type(value).__name__}; "
+            "a bool or a float is refused rather than coerced"
+        )
+        raise ChunkMultipassError(message)
+    if value <= 0:
+        message = f"a successor StagePlan's cache_bytes must be positive; got {value}"
+        raise ChunkMultipassError(message)
+    if value % 1024:
+        message = (
+            f"a successor StagePlan's cache_bytes must be a whole number of kibibytes; {value} "
+            "is not"
+        )
+        raise ChunkMultipassError(message)
+    return value
+
+
+def _identity_of(record: Mapping[str, object]) -> str:
+    """SHA-256 over the canonical bytes of a record that carries no identity field."""
+    return hashlib.sha256(canonical_json_bytes(record)).hexdigest()
+
+
+def _json_text(record: object) -> str:
+    """The canonical text rendering of one JSON-carriable value, without the trailing newline."""
+    return canonical_json_bytes(cast("Mapping[str, object]", {"v": record})).decode("utf-8")[5:-2]
+
+
+def _json_object(text: str, label: str) -> Mapping[str, object]:
+    try:
+        decoded = json.loads(text)
+    except ValueError as exc:
+        message = f"the successor {label} is not decodable JSON: {exc}"
+        raise ChunkMultipassError(message) from exc
+    if not isinstance(decoded, dict):
+        message = f"the successor {label} is not a JSON object; refused"
+        raise ChunkMultipassError(message)
+    return cast("Mapping[str, object]", decoded)
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessorFinalRequest:
+    """Everything one successor final process is given -- and the only thing it is given.
+
+    ``route`` selects the production or the calibration successor; the wrapper that reads the
+    request requires the route it serves. ``cache_bytes`` is REQUIRED and validated at
+    construction. ``stop_after_stage`` bounds one process to a prefix of the stage graph, which
+    is how a stage runs in a fresh process: the next invocation classifies the committed
+    evidence and continues. ``predecessor_*`` bind the run this successor continues -- claims
+    about the predecessor, sealed into the StagePlan identity and held to the input count.
+    """
+
+    route: str
+    plan_path: str
+    schedule_path: str
+    intermediates_root: str
+    internal_root: str
+    external_root: str | None
+    operational_catalog: str
+    world_directory: str
+    stage_receipt_root: str
+    run_id: str
+    predecessor_run_id: str
+    predecessor_checkpoint_count: int
+    predecessor_tip_ordinal: int
+    predecessor_tip_identity: str
+    predecessor_completed_group_count: int
+    cache_bytes: int
+    repository_head_sha: str
+    repository_tree_sha: str
+    storage_requirements: Mapping[str, object]
+    expected_sqlite_temp_binding: Mapping[str, object]
+    capacity_observations: tuple[Mapping[str, object], ...] = ()
+    stop_after_stage: str | None = None
+    kind: str = SUCCESSOR_REQUEST_KIND_FINAL
+
+    def __post_init__(self) -> None:
+        if self.kind != SUCCESSOR_REQUEST_KIND_FINAL:
+            message = f"a successor request of kind {self.kind!r} is refused"
+            raise ChunkMultipassError(message)
+        if self.route not in SUCCESSOR_ROUTES:
+            message = f"a successor request names route {self.route!r}; refused"
+            raise ChunkMultipassError(message)
+        require_successor_cache_bytes(self.cache_bytes)
+        for name in (
+            "predecessor_checkpoint_count",
+            "predecessor_tip_ordinal",
+            "predecessor_completed_group_count",
+        ):
+            _stored_int(getattr(self, name), name)
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering. Paths are the caller's; nothing is discovered."""
+        return {
+            "kind": self.kind,
+            "route": self.route,
+            "plan_path": self.plan_path,
+            "schedule_path": self.schedule_path,
+            "intermediates_root": self.intermediates_root,
+            "internal_root": self.internal_root,
+            "external_root": self.external_root,
+            "operational_catalog": self.operational_catalog,
+            "world_directory": self.world_directory,
+            "stage_receipt_root": self.stage_receipt_root,
+            "run_id": self.run_id,
+            "predecessor_run_id": self.predecessor_run_id,
+            "predecessor_checkpoint_count": self.predecessor_checkpoint_count,
+            "predecessor_tip_ordinal": self.predecessor_tip_ordinal,
+            "predecessor_tip_identity": self.predecessor_tip_identity,
+            "predecessor_completed_group_count": self.predecessor_completed_group_count,
+            "cache_bytes": self.cache_bytes,
+            "repository_head_sha": self.repository_head_sha,
+            "repository_tree_sha": self.repository_tree_sha,
+            "storage_requirements": dict(self.storage_requirements),
+            "expected_sqlite_temp_binding": dict(self.expected_sqlite_temp_binding),
+            "capacity_observations": [dict(item) for item in self.capacity_observations],
+            "stop_after_stage": self.stop_after_stage,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> SuccessorFinalRequest:
+        """Rebuild a request from its stored mapping.
+
+        Raises:
+            ChunkMultipassError: a field is absent, is not of the recorded type, the kind or
+                route is unknown, or the cache budget is refused.
+        """
+        try:
+            external = record["external_root"]
+            storage = record["storage_requirements"]
+            expected = record["expected_sqlite_temp_binding"]
+            observations = record["capacity_observations"]
+            stop_after = record["stop_after_stage"]
+            if (
+                not isinstance(storage, Mapping)
+                or not isinstance(expected, Mapping)
+                or not isinstance(observations, list)
+            ):
+                message = "a successor request's storage, binding or observations are not of shape"
+                raise ChunkMultipassError(message)
+            return cls(
+                kind=str(record["kind"]),
+                route=str(record["route"]),
+                plan_path=str(record["plan_path"]),
+                schedule_path=str(record["schedule_path"]),
+                intermediates_root=str(record["intermediates_root"]),
+                internal_root=str(record["internal_root"]),
+                external_root=None if external is None else str(external),
+                operational_catalog=str(record["operational_catalog"]),
+                world_directory=str(record["world_directory"]),
+                stage_receipt_root=str(record["stage_receipt_root"]),
+                run_id=str(record["run_id"]),
+                predecessor_run_id=str(record["predecessor_run_id"]),
+                predecessor_checkpoint_count=_stored_int(
+                    record["predecessor_checkpoint_count"], "predecessor_checkpoint_count"
+                ),
+                predecessor_tip_ordinal=_stored_int(
+                    record["predecessor_tip_ordinal"], "predecessor_tip_ordinal"
+                ),
+                predecessor_tip_identity=str(record["predecessor_tip_identity"]),
+                predecessor_completed_group_count=_stored_int(
+                    record["predecessor_completed_group_count"],
+                    "predecessor_completed_group_count",
+                ),
+                cache_bytes=require_successor_cache_bytes(record["cache_bytes"]),
+                repository_head_sha=str(record["repository_head_sha"]),
+                repository_tree_sha=str(record["repository_tree_sha"]),
+                storage_requirements={str(key): value for key, value in storage.items()},
+                expected_sqlite_temp_binding={str(key): value for key, value in expected.items()},
+                capacity_observations=tuple(
+                    {str(key): value for key, value in item.items()}
+                    for item in observations
+                    if isinstance(item, Mapping)
+                ),
+                stop_after_stage=None if stop_after is None else str(stop_after),
+            )
+        except KeyError as exc:
+            message = f"a successor request could not be read as this build writes them: {exc}"
+            raise ChunkMultipassError(message) from exc
+
+
+# --------------------------------------------------------------------------- #
+# The runtime tool manifest -- §26: recomputed from the implementation files at every admission
+# --------------------------------------------------------------------------- #
+#: The implementation modules whose bytes every successor stage is bound to. Recomputed from
+#: the files on disk at every stage admission and compared with the StagePlan-bound identity;
+#: a stored identity is never trusted and never copied forward.
+_TOOL_MANIFEST_MODULES: Final[tuple[tuple[str, str], ...]] = (
+    ("disclosure_drift.m3.chunk_multipass", __file__),
+    ("disclosure_drift.m3.chunk_consolidation", _chunk_consolidation_module.__file__),
+    ("disclosure_drift.m3.working_catalog", _working_catalog_module.__file__),
+    ("disclosure_drift.m3.chunk_tiering", _chunk_tiering_module.__file__),
+    ("disclosure_drift.m3.chunk_execution", _chunk_execution_module.__file__),
+    ("disclosure_drift.m3.chunk_evidence", _chunk_evidence_module.__file__),
+    ("disclosure_drift.m3.chunk_plan", _chunk_plan_module.__file__),
+    ("disclosure_drift.m3.chunk_storage", _chunk_storage_module.__file__),
+    ("disclosure_drift.m3.compact_evidence", _compact_evidence_module.__file__),
+    ("disclosure_drift.m3.offline_parse", _offline_parse_module.__file__),
+    ("disclosure_drift.m3.single_source_canary", _single_source_canary_module.__file__),
+    ("disclosure_drift.m3.canary_phases", _canary_phases_module.__file__),
+    ("disclosure_drift.m3.repository_identity", _repository_identity_module.__file__),
+    ("disclosure_drift.storage.sqlite", _storage_sqlite_module.__file__),
+    ("disclosure_drift.storage.catalog", _storage_catalog_module.__file__),
+    ("disclosure_drift.sec.census", _census_module.__file__),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolManifest:
+    """The implementation files a successor stage runs from, hashed NOW, and their identity."""
+
+    entries: tuple[Mapping[str, object], ...]
+    identity: str
+
+    def as_record(self) -> Mapping[str, object]:
+        """The persisted rendering: the entries and the identity over them."""
+        return {
+            "contract": L2_STAGE_PLAN_CONTRACT,
+            "entries": [dict(entry) for entry in self.entries],
+            "tool_manifest_identity": self.identity,
+        }
+
+    def source_file_digests(self) -> Mapping[str, str]:
+        """Module name to direct source-file digest -- the per-file view of the same bytes."""
+        return {str(entry["module"]): str(entry["sha256"]) for entry in self.entries}
+
+
+def _runtime_tool_manifest() -> ToolManifest:
+    """Hash every implementation file this process actually imported, from disk, now.
+
+    Raises:
+        ChunkMultipassError: a module is not loaded from a ``.py`` source file, or a file is a
+            link or absent.
+    """
+    entries: list[Mapping[str, object]] = []
+    for module, file in _TOOL_MANIFEST_MODULES:
+        path = Path(str(file))
+        if path.suffix != ".py":
+            message = (
+                f"implementation module {module!r} is not loaded from a .py source file "
+                f"({path.name!r}); the successor binds source bytes and refuses anything else"
+            )
+            raise ChunkMultipassError(message)
+        try:
+            sha256, length = file_sha256(path)
+        except ChunkEvidenceError as exc:
+            message = f"implementation module {module!r} could not be hashed: {exc}"
+            raise ChunkMultipassError(message) from exc
+        entries.append(
+            {"module": module, "filename": path.name, "sha256": sha256, "byte_length": length}
+        )
+    body = {"contract": L2_STAGE_PLAN_CONTRACT, "entries": entries}
+    return ToolManifest(entries=tuple(entries), identity=_identity_of(body))
+
+
+def _require_runtime_tool_identity(expected_identity: str, *, label: str) -> ToolManifest:
+    """Recompute the manifest from disk and hold it to ``expected_identity`` -- §26.
+
+    Raises:
+        ChunkMultipassError: the implementation files on disk are not the ones bound.
+    """
+    manifest = _runtime_tool_manifest()
+    if manifest.identity != expected_identity:
+        _stage_conflict(
+            f"{label}: the implementation files on disk hash to tool-manifest identity "
+            f"{manifest.identity[:16]}... where the StagePlan binds {expected_identity[:16]}...; "
+            "a changed tool is never continued under the old identity"
+        )
+    return manifest
+
+
+# --------------------------------------------------------------------------- #
+# Governed membership and selected-request provenance -- D151-R19A-C5-R1/R2, C6-R2, C7
+# --------------------------------------------------------------------------- #
+def _governed_intermediate_manifest_entries(
+    receipt: IntermediateReceipt,
+) -> tuple[ArtifactEntry, ...]:
+    """The six governed manifest entries of one authenticated intermediate receipt, canonical.
+
+    The accepted intermediate receipt and its manifest are the SOLE authority for governed
+    membership (D151-R19A-C5-R1). The input is the already parsed receipt the accepted resolver
+    returned -- never a directory listing, a flattened name set, a glob or a Boolean -- and the
+    membership is taken from the manifest it carries, authenticated rather than trusted:
+
+    * the contract is exactly :data:`INTERMEDIATE_RECEIPT_CONTRACT` and the status is complete;
+    * the manifest re-derives through the accepted :class:`ArtifactManifest.from_record`, which
+      recomputes the stored digest over the entries beside it, and the recomputed identity
+      equals the receipt's own;
+    * there are exactly six entries, each a canonical basename -- no absolute path, no parent
+      traversal, no nested path, no empty component, no duplicate -- and their names are
+      exactly :data:`GOVERNED_INTERMEDIATE_MANIFEST_NAMES`, each once;
+    * the receipt filename and any ``*-request.json`` are refused as members, as is any
+      seventh, unknown or missing entry.
+
+    The entries are returned exactly as the manifest carries them -- hashes, byte lengths and
+    paths unchanged -- in canonical filename order.
+
+    Raises:
+        ChunkMultipassError: any of the above.
+    """
+    _require(
+        receipt.contract == INTERMEDIATE_RECEIPT_CONTRACT and receipt.status == "complete",
+        f"governed membership is taken only from a complete {INTERMEDIATE_RECEIPT_CONTRACT!r} "
+        f"receipt; this one carries {receipt.contract!r} with status {receipt.status!r}",
+    )
+    try:
+        rederived = ArtifactManifest.from_record(dict(receipt.manifest.as_record()))
+    except ChunkEvidenceError as exc:
+        message = f"an intermediate receipt's manifest does not re-derive: {exc}"
+        raise ChunkMultipassError(message) from exc
+    _require(
+        rederived.digest == receipt.manifest.digest and rederived == receipt.manifest,
+        "an intermediate receipt's manifest identity does not describe its own entries; refused",
+    )
+    entries = receipt.manifest.entries
+    _require(
+        len(entries) == len(GOVERNED_INTERMEDIATE_MANIFEST_NAMES),
+        f"an intermediate manifest must carry exactly {len(GOVERNED_INTERMEDIATE_MANIFEST_NAMES)} "
+        f"governed entries; this one carries {len(entries)}: "
+        f"{[entry.relative_path for entry in entries]}",
+    )
+    seen: set[str] = set()
+    for entry in entries:
+        name = entry.relative_path
+        _require(
+            bool(name)
+            and "/" not in name
+            and "\\" not in name
+            and name not in {".", ".."}
+            and not name.startswith("/")
+            and name == name.strip(),
+            f"manifest entry {name!r} is not a canonical basename; refused",
+        )
+        _require(
+            name != INTERMEDIATE_RECEIPT_FILENAME and not name.endswith("-request.json"),
+            f"manifest entry {name!r} is never a governed member: the receipt and the group "
+            "request are provenance, not semantic input",
+        )
+        _require(
+            name in GOVERNED_INTERMEDIATE_MANIFEST_NAMES,
+            f"manifest entry {name!r} is not one of the governed names "
+            f"{list(GOVERNED_INTERMEDIATE_MANIFEST_NAMES)}; refused",
+        )
+        _require(name not in seen, f"manifest entry {name!r} appears more than once; refused")
+        seen.add(name)
+        _require(
+            len(entry.sha256) == 64 and entry.byte_length >= 0,
+            f"manifest entry {name!r} carries a malformed digest or byte length; refused",
+        )
+    _require(
+        seen == set(GOVERNED_INTERMEDIATE_MANIFEST_NAMES),
+        "an intermediate manifest is missing "
+        f"{sorted(set(GOVERNED_INTERMEDIATE_MANIFEST_NAMES) - seen)}",
+    )
+    return tuple(sorted(entries, key=lambda entry: entry.relative_path))
+
+
+@dataclass(frozen=True, slots=True)
+class GroupRequestProvenance:
+    """The selected attempt's group request, bound as provenance and nothing more -- C5-R2."""
+
+    relative_filename: str
+    byte_length: int
+    sha256: str
+
+    def as_record(self) -> Mapping[str, object]:
+        """The persisted rendering, with its classification stated explicitly."""
+        return {
+            "relative_filename": self.relative_filename,
+            "byte_length": self.byte_length,
+            "sha256": self.sha256,
+            "governed_manifest_member": False,
+            "governed_aggregate_member": False,
+            "successor_semantic_input": False,
+            "provenance_bound": True,
+        }
+
+
+def _selected_group_request_provenance(intermediate: IntermediateInput) -> GroupRequestProvenance:
+    """The one group request the selected attempt belongs to, by deterministic association.
+
+    D151-R19A-C6-R2:
+    ``request_path = attempt_root.parent / f"{group_id}-{attempt:03d}-request.json"``
+    from the accepted selected-intermediate resolution -- never a glob, a first match, a
+    lexicographic or newest choice, or a candidate-set winner. Other attempts' retained requests
+    may sit beside it; their presence is not ambiguity. The selected request must be a regular
+    non-symlink file with the expected basename in the expected group directory, and it is
+    never a manifest member, never governed aggregate bytes and never a semantic input.
+
+    Raises:
+        ChunkMultipassError: the attempt directory does not carry the selected ordinal, the
+            request is absent, a link, or not a regular file, or it is named by the manifest.
+    """
+    attempt = intermediate.receipt.attempt
+    directory = intermediate.directory
+    expected_directory = f"attempt-{attempt:03d}"
+    _require(
+        directory.name == expected_directory and directory.parent.name == intermediate.group_id,
+        f"intermediate {intermediate.group_id!r} resolved to {directory.parent.name}/"
+        f"{directory.name} where its receipt names attempt {attempt}; the selected request "
+        "is associated through the accepted resolution and never guessed",
+    )
+    request_path = directory.parent / f"{intermediate.group_id}-{attempt:03d}-request.json"
+    try:
+        status = os.lstat(request_path)
+    except OSError as exc:
+        message = (
+            f"the selected group request {request_path.name!r} for intermediate "
+            f"{intermediate.group_id!r} is absent; a StagePlan binds every selected request "
+            f"as provenance and refuses without it: {exc}"
+        )
+        raise ChunkMultipassError(message) from exc
+    _require(
+        stat.S_ISREG(status.st_mode),
+        f"the selected group request {request_path.name!r} is not a regular file "
+        "(a symbolic link or another object is refused)",
+    )
+    _require(
+        request_path.name
+        not in {entry.relative_path for entry in intermediate.receipt.manifest.entries},
+        f"the selected group request {request_path.name!r} is named by the intermediate "
+        "manifest; a request is provenance and never a governed member",
+    )
+    sha256, length = file_sha256(request_path)
+    return GroupRequestProvenance(
+        relative_filename=request_path.name, byte_length=length, sha256=sha256
+    )
+
+
+def _successor_intermediate_descriptor(intermediate: IntermediateInput) -> Mapping[str, object]:
+    """One StagePlan intermediate descriptor: receipt, manifest, governed entries, provenance."""
+    receipt = intermediate.receipt
+    entries = _governed_intermediate_manifest_entries(receipt)
+    provenance = _selected_group_request_provenance(intermediate)
+    document_sha256, document_length = file_sha256(
+        intermediate.directory / INTERMEDIATE_RECEIPT_FILENAME
+    )
+    return {
+        "group_id": intermediate.group_id,
+        "ordinal": intermediate.ordinal,
+        "region": intermediate.region,
+        "start": intermediate.start,
+        "end": intermediate.end,
+        "attempt": receipt.attempt,
+        "attempt_directory_name": intermediate.directory.name,
+        "receipt_document_sha256": document_sha256,
+        "receipt_document_byte_length": document_length,
+        "receipt_record_identity": _identity_of(dict(receipt.as_record())),
+        "manifest_digest": receipt.manifest.digest,
+        "manifest_total_bytes": receipt.manifest.total_bytes,
+        "governed_entries": [dict(entry.as_record()) for entry in entries],
+        "governed_bytes": sum(entry.byte_length for entry in entries),
+        "input_chunk_ids": list(receipt.input_chunk_ids),
+        "witness_ledger_identity": receipt.witness_ledger_identity,
+        "compact_evidence_identity": receipt.compact_evidence_identity,
+        "group_request_provenance": dict(provenance.as_record()),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The stage graph -- §32
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class L2Stage:
+    """One successor stage: its ordinal, identifier, unit, kind and attachment class."""
+
+    ordinal: int
+    stage_id: str
+    unit_id: str
+    kind: str
+    attachments: str
+    batch: int | None = None
+    table: str | None = None
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "ordinal": self.ordinal,
+            "stage_id": self.stage_id,
+            "unit_id": self.unit_id,
+            "kind": self.kind,
+            "attachments": self.attachments,
+            "batch": self.batch,
+            "table": self.table,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> L2Stage:
+        """Rebuild one stage descriptor from its stored mapping."""
+        batch = record.get("batch")
+        table = record.get("table")
+        return cls(
+            ordinal=_stored_int(record["ordinal"], "ordinal"),
+            stage_id=str(record["stage_id"]),
+            unit_id=str(record["unit_id"]),
+            kind=str(record["kind"]),
+            attachments=str(record["attachments"]),
+            batch=None if batch is None else _stored_int(batch, "batch"),
+            table=None if table is None else str(table),
+        )
+
+
+def successor_stage_graph(route: str, counter_source_count: int) -> tuple[L2Stage, ...]:
+    """The exact ordered stage graph of one successor route over ``counter_source_count`` chunks.
+
+    Variable-count by construction: the number of counter batches is ``ceil(chunks / fan-in)``,
+    the five deferred-index units are exact, and the production and calibration routes differ
+    only in their terminal stages (§32). Nothing here names five intermediates or any other
+    campaign-specific count.
+    """
+    _require(route in SUCCESSOR_ROUTES, f"route {route!r} has no stage graph")
+    _require(counter_source_count >= 1, "a successor stage graph needs at least one chunk source")
+    stages: list[L2Stage] = []
+
+    def add(stage_id: str, unit_id: str, kind: str, attachments: str, **extra: object) -> None:
+        batch = extra.get("batch")
+        table = extra.get("table")
+        stages.append(
+            L2Stage(
+                ordinal=len(stages),
+                stage_id=stage_id,
+                unit_id=unit_id,
+                kind=kind,
+                attachments=attachments,
+                batch=None if batch is None else int(cast("int", batch)),
+                table=None if table is None else str(table),
+            )
+        )
+
+    add(_STAGE_INITIALIZE, "world", _KIND_INITIALIZE, _ATTACH_NONE)
+    add(_STAGE_CAPTURE_DROP_INDEXES, "deferred-index-set", _KIND_CAPTURE_DROP, _ATTACH_NONE)
+    add(_STAGE_REDUCED_PARSER_RUN, "census_parser_runs", _KIND_REDUCED_RUN, _ATTACH_INTERMEDIATES)
+    for stage_id, table in _TABLE_STAGES:
+        add(stage_id, table, _KIND_TABLE_LOAD, _ATTACH_INTERMEDIATES, table=table)
+    add(_STAGE_WITNESS_RANK, L2_WITNESS_RANK_TABLE, _KIND_WITNESS_RANK, _ATTACH_INTERMEDIATES)
+    add(_STAGE_CORRECTIONS, L2_CORRECTIONS_TABLE, _KIND_CORRECTIONS, _ATTACH_NONE)
+    add(
+        _STAGE_ACCESSION_OBSERVATIONS,
+        "census_accession_observations",
+        _KIND_OBSERVATION_LOAD,
+        _ATTACH_INTERMEDIATES,
+        table="census_accession_observations",
+    )
+    add(_STAGE_EDGES_AND_CONFLICTS, "census_candidate_lineage_edges", _KIND_EDGES, _ATTACH_NONE)
+    if route == SUCCESSOR_ROUTE_PRODUCTION:
+        add(
+            _STAGE_PARSER_STATE,
+            "census_plan_sources.parser_state",
+            _KIND_PARSER_STATE,
+            _ATTACH_NONE,
+        )
+    for index, name in enumerate(EXPECTED_DEFERRED_INDEX_NAMES):
+        add(f"S16.{index}", name, _KIND_INDEX_REBUILD, _ATTACH_NONE)
+    batches = -(-counter_source_count // MERGE_FAN_IN)
+    for batch in range(batches):
+        add(
+            f"S17A.{batch}",
+            f"batch-{batch:03d}",
+            _KIND_COUNTER_CATALOG,
+            _ATTACH_CATALOG_BATCH,
+            batch=batch,
+        )
+        add(
+            f"S17B.{batch}",
+            f"batch-{batch:03d}",
+            _KIND_COUNTER_LEDGER,
+            _ATTACH_LEDGER_BATCH,
+            batch=batch,
+        )
+    add(_STAGE_COUNTERS_FINALIZE, L2_PLAN_WITNESS_RANK_TABLE, _KIND_COUNTERS_FINALIZE, _ATTACH_NONE)
+    add(_STAGE_SIDECAR, COMPACT_EVIDENCE_SIDECAR_FILENAME, _KIND_SIDECAR, _ATTACH_NONE)
+    add(_STAGE_OUTCOME, "derived-outcome", _KIND_OUTCOME, _ATTACH_NONE)
+    if route == SUCCESSOR_ROUTE_PRODUCTION:
+        add(_STAGE_MARK_PARSED, PROGRESS_LEDGER_FILENAME, _KIND_MARK_PARSED, _ATTACH_NONE)
+        add(_STAGE_REAUTHENTICATE_PRODUCTION, "intermediates", _KIND_REAUTHENTICATE, _ATTACH_NONE)
+        add(_STAGE_F0_CHECKPOINT, PHASE_F0, _KIND_F0_CHECKPOINT, _ATTACH_NONE)
+        add(_STAGE_FINAL_RECEIPT, FINAL_WORLD_RECEIPT_FILENAME, _KIND_FINAL_RECEIPT, _ATTACH_NONE)
+    else:
+        add(_STAGE_REAUTHENTICATE_CALIBRATION, "intermediates", _KIND_REAUTHENTICATE, _ATTACH_NONE)
+        add(
+            _STAGE_CALIBRATION_RESULT,
+            CALIBRATION_SUBSET_RESULT_FILENAME,
+            _KIND_CALIBRATION_RESULT,
+            _ATTACH_NONE,
+        )
+    return tuple(stages)
+
+
+# --------------------------------------------------------------------------- #
+# The successor StagePlan -- §18
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class L2StagePlan:
+    """The generic, variable-count successor StagePlan: its canonical body and its identity.
+
+    Every field §18 names is inside ``body``; ``identity`` is the SHA-256 over the canonical
+    bytes of the body with the identity field removed, and a reader always recomputes it. The
+    body is a pure function of durable inputs -- receipts, manifests, requests, plan, schedule,
+    repository, implementation bytes, storage terms, cache budget and paths -- so an expected
+    plan built fresh in a later process equals the stored one exactly, or the stage conflicts.
+    """
+
+    body: Mapping[str, object]
+    identity: str
+
+    @property
+    def route(self) -> str:
+        """The route this plan was sealed for."""
+        return str(self.body["route"])
+
+    @property
+    def successor_run_id(self) -> str:
+        """The successor run this plan belongs to."""
+        return str(self.body["successor_run_id"])
+
+    @property
+    def canonical_world_path(self) -> str:
+        """The exact canonical successor-world path."""
+        return str(self.body["canonical_world_path"])
+
+    @property
+    def cache_bytes(self) -> int:
+        """The required page-cache budget."""
+        return require_successor_cache_bytes(self.body["cache_bytes"])
+
+    @property
+    def tool_manifest_identity(self) -> str:
+        """The bound implementation identity, recomputed at every admission."""
+        return str(self.body["tool_manifest_identity"])
+
+    @property
+    def stages(self) -> tuple[L2Stage, ...]:
+        """The exact ordered stage graph."""
+        graph = self.body["stage_graph"]
+        return tuple(
+            L2Stage.from_record(cast("Mapping[str, object]", item))
+            for item in cast("list[object]", graph)
+        )
+
+    @property
+    def intermediates(self) -> tuple[Mapping[str, object], ...]:
+        """Every intermediate descriptor, in schedule order."""
+        return tuple(
+            cast("Mapping[str, object]", item)
+            for item in cast("list[object]", self.body["intermediates"])
+        )
+
+    def as_record(self) -> Mapping[str, object]:
+        """The persisted rendering: the body plus its identity."""
+        record = dict(self.body)
+        record["stage_plan_identity"] = self.identity
+        return record
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> L2StagePlan:
+        """Rebuild a StagePlan from its stored mapping and recompute its identity.
+
+        Raises:
+            ChunkMultipassError: the contract, route or identity refuse, or a required field is
+                absent or malformed.
+        """
+        body = {str(key): value for key, value in record.items() if key != "stage_plan_identity"}
+        recorded = record.get("stage_plan_identity")
+        plan = cls(body=body, identity=_identity_of(body))
+        _require(
+            str(body.get("contract")) == L2_STAGE_PLAN_CONTRACT,
+            f"a successor StagePlan carrying contract {body.get('contract')!r} is refused",
+        )
+        _require(plan.route in SUCCESSOR_ROUTES, f"a StagePlan names route {plan.route!r}; refused")
+        _require(
+            recorded is None or str(recorded) == plan.identity,
+            "a successor StagePlan's recorded identity does not describe its own body: recorded "
+            f"{recorded!r}, recomputed {plan.identity!r}",
+        )
+        require_successor_cache_bytes(body.get("cache_bytes"))
+        count = _stored_int(body["input_group_count"], "input_group_count")
+        _require(
+            count == len(plan.intermediates)
+            and count
+            == _stored_int(
+                body["predecessor_completed_group_count"], "predecessor_completed_group_count"
+            ),
+            "a successor StagePlan's input_group_count must equal both its descriptor count and "
+            "the predecessor's completed group count; refused",
+        )
+        _require(
+            tuple(stage.ordinal for stage in plan.stages) == tuple(range(len(plan.stages))),
+            "a successor StagePlan's stage graph is not contiguous from ordinal 0; refused",
+        )
+        return plan
+
+
+def _build_successor_stage_plan(
+    *,
+    request: SuccessorFinalRequest,
+    plan: ChunkPlan,
+    schedule: MergeSchedule,
+    intermediates: Sequence[IntermediateInput],
+    counter_source_count: int,
+    counter_source_identities: Sequence[str],
+    repository: RepositoryIdentity,
+    contract: ExecutionContract,
+    state: _AcceptedPlanState,
+    seed_catalog_sha256: str,
+    seed_catalog_bytes: int,
+    tool_manifest: ToolManifest,
+    expected_index_records: Sequence[tuple[int, str, str, str]],
+    requirements: MultipassStorageRequirements,
+    binding: SqliteTempBinding,
+) -> L2StagePlan:
+    """Build the expected StagePlan from authenticated inputs -- the StagePlan inventory builder.
+
+    Uses the accepted intermediate resolution (already applied by the caller), the accepted
+    manifest verifier (applied inside that resolution),
+    :func:`_governed_intermediate_manifest_entries`
+    for membership and :func:`_selected_group_request_provenance` for the selected request. It
+    never enumerates a directory to decide membership.
+    """
+    descriptors = [_successor_intermediate_descriptor(item) for item in intermediates]
+    index_set = [
+        {"ordinal": ordinal, "name": name, "table": table, "sql": sql}
+        for ordinal, name, table, sql in expected_index_records
+    ]
+    world = Path(request.world_directory)
+    body: dict[str, object] = {
+        "contract": L2_STAGE_PLAN_CONTRACT,
+        "route": request.route,
+        "successor_run_id": request.run_id,
+        "predecessor_run_id": request.predecessor_run_id,
+        "predecessor_checkpoint_count": request.predecessor_checkpoint_count,
+        "predecessor_tip_ordinal": request.predecessor_tip_ordinal,
+        "predecessor_tip_identity": request.predecessor_tip_identity,
+        "predecessor_completed_group_count": request.predecessor_completed_group_count,
+        "input_group_count": len(descriptors),
+        "intermediates": descriptors,
+        "governed_input_bytes": sum(
+            int(cast("int", item["governed_bytes"])) for item in descriptors
+        ),
+        "counter_source_count": counter_source_count,
+        "counter_source_identities": list(counter_source_identities),
+        "plan_digest": plan.plan_digest,
+        "schedule_digest": schedule.schedule_digest,
+        "source_instance_id": plan.source_instance_id,
+        "source_observation_id": plan.source_observation_id,
+        "source_sha256": plan.source_sha256,
+        "source_byte_length": plan.source_byte_length,
+        "member_order_digest": plan.member_order_digest,
+        "repository_head_sha": repository.head_sha,
+        "repository_tree_sha": repository.tree_sha,
+        "tool_manifest": dict(tool_manifest.as_record()),
+        "tool_manifest_identity": tool_manifest.identity,
+        "source_file_digests": dict(tool_manifest.source_file_digests()),
+        "stage_graph": [
+            dict(stage.as_record())
+            for stage in successor_stage_graph(request.route, counter_source_count)
+        ],
+        "expected_deferred_index_names": list(EXPECTED_DEFERRED_INDEX_NAMES),
+        "expected_deferred_index_count": len(EXPECTED_DEFERRED_INDEX_NAMES),
+        "expected_deferred_index_set": index_set,
+        "expected_deferred_index_set_identity": _identity_of(
+            {"contract": L2_DEFERRED_INDEX_SET_CONTRACT, "indexes": index_set}
+        ),
+        "internal_relation_names": list(L2_CONTROL_TABLES + L2_PERSISTENT_RELATIONS),
+        "cache_bytes": request.cache_bytes,
+        "stage_receipt_root": str(Path(request.stage_receipt_root)),
+        "canonical_world_path": str(world),
+        "initialization_attempt_parent": str(world.parent),
+        "storage_requirements": dict(requirements.as_record()),
+        "storage_requirement_identity": _identity_of(
+            {"level": MERGE_LEVEL_TWO, "requirements": dict(requirements.as_record())}
+        ),
+        "sqlite_temp_binding_identity": stable_binding_identity(binding),
+        "semantic_policy_identities": {
+            "execution_contract_identity": contract.contract_identity,
+            "seed_catalog_sha256": seed_catalog_sha256,
+            "seed_catalog_byte_length": seed_catalog_bytes,
+            "catalog_source_sha256": contract.catalog_source_sha256,
+            "migration_head": contract.migration_head,
+            "accepted_plan_state": {
+                "plan_position": state.plan_position,
+                "plan_source_count": state.plan_source_count,
+                "parser_state_before": state.parser_state_before,
+                "disposition": state.disposition,
+                "plan_fingerprint": state.plan_fingerprint,
+                "observation_id": state.observation_id,
+                "artifact_sha256": state.artifact_sha256,
+                "artifact_byte_length": state.artifact_byte_length,
+            },
+        },
+    }
+    return L2StagePlan.from_record(body)
+
+
+# --------------------------------------------------------------------------- #
+# Route proofs -- §15: the private engine runs only under a process-local proof
+# --------------------------------------------------------------------------- #
+#: A per-process nonce every route proof carries. Minted at import, never persisted, never
+#: derivable from a request, a StagePlan, an envelope or a Boolean: a proof constructed
+#: elsewhere -- another process, a stored record, a hand-built object -- does not carry it.
+_ROUTE_PROOF_NONCE: Final = os.urandom(16).hex()
+
+
+@dataclass(frozen=True, slots=True)
+class _SuccessorRouteProof:
+    """Process-local evidence that a route gate was passed in THIS process, and by which gate.
+
+    The wrapper that passed the gate mints it; the private engine requires it and re-invokes
+    the bound gate at every stage's STEP 0, so a route whose authority was withdrawn between
+    stages refuses at the next one. It is not durable, not serializable and not authority: the
+    gate function it binds is.
+    """
+
+    route: str
+    pid: int
+    nonce: str
+    gate_name: str
+    gate: Callable[[], object]
+    envelope: CalibrationChildEnvelope | None
+    plan_digest: str | None
+
+    def require_live(self, route: str) -> None:
+        """Re-run this proof's gate, in this process, for exactly ``route``.
+
+        Raises:
+            ChunkMultipassError: the proof is for another route, another process or was not
+                minted here; or the bound gate refuses.
+        """
+        if self.route != route:
+            message = (
+                f"a {self.route!r} route proof was handed to the {route!r} successor route; a "
+                "proof never crosses routes and the engine refuses before anything is read"
+            )
+            raise ChunkMultipassError(message)
+        if self.pid != os.getpid() or self.nonce != _ROUTE_PROOF_NONCE:
+            message = (
+                "a successor route proof is process-local: this one was not minted by a route "
+                "gate in this process and is refused"
+            )
+            raise ChunkMultipassError(message)
+        self.gate()
+
+
+def _require_route_proof(proof: object, route: str) -> _SuccessorRouteProof:
+    """The engine's gate: an exact proof object for exactly this route, or a refusal.
+
+    Refuses a missing proof, a Boolean, an envelope, a StagePlan, a request or any other
+    object standing in for one -- none of them is a gate that was passed in this process.
+
+    Raises:
+        ChunkMultipassError: the object is not a live route proof for ``route``.
+    """
+    if not isinstance(proof, _SuccessorRouteProof):
+        message = (
+            f"the successor engine requires a process-local route proof; got "
+            f"{type(proof).__name__}. A Boolean, an envelope, a StagePlan, a request or a "
+            "persisted record is never authority, and the engine refuses before anything is read"
+        )
+        raise ChunkMultipassError(message)
+    proof.require_live(route)
+    return proof
+
+
+def _mint_successor_route_proof(
+    route: str,
+    *,
+    gate: Callable[[], object],
+    gate_name: str,
+    envelope: CalibrationChildEnvelope | None = None,
+    plan_digest: str | None = None,
+) -> _SuccessorRouteProof:
+    """Mint the proof a wrapper hands the engine, AFTER that wrapper passed ``gate`` itself."""
+    return _SuccessorRouteProof(
+        route=route,
+        pid=os.getpid(),
+        nonce=_ROUTE_PROOF_NONCE,
+        gate_name=gate_name,
+        gate=gate,
+        envelope=envelope,
+        plan_digest=plan_digest,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Connection-state reconstruction -- §21
+# --------------------------------------------------------------------------- #
+_SQLITE_DETERMINISTIC_FLAG: Final = 0x800
+
+#: The three deterministic correction functions, with the exact arities the statements use.
+_CORRECTION_FUNCTION_ARITIES: Final[tuple[tuple[str, int], ...]] = (
+    (_FUNCTION_STABLE_ID, 5),
+    (_FUNCTION_RIVAL_FIELDS, 1),
+    (_FUNCTION_RECONSTRUCTED_FIELDS, 6),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessorConnectionState:
+    """What one successor connection was verified to hold, sealed as one identity."""
+
+    body: Mapping[str, object]
+    identity: str
+
+    def as_record(self) -> Mapping[str, object]:
+        """The persisted rendering."""
+        record = dict(self.body)
+        record["connection_state_identity"] = self.identity
+        return record
+
+
+def _establish_successor_connection_state(
+    connection: sqlite3.Connection,
+    expected_stage_plan: L2StagePlan,
+    route_proof: _SuccessorRouteProof,
+) -> SuccessorConnectionState:
+    """Establish and verify every connection-scoped fact a successor stage relies on -- §21.
+
+    Called immediately after every successor writer connection is created or reopened, before
+    any semantic SQL, ATTACH, stage classification or derivation. Nothing is inherited from a
+    previous connection: the row factory, ``foreign_keys``, the exact cache pragma derived from
+    the StagePlan's budget and the three deterministic correction functions are established
+    here and then READ BACK from SQLite -- ``PRAGMA function_list`` reports each function's
+    name, arity and deterministic flag -- and the implementation files are re-hashed from disk
+    and held to the StagePlan's tool identity. The whole is sealed as ``connection_state_identity``,
+    which every applied-unit row and stage receipt binds.
+
+    Raises:
+        ChunkMultipassError: the route proof is not live, or any fact cannot be established
+            exactly.
+    """
+    _require_route_proof(route_proof, expected_stage_plan.route)
+    connection.row_factory = sqlite3.Row
+    probe = connection.execute("SELECT 1 AS one").fetchone()
+    _require(isinstance(probe, sqlite3.Row), "the successor connection's row factory is not Row")
+    connection.execute("PRAGMA foreign_keys = ON")
+    foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    _require(foreign_keys == 1, f"PRAGMA foreign_keys reads {foreign_keys} where 1 is required")
+    cache_bytes = expected_stage_plan.cache_bytes
+    expected_pragma = cache_size_pragma(cache_bytes)
+    connection.execute(f"PRAGMA cache_size = {expected_pragma}")
+    observed_pragma = int(connection.execute("PRAGMA main.cache_size").fetchone()[0])
+    _require(
+        observed_pragma == expected_pragma,
+        f"PRAGMA cache_size reads {observed_pragma} where the StagePlan's {cache_bytes} bytes "
+        f"require {expected_pragma}",
+    )
+    _register_correction_functions(connection)
+    registered = {
+        str(row["name"]): (int(row["narg"]), int(row["flags"]))
+        for row in connection.execute("PRAGMA function_list")
+        if int(row["builtin"]) == 0
+        and str(row["name"]) in {name for name, _arity in _CORRECTION_FUNCTION_ARITIES}
+    }
+    functions: list[Mapping[str, object]] = []
+    for name, arity in _CORRECTION_FUNCTION_ARITIES:
+        found = registered.get(name)
+        _require(
+            found is not None,
+            f"correction function {name!r} is not registered on this connection; refused",
+        )
+        assert found is not None  # noqa: S101 - narrowed by the refusal above
+        narg, flags = found
+        deterministic = bool(flags & _SQLITE_DETERMINISTIC_FLAG)
+        _require(
+            narg == arity and deterministic,
+            f"correction function {name!r} is registered with arity {narg} and deterministic="
+            f"{deterministic} where arity {arity} and deterministic=True are required",
+        )
+        functions.append({"name": name, "arity": arity, "deterministic": True})
+    tool_manifest = _require_runtime_tool_identity(
+        expected_stage_plan.tool_manifest_identity, label="connection state"
+    )
+    body: dict[str, object] = {
+        "contract": L2_CONNECTION_STATE_CONTRACT,
+        "route": expected_stage_plan.route,
+        "stage_plan_identity": expected_stage_plan.identity,
+        "row_factory": "sqlite3.Row",
+        "foreign_keys": foreign_keys,
+        "cache_bytes": cache_bytes,
+        "cache_size_pragma": observed_pragma,
+        "functions": functions,
+        "tool_manifest_identity": tool_manifest.identity,
+        "source_file_digests": dict(tool_manifest.source_file_digests()),
+        "setup_complete": True,
+    }
+    return SuccessorConnectionState(body=body, identity=_identity_of(body))
+
+
+# --------------------------------------------------------------------------- #
+# The successor control schema -- §24, §25
+# --------------------------------------------------------------------------- #
+_L2_CONTROL_SCHEMA: Final = f"""
+CREATE TABLE {L2_STAGE_PLAN_TABLE} (
+    singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+    contract              TEXT NOT NULL,
+    successor_run_id      TEXT NOT NULL,
+    route                 TEXT NOT NULL,
+    canonical_world_path  TEXT NOT NULL,
+    stage_plan_identity   TEXT NOT NULL,
+    body_json             TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE {L2_APPLIED_UNITS_TABLE} (
+    stage_ordinal                       INTEGER PRIMARY KEY,
+    stage_id                            TEXT NOT NULL UNIQUE,
+    unit_id                             TEXT NOT NULL,
+    unit_kind                           TEXT NOT NULL,
+    contract                            TEXT NOT NULL,
+    route                               TEXT NOT NULL,
+    successor_run_id                    TEXT NOT NULL,
+    stage_plan_identity                 TEXT NOT NULL,
+    predecessor_unit_identity           TEXT NOT NULL,
+    input_identities_json               TEXT NOT NULL,
+    receipt_identities_json             TEXT NOT NULL,
+    request_provenance_identities_json  TEXT NOT NULL,
+    repository_head_sha                 TEXT NOT NULL,
+    repository_tree_sha                 TEXT NOT NULL,
+    tool_manifest_identity              TEXT NOT NULL,
+    connection_state_identity           TEXT NOT NULL,
+    source_file_digests_json            TEXT NOT NULL,
+    stage_operation_identity            TEXT NOT NULL,
+    rows_written                        INTEGER NOT NULL CHECK (rows_written >= 0),
+    outcome_witness_json                TEXT NOT NULL,
+    committed_at_utc                    TEXT NOT NULL,
+    unit_identity                       TEXT NOT NULL UNIQUE,
+    UNIQUE (stage_id, unit_id)
+) STRICT;
+
+CREATE TABLE {L2_CROSS_STORE_BINDINGS_TABLE} (
+    stage_ordinal        INTEGER PRIMARY KEY,
+    binding_kind         TEXT NOT NULL,
+    contract             TEXT NOT NULL,
+    target_name          TEXT NOT NULL,
+    target_byte_length   INTEGER,
+    target_sha256        TEXT,
+    target_identity      TEXT NOT NULL,
+    body_json            TEXT NOT NULL,
+    binding_identity     TEXT NOT NULL UNIQUE
+) STRICT;
+
+CREATE TABLE {L2_DEFERRED_INDEXES_TABLE} (
+    ordinal       INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    table_name    TEXT NOT NULL,
+    create_sql    TEXT NOT NULL,
+    set_identity  TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE {L2_WITNESS_RANK_TABLE} (
+    accession_plain        TEXT NOT NULL,
+    source_observation_id  TEXT NOT NULL,
+    parsed_record_id       TEXT NOT NULL,
+    first_observed_at_utc  TEXT NOT NULL,
+    chunk_ordinal          INTEGER NOT NULL,
+    witness_rank           INTEGER NOT NULL,
+    witnesses              INTEGER NOT NULL
+);
+
+CREATE TABLE {L2_CORRECTIONS_TABLE} (
+    accession_observation_id  TEXT,
+    accession_plain           TEXT,
+    source_observation_id     TEXT,
+    parsed_record_id          TEXT,
+    field_name                TEXT,
+    raw_value_json            TEXT,
+    observed_at_utc           TEXT,
+    conflict_indicator        INTEGER
+);
+
+CREATE TABLE {L2_PLAN_WITNESS_TABLE} (
+    accession_plain    TEXT NOT NULL,
+    parsed_record_id   TEXT NOT NULL,
+    chunk_ordinal      INTEGER NOT NULL
+);
+
+CREATE TABLE {L2_PLAN_LEDGER_TABLE} (
+    native_identity     TEXT NOT NULL,
+    member_ordinal      INTEGER NOT NULL,
+    record_ordinal      INTEGER NOT NULL,
+    delta_materialized  INTEGER NOT NULL
+);
+
+CREATE TABLE {L2_PLAN_WITNESS_RANK_TABLE} (
+    accession_plain    TEXT NOT NULL,
+    parsed_record_id   TEXT NOT NULL,
+    witness_rank       INTEGER NOT NULL,
+    witnesses          INTEGER NOT NULL
+);
+
+CREATE TABLE {L2_MEMBER_DELTA_TABLE} (
+    member_ordinal  INTEGER NOT NULL,
+    delta           INTEGER NOT NULL
+);
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedUnit:
+    """One committed applied-unit row, read back from the world catalog."""
+
+    stage_ordinal: int
+    stage_id: str
+    unit_id: str
+    unit_kind: str
+    stage_plan_identity: str
+    predecessor_unit_identity: str
+    tool_manifest_identity: str
+    connection_state_identity: str
+    stage_operation_identity: str
+    rows_written: int
+    outcome_witness: Mapping[str, object]
+    committed_at_utc: str
+    unit_identity: str
+    body: Mapping[str, object]
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> AppliedUnit:
+        """Rebuild one row and recompute its identity over the body it carries.
+
+        Raises:
+            ChunkMultipassError: the stored identity does not describe the row.
+        """
+        body: dict[str, object] = {
+            "contract": str(row["contract"]),
+            "route": str(row["route"]),
+            "successor_run_id": str(row["successor_run_id"]),
+            "stage_ordinal": int(row["stage_ordinal"]),
+            "stage_id": str(row["stage_id"]),
+            "unit_id": str(row["unit_id"]),
+            "unit_kind": str(row["unit_kind"]),
+            "stage_plan_identity": str(row["stage_plan_identity"]),
+            "predecessor_unit_identity": str(row["predecessor_unit_identity"]),
+            "input_identities": json.loads(str(row["input_identities_json"])),
+            "receipt_identities": json.loads(str(row["receipt_identities_json"])),
+            "request_provenance_identities": json.loads(
+                str(row["request_provenance_identities_json"])
+            ),
+            "repository_head_sha": str(row["repository_head_sha"]),
+            "repository_tree_sha": str(row["repository_tree_sha"]),
+            "tool_manifest_identity": str(row["tool_manifest_identity"]),
+            "connection_state_identity": str(row["connection_state_identity"]),
+            "source_file_digests": json.loads(str(row["source_file_digests_json"])),
+            "stage_operation_identity": str(row["stage_operation_identity"]),
+            "rows_written": int(row["rows_written"]),
+            "outcome_witness": json.loads(str(row["outcome_witness_json"])),
+            "committed_at_utc": str(row["committed_at_utc"]),
+        }
+        identity = _identity_of(body)
+        _require(
+            str(row["unit_identity"]) == identity
+            and str(row["contract"]) == L2_APPLIED_UNIT_CONTRACT,
+            f"applied unit {row['stage_id']!r} carries identity {row['unit_identity']!r} where "
+            f"its body recomputes to {identity!r}; refused",
+        )
+        witness = body["outcome_witness"]
+        _require(isinstance(witness, Mapping), "an applied unit's outcome witness is not a mapping")
+        return cls(
+            stage_ordinal=int(row["stage_ordinal"]),
+            stage_id=str(row["stage_id"]),
+            unit_id=str(row["unit_id"]),
+            unit_kind=str(row["unit_kind"]),
+            stage_plan_identity=str(row["stage_plan_identity"]),
+            predecessor_unit_identity=str(row["predecessor_unit_identity"]),
+            tool_manifest_identity=str(row["tool_manifest_identity"]),
+            connection_state_identity=str(row["connection_state_identity"]),
+            stage_operation_identity=str(row["stage_operation_identity"]),
+            rows_written=int(row["rows_written"]),
+            outcome_witness=cast("Mapping[str, object]", witness),
+            committed_at_utc=str(row["committed_at_utc"]),
+            unit_identity=identity,
+            body=body,
+        )
+
+
+def _stage_operation_identity(stage_plan: L2StagePlan, stage: L2Stage) -> str:
+    """The exact semantic operation one stage performs under one StagePlan, as one identity."""
+    return _identity_of(
+        {"stage_plan_identity": stage_plan.identity, "stage": dict(stage.as_record())}
+    )
+
+
+def _applied_units(connection: sqlite3.Connection) -> tuple[AppliedUnit, ...]:
+    rows = connection.execute(
+        f"SELECT * FROM main.{L2_APPLIED_UNITS_TABLE} ORDER BY stage_ordinal"  # noqa: S608
+    ).fetchall()
+    return tuple(AppliedUnit.from_row(row) for row in rows)
+
+
+def _insert_applied_unit(
+    connection: sqlite3.Connection,
+    *,
+    stage_plan: L2StagePlan,
+    stage: L2Stage,
+    predecessor_unit_identity: str,
+    input_identities: Sequence[str],
+    receipt_identities: Sequence[str],
+    request_provenance_identities: Sequence[str],
+    connection_state: SuccessorConnectionState,
+    rows_written: int,
+    outcome_witness: Mapping[str, object],
+) -> AppliedUnit:
+    """Insert one applied-unit row INSIDE the caller's open transaction, outside containment.
+
+    The row binds everything §25 names and is sealed by ``unit_identity``; the table's primary
+    key and uniqueness constraints refuse a duplicate ordinal, a duplicate stage and a
+    duplicate unit, and the caller has already held the predecessor to the expected identity.
+
+    Raises:
+        ChunkMultipassError: the connection is not inside a transaction.
+    """
+    _require(
+        connection.in_transaction,
+        "an applied-unit row is inserted inside the transaction that wrote the stage's data, "
+        "never in a transaction of its own",
+    )
+    committed_at = utc_now()
+    body: dict[str, object] = {
+        "contract": L2_APPLIED_UNIT_CONTRACT,
+        "route": stage_plan.route,
+        "successor_run_id": stage_plan.successor_run_id,
+        "stage_ordinal": stage.ordinal,
+        "stage_id": stage.stage_id,
+        "unit_id": stage.unit_id,
+        "unit_kind": stage.kind,
+        "stage_plan_identity": stage_plan.identity,
+        "predecessor_unit_identity": predecessor_unit_identity,
+        "input_identities": list(input_identities),
+        "receipt_identities": list(receipt_identities),
+        "request_provenance_identities": list(request_provenance_identities),
+        "repository_head_sha": str(stage_plan.body["repository_head_sha"]),
+        "repository_tree_sha": str(stage_plan.body["repository_tree_sha"]),
+        "tool_manifest_identity": str(connection_state.body["tool_manifest_identity"]),
+        "connection_state_identity": connection_state.identity,
+        "source_file_digests": dict(
+            cast("Mapping[str, str]", connection_state.body["source_file_digests"])
+        ),
+        "stage_operation_identity": _stage_operation_identity(stage_plan, stage),
+        "rows_written": rows_written,
+        "outcome_witness": dict(outcome_witness),
+        "committed_at_utc": committed_at,
+    }
+    identity = _identity_of(body)
+    connection.execute(
+        f"INSERT INTO main.{L2_APPLIED_UNITS_TABLE} ("  # noqa: S608
+        "stage_ordinal, stage_id, unit_id, unit_kind, contract, route, successor_run_id, "
+        "stage_plan_identity, predecessor_unit_identity, input_identities_json, "
+        "receipt_identities_json, request_provenance_identities_json, repository_head_sha, "
+        "repository_tree_sha, tool_manifest_identity, connection_state_identity, "
+        "source_file_digests_json, stage_operation_identity, rows_written, "
+        "outcome_witness_json, committed_at_utc, unit_identity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            stage.ordinal,
+            stage.stage_id,
+            stage.unit_id,
+            stage.kind,
+            L2_APPLIED_UNIT_CONTRACT,
+            stage_plan.route,
+            stage_plan.successor_run_id,
+            stage_plan.identity,
+            predecessor_unit_identity,
+            _json_text(list(input_identities)),
+            _json_text(list(receipt_identities)),
+            _json_text(list(request_provenance_identities)),
+            body["repository_head_sha"],
+            body["repository_tree_sha"],
+            body["tool_manifest_identity"],
+            connection_state.identity,
+            _json_text(body["source_file_digests"]),
+            body["stage_operation_identity"],
+            rows_written,
+            _json_text(dict(outcome_witness)),
+            committed_at,
+            identity,
+        ),
+    )
+    row = connection.execute(
+        f"SELECT * FROM main.{L2_APPLIED_UNITS_TABLE} WHERE stage_ordinal = ?",  # noqa: S608
+        (stage.ordinal,),
+    ).fetchone()
+    return AppliedUnit.from_row(row)
+
+
+def _insert_cross_store_binding(
+    connection: sqlite3.Connection,
+    *,
+    stage: L2Stage,
+    kind: str,
+    target_name: str,
+    target_byte_length: int | None,
+    target_sha256: str | None,
+    target_identity: str,
+    body: Mapping[str, object],
+) -> str:
+    """Insert one cross-store binding row inside the open transaction; return its identity."""
+    _require(connection.in_transaction, "a cross-store binding is committed with its applied unit")
+    record: dict[str, object] = {
+        "contract": L2_CROSS_STORE_BINDING_CONTRACT,
+        "stage_ordinal": stage.ordinal,
+        "binding_kind": kind,
+        "target_name": target_name,
+        "target_byte_length": target_byte_length,
+        "target_sha256": target_sha256,
+        "target_identity": target_identity,
+        "body": dict(body),
+    }
+    identity = _identity_of(record)
+    connection.execute(
+        f"INSERT INTO main.{L2_CROSS_STORE_BINDINGS_TABLE} ("  # noqa: S608
+        "stage_ordinal, binding_kind, contract, target_name, target_byte_length, "
+        "target_sha256, target_identity, body_json, binding_identity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            stage.ordinal,
+            kind,
+            L2_CROSS_STORE_BINDING_CONTRACT,
+            target_name,
+            target_byte_length,
+            target_sha256,
+            target_identity,
+            _json_text(dict(body)),
+            identity,
+        ),
+    )
+    return identity
+
+
+def _cross_store_binding(
+    connection: sqlite3.Connection, stage_ordinal: int
+) -> Mapping[str, object] | None:
+    row = connection.execute(
+        f"SELECT * FROM main.{L2_CROSS_STORE_BINDINGS_TABLE} WHERE stage_ordinal = ?",  # noqa: S608
+        (stage_ordinal,),
+    ).fetchone()
+    if row is None:
+        return None
+    record: dict[str, object] = {
+        "contract": str(row["contract"]),
+        "stage_ordinal": int(row["stage_ordinal"]),
+        "binding_kind": str(row["binding_kind"]),
+        "target_name": str(row["target_name"]),
+        "target_byte_length": None
+        if row["target_byte_length"] is None
+        else int(row["target_byte_length"]),
+        "target_sha256": None if row["target_sha256"] is None else str(row["target_sha256"]),
+        "target_identity": str(row["target_identity"]),
+        "body": _json_object(str(row["body_json"]), "cross-store binding"),
+    }
+    _require(
+        _identity_of(record) == str(row["binding_identity"]),
+        f"cross-store binding for stage ordinal {stage_ordinal} does not describe its own body",
+    )
+    record["binding_identity"] = str(row["binding_identity"])
+    return record
+
+
+# --------------------------------------------------------------------------- #
+# Stage receipts -- the immutable external record published after COMMIT and checkpoint
+# --------------------------------------------------------------------------- #
+def stage_receipt_path(receipt_root: Path, stage: L2Stage) -> Path:
+    """Where one stage's receipt lives: create-once, canonical bytes, never rewritten."""
+    unit = stage.unit_id.replace("/", "_").replace(".", "_")
+    return receipt_root / f"stage-{stage.ordinal:03d}-{stage.stage_id}-{unit}.json"
+
+
+def read_stage_receipt(path: Path) -> Mapping[str, object]:
+    """One stage receipt read from its canonical bytes with its identity recomputed.
+
+    Raises:
+        ChunkMultipassError: absent, a link, not canonical, wrong contract, or an identity that
+            does not describe the record.
+    """
+    _require(not path.is_symlink(), f"stage receipt {path.name!r} is a symbolic link; refused")
+    _require(path.is_file(), f"no stage receipt exists at {path.name!r}")
+    payload = path.read_bytes()
+    record = _json_object(payload.decode("utf-8"), f"stage receipt {path.name!r}")
+    _require(
+        canonical_json_bytes(record) == payload,
+        f"stage receipt {path.name!r} is not persisted as its canonical bytes; refused",
+    )
+    body = {key: value for key, value in record.items() if key != "receipt_identity"}
+    _require(
+        str(record.get("contract")) == L2_STAGE_RECEIPT_CONTRACT
+        and str(record.get("receipt_identity")) == _identity_of(body),
+        f"stage receipt {path.name!r} carries contract {record.get('contract')!r} or an "
+        "identity that does not describe its body; refused",
+    )
+    return record
+
+
+def _publish_stage_receipt(
+    *,
+    receipt_root: Path,
+    stage_plan: L2StagePlan,
+    stage: L2Stage,
+    unit: AppliedUnit,
+    main_state: _FileState,
+    normalized_wal: int,
+) -> Mapping[str, object]:
+    """Publish one stage's immutable receipt and read it back -- §30 steps 15-16."""
+    body: dict[str, object] = {
+        "contract": L2_STAGE_RECEIPT_CONTRACT,
+        "route": stage_plan.route,
+        "successor_run_id": stage_plan.successor_run_id,
+        "stage_ordinal": stage.ordinal,
+        "stage_id": stage.stage_id,
+        "unit_id": stage.unit_id,
+        "unit_kind": stage.kind,
+        "stage_plan_identity": stage_plan.identity,
+        "unit_identity": unit.unit_identity,
+        "predecessor_unit_identity": unit.predecessor_unit_identity,
+        "connection_state_identity": unit.connection_state_identity,
+        "tool_manifest_identity": unit.tool_manifest_identity,
+        "stage_operation_identity": unit.stage_operation_identity,
+        "rows_written": unit.rows_written,
+        "outcome_witness": dict(unit.outcome_witness),
+        "committed_at_utc": unit.committed_at_utc,
+        "main_file_sha256": main_state.sha256,
+        "main_file_byte_length": main_state.byte_length,
+        "main_file_inode": main_state.inode,
+        "normalized_wal_bytes": normalized_wal,
+        "published_at_utc": utc_now(),
+    }
+    body["receipt_identity"] = _identity_of(body)
+    path = stage_receipt_path(receipt_root, stage)
+    try:
+        write_once_canonical_json(path, body)
+    except ChunkExecutionError as exc:
+        message = f"stage receipt {path.name!r} could not be published: {exc}"
+        raise ChunkMultipassError(message) from exc
+    return read_stage_receipt(path)
+
+
+# --------------------------------------------------------------------------- #
+# File-state snapshots and the mode=ro pre-state probe -- §22, §23
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class _FileState:
+    """One path's lstat class, inode, byte length and (for a regular file) SHA-256."""
+
+    name: str
+    lstat_class: str
+    inode: int | None
+    byte_length: int | None
+    sha256: str | None
+
+    def as_record(self) -> Mapping[str, object]:
+        return {
+            "name": self.name,
+            "lstat_class": self.lstat_class,
+            "inode": self.inode,
+            "byte_length": self.byte_length,
+            "sha256": self.sha256,
+        }
+
+
+def _file_state(path: Path, *, digest: bool = True) -> _FileState:
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return _FileState(path.name, "absent", None, None, None)
+    if stat.S_ISLNK(status.st_mode):
+        return _FileState(path.name, "symlink", status.st_ino, status.st_size, None)
+    if not stat.S_ISREG(status.st_mode):
+        return _FileState(path.name, "other", status.st_ino, status.st_size, None)
+    sha256 = file_sha256(path)[0] if digest and status.st_size else None
+    if digest and not status.st_size:
+        sha256 = hashlib.sha256(b"").hexdigest()
+    return _FileState(path.name, "file", status.st_ino, status.st_size, sha256)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorldSnapshot:
+    """The authoritative pre-state of one world catalog: main, WAL class and SHM (evidence)."""
+
+    main: _FileState
+    wal: _FileState
+    wal_class: str
+    shm: _FileState
+
+    def as_record(self) -> Mapping[str, object]:
+        return {
+            "main": dict(self.main.as_record()),
+            "wal": dict(self.wal.as_record()),
+            "wal_class": self.wal_class,
+            "shm": dict(self.shm.as_record()),
+        }
+
+
+def _world_snapshot(catalog_path: Path) -> _WorldSnapshot:
+    main = _file_state(catalog_path)
+    _require(
+        main.lstat_class == "file",
+        f"the successor world catalog {catalog_path.name!r} is {main.lstat_class}; refused",
+    )
+    wal = _file_state(catalog_path.with_name(catalog_path.name + "-wal"))
+    if wal.lstat_class == "absent":
+        wal_class = _WAL_ABSENT
+    elif wal.lstat_class == "file" and wal.byte_length == 0:
+        wal_class = _WAL_ZERO
+    elif wal.lstat_class == "file":
+        wal_class = _WAL_NONZERO
+    else:
+        _stage_conflict(f"the write-ahead log {wal.name!r} is {wal.lstat_class}")
+    shm = _file_state(catalog_path.with_name(catalog_path.name + "-shm"))
+    return _WorldSnapshot(main=main, wal=wal, wal_class=wal_class, shm=shm)
+
+
+@dataclass(frozen=True, slots=True)
+class _MinimalStagePlanIdentity:
+    """What the mode=ro probe may read: the five identifying fields, nothing else."""
+
+    contract: str
+    successor_run_id: str
+    route: str
+    canonical_world_path: str
+    stage_plan_identity: str
+    snapshot_before: _WorldSnapshot
+    snapshot_after: _WorldSnapshot
+
+
+def _prestate_stage_plan_identity(catalog_path: Path) -> _MinimalStagePlanIdentity:
+    """STEP 1-3 of every existing-world stage: snapshot, mode=ro identity read, snapshot.
+
+    The probe is SQLite-logically read-only through the accepted connect helper's
+    ``read_only=True`` (URI ``mode=ro``): it observes committed WAL content truthfully and can
+    fold nothing into main -- a read-write open would checkpoint a crashed WAL on close before
+    the state was classified, and ``immutable=1`` is blind to the WAL. It may create the two
+    exact SQLite sidecars beside the catalog (a zero-length ``-wal`` and an ``-shm``), which is
+    EXPECTED_MODE_RO_SIDECAR_HOUSEKEEPING and never a conflict; it may not change main, may
+    not create a nonzero WAL and may not touch a preexisting nonzero WAL.
+
+    Raises:
+        ChunkMultipassError: the world has no StagePlan row, or the probe changed authoritative
+            state.
+    """
+    before = _world_snapshot(catalog_path)
+    try:
+        with connect(catalog_path, read_only=True) as probe:
+            row = probe.execute(
+                "SELECT contract, successor_run_id, route, canonical_world_path, "  # noqa: S608
+                f"stage_plan_identity FROM main.{L2_STAGE_PLAN_TABLE} WHERE singleton = 1"
+            ).fetchone()
+    except (sqlite3.Error, DisclosureDriftError) as exc:
+        _stage_conflict(
+            f"the world catalog {catalog_path.name!r} carries no readable successor StagePlan "
+            f"({exc}); an arbitrary, legacy or historical world is never continued by the "
+            "successor"
+        )
+    if row is None:
+        _stage_conflict(
+            f"the world catalog {catalog_path.name!r} carries no successor StagePlan; an "
+            "arbitrary, legacy or historical world is never continued by the successor"
+        )
+    after = _world_snapshot(catalog_path)
+    _require_probe_preserved(before, after)
+    return _MinimalStagePlanIdentity(
+        contract=str(row["contract"]),
+        successor_run_id=str(row["successor_run_id"]),
+        route=str(row["route"]),
+        canonical_world_path=str(row["canonical_world_path"]),
+        stage_plan_identity=str(row["stage_plan_identity"]),
+        snapshot_before=before,
+        snapshot_after=after,
+    )
+
+
+def _require_probe_preserved(before: _WorldSnapshot, after: _WorldSnapshot) -> None:
+    """The exact §22 STEP-3 predicate over the two snapshots around a mode=ro probe."""
+    main_same = after.main.lstat_class == "file" and (
+        before.main.inode,
+        before.main.byte_length,
+        before.main.sha256,
+    ) == (after.main.inode, after.main.byte_length, after.main.sha256)
+    if not main_same:
+        message = (
+            "the mode=ro pre-state probe changed the world's main file (inode, length or "
+            "SHA-256 moved); STOP -- the pre-state mechanism itself is compromised"
+        )
+        raise ChunkMultipassError(message)
+    if before.wal_class == _WAL_NONZERO:
+        preserved = after.wal.lstat_class == "file" and (
+            before.wal.inode,
+            before.wal.byte_length,
+            before.wal.sha256,
+        ) == (after.wal.inode, after.wal.byte_length, after.wal.sha256)
+        if not preserved:
+            message = (
+                "the mode=ro pre-state probe changed a preexisting nonzero write-ahead log; "
+                "STOP -- committed evidence may have been folded before classification"
+            )
+            raise ChunkMultipassError(message)
+    elif before.wal_class == _WAL_ZERO:
+        _require(
+            after.wal_class in {_WAL_ZERO, _WAL_ABSENT},
+            "the mode=ro pre-state probe turned a zero-length write-ahead log into a nonzero one",
+        )
+    else:
+        _require(
+            after.wal_class in {_WAL_ABSENT, _WAL_ZERO},
+            "the mode=ro pre-state probe created a nonzero write-ahead log; refused",
+        )
+
+
+def _normalized_wal_class(snapshot: _WorldSnapshot) -> int:
+    """``WAL_ABSENT == WAL_ZERO == 0`` at a clean boundary; a nonzero WAL is its length."""
+    if snapshot.wal_class == _WAL_NONZERO:
+        return int(snapshot.wal.byte_length or 0)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# The bounded world session -- §22 STEP 4-6 and §35, one per stage
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class _WorldSession:
+    """One boundedly reopened world: catalog, connection, state and the authenticated plan."""
+
+    world: WorkingCatalog
+    connection: sqlite3.Connection
+    connection_state: SuccessorConnectionState
+    stage_plan: L2StagePlan
+    prestate: _MinimalStagePlanIdentity
+
+
+def _read_stored_stage_plan(connection: sqlite3.Connection) -> L2StagePlan:
+    row = connection.execute(
+        f"SELECT * FROM main.{L2_STAGE_PLAN_TABLE} WHERE singleton = 1"  # noqa: S608
+    ).fetchone()
+    if row is None:
+        _stage_conflict("the world carries no successor StagePlan row")
+    plan = L2StagePlan.from_record(_json_object(str(row["body_json"]), "StagePlan body"))
+    _require(
+        plan.identity == str(row["stage_plan_identity"])
+        and plan.route == str(row["route"])
+        and plan.successor_run_id == str(row["successor_run_id"])
+        and plan.canonical_world_path == str(row["canonical_world_path"])
+        and str(row["contract"]) == L2_STAGE_PLAN_CONTRACT,
+        "the stored StagePlan row's identifying columns do not describe its own body; refused",
+    )
+    return plan
+
+
+@contextmanager
+def _successor_world_session(
+    *,
+    request: SuccessorFinalRequest,
+    expected: L2StagePlan,
+    proof: _SuccessorRouteProof,
+) -> Iterator[_WorldSession]:
+    """STEP 0 through STEP 6 of §22 for an existing canonical world, then the stage.
+
+    Route gate (the live proof) first; then the file snapshot, the mode=ro identity read and
+    the post-probe snapshot; then the accepted attach-existing writer reopen; then §21
+    connection-state reconstruction; then the complete in-world StagePlan re-read and held to
+    the minimal identity, to the expected invocation and to the runtime tool identity. Only a
+    session that reached the end of that sequence is handed to a stage.
+    """
+    proof.require_live(expected.route)
+    world_directory = Path(request.world_directory)
+    _require(
+        not world_directory.is_symlink() and world_directory.is_dir(),
+        f"the canonical successor world {world_directory.name!r} is not a regular directory",
+    )
+    catalog_path = world_directory / WORKING_CATALOG_FILENAME
+    prestate = _prestate_stage_plan_identity(catalog_path)
+    _require(
+        prestate.contract == L2_STAGE_PLAN_CONTRACT
+        and prestate.route == expected.route
+        and prestate.successor_run_id == expected.successor_run_id
+        and prestate.canonical_world_path == expected.canonical_world_path
+        and prestate.stage_plan_identity == expected.identity,
+        f"{_STAGE_CONFLICT}: the world's minimal StagePlan identity "
+        f"({prestate.route!r}, {prestate.successor_run_id!r}, "
+        f"{prestate.stage_plan_identity[:16]}...) "
+        f"is not the expected invocation ({expected.route!r}, {expected.successor_run_id!r}, "
+        f"{expected.identity[:16]}...); nothing is repaired or reinitialized",
+    )
+    with WorkingCatalog(
+        Path(request.operational_catalog),
+        world_directory,
+        cache_bytes=expected.cache_bytes,
+        attach=True,
+    ) as world:
+        connection = world.connection
+        connection_state = _establish_successor_connection_state(connection, expected, proof)
+        stored = _read_stored_stage_plan(connection)
+        if stored.identity != prestate.stage_plan_identity or stored.identity != expected.identity:
+            _stage_conflict(
+                f"the complete in-world StagePlan recomputes to {stored.identity[:16]}... where "
+                f"the mode=ro read saw {prestate.stage_plan_identity[:16]}... and this invocation "
+                f"expects {expected.identity[:16]}..."
+            )
+        yield _WorldSession(
+            world=world,
+            connection=connection,
+            connection_state=connection_state,
+            stage_plan=stored,
+            prestate=prestate,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# The stage context -- what every stage function is handed
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class _StageContext:
+    """Every authenticated input a successor stage may consume, resolved once per process."""
+
+    request: SuccessorFinalRequest
+    proof: _SuccessorRouteProof
+    route: str
+    plan: ChunkPlan
+    schedule: MergeSchedule
+    intermediates: tuple[IntermediateInput, ...]
+    counter_sources: tuple[PlanWitnessSource, ...]
+    counter_source_identities: tuple[str, ...]
+    repository: RepositoryIdentity
+    contract: ExecutionContract
+    state: _AcceptedPlanState
+    seed_catalog_sha256: str
+    seed_catalog_bytes: int
+    requirements: MultipassStorageRequirements
+    binding: SqliteTempBinding
+    stage_plan: L2StagePlan
+    world_directory: Path
+    receipt_root: Path
+
+    @property
+    def catalog_path(self) -> Path:
+        return self.world_directory / WORKING_CATALOG_FILENAME
+
+    @property
+    def stages(self) -> tuple[L2Stage, ...]:
+        return self.stage_plan.stages
+
+    def stage_by_id(self, stage_id: str) -> L2Stage:
+        for stage in self.stages:
+            if stage.stage_id == stage_id:
+                return stage
+        message = f"stage {stage_id!r} is not in this StagePlan's graph"
+        raise ChunkMultipassError(message)
+
+
+def _witness_of(units: Sequence[AppliedUnit], stage_id: str) -> Mapping[str, object]:
+    for unit in units:
+        if unit.stage_id == stage_id:
+            return unit.outcome_witness
+    _stage_conflict(f"stage {stage_id!r} has no committed applied unit to read from")
+
+
+def _reduced_run_from_witness(witness: Mapping[str, object]) -> _ReducedRun:
+    return _ReducedRun(
+        parser_run_id=str(witness["parser_run_id"]),
+        parser_id=str(witness["parser_id"]),
+        parser_version=str(witness["parser_version"]),
+        outcome=str(witness["outcome"]),
+        parsed=_stored_int(witness["parsed"], "parsed"),
+        quarantined=_stored_int(witness["quarantined"], "quarantined"),
+        parser_state=str(witness["parser_state"]),
+        duplicate_identities=_stored_strings(
+            witness["duplicate_identities"], "duplicate_identities"
+        ),
+    )
+
+
+def _count(connection: sqlite3.Connection, table: str, *, schema: str = "main") -> int:
+    row = connection.execute(f"SELECT COUNT(*) AS n FROM {schema}.{table}").fetchone()  # noqa: S608
+    return int(row["n"])
+
+
+def _require_not_derived(units: Sequence[AppliedUnit], stage: L2Stage) -> None:
+    """The successor's second-derivation guard: applied-unit state, same refusal text."""
+    if any(unit.stage_id == stage.stage_id for unit in units):
+        message = (
+            f"successor stage {stage.stage_id!r} ({stage.kind}) was {_ALREADY_DERIVED}'s world -- "
+            "its applied unit is committed -- and a second derivation is refused rather than "
+            "re-derived"
+        )
+        raise ChunkMultipassError(message)
+
+
+# --------------------------------------------------------------------------- #
+# Same-database stage semantics -- each returns (rows_written, outcome witness)
+# --------------------------------------------------------------------------- #
+def _stage_capture_and_drop_indexes(
+    connection: sqlite3.Connection, ctx: _StageContext
+) -> tuple[int, Mapping[str, object]]:
+    """S1: enumerate, persist and drop the five deferrable indexes in ONE transaction -- §29."""
+    records = _deferrable_index_records(connection)
+    expected = cast(
+        "list[Mapping[str, object]]", ctx.stage_plan.body["expected_deferred_index_set"]
+    )
+    observed = [
+        {"ordinal": ordinal, "name": name, "table": table, "sql": sql}
+        for ordinal, name, table, sql in records
+    ]
+    _require(
+        len(records) == len(EXPECTED_DEFERRED_INDEX_NAMES)
+        and tuple(name for _o, name, _t, _s in records) == EXPECTED_DEFERRED_INDEX_NAMES,
+        f"the world declares {[name for _o, name, _t, _s in records]} deferrable indexes where "
+        f"exactly {list(EXPECTED_DEFERRED_INDEX_NAMES)} are required",
+    )
+    _require(
+        [dict(item) for item in expected] == observed,
+        "the world's deferrable index set is not the set the StagePlan bound; refused",
+    )
+    set_identity = _identity_of({"contract": L2_DEFERRED_INDEX_SET_CONTRACT, "indexes": observed})
+    _require(
+        set_identity == str(ctx.stage_plan.body["expected_deferred_index_set_identity"]),
+        "the deferred-index set identity does not equal the StagePlan's expected identity",
+    )
+    for ordinal, name, table, sql in records:
+        connection.execute(
+            f"INSERT INTO main.{L2_DEFERRED_INDEXES_TABLE} "  # noqa: S608
+            "(ordinal, name, table_name, create_sql, set_identity) VALUES (?, ?, ?, ?, ?)",
+            (ordinal, name, table, sql, set_identity),
+        )
+    for _ordinal, name, _table, _sql in records:
+        connection.execute(f"DROP INDEX main.{name}")
+    remaining = {
+        str(row["name"])
+        for row in connection.execute(
+            "SELECT name FROM main.sqlite_master WHERE type = 'index' AND sql IS NOT NULL"
+        )
+        if str(row["name"]) in EXPECTED_DEFERRED_INDEX_NAMES
+    }
+    _require(not remaining, f"deferred indexes {sorted(remaining)} survived the DROP; refused")
+    return len(records), {
+        "deferred_index_count": len(records),
+        "deferred_index_names": [name for _o, name, _t, _s in records],
+        "deferred_index_set_identity": set_identity,
+    }
+
+
+def _stage_reduced_parser_run(
+    connection: sqlite3.Connection, aliases: Sequence[str], ctx: _StageContext
+) -> tuple[int, Mapping[str, object]]:
+    """S2: the accepted reduced parser-run row, under containment, witnessed durably."""
+    with write_containment(connection):
+        reduced = _reduced_parser_run(connection, aliases, contract=ctx.contract)
+    return 1, {
+        "parser_run_id": reduced.parser_run_id,
+        "parser_id": reduced.parser_id,
+        "parser_version": reduced.parser_version,
+        "outcome": reduced.outcome,
+        "parsed": reduced.parsed,
+        "quarantined": reduced.quarantined,
+        "parser_state": reduced.parser_state,
+        "duplicate_identities": list(reduced.duplicate_identities),
+        "row_count": _count(connection, "census_parser_runs"),
+    }
+
+
+def _stage_table_load(
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    ctx: _StageContext,
+    stage: L2Stage,
+    units: Sequence[AppliedUnit],
+) -> tuple[int, Mapping[str, object]]:
+    """S3..S10: one table's accepted key-sorted load or first/last reduction, under containment."""
+    table = str(stage.table)
+    with write_containment(connection):
+        if _MERGE_STRATEGY[table] == "keyed_first_last":
+            _keyed_first_last_load(connection, table, aliases)
+        else:
+            _sorted_bulk_load(connection, table, aliases)
+        if table == "census_parsed_records":
+            reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+            _apply_duplicate_identities(connection, reduced)
+    count = _count(connection, table)
+    return count, {"table": table, "row_count": count}
+
+
+def _stage_witness_rank(
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    units: Sequence[AppliedUnit],
+    stage: L2Stage,
+) -> tuple[int, Mapping[str, object]]:
+    """S11: the level-2 witness ranking, persisted -- the same window function, durable."""
+    _require_not_derived(units, stage)
+    _require(
+        _count(connection, L2_WITNESS_RANK_TABLE) == 0,
+        f"{L2_WITNESS_RANK_TABLE} is not empty before S11; refused rather than appended to",
+    )
+    union = _union_all(
+        aliases,
+        "census_accessions",
+        "accession_plain, source_observation_id, parsed_record_id, first_observed_at_utc",
+        extra=" AS chunk_ordinal",
+    )
+    connection.execute(
+        f"INSERT INTO main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
+        "(accession_plain, source_observation_id, parsed_record_id, first_observed_at_utc, "
+        "chunk_ordinal, witness_rank, witnesses) "
+        "SELECT accession_plain, source_observation_id, parsed_record_id, first_observed_at_utc, "
+        "chunk_ordinal, "
+        "ROW_NUMBER() OVER (PARTITION BY accession_plain ORDER BY chunk_ordinal) AS witness_rank, "
+        "COUNT(*) OVER (PARTITION BY accession_plain) AS witnesses "
+        f"FROM ({union})"
+    )
+    count = _count(connection, L2_WITNESS_RANK_TABLE)
+    contested = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
+        "WHERE witness_rank = 1 AND witnesses > 1"
+    ).fetchone()
+    return count, {"row_count": count, "contested": int(contested["n"])}
+
+
+def _stage_observation_corrections(
+    connection: sqlite3.Connection, units: Sequence[AppliedUnit], stage: L2Stage
+) -> tuple[int, Mapping[str, object]]:
+    """S12: the additive global loser upgrade, persisted -- the accepted statements, durable.
+
+    The two ``INSERT ... SELECT`` shapes of :func:`stage_first_witness_corrections` over the
+    persisted ranking, with the accepted rendering functions reached as the deterministic SQL
+    user functions §21 re-registered. No Python statement runs per accession or per rival.
+    """
+    _require_not_derived(units, stage)
+    _require(
+        _count(connection, L2_CORRECTIONS_TABLE) == 0,
+        f"{L2_CORRECTIONS_TABLE} is not empty before S12; refused rather than appended to",
+    )
+    orphaned_winners = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
+        "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
+    ).fetchone()
+    _require(
+        int(orphaned_winners["n"]) == 0,
+        "a contested accession has no loaded canonical row between load and correction; the "
+        "consolidation is refused rather than corrected against a row that is not there",
+    )
+    orphaned_rivals = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
+        "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
+    ).fetchone()
+    _require(
+        int(orphaned_rivals["n"]) == 0,
+        "a rival witness's parsed record is absent at correction time; the consolidation is "
+        "refused rather than materialized from nothing",
+    )
+    connection.execute(
+        f"INSERT INTO main.{L2_CORRECTIONS_TABLE} "  # noqa: S608
+        f"SELECT {_FUNCTION_STABLE_ID}('accession-observation', a.accession_plain, "
+        "a.source_observation_id, a.parsed_record_id, je.key), "
+        "a.accession_plain, a.source_observation_id, a.parsed_record_id, je.key, je.value, "
+        "a.first_observed_at_utc, 0 "
+        f"FROM main.{L2_WITNESS_RANK_TABLE} AS w "
+        "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
+        f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
+        "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
+        "ELSE printf('%010d', a.registrant_cik_numeric) END, "
+        "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
+        "WHERE w.witness_rank = 1 AND w.witnesses > 1"
+    )
+    connection.execute(
+        f"INSERT INTO main.{L2_CORRECTIONS_TABLE} "  # noqa: S608
+        f"SELECT {_FUNCTION_STABLE_ID}('accession-observation', w.accession_plain, "
+        "w.source_observation_id, w.parsed_record_id, je.key), "
+        "w.accession_plain, w.source_observation_id, w.parsed_record_id, je.key, je.value, "
+        "w.first_observed_at_utc, 0 "
+        f"FROM main.{L2_WITNESS_RANK_TABLE} AS w "
+        "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
+        f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
+        "WHERE w.witness_rank > 1"
+    )
+    summary = connection.execute(
+        f"SELECT (SELECT COUNT(*) FROM main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
+        "WHERE witness_rank = 1 AND witnesses > 1) AS contested, "
+        f"(SELECT COUNT(*) FROM main.{L2_CORRECTIONS_TABLE}) AS staged"
+    ).fetchone()
+    staged = int(summary["staged"])
+    return staged, {
+        "contested": int(summary["contested"]),
+        "rows_staged": staged,
+        "row_count": staged,
+    }
+
+
+def _successor_load_accession_observations(
+    connection: sqlite3.Connection, aliases: Sequence[str]
+) -> None:
+    """S13's load: the accepted single sorted load, reading the PERSISTED corrections."""
+    columns = _columns(connection, "census_accession_observations")
+    projection = ", ".join(columns)
+    parts = [
+        f"SELECT {projection}, {ordinal} AS chunk_ordinal, 0 AS priority "  # noqa: S608
+        f"FROM {alias}.census_accession_observations"
+        for ordinal, alias in enumerate(aliases)
+    ]
+    parts.append(
+        f"SELECT {projection}, 2147483647 AS chunk_ordinal, 1 AS priority "  # noqa: S608
+        f"FROM main.{L2_CORRECTIONS_TABLE}"
+    )
+    union = " UNION ALL ".join(parts)
+    connection.execute(
+        f"INSERT OR IGNORE INTO census_accession_observations ({projection}) "  # noqa: S608
+        f"SELECT {projection} FROM ({union}) "
+        "ORDER BY accession_observation_id, priority, chunk_ordinal"
+    )
+
+
+def _stage_accession_observations(
+    connection: sqlite3.Connection, aliases: Sequence[str]
+) -> tuple[int, Mapping[str, object]]:
+    """S13: the observation load over the intermediates plus the persisted corrections."""
+    with write_containment(connection):
+        _successor_load_accession_observations(connection, aliases)
+    count = _count(connection, "census_accession_observations")
+    return count, {"table": "census_accession_observations", "row_count": count}
+
+
+def _stage_edges_and_conflicts(
+    connection: sqlite3.Connection, ctx: _StageContext
+) -> tuple[int, Mapping[str, object]]:
+    """S14: the two accepted whole-observation derivations, once, under containment."""
+    with write_containment(connection):
+        CensusCatalog._candidate_edges(  # noqa: SLF001 - the accepted derivation
+            connection, ctx.plan.source_observation_id, kind="company_name"
+        )
+        CensusCatalog._candidate_edges(  # noqa: SLF001
+            connection, ctx.plan.source_observation_id, kind="ticker"
+        )
+        CensusCatalog._mark_accession_conflicts(connection)  # noqa: SLF001
+    count = _count(connection, "census_candidate_lineage_edges")
+    return count, {"table": "census_candidate_lineage_edges", "row_count": count}
+
+
+def _stage_parser_state(
+    connection: sqlite3.Connection, ctx: _StageContext, units: Sequence[AppliedUnit]
+) -> tuple[int, Mapping[str, object]]:
+    """S15P: the accepted parser_state update -- production only, the one permitted column."""
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    with write_containment(connection):
+        connection.execute(
+            "UPDATE census_plan_sources SET parser_state = ? WHERE source_instance_id = ?",
+            (reduced.parser_state, ctx.plan.source_instance_id),
+        )
+    row = connection.execute(
+        "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
+        (ctx.plan.source_instance_id,),
+    ).fetchone()
+    observed = "" if row is None else str(row["parser_state"])
+    _require(observed == reduced.parser_state, "the parser_state update did not land; refused")
+    return 1, {"parser_state": observed}
+
+
+def _stage_index_rebuild(
+    connection: sqlite3.Connection, ctx: _StageContext, stage: L2Stage
+) -> tuple[int, Mapping[str, object]]:
+    """S16.k: rebuild exactly one index from its PERSISTED DDL -- never from sqlite_master."""
+    row = connection.execute(
+        "SELECT ordinal, name, table_name, create_sql, set_identity "  # noqa: S608
+        f"FROM main.{L2_DEFERRED_INDEXES_TABLE} WHERE name = ?",
+        (stage.unit_id,),
+    ).fetchone()
+    if row is None:
+        _stage_conflict(f"no persisted DDL exists for deferred index {stage.unit_id!r}")
+    persisted = [
+        {
+            "ordinal": int(item["ordinal"]),
+            "name": str(item["name"]),
+            "table": str(item["table_name"]),
+            "sql": str(item["create_sql"]),
+        }
+        for item in connection.execute(
+            "SELECT ordinal, name, table_name, create_sql "  # noqa: S608
+            f"FROM main.{L2_DEFERRED_INDEXES_TABLE} ORDER BY ordinal"
+        )
+    ]
+    set_identity = _identity_of({"contract": L2_DEFERRED_INDEX_SET_CONTRACT, "indexes": persisted})
+    expected_identity = str(ctx.stage_plan.body["expected_deferred_index_set_identity"])
+    if set_identity != expected_identity or set_identity != str(row["set_identity"]):
+        _stage_conflict(
+            f"the persisted deferred-index set recomputes to {set_identity[:16]}... where the "
+            f"StagePlan bound {expected_identity[:16]}...; a rebuild never executes DDL the "
+            "plan did not seal"
+        )
+    connection.execute(str(row["create_sql"]))
+    stored = connection.execute(
+        "SELECT sql, tbl_name FROM main.sqlite_master WHERE type = 'index' AND name = ?",
+        (stage.unit_id,),
+    ).fetchone()
+    _require(
+        stored is not None
+        and str(stored["sql"]) == str(row["create_sql"])
+        and str(stored["tbl_name"]) == str(row["table_name"]),
+        f"index {stage.unit_id!r} did not rebuild to its exact persisted DDL; refused",
+    )
+    return 1, {
+        "index": stage.unit_id,
+        "table": str(row["table_name"]),
+        "create_sql": str(row["create_sql"]),
+        "deferred_index_set_identity": str(row["set_identity"]),
+    }
+
+
+def _counter_batch(ctx: _StageContext, stage: L2Stage) -> tuple[PlanWitnessSource, ...]:
+    batch = int(cast("int", stage.batch))
+    return ctx.counter_sources[batch * MERGE_FAN_IN : (batch + 1) * MERGE_FAN_IN]
+
+
+def _stage_counter_catalog_batch(
+    connection: sqlite3.Connection, aliases: Sequence[str], ctx: _StageContext, stage: L2Stage
+) -> tuple[int, Mapping[str, object]]:
+    """S17A[n]: every chunk's canonical accession rows for one fan-in batch, persisted."""
+    batch = _counter_batch(ctx, stage)
+    _require(len(aliases) == len(batch), "the catalog batch attachments do not match the batch")
+    rows = 0
+    for alias, item in zip(aliases, batch, strict=True):
+        cursor = connection.execute(
+            f"INSERT INTO main.{L2_PLAN_WITNESS_TABLE} "  # noqa: S608
+            "(accession_plain, parsed_record_id, chunk_ordinal) "
+            "SELECT accession_plain, parsed_record_id, ? "
+            f"FROM {alias}.census_accessions",
+            (item.ordinal,),
+        )
+        rows += int(cursor.rowcount)
+    return rows, {
+        "batch": stage.batch,
+        "chunk_ordinals": [item.ordinal for item in batch],
+        "rows": rows,
+        "row_count": _count(connection, L2_PLAN_WITNESS_TABLE),
+    }
+
+
+def _stage_counter_ledger_batch(
+    connection: sqlite3.Connection, aliases: Sequence[str], ctx: _StageContext, stage: L2Stage
+) -> tuple[int, Mapping[str, object]]:
+    """S17B[n]: every chunk's first-witness ledger for one fan-in batch, persisted."""
+    batch = _counter_batch(ctx, stage)
+    _require(len(aliases) == len(batch), "the ledger batch attachments do not match the batch")
+    rows = 0
+    for alias in aliases:
+        cursor = connection.execute(
+            f"INSERT INTO main.{L2_PLAN_LEDGER_TABLE} "  # noqa: S608
+            "(native_identity, member_ordinal, record_ordinal, delta_materialized) "
+            "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "
+            f"FROM {alias}.chunk_first_witness"
+        )
+        rows += int(cursor.rowcount)
+    return rows, {
+        "batch": stage.batch,
+        "chunk_ordinals": [item.ordinal for item in batch],
+        "rows": rows,
+        "row_count": _count(connection, L2_PLAN_LEDGER_TABLE),
+    }
+
+
+def _stage_counters_finalize(
+    connection: sqlite3.Connection, ctx: _StageContext, units: Sequence[AppliedUnit], stage: L2Stage
+) -> tuple[int, Mapping[str, object]]:
+    """S17C: the four whole-F0 counters over the persisted plan witnesses -- D151-C15 R1.
+
+    The accepted derivation's ranking, orphan checks, two counts and member-delta reduction,
+    each reading the persisted relations by their successor names. The closure keys stay
+    distinct: ``accession_plain`` for the witness ranking, ``native_identity`` for the
+    member-delta reduction.
+    """
+    _require_not_derived(units, stage)
+    _require(
+        _count(connection, L2_PLAN_WITNESS_RANK_TABLE) == 0
+        and _count(connection, L2_MEMBER_DELTA_TABLE) == 0,
+        "the counter relations are not empty before S17C; refused rather than appended to",
+    )
+    expected_batches = -(-len(ctx.counter_sources) // MERGE_FAN_IN)
+    seen = {
+        unit.stage_id
+        for unit in units
+        if unit.unit_kind in {_KIND_COUNTER_CATALOG, _KIND_COUNTER_LEDGER}
+    }
+    _require(
+        len(seen) == 2 * expected_batches,
+        f"S17C requires every counter batch committed; {len(seen)} of {2 * expected_batches} are",
+    )
+    connection.execute(
+        f"INSERT INTO main.{L2_PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
+        "(accession_plain, parsed_record_id, witness_rank, witnesses) "
+        "SELECT accession_plain, parsed_record_id, "
+        "ROW_NUMBER() OVER (PARTITION BY accession_plain ORDER BY chunk_ordinal) AS witness_rank, "
+        "COUNT(*) OVER (PARTITION BY accession_plain) AS witnesses "
+        f"FROM main.{L2_PLAN_WITNESS_TABLE}"
+    )
+    orphaned_winners = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
+        "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
+    ).fetchone()
+    _require(
+        int(orphaned_winners["n"]) == 0,
+        "a contested accession of the plan has no canonical row in the final world; the whole-F0 "
+        "counters are refused rather than derived against a row that is not there",
+    )
+    orphaned_rivals = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
+        "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
+    ).fetchone()
+    _require(
+        int(orphaned_rivals["n"]) == 0,
+        "a chunk's local-first witness has no parsed record in the final world; the whole-F0 "
+        "counters are refused rather than derived from nothing",
+    )
+    contested = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
+        "WHERE witness_rank = 1 AND witnesses > 1"
+    ).fetchone()
+    winner_rows = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
+        f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
+        "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
+        "ELSE printf('%010d', a.registrant_cik_numeric) END, "
+        "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
+        "WHERE w.witness_rank = 1 AND w.witnesses > 1"
+    ).fetchone()
+    rival_rows = connection.execute(
+        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+        "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
+        f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
+        "WHERE w.witness_rank > 1"
+    ).fetchone()
+    connection.execute(
+        f"INSERT INTO main.{L2_MEMBER_DELTA_TABLE} (member_ordinal, delta) "  # noqa: S608
+        "WITH ranked AS ("
+        "  SELECT member_ordinal, delta_materialized,"
+        "    ROW_NUMBER() OVER (PARTITION BY native_identity "
+        "                       ORDER BY member_ordinal, record_ordinal) AS rn"
+        f"  FROM main.{L2_PLAN_LEDGER_TABLE})"
+        "SELECT member_ordinal, SUM(delta_materialized) AS delta FROM ranked "
+        "WHERE rn > 1 GROUP BY member_ordinal"
+    )
+    deltas = connection.execute(
+        "SELECT COUNT(*) AS members, COALESCE(SUM(delta), 0) AS total "  # noqa: S608
+        f"FROM main.{L2_MEMBER_DELTA_TABLE}"
+    ).fetchone()
+    rank_rows = _count(connection, L2_PLAN_WITNESS_RANK_TABLE)
+    return rank_rows, {
+        "first_witness_accessions_corrected": int(contested["n"]),
+        "first_witness_rows_staged": int(winner_rows["n"]) + int(rival_rows["n"]),
+        "evidence_members_corrected": int(deltas["members"]),
+        "evidence_delta": int(deltas["total"]),
+        "row_count": rank_rows,
+        "member_delta_rows": int(deltas["members"]),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Cross-store stages -- §36: never atomic across stores, always convergent
+# --------------------------------------------------------------------------- #
+def _sidecar_is_complete_readonly(path: Path, ctx: _StageContext) -> bool:
+    """Whether a present sidecar holds the finished source row, read through ``mode=ro``.
+
+    A raw read-only handle rather than the accepted class: the class constructor upserts its
+    schema rows and would rewrite bytes of an artifact this classification must preserve.
+    """
+    for suffix in ("-wal", "-shm"):
+        if os.path.lexists(path.with_name(path.name + suffix)):
+            return False
+    try:
+        reader = sqlite3.connect(
+            f"{path.absolute().as_uri()}?mode=ro", uri=True, isolation_level=None
+        )
+    except sqlite3.Error:
+        return False
+    try:
+        reader.row_factory = sqlite3.Row
+        try:
+            row = reader.execute(
+                "SELECT members, completeness_digest FROM compact_source_evidence "
+                "WHERE source_observation_id = ?",
+                (ctx.plan.source_observation_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+    finally:
+        reader.close()
+    return (
+        row is not None
+        and int(row["members"]) == ctx.plan.total_members
+        and bool(row["completeness_digest"])
+    )
+
+
+def _prepare_sidecar(ctx: _StageContext) -> Mapping[str, object]:
+    """S18's out-of-catalog half: build or authenticate the sidecar, never overwrite one."""
+    path = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
+    state = _file_state(path, digest=False)
+    if state.lstat_class == "absent":
+        completeness, manifest_digest, totals, _level_two_evidence = _merge_sidecar(
+            sidecar_path=path,
+            inputs=cast("Sequence[ChunkInput]", ctx.intermediates),
+            plan=ctx.plan,
+            source_id=ctx.plan.source_id,
+        )
+    elif state.lstat_class == "file" and _sidecar_is_complete_readonly(path, ctx):
+        reopened = CompactEvidenceSidecar(path)
+        try:
+            evidence = reopened.source_evidence(ctx.plan.source_observation_id)
+            manifest_digest = reopened.member_manifest_digest(ctx.plan.source_observation_id)
+        finally:
+            reopened.close()
+        _require(evidence is not None, "the sidecar carries no source evidence row; refused")
+        assert evidence is not None  # noqa: S101 - narrowed by the refusal above
+        completeness = str(evidence["completeness_digest"])
+        totals = {
+            "members": int(cast("int", evidence["members"])),
+            "records": int(cast("int", evidence["records"])),
+            "omitted": int(cast("int", evidence["omitted_field_observations"])),
+            "materialized": int(cast("int", evidence["materialized_field_observations"])),
+        }
+    else:
+        _stage_conflict(
+            f"the sidecar {path.name!r} is present but is {state.lstat_class} or incomplete; a "
+            "partial or conflicting sidecar is preserved exactly as it is and never rebuilt"
+        )
+    reopened = CompactEvidenceSidecar(path)
+    try:
+        identity = reopened.identity()
+    finally:
+        reopened.close()
+    for suffix in ("-wal", "-shm"):
+        _require(
+            not os.path.lexists(path.with_name(path.name + suffix)),
+            f"the sidecar left a {suffix} beside it after close; refused",
+        )
+    sha256, length = file_sha256(path)
+    _fsync_path(path)
+    return {
+        "completeness_digest": completeness,
+        "member_manifest_digest": manifest_digest,
+        "totals": dict(totals),
+        "sidecar_identity": identity,
+        "sidecar_sha256": sha256,
+        "sidecar_byte_length": length,
+    }
+
+
+def _fsync_path(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _derived_outcome(ctx: _StageContext, units: Sequence[AppliedUnit]) -> SingleSourceOutcome:
+    """The accepted F0 outcome re-derived from the committed S2 and S18 witnesses."""
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    sidecar = _witness_of(units, _STAGE_SIDECAR)
+    totals = cast("Mapping[str, object]", sidecar["totals"])
+    return derived_f0_outcome(
+        plan=ctx.plan,
+        state=ctx.state,
+        reduced=reduced,
+        members=_stored_int(totals["members"], "members"),
+        records=_stored_int(totals["records"], "records"),
+        omitted=_stored_int(totals["omitted"], "omitted"),
+        materialized=_stored_int(totals["materialized"], "materialized"),
+        completeness_digest=str(sidecar["completeness_digest"]),
+    )
+
+
+def _require_bound_plan_state(ctx: _StageContext) -> None:
+    """The accepted plan state read now equals the one the StagePlan sealed."""
+    policies = cast("Mapping[str, object]", ctx.stage_plan.body["semantic_policy_identities"])
+    bound = cast("Mapping[str, object]", policies["accepted_plan_state"])
+    observed = {
+        "plan_position": ctx.state.plan_position,
+        "plan_source_count": ctx.state.plan_source_count,
+        "parser_state_before": ctx.state.parser_state_before,
+        "disposition": ctx.state.disposition,
+        "plan_fingerprint": ctx.state.plan_fingerprint,
+        "observation_id": ctx.state.observation_id,
+        "artifact_sha256": ctx.state.artifact_sha256,
+        "artifact_byte_length": ctx.state.artifact_byte_length,
+    }
+    if dict(bound) != observed:
+        _stage_conflict("the accepted plan state moved since the StagePlan was sealed")
+
+
+def _stage_outcome(
+    ctx: _StageContext, units: Sequence[AppliedUnit]
+) -> tuple[int, Mapping[str, object]]:
+    """S19: the accepted D140-R12 gate over the derived outcome; nothing below it on refusal."""
+    _require_bound_plan_state(ctx)
+    outcome = _derived_outcome(ctx, units)
+    require_f0_success(outcome)
+    return 0, {
+        "disposition": outcome.outcome.disposition,
+        "parser_run_id": outcome.outcome.parser_run_id,
+        "parser_state_before": outcome.outcome.parser_state_before,
+        "parser_state_after": outcome.outcome.parser_state_after,
+        "parsed_records": outcome.outcome.parsed_records,
+        "quarantined_records": outcome.outcome.quarantined_records,
+        "members": outcome.members,
+        "records": outcome.records,
+        "omitted_field_observations": outcome.omitted_field_observations,
+        "materialized_field_observations": outcome.materialized_field_observations,
+        "completeness_digest": outcome.completeness_digest,
+        "f0_success": True,
+    }
+
+
+def _progress_identity(progress: SourceProgress) -> str:
+    return _identity_of(
+        {
+            "source_instance_id": progress.source_instance_id,
+            "state": progress.state,
+            "parts_committed": progress.parts_committed,
+            "batches_committed": progress.batches_committed,
+        }
+    )
+
+
+def _prepare_mark_parsed(ctx: _StageContext, units: Sequence[AppliedUnit]) -> Mapping[str, object]:
+    """S20P's run-progress half: mark parsed once, or hold an existing mark to the expectation."""
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    ledger = RunProgressLedger(ctx.world_directory / PROGRESS_LEDGER_FILENAME)
+    try:
+        progress = ledger.progress(ctx.plan.source_instance_id)
+        if progress is None:
+            _stage_conflict("the run-progress ledger carries no source row to mark parsed")
+        if progress.state == "in_progress":
+            ledger.mark_parsed(
+                ctx.plan.source_instance_id, parts=ctx.plan.total_members, batches=reduced.parsed
+            )
+        elif progress.state != "parsed" or (
+            progress.parts_committed,
+            progress.batches_committed,
+        ) != (
+            ctx.plan.total_members,
+            reduced.parsed,
+        ):
+            _stage_conflict(
+                f"the run-progress ledger records state {progress.state!r} "
+                f"({progress.parts_committed}/{progress.batches_committed}) where 'parsed' over "
+                f"{ctx.plan.total_members}/{reduced.parsed} is the only convergent state"
+            )
+        after = ledger.progress(ctx.plan.source_instance_id)
+    finally:
+        ledger.close()
+    _require(after is not None and after.state == "parsed", "mark_parsed did not land; refused")
+    assert after is not None  # noqa: S101 - narrowed above
+    return {
+        "state": after.state,
+        "parts_committed": after.parts_committed,
+        "batches_committed": after.batches_committed,
+        "progress_identity": _progress_identity(after),
+    }
+
+
+def _prepare_reauthentication(ctx: _StageContext) -> Mapping[str, object]:
+    """S21P / S20C's out-of-catalog half: every StagePlan intermediate and selected request."""
+    resolved = _resolve_route_intermediates(ctx.request, ctx.plan, ctx.schedule, ctx.route)
+    descriptors = [_successor_intermediate_descriptor(item) for item in resolved]
+    bound = [dict(item) for item in ctx.stage_plan.intermediates]
+    _require(
+        len(descriptors)
+        == _stored_int(ctx.stage_plan.body["input_group_count"], "input_group_count"),
+        f"{len(descriptors)} intermediates resolved where the StagePlan enumerates "
+        f"{ctx.stage_plan.body['input_group_count']}",
+    )
+    if [dict(item) for item in descriptors] != bound:
+        _stage_conflict(
+            "a StagePlan-enumerated intermediate or its selected request changed after the "
+            "merge: the re-derived descriptors differ from the sealed ones, and no checkpoint or "
+            "result is published over changed inputs"
+        )
+    return {
+        "input_group_count": len(descriptors),
+        "descriptor_identity": _identity_of({"intermediates": descriptors}),
+        "receipt_document_sha256": [str(item["receipt_document_sha256"]) for item in descriptors],
+        "request_sha256": [
+            str(cast("Mapping[str, object]", item["group_request_provenance"])["sha256"])
+            for item in descriptors
+        ],
+    }
+
+
+def _phase_checkpoint(ctx: _StageContext, units: Sequence[AppliedUnit]) -> PhaseCheckpoint:
+    outcome = _derived_outcome(ctx, units)
+    initialize = _witness_of(units, _STAGE_INITIALIZE)
+    started_at_utc = min(item.receipt.earliest_input_started_at_utc for item in ctx.intermediates)
+    return PhaseCheckpoint(
+        contract=PHASE_RESTART_CONTRACT,
+        phase=PHASE_F0,
+        status=PHASE_STATUS_COMPLETE,
+        run_id=ctx.request.run_id,
+        source_instance_id=ctx.plan.source_instance_id,
+        execution_identity=phase_execution_identity(
+            repository=ctx.repository, batch_size=ctx.contract.batch_size
+        ),
+        repository_head_sha=ctx.repository.head_sha,
+        repository_tree_sha=ctx.repository.tree_sha,
+        catalog_source_sha256=ctx.contract.catalog_source_sha256,
+        migration_head=ctx.contract.migration_head,
+        plan_fingerprint=ctx.state.plan_fingerprint,
+        completed_at_utc=utc_now(),
+        pid=os.getpid(),
+        rss_peak_bytes_at_start=None,
+        rss_peak_bytes_at_terminal=process_peak_resident_bytes(),
+        payload=dict(
+            derived_f0_payload(
+                outcome=outcome,
+                state=ctx.state,
+                plan=ctx.plan,
+                started_at_utc=started_at_utc,
+                catalog_source_sha256=ctx.contract.catalog_source_sha256,
+                work_root_free_bytes_before=_stored_int(
+                    initialize["free_before_bytes"], "free_before_bytes"
+                ),
+                capacity_observations=ctx.request.capacity_observations,
+            )
+        ),
+    )
+
+
+def _checkpoint_core(checkpoint: PhaseCheckpoint) -> Mapping[str, object]:
+    """The deterministic core of a phase checkpoint -- everything but the process facts."""
+    record = dict(checkpoint.as_record())
+    for key in ("completed_at_utc", "pid", "rss_peak_bytes_at_start", "rss_peak_bytes_at_terminal"):
+        record.pop(key, None)
+    return record
+
+
+def _prepare_f0_checkpoint(
+    ctx: _StageContext, units: Sequence[AppliedUnit]
+) -> Mapping[str, object]:
+    """S22P's run-progress half: write the F0 phase checkpoint once, or hold the existing one."""
+    expected = _phase_checkpoint(ctx, units)
+    ledger = RunProgressLedger(ctx.world_directory / PROGRESS_LEDGER_FILENAME)
+    try:
+        existing = read_phase_checkpoint(ledger, PHASE_F0)
+        if existing is None:
+            write_phase_checkpoint(ledger, expected)
+            existing = read_phase_checkpoint(ledger, PHASE_F0)
+    finally:
+        ledger.close()
+    _require(existing is not None, "the F0 phase checkpoint did not land; refused")
+    assert existing is not None  # noqa: S101 - narrowed above
+    if dict(_checkpoint_core(existing)) != dict(_checkpoint_core(expected)):
+        _stage_conflict(
+            "the run-progress ledger already carries an F0 phase checkpoint that is not the one "
+            "this world derives; a checkpoint is never overwritten and never continued under"
+        )
+    return {
+        "execution_identity": existing.execution_identity,
+        "checkpoint_identity": _identity_of(dict(existing.as_record())),
+        "core_identity": _identity_of(dict(_checkpoint_core(existing))),
+        "completed_at_utc": existing.completed_at_utc,
+        "pid": existing.pid,
+    }
+
+
+def _plan_counters(units: Sequence[AppliedUnit]) -> tuple[int, int, int, int]:
+    witness = _witness_of(units, _STAGE_COUNTERS_FINALIZE)
+    return (
+        _stored_int(
+            witness["first_witness_accessions_corrected"], "first_witness_accessions_corrected"
+        ),
+        _stored_int(witness["first_witness_rows_staged"], "first_witness_rows_staged"),
+        _stored_int(witness["evidence_members_corrected"], "evidence_members_corrected"),
+        _stored_int(witness["evidence_delta"], "evidence_delta"),
+    )
+
+
+def _result_ready_core(
+    ctx: _StageContext, units: Sequence[AppliedUnit], connection: sqlite3.Connection
+) -> Mapping[str, object]:
+    """The semantic core the RESULT_READY binding seals: what the final record will say."""
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    sidecar = _witness_of(units, _STAGE_SIDECAR)
+    counters = _plan_counters(units)
+    outcome = _witness_of(units, _STAGE_OUTCOME)
+    counts = table_row_counts(connection)
+    return {
+        "stage_plan_identity": ctx.stage_plan.identity,
+        "parser_run_id": reduced.parser_run_id,
+        "run_outcome": reduced.outcome,
+        "parser_state_after": reduced.parser_state,
+        "parsed_records": reduced.parsed,
+        "quarantined_records": reduced.quarantined,
+        "totals": dict(cast("Mapping[str, object]", sidecar["totals"])),
+        "completeness_digest": str(sidecar["completeness_digest"]),
+        "member_manifest_digest": str(sidecar["member_manifest_digest"]),
+        "first_witness_accessions_corrected": counters[0],
+        "first_witness_rows_staged": counters[1],
+        "evidence_members_corrected": counters[2],
+        "evidence_delta": counters[3],
+        "table_row_counts": dict(sorted(counts.items())),
+        "f0_success": bool(outcome["f0_success"]),
+    }
+
+
+def _publish_final_receipt(
+    ctx: _StageContext, units: Sequence[AppliedUnit]
+) -> Mapping[str, object]:
+    """S23P's LAST act: the accepted FinalWorldReceipt, create-once, over the closed world."""
+    core = _witness_of(units, _STAGE_FINAL_RECEIPT)
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    totals = cast("Mapping[str, object]", core["totals"])
+    counts = {
+        str(key): _stored_int(value, str(key))
+        for key, value in cast("Mapping[str, object]", core["table_row_counts"]).items()
+    }
+    manifest = build_artifact_manifest(ctx.world_directory, exclude=(FINAL_WORLD_RECEIPT_FILENAME,))
+    chunk_inputs: list[Mapping[str, object]] = []
+    for item in ctx.intermediates:
+        chunk_inputs.extend(item.receipt.chunk_inputs)
+    receipt = FinalWorldReceipt(
+        contract=FINAL_WORLD_RECEIPT_CONTRACT,
+        consolidation_contract=MULTIPASS_CONSOLIDATION_CONTRACT,
+        plan_digest=ctx.plan.plan_digest,
+        source_instance_id=ctx.plan.source_instance_id,
+        source_observation_id=ctx.plan.source_observation_id,
+        source_sha256=ctx.plan.source_sha256,
+        repository_head_sha=ctx.repository.head_sha,
+        repository_tree_sha=ctx.repository.tree_sha,
+        catalog_source_sha256=ctx.contract.catalog_source_sha256,
+        execution_contract_identity=ctx.contract.contract_identity,
+        chunk_count=ctx.plan.chunk_count,
+        chunk_inputs=tuple(dict(item) for item in chunk_inputs),
+        chunks_unchanged=True,
+        parser_run_id=reduced.parser_run_id,
+        run_outcome=reduced.outcome,
+        parser_state_after=reduced.parser_state,
+        members=_stored_int(totals["members"], "members"),
+        records=_stored_int(totals["records"], "records"),
+        parsed_records=reduced.parsed,
+        quarantined_records=reduced.quarantined,
+        omitted_field_observations=_stored_int(totals["omitted"], "omitted"),
+        materialized_field_observations=_stored_int(totals["materialized"], "materialized"),
+        completeness_digest=str(core["completeness_digest"]),
+        member_manifest_digest=str(core["member_manifest_digest"]),
+        table_row_counts=counts,
+        first_witness_accessions_corrected=_stored_int(
+            core["first_witness_accessions_corrected"], "c"
+        ),
+        first_witness_rows_staged=_stored_int(core["first_witness_rows_staged"], "c"),
+        evidence_members_corrected=_stored_int(core["evidence_members_corrected"], "c"),
+        evidence_delta=_stored_int(core["evidence_delta"], "c"),
+        manifest=manifest,
+        completed_at_utc=utc_now(),
+        status="complete",
+    )
+    path = ctx.world_directory / FINAL_WORLD_RECEIPT_FILENAME
+    # LAST. Nothing is written after this.
+    write_once_json(path, dict(receipt.as_record()))
+    return read_receipt_document(path, contract=FINAL_WORLD_RECEIPT_CONTRACT)
+
+
+def _publish_calibration_result(
+    ctx: _StageContext, units: Sequence[AppliedUnit]
+) -> CalibrationSubsetResult:
+    """S21C's LAST act: the accepted CalibrationSubsetResult, sealed and create-once."""
+    core = _witness_of(units, _STAGE_CALIBRATION_RESULT)
+    initialize = _witness_of(units, _STAGE_INITIALIZE)
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    totals = cast("Mapping[str, object]", core["totals"])
+    counts = {
+        str(key): _stored_int(value, str(key))
+        for key, value in cast("Mapping[str, object]", core["table_row_counts"]).items()
+    }
+    plan = ctx.plan
+    _require(isinstance(plan, CalibrationSubsetPlan), "the calibration result needs a subset plan")
+    subset = cast("CalibrationSubsetPlan", plan)
+    envelope = ctx.proof.envelope
+    _require(envelope is not None, "the calibration result needs the child's envelope")
+    assert envelope is not None  # noqa: S101 - narrowed above
+    manifest = build_artifact_manifest(
+        ctx.world_directory, exclude=(CALIBRATION_SUBSET_RESULT_FILENAME,)
+    )
+    started_at_utc = min(item.receipt.earliest_input_started_at_utc for item in ctx.intermediates)
+    result = CalibrationSubsetResult(
+        contract=CALIBRATION_SUBSET_RESULT_CONTRACT,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        plan_digest=subset.plan_digest,
+        merge_schedule_digest=ctx.schedule.schedule_digest,
+        run_id=ctx.request.run_id,
+        source_instance_id=subset.source_instance_id,
+        source_observation_id=subset.source_observation_id,
+        source_sha256=subset.source_sha256,
+        source_byte_length=subset.source_byte_length,
+        member_order_digest=subset.member_order_digest,
+        selected_member_order_digest=subset.selected_member_order_digest,
+        shard_parent_binding_digest=subset.shard_parent_binding_digest,
+        primary_prefix_members=subset.primary_prefix_members,
+        selected_shard_members=subset.selected_shard_members,
+        excluded_shard_members=subset.excluded_shard_members,
+        selected_members=subset.selected_members,
+        full_total_members=subset.full_total_members,
+        repository_head_sha=ctx.repository.head_sha,
+        repository_tree_sha=ctx.repository.tree_sha,
+        catalog_source_sha256=ctx.contract.catalog_source_sha256,
+        execution_contract_identity=ctx.contract.contract_identity,
+        chunk_count=subset.chunk_count,
+        intermediate_count=len(ctx.intermediates),
+        parser_run_id=reduced.parser_run_id,
+        run_outcome=reduced.outcome,
+        parser_state_after="chunk_local",
+        world_parser_state=str(core["world_parser_state"]),
+        members=_stored_int(totals["members"], "members"),
+        records=_stored_int(totals["records"], "records"),
+        parsed_records=reduced.parsed,
+        quarantined_records=reduced.quarantined,
+        omitted_field_observations=_stored_int(totals["omitted"], "omitted"),
+        materialized_field_observations=_stored_int(totals["materialized"], "materialized"),
+        completeness_digest=str(core["completeness_digest"]),
+        member_manifest_digest=str(core["member_manifest_digest"]),
+        table_row_counts=counts,
+        first_witness_accessions_corrected=_stored_int(
+            core["first_witness_accessions_corrected"], "c"
+        ),
+        first_witness_rows_staged=_stored_int(core["first_witness_rows_staged"], "c"),
+        evidence_members_corrected=_stored_int(core["evidence_members_corrected"], "c"),
+        evidence_delta=_stored_int(core["evidence_delta"], "c"),
+        storage_admission=dict(cast("Mapping[str, object]", initialize["admission"])),
+        admission_event_identity=str(initialize["admission_event_identity"]),
+        envelope_sha256=envelope.sha256,
+        pid=os.getpid(),
+        rss_peak_bytes=process_peak_resident_bytes(),
+        started_at_utc=started_at_utc,
+        completed_at_utc=utc_now(),
+        manifest=manifest,
+        status="complete",
+        result_identity="",
+    )
+    sealed = replace(result, result_identity=result.identity())
+    # LAST. Nothing is written after this.
+    write_once_canonical_json(
+        ctx.world_directory / CALIBRATION_SUBSET_RESULT_FILENAME, dict(sealed.as_record())
+    )
+    return read_calibration_subset_result(ctx.world_directory / CALIBRATION_SUBSET_RESULT_FILENAME)
+
+
+# --------------------------------------------------------------------------- #
+# Stage classification -- §31
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class _Progress:
+    """What the committed evidence says: every applied unit, and what comes next."""
+
+    units: tuple[AppliedUnit, ...]
+    next_stage: L2Stage | None
+    pending: L2Stage | None
+    terminal_complete: bool
+
+
+def _terminal_record_present(ctx: _StageContext, stage: L2Stage) -> bool:
+    if stage.kind == _KIND_FINAL_RECEIPT:
+        return os.path.lexists(ctx.world_directory / FINAL_WORLD_RECEIPT_FILENAME)
+    if stage.kind == _KIND_CALIBRATION_RESULT:
+        return os.path.lexists(ctx.world_directory / CALIBRATION_SUBSET_RESULT_FILENAME)
+    return False
+
+
+def _is_terminal(stage: L2Stage) -> bool:
+    return stage.kind in {_KIND_FINAL_RECEIPT, _KIND_CALIBRATION_RESULT}
+
+
+def _verify_committed_witness(
+    connection: sqlite3.Connection,
+    world: WorkingCatalog,
+    ctx: _StageContext,
+    unit: AppliedUnit,
+    units: Sequence[AppliedUnit],
+) -> None:
+    """§31 H: a committed output witness that no longer describes the world is a conflict."""
+    witness = unit.outcome_witness
+    if unit.unit_kind in {_KIND_TABLE_LOAD, _KIND_OBSERVATION_LOAD, _KIND_EDGES}:
+        table = str(witness["table"])
+        observed = _count(connection, table)
+        if observed != _stored_int(witness["row_count"], "row_count"):
+            _stage_conflict(
+                f"stage {unit.stage_id!r} committed {witness['row_count']} rows in {table!r} and "
+                f"the world now holds {observed}"
+            )
+    elif unit.unit_kind in {_KIND_WITNESS_RANK, _KIND_CORRECTIONS, _KIND_COUNTERS_FINALIZE}:
+        table = {
+            _KIND_WITNESS_RANK: L2_WITNESS_RANK_TABLE,
+            _KIND_CORRECTIONS: L2_CORRECTIONS_TABLE,
+            _KIND_COUNTERS_FINALIZE: L2_PLAN_WITNESS_RANK_TABLE,
+        }[unit.unit_kind]
+        observed = _count(connection, table)
+        if observed != _stored_int(witness["row_count"], "row_count"):
+            _stage_conflict(
+                f"stage {unit.stage_id!r} committed {witness['row_count']} rows in {table!r} and "
+                f"the world now holds {observed}"
+            )
+    elif unit.unit_kind in {_KIND_COUNTER_CATALOG, _KIND_COUNTER_LEDGER}:
+        # A batch appends to a relation later batches append to as well: the relation's count
+        # is held to the SUM of every committed batch of this kind, checked at the latest one.
+        table = {
+            _KIND_COUNTER_CATALOG: L2_PLAN_WITNESS_TABLE,
+            _KIND_COUNTER_LEDGER: L2_PLAN_LEDGER_TABLE,
+        }[unit.unit_kind]
+        same_kind = [item for item in units if item.unit_kind == unit.unit_kind]
+        if same_kind and same_kind[-1].stage_ordinal == unit.stage_ordinal:
+            expected = sum(_stored_int(item.outcome_witness["rows"], "rows") for item in same_kind)
+            observed = _count(connection, table)
+            if observed != expected or observed != _stored_int(witness["row_count"], "row_count"):
+                _stage_conflict(
+                    f"the committed counter batches of {unit.stage_id!r} sum to {expected} rows in "
+                    f"{table!r} and the world now holds {observed}"
+                )
+    elif unit.unit_kind == _KIND_CAPTURE_DROP:
+        present = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM main.sqlite_master WHERE type = 'index' AND sql IS NOT NULL"
+            )
+        }
+        rebuilt = {item.unit_id for item in units if item.unit_kind == _KIND_INDEX_REBUILD}
+        expected_absent = set(EXPECTED_DEFERRED_INDEX_NAMES) - rebuilt
+        if expected_absent & present:
+            _stage_conflict(f"dropped indexes {sorted(expected_absent & present)} are present")
+        persisted = _count(connection, L2_DEFERRED_INDEXES_TABLE)
+        if persisted != len(EXPECTED_DEFERRED_INDEX_NAMES):
+            _stage_conflict(f"{persisted} deferred-index rows persisted where 5 are required")
+    elif unit.unit_kind == _KIND_INDEX_REBUILD:
+        stored = connection.execute(
+            "SELECT sql FROM main.sqlite_master WHERE type = 'index' AND name = ?", (unit.unit_id,)
+        ).fetchone()
+        if stored is None or str(stored["sql"]) != str(witness["create_sql"]):
+            _stage_conflict(f"rebuilt index {unit.unit_id!r} is absent or its DDL moved")
+    elif unit.unit_kind == _KIND_MARK_PARSED:
+        progress = world.ledger.progress(ctx.plan.source_instance_id)
+        if (
+            progress is None
+            or progress.state != "parsed"
+            or _progress_identity(progress) != str(witness["progress_identity"])
+        ):
+            _stage_conflict(
+                "a mark_parsed binding exists but the run-progress ledger is not parsed"
+            )
+    elif unit.unit_kind == _KIND_F0_CHECKPOINT:
+        checkpoint = read_phase_checkpoint(world.ledger, PHASE_F0)
+        if checkpoint is None or _identity_of(dict(checkpoint.as_record())) != str(
+            witness["checkpoint_identity"]
+        ):
+            _stage_conflict(
+                "an F0 checkpoint binding exists but the ledger's checkpoint is absent or differs"
+            )
+    elif unit.unit_kind == _KIND_SIDECAR:
+        path = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
+        state = _file_state(path)
+        if state.lstat_class != "file" or state.sha256 != str(witness["sidecar_sha256"]):
+            _stage_conflict("the bound sidecar is absent or its bytes moved since its binding")
+    if unit.unit_kind in {
+        _KIND_SIDECAR,
+        _KIND_MARK_PARSED,
+        _KIND_REAUTHENTICATE,
+        _KIND_F0_CHECKPOINT,
+        _KIND_FINAL_RECEIPT,
+        _KIND_CALIBRATION_RESULT,
+    }:
+        binding = _cross_store_binding(connection, unit.stage_ordinal)
+        if binding is None or str(binding["binding_identity"]) != str(witness["binding_identity"]):
+            _stage_conflict(
+                f"stage {unit.stage_id!r} has no cross-store binding row or a different one"
+            )
+
+
+def _classify(session: _WorldSession, ctx: _StageContext) -> _Progress:
+    """§31 over the committed rows and the published receipts; every conflict is terminal."""
+    stages = ctx.stages
+    units = _applied_units(session.connection)
+    ordinals = [unit.stage_ordinal for unit in units]
+    if ordinals != list(range(len(units))):
+        _stage_conflict(f"applied units are not contiguous from ordinal 0: {ordinals}")
+    for unit in units:
+        stage = stages[unit.stage_ordinal] if unit.stage_ordinal < len(stages) else None
+        if stage is None or (stage.stage_id, stage.unit_id, stage.kind) != (
+            unit.stage_id,
+            unit.unit_id,
+            unit.unit_kind,
+        ):
+            _stage_conflict(
+                f"applied unit ordinal {unit.stage_ordinal} is not the StagePlan's stage"
+            )
+        if (
+            unit.stage_plan_identity != session.stage_plan.identity
+            or unit.stage_operation_identity != _stage_operation_identity(session.stage_plan, stage)
+            or unit.tool_manifest_identity != session.stage_plan.tool_manifest_identity
+        ):
+            _stage_conflict(
+                f"applied unit {unit.stage_id!r} binds another StagePlan, semantic operation or "
+                "tool identity than this invocation"
+            )
+        expected_predecessor = (
+            units[unit.stage_ordinal - 1].unit_identity
+            if unit.stage_ordinal
+            else session.stage_plan.identity
+        )
+        if unit.predecessor_unit_identity != expected_predecessor:
+            _stage_conflict(
+                f"applied unit {unit.stage_id!r} binds a predecessor that is not its predecessor"
+            )
+        _verify_committed_witness(session.connection, session.world, ctx, unit, units)
+    # Receipts: every applied unit but possibly the last carries one; none exists beyond them.
+    pending: L2Stage | None = None
+    for index, stage in enumerate(stages):
+        if _is_terminal(stage):
+            present = _terminal_record_present(ctx, stage)
+            applied = index < len(units)
+            if present and not applied:
+                _stage_conflict(
+                    f"the terminal record for {stage.stage_id!r} exists with no RESULT_READY unit"
+                )
+            if applied and not present:
+                pending = stage
+            continue
+        path = stage_receipt_path(ctx.receipt_root, stage)
+        exists = os.path.lexists(path)
+        if index < len(units):
+            if not exists:
+                if index == len(units) - 1:
+                    pending = stage
+                else:
+                    _stage_conflict(
+                        f"stage {stage.stage_id!r} is applied, a later stage is applied too, "
+                        "and its receipt is absent"
+                    )
+                continue
+            receipt = read_stage_receipt(path)
+            unit = units[index]
+            if (
+                str(receipt["unit_identity"]) != unit.unit_identity
+                or str(receipt["stage_plan_identity"]) != session.stage_plan.identity
+                or str(receipt["stage_operation_identity"]) != unit.stage_operation_identity
+            ):
+                _stage_conflict(
+                    f"stage {stage.stage_id!r}'s receipt does not describe its applied unit"
+                )
+        elif exists:
+            _stage_conflict(
+                f"a receipt exists for {stage.stage_id!r} with no applied unit: a receipt never "
+                "outruns committed data"
+            )
+    next_stage = stages[len(units)] if len(units) < len(stages) else None
+    return _Progress(
+        units=units,
+        next_stage=next_stage,
+        pending=pending,
+        terminal_complete=next_stage is None and pending is None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The engine -- §30 step order, §28 initialization, §35 bounded reopen per stage
+# --------------------------------------------------------------------------- #
+def _attach_for_stage(
+    connection: sqlite3.Connection, ctx: _StageContext, stage: L2Stage
+) -> tuple[str, ...]:
+    """ATTACH the stage's immutable inputs outside any transaction, at most nine."""
+    if stage.attachments == _ATTACH_NONE:
+        return ()
+    if stage.attachments == _ATTACH_INTERMEDIATES:
+        paths = [item.catalog_path for item in ctx.intermediates]
+        prefix = "k"
+    elif stage.attachments == _ATTACH_CATALOG_BATCH:
+        paths = [item.catalog_path for item in _counter_batch(ctx, stage)]
+        prefix = "pc"
+    elif stage.attachments == _ATTACH_LEDGER_BATCH:
+        paths = [item.witness_path for item in _counter_batch(ctx, stage)]
+        prefix = "pw"
+    else:
+        message = f"stage {stage.stage_id!r} names attachment class {stage.attachments!r}"
+        raise ChunkMultipassError(message)
+    _require(
+        len(paths) <= _MAX_STAGE_ATTACHMENTS,
+        f"stage {stage.stage_id!r} would attach {len(paths)} databases; the engine bounds a "
+        f"stage at {_MAX_STAGE_ATTACHMENTS} and never leaves that to SQLite",
+    )
+    _require(not connection.in_transaction, "ATTACH is issued outside any transaction")
+    return _attach_all(connection, paths, prefix)
+
+
+def _require_no_attachments(connection: sqlite3.Connection) -> None:
+    attached = [
+        str(row["name"])
+        for row in connection.execute("PRAGMA database_list")
+        if str(row["name"]) not in {"main", "temp"}
+    ]
+    _require(not attached, f"{attached} remain attached where none may")
+
+
+def _execute_semantics(
+    session: _WorldSession,
+    ctx: _StageContext,
+    stage: L2Stage,
+    units: Sequence[AppliedUnit],
+    aliases: Sequence[str],
+    prepared: Mapping[str, object] | None,
+) -> tuple[int, Mapping[str, object]]:
+    """The stage's exact semantic writes, inside the open transaction, before the applied row."""
+    connection = session.connection
+    kind = stage.kind
+    if kind == _KIND_CAPTURE_DROP:
+        return _stage_capture_and_drop_indexes(connection, ctx)
+    if kind == _KIND_REDUCED_RUN:
+        return _stage_reduced_parser_run(connection, aliases, ctx)
+    if kind == _KIND_TABLE_LOAD:
+        return _stage_table_load(connection, aliases, ctx, stage, units)
+    if kind == _KIND_WITNESS_RANK:
+        return _stage_witness_rank(connection, aliases, units, stage)
+    if kind == _KIND_CORRECTIONS:
+        return _stage_observation_corrections(connection, units, stage)
+    if kind == _KIND_OBSERVATION_LOAD:
+        return _stage_accession_observations(connection, aliases)
+    if kind == _KIND_EDGES:
+        return _stage_edges_and_conflicts(connection, ctx)
+    if kind == _KIND_PARSER_STATE:
+        return _stage_parser_state(connection, ctx, units)
+    if kind == _KIND_INDEX_REBUILD:
+        return _stage_index_rebuild(connection, ctx, stage)
+    if kind == _KIND_COUNTER_CATALOG:
+        return _stage_counter_catalog_batch(connection, aliases, ctx, stage)
+    if kind == _KIND_COUNTER_LEDGER:
+        return _stage_counter_ledger_batch(connection, aliases, ctx, stage)
+    if kind == _KIND_COUNTERS_FINALIZE:
+        return _stage_counters_finalize(connection, ctx, units, stage)
+    if kind == _KIND_OUTCOME:
+        return _stage_outcome(ctx, units)
+    _require(prepared is not None, f"stage {stage.stage_id!r} needs its cross-store half")
+    assert prepared is not None  # noqa: S101 - narrowed above
+    if kind == _KIND_SIDECAR:
+        identity = _insert_cross_store_binding(
+            connection,
+            stage=stage,
+            kind=_BINDING_SIDECAR,
+            target_name=COMPACT_EVIDENCE_SIDECAR_FILENAME,
+            target_byte_length=_stored_int(prepared["sidecar_byte_length"], "sidecar_byte_length"),
+            target_sha256=str(prepared["sidecar_sha256"]),
+            target_identity=str(prepared["sidecar_identity"]),
+            body=prepared,
+        )
+        return 0, {**dict(prepared), "binding_identity": identity}
+    if kind == _KIND_MARK_PARSED:
+        identity = _insert_cross_store_binding(
+            connection,
+            stage=stage,
+            kind=_BINDING_MARK_PARSED,
+            target_name=PROGRESS_LEDGER_FILENAME,
+            target_byte_length=None,
+            target_sha256=None,
+            target_identity=str(prepared["progress_identity"]),
+            body=prepared,
+        )
+        return 0, {**dict(prepared), "binding_identity": identity}
+    if kind == _KIND_REAUTHENTICATE:
+        identity = _insert_cross_store_binding(
+            connection,
+            stage=stage,
+            kind=_BINDING_REAUTHENTICATION,
+            target_name="intermediates",
+            target_byte_length=None,
+            target_sha256=None,
+            target_identity=str(prepared["descriptor_identity"]),
+            body=prepared,
+        )
+        return 0, {**dict(prepared), "binding_identity": identity}
+    if kind == _KIND_F0_CHECKPOINT:
+        identity = _insert_cross_store_binding(
+            connection,
+            stage=stage,
+            kind=_BINDING_F0_CHECKPOINT,
+            target_name=PROGRESS_LEDGER_FILENAME,
+            target_byte_length=None,
+            target_sha256=None,
+            target_identity=str(prepared["checkpoint_identity"]),
+            body=prepared,
+        )
+        return 0, {**dict(prepared), "binding_identity": identity}
+    if kind in {_KIND_FINAL_RECEIPT, _KIND_CALIBRATION_RESULT}:
+        core = dict(_result_ready_core(ctx, units, connection))
+        if kind == _KIND_CALIBRATION_RESULT:
+            row = connection.execute(
+                "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
+                (ctx.plan.source_instance_id,),
+            ).fetchone()
+            core["world_parser_state"] = "" if row is None else str(row["parser_state"])
+        target = (
+            FINAL_WORLD_RECEIPT_FILENAME
+            if kind == _KIND_FINAL_RECEIPT
+            else CALIBRATION_SUBSET_RESULT_FILENAME
+        )
+        identity = _insert_cross_store_binding(
+            connection,
+            stage=stage,
+            kind=_BINDING_RESULT_READY,
+            target_name=target,
+            target_byte_length=None,
+            target_sha256=None,
+            target_identity=_identity_of(core),
+            body=core,
+        )
+        return 0, {**core, "binding_identity": identity}
+    message = f"stage kind {kind!r} has no executor"
+    raise ChunkMultipassError(message)
+
+
+def _prepare_stage(
+    ctx: _StageContext, stage: L2Stage, units: Sequence[AppliedUnit]
+) -> Mapping[str, object] | None:
+    """The cross-store half of a stage, BEFORE the world is boundedly reopened -- §36."""
+    if stage.kind == _KIND_SIDECAR:
+        return _prepare_sidecar(ctx)
+    if stage.kind == _KIND_MARK_PARSED:
+        return _prepare_mark_parsed(ctx, units)
+    if stage.kind == _KIND_REAUTHENTICATE:
+        return _prepare_reauthentication(ctx)
+    if stage.kind == _KIND_F0_CHECKPOINT:
+        return _prepare_f0_checkpoint(ctx, units)
+    if _is_terminal(stage):
+        return {}
+    return None
+
+
+def _finish_terminal(ctx: _StageContext, stage: L2Stage, units: Sequence[AppliedUnit]) -> None:
+    """Publish the final semantic record LAST, over the closed world -- never before."""
+    if stage.kind == _KIND_FINAL_RECEIPT:
+        _publish_final_receipt(ctx, units)
+    else:
+        _publish_calibration_result(ctx, units)
+
+
+def _seal_stage(
+    session: _WorldSession, ctx: _StageContext, stage: L2Stage, unit: AppliedUnit
+) -> Mapping[str, object] | None:
+    """§30 steps 9-16 after COMMIT: no transaction, no attachment, checkpoint, validate, receipt."""
+    connection = session.connection
+    _require(
+        not connection.in_transaction, "the stage transaction must be committed before sealing"
+    )
+    _require_no_attachments(connection)
+    checkpoint_main_truncate(connection)
+    normalized = normalized_wal_bytes(ctx.catalog_path)
+    units = _applied_units(connection)
+    _require(
+        bool(units) and units[-1].unit_identity == unit.unit_identity,
+        "the applied unit did not read back as the last committed unit; refused",
+    )
+    _verify_committed_witness(connection, session.world, ctx, units[-1], units)
+    main_state = _file_state(ctx.catalog_path)
+    if _is_terminal(stage):
+        return None
+    return _publish_stage_receipt(
+        receipt_root=ctx.receipt_root,
+        stage_plan=session.stage_plan,
+        stage=stage,
+        unit=units[-1],
+        main_state=main_state,
+        normalized_wal=normalized,
+    )
+
+
+def _run_stage(ctx: _StageContext, stage: L2Stage, prior: Sequence[AppliedUnit]) -> None:
+    """One stage, end to end: prepare, reopen, authenticate, attach, write, seal, publish."""
+    prepared = _prepare_stage(ctx, stage, prior)
+    with _successor_world_session(
+        request=ctx.request, expected=ctx.stage_plan, proof=ctx.proof
+    ) as session:
+        progress = _classify(session, ctx)
+        _require(
+            progress.pending is None
+            and progress.next_stage is not None
+            and progress.next_stage.ordinal == stage.ordinal,
+            f"the world's committed evidence no longer names {stage.stage_id!r} as the next stage",
+        )
+        units = progress.units
+        predecessor = units[-1].unit_identity if units else session.stage_plan.identity
+        input_identities = [
+            str(item["manifest_digest"]) for item in session.stage_plan.intermediates
+        ]
+        receipt_identities = [
+            str(item["receipt_document_sha256"]) for item in session.stage_plan.intermediates
+        ]
+        provenance = [
+            str(cast("Mapping[str, object]", item["group_request_provenance"])["sha256"])
+            for item in session.stage_plan.intermediates
+        ]
+        connection = session.connection
+        aliases = _attach_for_stage(connection, ctx, stage)
+        try:
+            with transaction(connection):
+                rows_written, witness = _execute_semantics(
+                    session, ctx, stage, units, aliases, prepared
+                )
+                unit = _insert_applied_unit(
+                    connection,
+                    stage_plan=session.stage_plan,
+                    stage=stage,
+                    predecessor_unit_identity=predecessor,
+                    input_identities=input_identities,
+                    receipt_identities=receipt_identities,
+                    request_provenance_identities=provenance,
+                    connection_state=session.connection_state,
+                    rows_written=rows_written,
+                    outcome_witness=witness,
+                )
+        finally:
+            _detach_all(connection, aliases)
+        _seal_stage(session, ctx, stage, unit)
+    if _is_terminal(stage):
+        _finish_terminal(ctx, stage, [*prior, unit])
+
+
+def _converge_receipt(ctx: _StageContext, stage: L2Stage) -> None:
+    """§31 B: the unit is committed and its receipt is absent -- publish without re-execution."""
+    with _successor_world_session(
+        request=ctx.request, expected=ctx.stage_plan, proof=ctx.proof
+    ) as session:
+        progress = _classify(session, ctx)
+        _require(
+            progress.pending is not None and progress.pending.ordinal == stage.ordinal,
+            f"stage {stage.stage_id!r} is no longer receipt-pending",
+        )
+        unit = progress.units[-1]
+        _require(
+            unit.stage_ordinal == stage.ordinal, "the pending stage is not the last applied unit"
+        )
+        _seal_stage(session, ctx, stage, unit)
+        units = progress.units
+    if _is_terminal(stage):
+        _finish_terminal(ctx, stage, units)
+
+
+def _attempt_directories_for(world: Path) -> list[Path]:
+    parent = world.parent
+    prefix = f"{world.name}.init-attempt-"
+    if not parent.is_dir():
+        return []
+    return sorted(
+        path
+        for path in parent.iterdir()
+        if path.name.startswith(prefix) and path.is_dir() and not path.is_symlink()
+    )
+
+
+def _attempt_is_complete(attempt: Path, expected: L2StagePlan) -> bool:
+    """A complete attempt carries the expected StagePlan and a committed S0 unit, read mode=ro."""
+    catalog = attempt / WORKING_CATALOG_FILENAME
+    if not (catalog.is_file() and (attempt / PROGRESS_LEDGER_FILENAME).is_file()):
+        return False
+    try:
+        with connect(catalog, read_only=True) as probe:
+            plan_row = probe.execute(
+                f"SELECT stage_plan_identity FROM main.{L2_STAGE_PLAN_TABLE} WHERE singleton = 1"  # noqa: S608
+            ).fetchone()
+            unit_row = probe.execute(
+                f"SELECT stage_id FROM main.{L2_APPLIED_UNITS_TABLE} WHERE stage_ordinal = 0"  # noqa: S608
+            ).fetchone()
+    except (sqlite3.Error, DisclosureDriftError):
+        return False
+    return (
+        plan_row is not None
+        and str(plan_row["stage_plan_identity"]) == expected.identity
+        and unit_row is not None
+        and str(unit_row["stage_id"]) == _STAGE_INITIALIZE
+    )
+
+
+def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
+    """P1 admission, then S0 inside a create-once attempt, then atomic promotion -- §27, §28."""
+    world = ctx.world_directory
+    attempt = world.parent / f"{world.name}.init-attempt-{attempt_ordinal:03d}"
+    _require(
+        not os.path.lexists(attempt), f"initialization attempt {attempt.name!r} already exists"
+    )
+    ctx.proof.require_live(ctx.route)
+    tool_manifest = _require_runtime_tool_identity(
+        ctx.stage_plan.tool_manifest_identity, label="admission"
+    )
+    input_bytes = _stored_int(ctx.stage_plan.body["governed_input_bytes"], "governed_input_bytes")
+    admission = _admit_merge_step(
+        step=_SUCCESSOR_CALIBRATION_STEP,
+        level=MERGE_LEVEL_TWO,
+        target=world,
+        input_bytes=input_bytes,
+        seed_catalog_bytes=ctx.seed_catalog_bytes,
+        peak_ratio=ctx.requirements.level_two_peak_ratio,
+        requirements=ctx.requirements,
+    )
+    record: dict[str, object] = {
+        "contract": L2_STAGE_ADMISSION_CONTRACT,
+        "route": ctx.route,
+        "successor_run_id": ctx.request.run_id,
+        "stage_plan_identity": ctx.stage_plan.identity,
+        "tool_manifest_identity": tool_manifest.identity,
+        "sqlite_temp_binding": dict(ctx.binding.as_record()),
+        "admission": dict(admission.as_record()),
+        "input_bytes": input_bytes,
+        "seed_catalog_bytes": ctx.seed_catalog_bytes,
+        "attempt_ordinal": attempt_ordinal,
+        "initialization_attempt_directory_name": attempt.name,
+        "reusable": False,
+        "utc": utc_now(),
+    }
+    record["admission_identity"] = _identity_of(record)
+    ctx.receipt_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    try:
+        write_once_canonical_json(
+            ctx.receipt_root / f"admission-attempt-{attempt_ordinal:03d}.json", record
+        )
+    except ChunkExecutionError as exc:
+        message = f"the successor admission record could not be written: {exc}"
+        raise ChunkMultipassError(message) from exc
+    event_identity: str | None = None
+    if ctx.route == SUCCESSOR_ROUTE_CALIBRATION:
+        envelope = ctx.proof.envelope
+        _require(
+            envelope is not None, "a calibration successor admission needs the child's envelope"
+        )
+        assert envelope is not None  # noqa: S101 - narrowed above
+        event = _emit_calibration_admission_event(
+            envelope=envelope,
+            admission=admission,
+            binding=ctx.binding,
+            input_bytes=input_bytes,
+            seed_catalog_bytes=ctx.seed_catalog_bytes,
+            charged_directory=world,
+            attempt=attempt_ordinal,
+        )
+        event_identity = event.event_identity
+    attempt.mkdir(mode=_DIRECTORY_MODE)
+    stage = ctx.stages[0]
+    with WorkingCatalog(
+        Path(ctx.request.operational_catalog), attempt, cache_bytes=ctx.stage_plan.cache_bytes
+    ) as world_catalog:
+        connection = world_catalog.connection
+        _require(
+            world_catalog.identity.migration_head == ctx.contract.migration_head,
+            "the successor world was seeded at migration head "
+            f"{world_catalog.identity.migration_head} "
+            f"where every input executed at {ctx.contract.migration_head}",
+        )
+        world_catalog.ledger.begin_source(ctx.plan.source_instance_id, ctx.plan.source_id)
+        connection_state = _establish_successor_connection_state(
+            connection, ctx.stage_plan, ctx.proof
+        )
+        with transaction(connection):
+            for statement in _L2_CONTROL_SCHEMA.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+            connection.execute(
+                f"INSERT INTO main.{L2_STAGE_PLAN_TABLE} (singleton, contract, successor_run_id, "  # noqa: S608
+                "route, canonical_world_path, stage_plan_identity, body_json) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?)",
+                (
+                    L2_STAGE_PLAN_CONTRACT,
+                    ctx.stage_plan.successor_run_id,
+                    ctx.stage_plan.route,
+                    ctx.stage_plan.canonical_world_path,
+                    ctx.stage_plan.identity,
+                    _json_text(dict(ctx.stage_plan.body)),
+                ),
+            )
+            _insert_applied_unit(
+                connection,
+                stage_plan=ctx.stage_plan,
+                stage=stage,
+                predecessor_unit_identity=ctx.stage_plan.identity,
+                input_identities=[
+                    str(item["manifest_digest"]) for item in ctx.stage_plan.intermediates
+                ],
+                receipt_identities=[
+                    str(item["receipt_document_sha256"]) for item in ctx.stage_plan.intermediates
+                ],
+                request_provenance_identities=[
+                    str(cast("Mapping[str, object]", item["group_request_provenance"])["sha256"])
+                    for item in ctx.stage_plan.intermediates
+                ],
+                connection_state=connection_state,
+                rows_written=0,
+                outcome_witness={
+                    "admission_identity": str(record["admission_identity"]),
+                    "admission": dict(admission.as_record()),
+                    "admission_event_identity": event_identity,
+                    "free_before_bytes": admission.free_bytes,
+                    "seed_catalog_sha256": ctx.seed_catalog_sha256,
+                    "seed_catalog_byte_length": ctx.seed_catalog_bytes,
+                    "attempt_ordinal": attempt_ordinal,
+                    "attempt_directory_name": attempt.name,
+                    "begin_source": True,
+                },
+            )
+        checkpoint_main_truncate(connection)
+        normalized_wal_bytes(attempt / WORKING_CATALOG_FILENAME)
+        stored = _read_stored_stage_plan(connection)
+        _require(
+            stored.identity == ctx.stage_plan.identity, "the stored StagePlan did not read back"
+        )
+        _require(
+            len(_applied_units(connection)) == 1, "S0 did not read back as the one applied unit"
+        )
+    promote_world_directory(attempt, world)
+
+
+def _ensure_world(ctx: _StageContext) -> None:
+    """§28 states: initialize, preserve an incomplete attempt, promote a complete one."""
+    world = ctx.world_directory
+    if os.path.lexists(world):
+        _require(
+            not world.is_symlink() and world.is_dir(),
+            f"the canonical successor world {world.name!r} exists and is not a directory",
+        )
+        return
+    attempts = _attempt_directories_for(world)
+    complete = [attempt for attempt in attempts if _attempt_is_complete(attempt, ctx.stage_plan)]
+    if len(complete) > 1:
+        _stage_conflict(
+            f"{len(complete)} complete initialization attempts exist beside an absent world"
+        )
+    if complete:
+        promote_world_directory(complete[0], world)
+        return
+    ordinals = []
+    for attempt in attempts:
+        suffix = attempt.name.rsplit("-", 1)[-1]
+        if suffix.isdigit():
+            ordinals.append(int(suffix))
+    _initialize_world_attempt(ctx, max(ordinals, default=-1) + 1)
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessorRunOutcome:
+    """What one successor invocation established, read back from durable evidence."""
+
+    route: str
+    successor_run_id: str
+    stage_plan_identity: str | None
+    world_directory: Path
+    stage_receipt_root: Path
+    completed_stage_ids: tuple[str, ...]
+    terminal_reached: bool
+    final_receipt: Mapping[str, object] | None
+    calibration_result: CalibrationSubsetResult | None
+
+
+def _successor_outcome_from_disk(request: SuccessorFinalRequest) -> SuccessorRunOutcome:
+    """The outcome as the receipts and the terminal record on disk describe it."""
+    world = Path(request.world_directory)
+    receipt_root = Path(request.stage_receipt_root)
+    completed: list[tuple[int, str]] = []
+    identity: str | None = None
+    if receipt_root.is_dir():
+        for path in sorted(receipt_root.iterdir()):
+            if path.name.startswith("stage-") and path.suffix == ".json":
+                receipt = read_stage_receipt(path)
+                completed.append(
+                    (
+                        _stored_int(receipt["stage_ordinal"], "stage_ordinal"),
+                        str(receipt["stage_id"]),
+                    )
+                )
+                identity = str(receipt["stage_plan_identity"])
+    final_receipt: Mapping[str, object] | None = None
+    calibration_result: CalibrationSubsetResult | None = None
+    if (
+        request.route == SUCCESSOR_ROUTE_PRODUCTION
+        and (world / FINAL_WORLD_RECEIPT_FILENAME).is_file()
+    ):
+        final_receipt = read_receipt_document(
+            world / FINAL_WORLD_RECEIPT_FILENAME, contract=FINAL_WORLD_RECEIPT_CONTRACT
+        )
+        manifest_record = final_receipt.get("manifest")
+        _require(isinstance(manifest_record, Mapping), "the final receipt carries no manifest")
+        verify_artifact_manifest(
+            world,
+            ArtifactManifest.from_record(cast("Mapping[str, object]", manifest_record)),
+            exclude=(FINAL_WORLD_RECEIPT_FILENAME,),
+        )
+        completed.append((len(completed) + 1_000_000, _STAGE_FINAL_RECEIPT))
+    if (
+        request.route == SUCCESSOR_ROUTE_CALIBRATION
+        and (world / CALIBRATION_SUBSET_RESULT_FILENAME).is_file()
+    ):
+        calibration_result = read_calibration_subset_result(
+            world / CALIBRATION_SUBSET_RESULT_FILENAME
+        )
+        verify_artifact_manifest(
+            world, calibration_result.manifest, exclude=(CALIBRATION_SUBSET_RESULT_FILENAME,)
+        )
+        completed.append((len(completed) + 1_000_000, _STAGE_CALIBRATION_RESULT))
+    return SuccessorRunOutcome(
+        route=request.route,
+        successor_run_id=request.run_id,
+        stage_plan_identity=identity,
+        world_directory=world,
+        stage_receipt_root=receipt_root,
+        completed_stage_ids=tuple(stage_id for _ordinal, stage_id in sorted(completed)),
+        terminal_reached=final_receipt is not None or calibration_result is not None,
+        final_receipt=final_receipt,
+        calibration_result=calibration_result,
+    )
+
+
+def _resolve_route_intermediates(
+    request: SuccessorFinalRequest, plan: ChunkPlan, schedule: MergeSchedule, route: str
+) -> tuple[IntermediateInput, ...]:
+    """The route's accepted intermediate resolution: production binds chunks as well."""
+    intermediates_root = Path(request.intermediates_root)
+    if route == SUCCESSOR_ROUTE_PRODUCTION:
+        chunks = resolve_chunk_inputs(
+            plan,
+            internal_root=Path(request.internal_root),
+            external_root=None if request.external_root is None else Path(request.external_root),
+        )
+        return resolve_intermediate_inputs(
+            plan, schedule, intermediates_root=intermediates_root, chunk_inputs=chunks
+        )
+    return resolve_intermediate_inputs(plan, schedule, intermediates_root=intermediates_root)
+
+
+def _measured_successor_binding(charged_path: Path) -> SqliteTempBinding:
+    """THIS process's SQLite temporary binding for the successor world -- D151-C17 R6."""
+    return require_sqlite_temp_binding(charged_path=charged_path)
+
+
+def _resolve_successor_context(
+    request: SuccessorFinalRequest, proof: _SuccessorRouteProof
+) -> _StageContext:
+    """P0 ROUTE_GATE_AND_AUTHENTICATE: everything a stage may consume, authenticated once."""
+    proof.require_live(request.route)
+    repository = _authenticate_running_repository(
+        head=request.repository_head_sha, tree=request.repository_tree_sha, label="successor-final"
+    )
+    plan: ChunkPlan
+    if request.route == SUCCESSOR_ROUTE_PRODUCTION:
+        plan, schedule = _read_plan_and_schedule(request.plan_path, request.schedule_path)
+    else:
+        plan, schedule = _read_calibration_plan_and_schedule(
+            request.plan_path, request.schedule_path
+        )
+        _require(
+            proof.plan_digest == plan.plan_digest,
+            "the calibration successor's sealed plan identity is not the one the envelope bound",
+        )
+    require_chunkable_source(plan.source_id)
+    requirements = MultipassStorageRequirements.from_record(request.storage_requirements)
+    world = Path(request.world_directory)
+    receipt_root = Path(request.stage_receipt_root)
+    _require(
+        world != receipt_root
+        and not _within(world, receipt_root)
+        and not _within(receipt_root, world),
+        "the stage receipt root must lie outside the successor world and the reverse",
+    )
+    binding = _require_expected_binding(
+        _measured_successor_binding(world),
+        request.expected_sqlite_temp_binding,
+        label="successor-final",
+    )
+    operational = Path(request.operational_catalog)
+    seed_sha256, seed_bytes = file_digest(operational)
+    counter_sources: tuple[PlanWitnessSource, ...]
+    if request.route == SUCCESSOR_ROUTE_PRODUCTION:
+        chunks = resolve_chunk_inputs(
+            plan,
+            internal_root=Path(request.internal_root),
+            external_root=None if request.external_root is None else Path(request.external_root),
+        )
+        intermediates = resolve_intermediate_inputs(
+            plan, schedule, intermediates_root=Path(request.intermediates_root), chunk_inputs=chunks
+        )
+        counter_sources = tuple(chunks)
+        identities = tuple(f"{item.chunk_id}:{item.receipt.manifest.digest}" for item in chunks)
+    else:
+        retained_root = calibration_retained_root(Path(request.intermediates_root))
+        witnesses = resolve_calibration_chunk_witnesses(
+            cast("CalibrationSubsetPlan", plan),
+            schedule,
+            run_id=request.predecessor_run_id,
+            retained_root=retained_root,
+        )
+        checkpoints = resolve_calibration_group_checkpoints(
+            cast("CalibrationSubsetPlan", plan),
+            schedule,
+            run_id=request.predecessor_run_id,
+            retained_root=retained_root,
+            witnesses=witnesses,
+        )
+        intermediates = resolve_intermediate_inputs(
+            plan, schedule, intermediates_root=Path(request.intermediates_root)
+        )
+        _require_witness_bound_intermediates(intermediates, witnesses, checkpoints)
+        counter_sources = tuple(witnesses)
+        identities = tuple(f"{item.chunk_id}:{item.witness.witness_identity}" for item in witnesses)
+    require_attachable(len(intermediates))
+    contract = intermediates[0].receipt.execution_contract
+    _require_seed_identity(
+        label="successor-final",
+        repository=repository,
+        recorded_head=intermediates[0].receipt.repository_head_sha,
+        recorded_tree=intermediates[0].receipt.repository_tree_sha,
+        contract=contract,
+        catalog_sha256=seed_sha256,
+    )
+    state = _accepted_plan_state(operational, plan)
+    tool_manifest = _runtime_tool_manifest()
+    with connect(operational, read_only=True) as reader:
+        expected_indexes = _deferrable_index_records(reader)
+    stage_plan = _build_successor_stage_plan(
+        request=request,
+        plan=plan,
+        schedule=schedule,
+        intermediates=intermediates,
+        counter_source_count=len(counter_sources),
+        counter_source_identities=identities,
+        repository=repository,
+        contract=contract,
+        state=state,
+        seed_catalog_sha256=seed_sha256,
+        seed_catalog_bytes=seed_bytes,
+        tool_manifest=tool_manifest,
+        expected_index_records=expected_indexes,
+        requirements=requirements,
+        binding=binding,
+    )
+    if request.stop_after_stage is not None:
+        _require(
+            any(stage.stage_id == request.stop_after_stage for stage in stage_plan.stages),
+            f"stop_after_stage {request.stop_after_stage!r} names no stage of this route",
+        )
+    return _StageContext(
+        request=request,
+        proof=proof,
+        route=request.route,
+        plan=plan,
+        schedule=schedule,
+        intermediates=intermediates,
+        counter_sources=counter_sources,
+        counter_source_identities=identities,
+        repository=repository,
+        contract=contract,
+        state=state,
+        seed_catalog_sha256=seed_sha256,
+        seed_catalog_bytes=seed_bytes,
+        requirements=requirements,
+        binding=binding,
+        stage_plan=stage_plan,
+        world_directory=world,
+        receipt_root=receipt_root,
+    )
+
+
+def _run_successor_stages(ctx: _StageContext) -> SuccessorRunOutcome:
+    """The stage loop: classify committed evidence, converge a pending receipt, or run the next."""
+    _ensure_world(ctx)
+    stop_after = ctx.request.stop_after_stage
+    while True:
+        with _successor_world_session(
+            request=ctx.request, expected=ctx.stage_plan, proof=ctx.proof
+        ) as session:
+            progress = _classify(session, ctx)
+        if progress.pending is not None:
+            _converge_receipt(ctx, progress.pending)
+            continue
+        if progress.next_stage is None:
+            break
+        if stop_after is not None and progress.units and progress.units[-1].stage_id == stop_after:
+            break
+        _run_stage(ctx, progress.next_stage, progress.units)
+    return _successor_outcome_from_disk(ctx.request)
+
+
+def _run_successor_final(
+    request: SuccessorFinalRequest, proof: _SuccessorRouteProof
+) -> SuccessorRunOutcome:
+    """The private engine entry: proof first, then P0 authentication, then the stage loop."""
+    _require_route_proof(proof, request.route)
+    return _run_successor_stages(_resolve_successor_context(request, proof))
+
+
+# --------------------------------------------------------------------------- #
+# The two public route gates -- §15
+# --------------------------------------------------------------------------- #
+def run_successor_multipass_final(request: SuccessorFinalRequest) -> SuccessorRunOutcome:
+    """The production successor final: authority FIRST, then the durable stage spine.
+
+    The real multipass authority is the absolute first effective operation -- before a path is
+    stat'ed, a request parsed, a StagePlan read, a manifest read, a world inspected, a proof
+    minted or a file created. Then the production route request is validated, the process-local
+    production proof is minted from the gate that just passed, and the private engine runs the
+    stage loop under it, re-invoking the gate at every stage's STEP 0.
+
+    Raises:
+        ChunkMultipassError: the authority is ``None``, the request is not a production
+            successor request, or any successor precondition, classification or stage refuses.
+    """
+    require_real_multipass_authority()
+    _require(
+        isinstance(request, SuccessorFinalRequest) and request.route == SUCCESSOR_ROUTE_PRODUCTION,
+        "run_successor_multipass_final serves the production route only",
+    )
+    proof = _mint_successor_route_proof(
+        SUCCESSOR_ROUTE_PRODUCTION,
+        gate=require_real_multipass_authority,
+        gate_name="require_real_multipass_authority",
+    )
+    return _run_successor_final(request, proof)
+
+
+def run_successor_calibration_final(
+    request: SuccessorFinalRequest,
+    *,
+    calibration_plan: ChunkPlan,
+    instrumentation_ledger: Path,
+    predecessor_pid: int | None = None,
+    timeout_seconds: float | None = None,
+    observe: Callable[[str], None] | None = None,
+) -> SuccessorRunOutcome:
+    """The calibration successor final: sealed plan FIRST, then one envelope-gated child.
+
+    The sealed calibration-subset plan is the absolute first effective operation -- a constructed
+    envelope is not authority, and no path, StagePlan or world is touched before it. Then the
+    request is written create-once, the envelope is issued over exactly those bytes, and the
+    existing calibration child lifecycle spawns one child that receives the envelope, requires
+    the final role, holds the sealed plan identity, mints its own proof and enters the engine.
+
+    Raises:
+        ChunkPlanError: the plan is not a sealed subset plan.
+        ChunkMultipassError, ChunkExecutionError, ChunkEvidenceError: any proof fails.
+    """
+    require_calibration_subset_plan(calibration_plan)
+    _require(
+        isinstance(request, SuccessorFinalRequest) and request.route == SUCCESSOR_ROUTE_CALIBRATION,
+        "run_successor_calibration_final serves the calibration route only",
+    )
+    if predecessor_pid is not None:
+        _require_process_dead(predecessor_pid)
+    receipt_root = Path(request.stage_receipt_root)
+    receipt_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    launch = 0
+    while os.path.lexists(receipt_root / f"successor-request-{launch:03d}.json"):
+        launch += 1
+    request_path = receipt_root / f"successor-request-{launch:03d}.json"
+    write_once_json(request_path, dict(request.as_record()))
+    envelope = issue_calibration_envelope(
+        run_id=request.run_id,
+        plan=cast("CalibrationSubsetPlan", calibration_plan),
+        role=CALIBRATION_ROLE_FINAL,
+        step_id=_SUCCESSOR_CALIBRATION_STEP,
+        request_path=request_path,
+        instrumentation_ledger=instrumentation_ledger,
+    )
+    _spawn_calibration_child(
+        request_path, envelope, timeout_seconds=timeout_seconds, observe=observe
+    )
+    outcome = _successor_outcome_from_disk(request)
+    if outcome.calibration_result is not None:
+        _require(
+            outcome.calibration_result.run_id == request.run_id
+            and outcome.calibration_result.plan_digest == calibration_plan.plan_digest
+            and outcome.calibration_result.envelope_sha256 == envelope.sha256,
+            "the calibration-subset result does not describe this plan, run and envelope; refused",
+        )
+        _require(
+            outcome.calibration_result.pid != os.getpid(),
+            "the calibration-subset result records THIS process's pid; the finalization did not "
+            "run in a separate operating-system process",
+        )
+        _require_process_dead(outcome.calibration_result.pid)
+    return outcome
+
+
+def _successor_calibration_final_body(
+    request: SuccessorFinalRequest, envelope: CalibrationChildEnvelope
+) -> SuccessorRunOutcome:
+    """The spawned calibration successor child's body: envelope role FIRST, then the engine.
+
+    In order: the exact-contract envelope for the final role; the sealed subset plan re-read
+    and held to the envelope's plan identity, step and run; the process-local calibration proof
+    minted from a gate that re-validates both; then the private engine.
+    """
+    require_calibration_envelope(envelope, role=CALIBRATION_ROLE_FINAL)
+    _require(
+        request.route == SUCCESSOR_ROUTE_CALIBRATION,
+        "the calibration successor child serves the calibration route only",
+    )
+    plan, _schedule = _read_calibration_plan_and_schedule(request.plan_path, request.schedule_path)
+    require_envelope_binding(
+        envelope,
+        plan=plan,
+        role=CALIBRATION_ROLE_FINAL,
+        step_id=_SUCCESSOR_CALIBRATION_STEP,
+        run_id=request.run_id,
+    )
+
+    def gate() -> object:
+        require_calibration_envelope(envelope, role=CALIBRATION_ROLE_FINAL)
+        return require_calibration_subset_plan(plan)
+
+    proof = _mint_successor_route_proof(
+        SUCCESSOR_ROUTE_CALIBRATION,
+        gate=gate,
+        gate_name="require_calibration_envelope",
+        envelope=envelope,
+        plan_digest=plan.plan_digest,
+    )
+    return _run_successor_final(request, proof)

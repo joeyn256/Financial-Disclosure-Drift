@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -202,33 +203,108 @@ def test_c1705_the_storage_identity_moves_with_either_transient_term() -> None:
     assert swapped != base
 
 
-def test_c1706_the_level_two_term_defines_the_complete_measurement_target() -> None:
-    """The definition a future storage-qualification session is bound by."""
+def _slice_prose(text: str) -> str:
+    """The words of one ``#:`` slice with the comment prefix and line wrapping removed."""
+    lines = [line[2:].strip() for line in text.splitlines() if line.startswith("#:")]
+    return " ".join(" ".join(lines).split())
+
+
+def _has_token(text: str, name: str) -> bool:
+    """Whether ``name`` occurs as a whole identifier token -- never inside ``m3_l2_<name>``."""
+    return re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", text) is not None
+
+
+LEGACY_LEVEL_TWO_RELATIONS = (
+    "chunk_observation_corrections",
+    "chunk_witness_rank",
+    "plan_chunk_witnesses",
+    "plan_witness_rank",
+    "chunk_first_witness",
+    "chunk_member_delta",
+)
+SUCCESSOR_LEVEL_TWO_RELATIONS = tuple(f"m3_l2_{name}" for name in LEGACY_LEVEL_TWO_RELATIONS)
+LEGACY_SENTINEL = "#: LEGACY MONOLITHIC LEVEL-2 TRANSIENT REGIME"
+SUCCESSOR_SENTINEL = "#: SUCCESSOR DURABLE-STAGE LEVEL-2 STORAGE REGIME"
+LEVEL_ONE_INDEPENDENCE = "never satisfied by :data:`MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES`"
+SUCCESSOR_METHOD_BINDING = (
+    "The regime-independent measurement method above governs this successor transient term "
+    "unchanged."
+)
+DANGLING_BACKREFERENCES = ("those six", "the six above", "the two D151-C15 tables", "ranking above")
+
+
+def level_two_definition_slices() -> tuple[str, str, str, str]:
+    """The whole definition and its three slices: overall method, legacy regime, successor."""
     source = Path(ct.__file__).read_text(encoding="utf-8")
     start = source.index("#: The LEVEL-2 transient allowance")
     end = source.index("MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES: Final", start)
     definition = source[start:end]
-    # It names the whole coexisting set D151-C16 measured, not the two D151-C15 named.
-    for table in (
-        "chunk_observation_corrections",
-        "chunk_witness_rank",
-        "plan_chunk_witnesses",
-        "plan_witness_rank",
-        "chunk_first_witness",
-        "chunk_member_delta",
+    legacy_at = definition.index(LEGACY_SENTINEL)
+    successor_at = definition.index(SUCCESSOR_SENTINEL, legacy_at)
+    return (
+        definition,
+        definition[:legacy_at],
+        definition[legacy_at:successor_at],
+        definition[successor_at:],
+    )
+
+
+def test_c1706_the_level_two_term_defines_the_complete_measurement_target() -> None:
+    """The definition a future storage-qualification session is bound by -- three slices.
+
+    D151-C31R2-R19A-C2 §37-§38: the regime-independent method (slice A) is self-contained,
+    the historical D151-C15/D151-C16 six-relation observation (slice B) names the legacy
+    relations as whole tokens, and the successor charge model (slice C) names the six
+    ``m3_l2_*`` relations and binds itself to the method above. Every term the accepted
+    definition pinned is still pinned; nothing was weakened, and a successor name can never
+    satisfy a legacy assertion because the checks are anchored on identifier boundaries.
+    """
+    definition, overall_method, legacy_regime, successor_regime = level_two_definition_slices()
+    assert definition.startswith("#: The LEVEL-2 transient allowance")
+    # OVERALL METHOD -- every method term precedes the LEGACY sentinel.
+    method_prose = _slice_prose(overall_method)
+    for term in (
+        LEVEL_ONE_INDEPENDENCE,
+        "D140-R7",
+        "a sum of estimated table sizes",
+        "It is **not** a sum of estimated table sizes.",
+        "FREE-SPACE DRAWDOWN",
+        "high-water",
+        "never from a directory walk",
+        "never from a schema enumeration",
+        "sorter",
+        "workfile",
+        "measure the filesystem, not the schema",
+        "No enumeration of named temporary relations is the whole cost either",
+        "Level-Two witness-ranking query",
+        "reports only a named-relation enumeration",
     ):
-        assert table in definition, table
-    # It says the named tables are NOT the quantity, and that sorter/workfile space is unnamed.
-    assert "sorter" in definition and "workfile" in definition.replace("WORKFILES", "workfiles")
-    assert "a sum of estimated table sizes" in definition
-    # It states the accepted method, and rules out the two wrong ones.
-    assert "FREE-SPACE DRAWDOWN" in definition
-    assert "high-water" in definition
-    assert "never from a directory walk" in definition
-    assert "never from a schema enumeration" in definition
-    assert "D140-R7" in definition
-    # And it is a distinct term from level 1, which cannot satisfy it.
-    assert "never satisfied by :data:`MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES`" in definition
+        assert term in method_prose, term
+    # Keyword presence is not sufficient: the method slice -- and the WHOLE definition -- carries
+    # no reference into a block that now lives in another slice (D151-R19A-C7-R1, N-C7-i1).
+    for fragment in DANGLING_BACKREFERENCES:
+        assert fragment not in _slice_prose(definition), fragment
+    # LEGACY -- the historical observation, with the six bare names as whole tokens only.
+    assert legacy_regime.startswith(LEGACY_SENTINEL)
+    assert "D151-C15" in legacy_regime and "D151-C16" in legacy_regime
+    for name in LEGACY_LEVEL_TWO_RELATIONS:
+        assert _has_token(legacy_regime, name), name
+    for name in SUCCESSOR_LEVEL_TWO_RELATIONS:
+        assert name not in legacy_regime, name
+    # SUCCESSOR -- the six persistent relations, the two charge volumes, no frozen value, and
+    # the exact sentence that binds the successor term to the method above.
+    assert successor_regime.startswith(SUCCESSOR_SENTINEL)
+    successor_prose = _slice_prose(successor_regime)
+    for name in SUCCESSOR_LEVEL_TWO_RELATIONS:
+        assert _has_token(successor_regime, name), name
+    assert "WORLD-VOLUME growth" in successor_prose
+    assert "SQLITE_TMPDIR volume" in successor_prose
+    assert "remains ``None``" in successor_prose
+    assert "R21 must remeasure" in successor_prose
+    assert "freezes no production storage value" in successor_prose
+    assert SUCCESSOR_METHOD_BINDING in successor_prose
+    assert ct.MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES is None
+    assert ct.MULTIPASS_LEVEL_TWO_PEAK_RATIO is None
 
 
 # ==========================================================================
@@ -435,7 +511,10 @@ def test_c1714_c1716_nothing_in_a_request_environment_or_config_can_forge_the_bi
         and isinstance(node.func, ast.Name)
         and node.func.id == "require_sqlite_temp_binding"
     ]
-    assert len(calls) == 3, len(calls)
+    # Three accepted call sites plus the ONE successor site (D151-C31R2-R19A-C2 §27): the
+    # successor measures its own binding for its world before any admission, exactly as the
+    # legacy finals do, and hands the guard nothing but the charged path.
+    assert len(calls) == 4, len(calls)
     for call in calls:
         assert not call.args
         assert {keyword.arg for keyword in call.keywords} == {"charged_path"}

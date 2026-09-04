@@ -175,8 +175,23 @@ MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES: Final[int | None] = None
 #: sampled across the finalizer and taken at its high-water -- never from a directory walk, and
 #: never from a schema enumeration.
 #:
-#: D151-C15 §INFO-2 projected this from two tables. D151-C16 measured the real finalizer and
-#: found SIX temporary tables coexisting at the counter peak::
+#: No enumeration of named temporary relations is the whole cost either: the whole-plan window
+#: functions in :func:`~disclosure_drift.m3.chunk_consolidation._member_deltas` and in the
+#: Level-Two witness-ranking query sort their whole input, and SQLite serves that from sorter
+#: and transient-B-tree workfiles that are not named tables and cannot be read out of
+#: ``temp.sqlite_master`` at all. A measurement that enumerates tables therefore systematically
+#: understates this term.
+#:
+#: **So: measure the filesystem, not the schema.** Named-table and page counts are legitimate
+#: supporting diagnostics; they are never the quantity. A future storage-qualification session
+#: that reports only a named-relation enumeration, or a traversal of the temporary root, has not
+#: measured this term.
+#:
+#: LEGACY MONOLITHIC LEVEL-2 TRANSIENT REGIME
+#:
+#: The historical observation the method was drawn from, under the accepted one-transaction
+#: finalizer: D151-C15 §INFO-2 projected this from two tables. D151-C16 measured the real
+#: finalizer and found SIX temporary tables coexisting at the counter peak::
 #:
 #:     chunk_observation_corrections   the level-2 staged correction rows
 #:     chunk_witness_rank              the level-2 ranking over the intermediates
@@ -185,16 +200,26 @@ MULTIPASS_LEVEL_ONE_TRANSIENT_BYTES: Final[int | None] = None
 #:     chunk_first_witness             every chunk's first-witness ledger, whole plan
 #:     chunk_member_delta              the reduced member deltas
 #:
-#: and none of those six is the whole cost either: the whole-plan window functions in
-#: :func:`~disclosure_drift.m3.chunk_consolidation._member_deltas` and in the ranking above sort
-#: their whole input, and SQLite serves that from sorter and transient-B-tree WORKFILES that are
-#: not named tables and cannot be read out of ``temp.sqlite_master`` at all. A measurement that
-#: enumerates tables therefore systematically understates this term.
+#: SUCCESSOR DURABLE-STAGE LEVEL-2 STORAGE REGIME
 #:
-#: **So: measure the filesystem, not the schema.** Named-table and page counts are legitimate
-#: supporting diagnostics; they are never the quantity. A future storage-qualification session
-#: that reports only the two D151-C15 tables, or only the six above, or a traversal of the
-#: temporary root, has not measured this term.
+#: The durable-stage successor (D151-C31R2-R19A-C2) replaces those TEMP relations, on its route
+#: only, with six persistent successor relations inside the world catalog::
+#:
+#:     m3_l2_chunk_observation_corrections
+#:     m3_l2_chunk_witness_rank
+#:     m3_l2_plan_chunk_witnesses
+#:     m3_l2_plan_witness_rank
+#:     m3_l2_chunk_first_witness
+#:     m3_l2_chunk_member_delta
+#:
+#: The six successor persistent relations are charged as WORLD-VOLUME growth: they are pages of
+#: ``working_catalog.sqlite3`` and belong to the world's peak, not to this term. The successor's
+#: unlinked sorter, transient B-tree, workfile and other SQLite temporary allocation are charged
+#: to the SQLITE_TMPDIR volume as its high-water, and that is what this term bounds on the
+#: successor route. :data:`MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES` remains ``None``: R21 must
+#: remeasure the successor transient high-water, and R19A-C2 freezes no production storage value.
+#: The regime-independent measurement method above governs this successor transient term
+#: unchanged.
 MULTIPASS_LEVEL_TWO_TRANSIENT_BYTES: Final[int | None] = None
 
 #: The two merge levels, named once. A storage step is charged at exactly one of them, and the

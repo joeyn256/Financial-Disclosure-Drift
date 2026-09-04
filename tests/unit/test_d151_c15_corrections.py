@@ -76,6 +76,10 @@ WORLD_CREATING_ENTRIES = (
     "merge_group_body",
     "finalize_multipass_body",
     "_child_main",
+    # D151-C31R2-R19A-C2 §16: the production successor wrapper joins the exact set; the private
+    # successor engine never calls the gate by name -- it re-invokes the gate the wrapper bound
+    # into its process-local proof, so this set stays exact.
+    "run_successor_multipass_final",
 )
 
 
@@ -436,13 +440,21 @@ def test_c1527_the_committed_literal_is_none_and_every_entry_opens_with_the_gate
 # ==========================================================================
 # D151-C27R1: the separate calibration entries open with THEIR gate, never the production one
 # ==========================================================================
-CALIBRATION_BODIES = ("merge_calibration_subset_group_body", "finalize_calibration_subset_body")
+CALIBRATION_BODIES = (
+    "merge_calibration_subset_group_body",
+    "finalize_calibration_subset_body",
+    # D151-C31R2-R19A-C2 §15: the spawned successor calibration child body opens with the
+    # exact-role envelope gate, exactly as the accepted calibration bodies do.
+    "_successor_calibration_final_body",
+)
 CALIBRATION_LAUNCHERS = (
     "run_calibration_subset_chunk",
     "run_calibration_subset_chunks",
     "run_calibration_subset_group_merge",
     "run_calibration_subset_final_merge",
     "run_calibration_subset_multipass",
+    # D151-C31R2-R19A-C2 §15: the successor calibration wrapper opens with the sealed plan.
+    "run_successor_calibration_final",
 )
 
 

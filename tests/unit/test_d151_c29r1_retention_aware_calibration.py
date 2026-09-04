@@ -1220,6 +1220,9 @@ PRODUCTION_ENTRIES = (
     "merge_group_body",
     "finalize_multipass_body",
     "_child_main",
+    # D151-C31R2-R19A-C2 §16: the production successor wrapper is gated, delegates narrowly and
+    # is held to the same retention-name byte scan as every other production entry.
+    "run_successor_multipass_final",
 )
 RETENTION_NAMES = (
     "resolve_contiguous_chunk_inputs",

@@ -786,6 +786,30 @@ def _deferrable_indexes(connection: sqlite3.Connection) -> tuple[tuple[str, str]
     )
 
 
+def _deferrable_index_records(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[int, str, str, str], ...]:
+    """Every deferrable index as ``(ordinal, name, table, exact stored CREATE SQL)``, canonical.
+
+    The successor's durable form of :func:`_deferrable_indexes` -- D151-C31R2-R19A-C2 §29.
+    The same enumeration over ``sqlite_master`` and the same F0-table filter, canonicalized by
+    index name so the set has one identity whatever order SQLite reports it in; the ordinal is
+    the position in that order. The stored ``sql`` is carried exactly as SQLite holds it, which
+    is what a rebuild after a restart must execute: once the indexes are dropped their DDL is
+    gone from ``sqlite_master``, and the persisted rows are the only place it survives.
+    """
+    rows = connection.execute(
+        "SELECT name, sql, tbl_name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL "
+        "ORDER BY name"
+    ).fetchall()
+    return tuple(
+        (ordinal, str(row["name"]), str(row["tbl_name"]), str(row["sql"]))
+        for ordinal, row in enumerate(
+            row for row in rows if str(row["tbl_name"]) in F0_WRITTEN_TABLES
+        )
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The merge
 # --------------------------------------------------------------------------- #

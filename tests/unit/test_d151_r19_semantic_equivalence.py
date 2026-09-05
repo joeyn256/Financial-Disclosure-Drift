@@ -185,17 +185,23 @@ def test_s03_a_second_derivation_refuses_with_the_legacy_text_and_leaves_the_fir
         r19.count(estate.catalog, cm.L2_WITNESS_RANK_TABLE),
         r19.count(estate.catalog, cm.L2_CORRECTIONS_TABLE),
     )
+    proof = cm._mint_successor_route_proof(
+        cm.SUCCESSOR_ROUTE_PRODUCTION, gate=lambda: None, gate_name="t"
+    )
+    context = cm._resolve_successor_context(r19.production_request(estate), proof)
     connection = r19.writer(estate.catalog)
     try:
+        instr = cm._stage_instrumentation_for(context, stage, units)
         with pytest.raises(cm.ChunkMultipassError, match="already derived on this connection"):
-            cm._stage_observation_corrections(connection, units, stage)
+            cm._stage_observation_corrections(connection, units, stage, instr)
         rank_stage = next(
             s
             for s in cm.successor_stage_graph(cm.SUCCESSOR_ROUTE_PRODUCTION, 10)
             if s.stage_id == "S11"
         )
+        rank_instr = cm._stage_instrumentation_for(context, rank_stage, units)
         with pytest.raises(cm.ChunkMultipassError, match="already derived on this connection"):
-            cm._stage_witness_rank(connection, (), units, rank_stage)
+            cm._stage_witness_rank(connection, (), units, rank_stage, rank_instr)
     finally:
         connection.close()
     assert (
@@ -216,8 +222,9 @@ def test_s03_a_second_derivation_refuses_with_the_legacy_text_and_leaves_the_fir
     context = cm._resolve_successor_context(r19.production_request(estate), proof)
     connection = r19.writer(estate.catalog)
     try:
+        instr = cm._stage_instrumentation_for(context, counters_stage, units)
         with pytest.raises(cm.ChunkMultipassError, match="already derived on this connection"):
-            cm._stage_counters_finalize(connection, context, units, counters_stage)
+            cm._stage_counters_finalize(connection, context, units, counters_stage, instr)
     finally:
         connection.close()
 

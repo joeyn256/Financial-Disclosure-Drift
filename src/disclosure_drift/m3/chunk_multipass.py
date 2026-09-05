@@ -159,18 +159,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, NoReturn, Protocol, cast
+from typing import Any, Final, NoReturn, Protocol, cast
 
+import disclosure_drift.errors as _errors_module
 import disclosure_drift.m3.canary_phases as _canary_phases_module
+import disclosure_drift.m3.canary_runtime as _canary_runtime_module
 import disclosure_drift.m3.chunk_consolidation as _chunk_consolidation_module
 import disclosure_drift.m3.chunk_evidence as _chunk_evidence_module
 import disclosure_drift.m3.chunk_execution as _chunk_execution_module
@@ -194,7 +197,7 @@ from disclosure_drift.m3.canary_phases import (
     read_phase_checkpoint,
     write_phase_checkpoint,
 )
-from disclosure_drift.m3.canary_runtime import process_peak_resident_bytes
+from disclosure_drift.m3.canary_runtime import free_bytes, process_peak_resident_bytes
 
 # The accepted single-pass merge primitives, imported rather than restated. They are private to
 # the consolidator's module because the single-pass consolidator is their only OTHER caller; a
@@ -203,6 +206,14 @@ from disclosure_drift.m3.chunk_consolidation import (
     _LOAD_ORDER,
     _MERGE_STRATEGY,
     CORRECTIONS_TABLE,
+    DUPLICATE_IDENTITY_UPDATE_SQL,
+    MEMBER_DELTA_SUMMARY_SQL,
+    REDUCED_PARSER_RUN_INSERT_SQL,
+    SIDECAR_DIGEST_REPLAY_SQL,
+    SIDECAR_MEMBER_SUMMARY_SQL,
+    STATEMENT_KIND_EXECUTE,
+    STATEMENT_KIND_FETCHALL,
+    STATEMENT_KIND_ITERATE,
     ChunkInput,
     FinalWorldReceipt,
     _accepted_plan_state,
@@ -252,6 +263,7 @@ from disclosure_drift.m3.chunk_execution import (
     CALIBRATION_ROLE_CHUNK,
     CALIBRATION_ROLE_FINAL,
     CALIBRATION_ROLE_GROUP,
+    F0_WRITTEN_TABLES,
     CalibrationChildEnvelope,
     ChunkExecutionError,
     ChunkRequest,
@@ -282,6 +294,7 @@ from disclosure_drift.m3.chunk_plan import (
     CalibrationSubsetPlan,
     ChunkBounds,
     ChunkPlan,
+    ChunkPlanError,
     canonical_json_bytes,
     chunk_by_id,
     require_calibration_subset_plan,
@@ -315,6 +328,8 @@ from disclosure_drift.m3.chunk_transfer import (
 )
 from disclosure_drift.m3.compact_evidence import (
     COMPACT_EVIDENCE_SIDECAR_FILENAME,
+    IDENTITY_FOLD_STATEMENTS,
+    MEMBER_MANIFEST_ROWS_SQL,
     CompactEvidenceSidecar,
     materialized_fields,
     reconstructed_observations,
@@ -329,16 +344,31 @@ from disclosure_drift.m3.single_source_canary import (
     require_f0_success,
 )
 from disclosure_drift.m3.working_catalog import (
+    EVENT_STATEMENT_END,
+    EVENT_STATEMENT_ERROR,
+    EVENT_STATEMENT_SAMPLE,
+    EVENT_STATEMENT_START,
+    EVENT_WATCHDOG_ABORT,
+    JOURNAL_AUTHENTIC,
+    JOURNAL_MISSING,
     PROGRESS_LEDGER_FILENAME,
+    WAL_FRAME_HEADER_BYTES,
     WORKING_CATALOG_FILENAME,
     RunProgressLedger,
     SourceProgress,
+    StatementJournalWriter,
+    WalObservation,
     WorkingCatalog,
+    WorkingCatalogError,
+    authenticate_statement_journal,
     cache_size_pragma,
     checkpoint_main_truncate,
     file_digest,
     normalized_wal_bytes,
+    observe_wal,
     promote_world_directory,
+    require_sqlite_page_size,
+    wal_index_committed_frames,
 )
 from disclosure_drift.sec.census import CensusCatalog, _stable_id
 from disclosure_drift.sec.census import _json as _stable_json
@@ -384,6 +414,16 @@ __all__ = [
     "SUCCESSOR_ROUTE_CALIBRATION",
     "SUCCESSOR_ROUTE_PRODUCTION",
     "SUCCESSOR_ROUTES",
+    "L2_APPLIED_UNIT_CONTRACT_V2",
+    "L2_OBSERVABILITY_CLOSEOUT_CONTRACT",
+    "L2_STAGE_PLAN_CONTRACT_V2",
+    "L2_STAGE_RECEIPT_CONTRACT_V2",
+    "L2_STATEMENT_EVENT_CONTRACT",
+    "L2_STATEMENT_EXECUTION_SET_CONTRACT",
+    "L2_STATEMENT_JOURNAL_CONTRACT",
+    "L2_STATEMENT_REGISTRY_CONTRACT",
+    "L2_TOOL_MANIFEST_CONTRACT",
+    "STATEMENT_PROGRESS_DIRECTORY",
     "AppliedUnit",
     "CalibrationAdmissionEvent",
     "CalibrationChunkExecution",
@@ -408,6 +448,7 @@ __all__ = [
     "RetainedWitnessInput",
     "SuccessorConnectionState",
     "SuccessorFinalRequest",
+    "StatementObservabilityTerms",
     "SuccessorRunOutcome",
     "ToolManifest",
     "calibration_admission_event_path",
@@ -434,8 +475,12 @@ __all__ = [
     "read_calibration_group_checkpoint",
     "read_calibration_group_deletion",
     "read_calibration_subset_result",
+    "read_observability_closeout",
     "read_stage_receipt",
+    "require_executable_level_two_cache_bytes",
     "require_multipass_plan",
+    "require_r21_observability_ready",
+    "require_statement_observability_terms",
     "require_real_multipass_authority",
     "require_sealed_schedule",
     "require_successor_cache_bytes",
@@ -457,6 +502,7 @@ __all__ = [
     "stage_first_witness_corrections",
     "stage_receipt_path",
     "successor_stage_graph",
+    "successor_statement_registry",
     "write_calibration_chunk_witness",
     "write_calibration_group_checkpoint",
 ]
@@ -3546,9 +3592,12 @@ class CalibrationSubsetResult:
     manifest: ArtifactManifest
     status: str
     result_identity: str
+    #: D151-C31R2-R19B-C2 §32: the successor terminal binds its observability closeout here; a
+    #: legacy calibration result never carries the key and its identity is unchanged.
+    successor_observability: Mapping[str, object] | None = None
 
     def _identity_inputs(self) -> dict[str, object]:
-        return {
+        inputs: dict[str, object] = {
             "contract": self.contract,
             "classifications": list(self.classifications),
             "plan_digest": self.plan_digest,
@@ -3599,6 +3648,9 @@ class CalibrationSubsetResult:
             "manifest": dict(self.manifest.as_record()),
             "status": self.status,
         }
+        if self.successor_observability is not None:
+            inputs["successor_observability"] = dict(self.successor_observability)
+        return inputs
 
     def as_record(self) -> Mapping[str, object]:
         """The exact persisted rendering."""
@@ -3617,7 +3669,7 @@ class CalibrationSubsetResult:
         Raises:
             ChunkMultipassError: the shape, contract, labels, status or identity refuses.
         """
-        present = {str(key) for key in record}
+        present = {str(key) for key in record} - {"successor_observability"}
         if present != _RESULT_KEYS:
             message = (
                 "a calibration-subset result is exact; this one is missing "
@@ -3628,10 +3680,12 @@ class CalibrationSubsetResult:
         counts = record["table_row_counts"]
         admission = record["storage_admission"]
         manifest = record["manifest"]
+        observability = record.get("successor_observability")
         if (
             not isinstance(counts, Mapping)
             or not isinstance(admission, Mapping)
             or not isinstance(manifest, Mapping)
+            or not (observability is None or isinstance(observability, Mapping))
         ):
             message = "a calibration-subset result's counts, admission or manifest are not mappings"
             raise ChunkMultipassError(message)
@@ -3709,6 +3763,9 @@ class CalibrationSubsetResult:
                 manifest=ArtifactManifest.from_record(manifest),
                 status=str(record["status"]),
                 result_identity=str(record["result_identity"]),
+                successor_observability=None
+                if observability is None
+                else {str(key): value for key, value in observability.items()},
             )
         except ChunkEvidenceError as exc:
             message = f"a calibration-subset result's manifest is refused: {exc}"
@@ -6960,6 +7017,39 @@ L2_STAGE_ADMISSION_CONTRACT: Final = "m3.3-chunked-f0-l2-stage-admission/1"
 #: The reconstructed connection state every successor connection is held to.
 L2_CONNECTION_STATE_CONTRACT: Final = "m3.3-chunked-f0-l2-connection-state/1"
 
+# --------------------------------------------------------------------------- #
+# D151-C31R2-R19B-C2 -- statement observability, the WAL watchdog and the /2 contracts
+# --------------------------------------------------------------------------- #
+#: The executable successor StagePlan. ``/1`` above stays for read-only historical parsing and
+#: is never executed after R19B; every writer emits ``/2`` and every executing reader requires
+#: it. There is no automatic conversion in either direction.
+L2_STAGE_PLAN_CONTRACT_V2: Final = "m3.3-chunked-f0-l2-stage-plan/2"
+
+#: The applied unit that binds its statement registry and statement execution set.
+L2_APPLIED_UNIT_CONTRACT_V2: Final = "m3.3-chunked-f0-l2-applied-unit/2"
+
+#: The stage receipt that carries the execution set and the observability status.
+L2_STAGE_RECEIPT_CONTRACT_V2: Final = "m3.3-chunked-f0-l2-stage-receipt/2"
+
+#: The runtime tool manifest's own contract -- never a StagePlan contract string.
+L2_TOOL_MANIFEST_CONTRACT: Final = "m3.3-chunked-f0-l2-tool-manifest/1"
+
+#: The operation registry a StagePlan binds: every material operation of every stage.
+L2_STATEMENT_REGISTRY_CONTRACT: Final = "m3.3-chunked-f0-l2-statement-registry/1"
+
+#: The per-statement journal and its event lines (restated literals; equal to the primitives').
+L2_STATEMENT_JOURNAL_CONTRACT: Final = "m3.3-chunked-f0-l2-statement-journal/1"
+L2_STATEMENT_EVENT_CONTRACT: Final = "m3.3-chunked-f0-l2-statement-event/1"
+
+#: The ordered set of successful, sealed journals one applied unit binds.
+L2_STATEMENT_EXECUTION_SET_CONTRACT: Final = "m3.3-chunked-f0-l2-statement-execution-set/1"
+
+#: The durable per-run observability closeout published before the terminal record.
+L2_OBSERVABILITY_CLOSEOUT_CONTRACT: Final = "m3.3-chunked-f0-l2-observability-closeout/1"
+
+#: The one directory name statement journals live under, beneath the stage receipt root.
+STATEMENT_PROGRESS_DIRECTORY: Final = "statement-progress"
+
 #: The request kind a successor final carries; refused by :func:`_child_main` and by every
 #: legacy reader, and dispatched by the calibration child only under the final role.
 SUCCESSOR_REQUEST_KIND_FINAL: Final = "successor-final"
@@ -7105,8 +7195,12 @@ _WAL_NONZERO: Final = "WAL_NONZERO"
 _ALREADY_DERIVED: Final = "already derived on this connection"
 
 _STAGE_CONFLICT: Final = "STAGE_CONFLICT"
+_STAGE_EXECUTE: Final = "STAGE_EXECUTE"
 _STAGE_COMMITTED_RECEIPT_PENDING: Final = "STAGE_COMMITTED_RECEIPT_PENDING"
 _STAGE_COMPLETE: Final = "STAGE_COMPLETE"
+_RESIDUE_NONE: Final = "NONE"
+_RESIDUE_PENDING: Final = "COMMITTED_STAGE_PENDING_RECEIPT"
+_RESIDUE_ROLLBACK: Final = "ROLLBACK_OR_INTERRUPTION_RESIDUE"
 
 
 def _stage_conflict(detail: str) -> NoReturn:
@@ -7152,6 +7246,132 @@ def require_successor_cache_bytes(value: object) -> int:
         )
         raise ChunkMultipassError(message)
     return value
+
+
+def require_executable_level_two_cache_bytes(value: object) -> int:
+    """The FUTURE Level-Two execution gate on the page-cache budget -- D151-C31R2-R19B-C2 §17.
+
+    Asked again at every successor execution boundary that opens a world -- the initialization
+    attempt and every bounded reopen -- with the rules of :func:`require_successor_cache_bytes`:
+    ``type(value) is int``, no bool, no ``None``, no float, positive, a whole number of kibibytes.
+    A parsed historical request whose cache is ``null`` stays readable and is never executed
+    through this boundary; no SQLite default, synthetic or owner-candidate budget is substituted.
+
+    Raises:
+        ChunkMultipassError: the value is not an executable page-cache budget.
+    """
+    try:
+        return require_successor_cache_bytes(value)
+    except ChunkMultipassError as exc:
+        message = (
+            f"a Level-Two execution boundary requires an explicit executable cache_bytes ({exc}); "
+            "a null, defaulted or substituted budget never opens a world"
+        )
+        raise ChunkMultipassError(message) from exc
+
+
+#: The bounds the four statement-observability terms are held to -- exact ints, bool refused.
+_INTERVAL_SECONDS_BOUNDS: Final = (1, 300)
+_VM_STEPS_BOUNDS: Final = (1_000, 100_000)
+_FRAME_BOUND_BOUNDS: Final = (1, 1 << 62)
+_OBSERVABILITY_TERM_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "statement_progress_interval_seconds",
+        "progress_handler_vm_steps",
+        "wal_watchdog_max_uncommitted_frames",
+        "expected_page_size_bytes",
+    }
+)
+
+
+def _exact_int(value: object, name: str, bounds: tuple[int, int]) -> int:
+    """``type(value) is int`` within closed ``bounds``; a bool, float or string is refused."""
+    low, high = bounds
+    if type(value) is not int:
+        message = f"{name} must be an int, not {type(value).__name__}; a bool or a float is refused"
+        raise ChunkMultipassError(message)
+    if value < low or value > high:
+        message = f"{name} must lie in [{low}, {high}]; got {value}"
+        raise ChunkMultipassError(message)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class StatementObservabilityTerms:
+    """The four request-carried observability terms a StagePlan /2 binds -- §19.
+
+    None of them is a production value frozen by R19B: each is carried by the request that
+    launches a successor run, validated exactly, and sealed into the StagePlan identity.
+    """
+
+    statement_progress_interval_seconds: int
+    progress_handler_vm_steps: int
+    wal_watchdog_max_uncommitted_frames: int
+    expected_page_size_bytes: int
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "statement_progress_interval_seconds": self.statement_progress_interval_seconds,
+            "progress_handler_vm_steps": self.progress_handler_vm_steps,
+            "wal_watchdog_max_uncommitted_frames": self.wal_watchdog_max_uncommitted_frames,
+            "expected_page_size_bytes": self.expected_page_size_bytes,
+        }
+
+    @property
+    def frame_size_bytes(self) -> int:
+        """One WAL frame at the expected page size: ``page_size + 24``."""
+        return self.expected_page_size_bytes + WAL_FRAME_HEADER_BYTES
+
+    @property
+    def derived_watchdog_bytes(self) -> int:
+        """The bytes the frame bound admits before the watchdog trips: frames x frame size."""
+        return self.wal_watchdog_max_uncommitted_frames * self.frame_size_bytes
+
+
+def require_statement_observability_terms(value: object) -> StatementObservabilityTerms:
+    """The exact four-key mapping, each term an exact int within its bound -- §19.
+
+    Raises:
+        ChunkMultipassError: not a mapping with exactly the four keys, or a term is not an
+            exact int in range, or the page size is not a SQLite page size.
+    """
+    if not isinstance(value, Mapping):
+        message = (
+            "statement_observability must be a mapping of the four observability terms; got "
+            f"{type(value).__name__}"
+        )
+        raise ChunkMultipassError(message)
+    keys = {str(key) for key in value}
+    if keys != _OBSERVABILITY_TERM_KEYS:
+        message = (
+            f"statement_observability must carry exactly {sorted(_OBSERVABILITY_TERM_KEYS)}; got "
+            f"{sorted(keys)}"
+        )
+        raise ChunkMultipassError(message)
+    interval = _exact_int(
+        value["statement_progress_interval_seconds"],
+        "statement_progress_interval_seconds",
+        _INTERVAL_SECONDS_BOUNDS,
+    )
+    vm_steps = _exact_int(
+        value["progress_handler_vm_steps"], "progress_handler_vm_steps", _VM_STEPS_BOUNDS
+    )
+    frames = _exact_int(
+        value["wal_watchdog_max_uncommitted_frames"],
+        "wal_watchdog_max_uncommitted_frames",
+        _FRAME_BOUND_BOUNDS,
+    )
+    try:
+        page_size = require_sqlite_page_size(value["expected_page_size_bytes"])
+    except WorkingCatalogError as exc:
+        raise ChunkMultipassError(str(exc)) from exc
+    return StatementObservabilityTerms(
+        statement_progress_interval_seconds=interval,
+        progress_handler_vm_steps=vm_steps,
+        wal_watchdog_max_uncommitted_frames=frames,
+        expected_page_size_bytes=page_size,
+    )
 
 
 def _identity_of(record: Mapping[str, object]) -> str:
@@ -7208,6 +7428,7 @@ class SuccessorFinalRequest:
     repository_tree_sha: str
     storage_requirements: Mapping[str, object]
     expected_sqlite_temp_binding: Mapping[str, object]
+    statement_observability: Mapping[str, object]
     capacity_observations: tuple[Mapping[str, object], ...] = ()
     stop_after_stage: str | None = None
     kind: str = SUCCESSOR_REQUEST_KIND_FINAL
@@ -7220,6 +7441,7 @@ class SuccessorFinalRequest:
             message = f"a successor request names route {self.route!r}; refused"
             raise ChunkMultipassError(message)
         require_successor_cache_bytes(self.cache_bytes)
+        require_statement_observability_terms(self.statement_observability)
         for name in (
             "predecessor_checkpoint_count",
             "predecessor_tip_ordinal",
@@ -7251,9 +7473,15 @@ class SuccessorFinalRequest:
             "repository_tree_sha": self.repository_tree_sha,
             "storage_requirements": dict(self.storage_requirements),
             "expected_sqlite_temp_binding": dict(self.expected_sqlite_temp_binding),
+            "statement_observability": dict(self.statement_observability),
             "capacity_observations": [dict(item) for item in self.capacity_observations],
             "stop_after_stage": self.stop_after_stage,
         }
+
+    @property
+    def observability_terms(self) -> StatementObservabilityTerms:
+        """The validated observability terms this request carries."""
+        return require_statement_observability_terms(self.statement_observability)
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> SuccessorFinalRequest:
@@ -7267,14 +7495,19 @@ class SuccessorFinalRequest:
             external = record["external_root"]
             storage = record["storage_requirements"]
             expected = record["expected_sqlite_temp_binding"]
+            observability = record["statement_observability"]
             observations = record["capacity_observations"]
             stop_after = record["stop_after_stage"]
             if (
                 not isinstance(storage, Mapping)
                 or not isinstance(expected, Mapping)
+                or not isinstance(observability, Mapping)
                 or not isinstance(observations, list)
             ):
-                message = "a successor request's storage, binding or observations are not of shape"
+                message = (
+                    "a successor request's storage, binding, observability terms or "
+                    "observations are not of shape"
+                )
                 raise ChunkMultipassError(message)
             return cls(
                 kind=str(record["kind"]),
@@ -7305,6 +7538,7 @@ class SuccessorFinalRequest:
                 repository_tree_sha=str(record["repository_tree_sha"]),
                 storage_requirements={str(key): value for key, value in storage.items()},
                 expected_sqlite_temp_binding={str(key): value for key, value in expected.items()},
+                statement_observability={str(key): value for key, value in observability.items()},
                 capacity_observations=tuple(
                     {str(key): value for key, value in item.items()}
                     for item in observations
@@ -7340,6 +7574,11 @@ _TOOL_MANIFEST_MODULES: Final[tuple[tuple[str, str], ...]] = (
     ("disclosure_drift.storage.sqlite", _storage_sqlite_module.__file__),
     ("disclosure_drift.storage.catalog", _storage_catalog_module.__file__),
     ("disclosure_drift.sec.census", _census_module.__file__),
+    # D151-C31R2-R19B-C2 (R19A-R1 MINOR-2): the two further modules the successor region
+    # reaches -- the peak-RSS and free-space readers, and the error base every refusal derives
+    # from -- so the declared influence set is the complete one.
+    ("disclosure_drift.m3.canary_runtime", _canary_runtime_module.__file__),
+    ("disclosure_drift.errors", _errors_module.__file__),
 )
 
 
@@ -7353,7 +7592,7 @@ class ToolManifest:
     def as_record(self) -> Mapping[str, object]:
         """The persisted rendering: the entries and the identity over them."""
         return {
-            "contract": L2_STAGE_PLAN_CONTRACT,
+            "contract": L2_TOOL_MANIFEST_CONTRACT,
             "entries": [dict(entry) for entry in self.entries],
             "tool_manifest_identity": self.identity,
         }
@@ -7387,7 +7626,7 @@ def _runtime_tool_manifest() -> ToolManifest:
         entries.append(
             {"module": module, "filename": path.name, "sha256": sha256, "byte_length": length}
         )
-    body = {"contract": L2_STAGE_PLAN_CONTRACT, "entries": entries}
+    body = {"contract": L2_TOOL_MANIFEST_CONTRACT, "entries": entries}
     return ToolManifest(entries=tuple(entries), identity=_identity_of(body))
 
 
@@ -7725,8 +7964,743 @@ def successor_stage_graph(route: str, counter_source_count: int) -> tuple[L2Stag
 
 
 # --------------------------------------------------------------------------- #
-# The successor StagePlan -- §18
+# The operation registry -- D151-C31R2-R19B-C2 §20, §21, §24 (owner rulings C2-R1, C2-R2)
 # --------------------------------------------------------------------------- #
+_ROLE_WORKING_CATALOG: Final = "WORKING_CATALOG"
+_ROLE_COMPACT_EVIDENCE: Final = "COMPACT_EVIDENCE"
+_ROLE_INTERMEDIATES: Final = "INTERMEDIATES"
+_ROLE_WORLD: Final = "WORLD"
+_WATCHDOG_ROLES: Final[frozenset[str]] = frozenset({_ROLE_WORKING_CATALOG, _ROLE_COMPACT_EVIDENCE})
+
+_MODE_STATIC_SQL: Final = "STATIC_SQL"
+_MODE_DYNAMIC_SQL_CAPTURE: Final = "DYNAMIC_SQL_CAPTURE"
+_MODE_CALLABLE_NON_SQL: Final = "CALLABLE_NON_SQL"
+_SQL_MODES: Final[frozenset[str]] = frozenset({_MODE_STATIC_SQL, _MODE_DYNAMIC_SQL_CAPTURE})
+
+_PHASE_PREPARE: Final = "prepare"
+_PHASE_TRANSACTION: Final = "transaction"
+_PHASE_POST_COMMIT: Final = "post_commit"
+
+_S18_PATH_BUILD: Final = "BUILD"
+_S18_PATH_AUTHENTICATE: Final = "AUTHENTICATE"
+_S18_PATHS: Final[tuple[str, ...]] = (_S18_PATH_BUILD, _S18_PATH_AUTHENTICATE)
+
+_KIND_EXECUTEMANY: Final = "executemany"
+_KIND_CALLABLE: Final = "callable"
+_KIND_PATH_DECISION: Final = "path_decision"
+_SQL_EXECUTION_KINDS: Final[frozenset[str]] = frozenset(
+    {STATEMENT_KIND_EXECUTE, STATEMENT_KIND_FETCHALL, STATEMENT_KIND_ITERATE, _KIND_EXECUTEMANY}
+)
+
+_EXPECTED_DATA_DEPENDENT: Final = "data_dependent"
+_EXPECTED_S2_DUPLICATES: Final = "witness:S2.duplicate_identities"
+
+#: The owner classification of the one ``executemany`` in the consolidator (D151-R19B-C2-R1):
+#: bounded by the duplicate-accession correction set, never routed through instrumentation.
+STAGE_ROWS_CLASSIFICATION: Final = "BOUNDED_CONTROL_OPERATION"
+
+#: The exact static statements the successor stage functions execute, stated once so the
+#: registry binds each SHA-256 before execution and the runtime holds the text to it.
+_SQL_COUNT_TEMPLATE: Final = "SELECT COUNT(*) AS n FROM main.{table}"
+_SQL_S11_CONTESTED: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
+    "WHERE witness_rank = 1 AND witnesses > 1"
+)
+_SQL_S12_ORPHANED_WINNERS: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+    "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
+    "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
+)
+_SQL_S12_ORPHANED_RIVALS: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+    "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
+    "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
+)
+_SQL_S12_INSERT_WINNERS: Final = (
+    f"INSERT INTO main.{L2_CORRECTIONS_TABLE} "  # noqa: S608
+    f"SELECT {_FUNCTION_STABLE_ID}('accession-observation', a.accession_plain, "
+    "a.source_observation_id, a.parsed_record_id, je.key), "
+    "a.accession_plain, a.source_observation_id, a.parsed_record_id, je.key, je.value, "
+    "a.first_observed_at_utc, 0 "
+    f"FROM main.{L2_WITNESS_RANK_TABLE} AS w "
+    "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
+    f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
+    "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
+    "ELSE printf('%010d', a.registrant_cik_numeric) END, "
+    "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
+    "WHERE w.witness_rank = 1 AND w.witnesses > 1"
+)
+_SQL_S12_INSERT_RIVALS: Final = (
+    f"INSERT INTO main.{L2_CORRECTIONS_TABLE} "  # noqa: S608
+    f"SELECT {_FUNCTION_STABLE_ID}('accession-observation', w.accession_plain, "
+    "w.source_observation_id, w.parsed_record_id, je.key), "
+    "w.accession_plain, w.source_observation_id, w.parsed_record_id, je.key, je.value, "
+    "w.first_observed_at_utc, 0 "
+    f"FROM main.{L2_WITNESS_RANK_TABLE} AS w "
+    "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
+    f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
+    "WHERE w.witness_rank > 1"
+)
+_SQL_S12_SUMMARY: Final = (
+    f"SELECT (SELECT COUNT(*) FROM main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
+    "WHERE witness_rank = 1 AND witnesses > 1) AS contested, "
+    f"(SELECT COUNT(*) FROM main.{L2_CORRECTIONS_TABLE}) AS staged"
+)
+_SQL_S15P_UPDATE: Final = (
+    "UPDATE census_plan_sources SET parser_state = ? WHERE source_instance_id = ?"
+)
+_SQL_S17C_INSERT_RANK: Final = (
+    f"INSERT INTO main.{L2_PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
+    "(accession_plain, parsed_record_id, witness_rank, witnesses) "
+    "SELECT accession_plain, parsed_record_id, "
+    "ROW_NUMBER() OVER (PARTITION BY accession_plain ORDER BY chunk_ordinal) AS witness_rank, "
+    "COUNT(*) OVER (PARTITION BY accession_plain) AS witnesses "
+    f"FROM main.{L2_PLAN_WITNESS_TABLE}"
+)
+_SQL_S17C_ORPHANED_WINNERS: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+    "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
+    "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
+)
+_SQL_S17C_ORPHANED_RIVALS: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+    "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
+    "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
+)
+_SQL_S17C_CONTESTED: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
+    "WHERE witness_rank = 1 AND witnesses > 1"
+)
+_SQL_S17C_WINNER_ROWS: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+    "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
+    f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
+    "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
+    "ELSE printf('%010d', a.registrant_cik_numeric) END, "
+    "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
+    "WHERE w.witness_rank = 1 AND w.witnesses > 1"
+)
+_SQL_S17C_RIVAL_ROWS: Final = (
+    f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
+    "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
+    f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
+    "WHERE w.witness_rank > 1"
+)
+_SQL_S17C_INSERT_MEMBER_DELTA: Final = (
+    f"INSERT INTO main.{L2_MEMBER_DELTA_TABLE} (member_ordinal, delta) "  # noqa: S608
+    "WITH ranked AS ("
+    "  SELECT member_ordinal, delta_materialized,"
+    "    ROW_NUMBER() OVER (PARTITION BY native_identity "
+    "                       ORDER BY member_ordinal, record_ordinal) AS rn"
+    f"  FROM main.{L2_PLAN_LEDGER_TABLE})"
+    "SELECT member_ordinal, SUM(delta_materialized) AS delta FROM ranked "
+    "WHERE rn > 1 GROUP BY member_ordinal"
+)
+_SQL_S17C_DELTAS: Final = (
+    "SELECT COUNT(*) AS members, COALESCE(SUM(delta), 0) AS total "  # noqa: S608
+    f"FROM main.{L2_MEMBER_DELTA_TABLE}"
+)
+
+#: The exact prefixes that identify the statements two modules R19B may not edit issue, as
+#: observed at the connection-boundary proxy. Exact runtime SQL is captured at that boundary;
+#: the registry binds the builder identity and this prefix.
+_PREFIX_CANDIDATE_EDGES_SELECT: Final = (
+    "SELECT value_text, GROUP_CONCAT(DISTINCT printf('%010d', cik_numeric)) AS ciks "
+    "FROM census_registrant_observations"
+)
+_PREFIX_CANDIDATE_EDGES_INSERT: Final = "INSERT OR IGNORE INTO census_candidate_lineage_edges"
+_PREFIX_MARK_CONFLICTS: Final = (
+    "UPDATE census_accession_observations AS o SET conflict_indicator = 1"
+)
+_PREFIX_TABLE_ROW_COUNTS: Final = "SELECT COUNT(*) AS rows FROM "
+
+#: Per stage kind, the proxy-observed statement prefixes that are bounded control operations
+#: -- executed through the proxy unjournaled and counted, never instrumented: S14's per-pair
+#: candidate-edge insert is bounded by the alias-sharing pair set, not by record volume.
+_BOUNDED_PROXY_PREFIXES: Final[Mapping[str, tuple[str, ...]]] = {
+    _KIND_EDGES: (_PREFIX_CANDIDATE_EDGES_INSERT,),
+}
+
+_OP_CANDIDATE_EDGES_SELECT: Final = "candidate_edges.select"
+_OP_MARK_CONFLICTS: Final = "mark_accession_conflicts.update"
+_OP_TABLE_ROW_COUNTS: Final = "table_row_counts"
+_OP_PATH_DECISION: Final = "path_decision"
+_OP_REAUTHENTICATE: Final = "reauthenticate_intermediates"
+_OP_BUILD_MANIFEST: Final = "build_artifact_manifest"
+
+_CC: Final = "disclosure_drift.m3.chunk_consolidation."
+_CM: Final = "disclosure_drift.m3.chunk_multipass."
+_CE: Final = "disclosure_drift.m3.compact_evidence.CompactEvidenceSidecar."
+_CENSUS: Final = "disclosure_drift.sec.census.CensusCatalog."
+
+
+def _count_sql(table: str) -> str:
+    """The exact count statement the successor issues over one main table."""
+    return _SQL_COUNT_TEMPLATE.format(table=table)
+
+
+def _sql_sha256(sql: str) -> str:
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+def _source_module(source_callable: str) -> str:
+    """The module a source callable lives in (its class segment removed where it has one)."""
+    for prefix, module in (
+        (_CENSUS, "disclosure_drift.sec.census"),
+        (_CE, "disclosure_drift.m3.compact_evidence"),
+        (_CM + "_StageInstrumentation.", "disclosure_drift.m3.chunk_multipass"),
+    ):
+        if source_callable.startswith(prefix):
+            return module
+    return source_callable.rsplit(".", 1)[0]
+
+
+@dataclass(frozen=True, slots=True)
+class _OperationDescriptor:
+    """One registered material operation: what it is, where it runs, how its SQL is identified."""
+
+    stage_id: str
+    stage_ordinal: int
+    unit_kind: str
+    statement_ordinal: int
+    operation: str
+    database_role: str
+    source_callable: str
+    operation_kind: str
+    sql_identity_mode: str
+    static_sql_sha256: str | None
+    sql_prefix: str | None
+    expected_executions: int | str
+    path: str | None
+    phase: str
+    watchdog_applicable: bool
+
+    @property
+    def statement_id(self) -> str:
+        return f"{self.stage_id}/{self.operation}"
+
+    def body(self) -> dict[str, object]:
+        return {
+            "stage_id": self.stage_id,
+            "stage_ordinal": self.stage_ordinal,
+            "unit_kind": self.unit_kind,
+            "statement_ordinal": self.statement_ordinal,
+            "statement_id": self.statement_id,
+            "operation": self.operation,
+            "database_role": self.database_role,
+            "source_callable": self.source_callable,
+            "source_module": _source_module(self.source_callable),
+            "operation_kind": self.operation_kind,
+            "sql_identity_mode": self.sql_identity_mode,
+            "static_sql_sha256": self.static_sql_sha256,
+            "sql_prefix": self.sql_prefix,
+            "instrumentation_required": True,
+            "watchdog_applicable": self.watchdog_applicable,
+            "expected_executions": self.expected_executions,
+            "path": self.path,
+            "phase": self.phase,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        record = self.body()
+        record["descriptor_identity"] = _identity_of(record)
+        return record
+
+    @property
+    def identity(self) -> str:
+        return _identity_of(self.body())
+
+
+def _descriptor(
+    stage: L2Stage,
+    ordinal: int,
+    operation: str,
+    *,
+    mode: str,
+    kind: str,
+    source: str,
+    role: str = _ROLE_WORKING_CATALOG,
+    static_sql: str | None = None,
+    prefix: str | None = None,
+    expected: int | str = 1,
+    path: str | None = None,
+    phase: str = _PHASE_TRANSACTION,
+) -> _OperationDescriptor:
+    _require(
+        (mode == _MODE_STATIC_SQL) == (static_sql is not None),
+        f"descriptor {operation!r}: STATIC_SQL binds exactly one static text",
+    )
+    _require(
+        mode != _MODE_CALLABLE_NON_SQL or kind in {_KIND_CALLABLE, _KIND_PATH_DECISION},
+        f"descriptor {operation!r}: a non-SQL operation is a callable or a path decision",
+    )
+    _require(
+        mode == _MODE_CALLABLE_NON_SQL or kind in _SQL_EXECUTION_KINDS,
+        f"descriptor {operation!r}: a SQL operation names a SQL execution kind",
+    )
+    return _OperationDescriptor(
+        stage_id=stage.stage_id,
+        stage_ordinal=stage.ordinal,
+        unit_kind=stage.kind,
+        statement_ordinal=ordinal,
+        operation=operation,
+        database_role=role,
+        source_callable=source,
+        operation_kind=kind,
+        sql_identity_mode=mode,
+        static_sql_sha256=None if static_sql is None else _sql_sha256(static_sql),
+        sql_prefix=prefix,
+        expected_executions=expected,
+        path=path,
+        phase=phase,
+        watchdog_applicable=role in _WATCHDOG_ROLES and mode in _SQL_MODES,
+    )
+
+
+def _declared_operations(  # noqa: PLR0915 - one exhaustive table per stage kind
+    stage: L2Stage, counter_source_count: int
+) -> tuple[_OperationDescriptor, ...]:
+    """Every material operation of one stage, in its declared order -- derived from source.
+
+    S0 and S1 perform seed-bounded control work only (control schema, StagePlan row, the five
+    persisted index rows and their DROP); S19 derives its outcome from committed witnesses and
+    runs no SQL; S20P and S22P write the run-progress ledger, a control store. Every other stage
+    lists each statement its function executes over a record-volume relation.
+    """
+    items: list[_OperationDescriptor] = []
+
+    def add(operation: str, **terms: object) -> None:
+        items.append(_descriptor(stage, len(items), operation, **cast("dict[str, Any]", terms)))
+
+    def count(table: str, expected: int = 1) -> None:
+        add(
+            f"count:{table}",
+            mode=_MODE_STATIC_SQL,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CM + "_StageInstrumentation.count",
+            static_sql=_count_sql(table),
+            expected=expected,
+        )
+
+    static = _MODE_STATIC_SQL
+    dynamic = _MODE_DYNAMIC_SQL_CAPTURE
+    kind = stage.kind
+    if kind == _KIND_REDUCED_RUN:
+        add(
+            "reduced_parser_run.select_chunk_runs",
+            mode=dynamic,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CC + "_reduced_parser_run",
+        )
+        add(
+            "reduced_parser_run.insert_run_row",
+            mode=static,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CC + "_reduced_parser_run",
+            static_sql=REDUCED_PARSER_RUN_INSERT_SQL,
+        )
+        count("census_parser_runs")
+    elif kind == _KIND_TABLE_LOAD:
+        table = str(stage.table)
+        if _MERGE_STRATEGY[table] == "keyed_first_last":
+            add(
+                "keyed_first_last_load.insert",
+                mode=dynamic,
+                kind=STATEMENT_KIND_EXECUTE,
+                source=_CC + "_keyed_first_last_load",
+            )
+        else:
+            add(
+                "sorted_bulk_load.insert",
+                mode=dynamic,
+                kind=STATEMENT_KIND_EXECUTE,
+                source=_CC + "_sorted_bulk_load",
+            )
+        if table == "census_parsed_records":
+            add(
+                "apply_duplicate_identities.update",
+                mode=static,
+                kind=STATEMENT_KIND_EXECUTE,
+                source=_CC + "_apply_duplicate_identities",
+                static_sql=DUPLICATE_IDENTITY_UPDATE_SQL,
+                expected=_EXPECTED_S2_DUPLICATES,
+            )
+        count(table)
+    elif kind == _KIND_WITNESS_RANK:
+        count(L2_WITNESS_RANK_TABLE, 2)
+        add(
+            "witness_rank.insert",
+            mode=dynamic,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CM + "_stage_witness_rank",
+        )
+        add(
+            "witness_rank.contested",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CM + "_stage_witness_rank",
+            static_sql=_SQL_S11_CONTESTED,
+        )
+    elif kind == _KIND_CORRECTIONS:
+        count(L2_CORRECTIONS_TABLE)
+        add(
+            "corrections.orphaned_winners",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CM + "_stage_observation_corrections",
+            static_sql=_SQL_S12_ORPHANED_WINNERS,
+        )
+        add(
+            "corrections.orphaned_rivals",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CM + "_stage_observation_corrections",
+            static_sql=_SQL_S12_ORPHANED_RIVALS,
+        )
+        add(
+            "corrections.insert_winners",
+            mode=static,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CM + "_stage_observation_corrections",
+            static_sql=_SQL_S12_INSERT_WINNERS,
+        )
+        add(
+            "corrections.insert_rivals",
+            mode=static,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CM + "_stage_observation_corrections",
+            static_sql=_SQL_S12_INSERT_RIVALS,
+        )
+        add(
+            "corrections.summary",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CM + "_stage_observation_corrections",
+            static_sql=_SQL_S12_SUMMARY,
+        )
+    elif kind == _KIND_OBSERVATION_LOAD:
+        add(
+            "load_accession_observations.insert",
+            mode=dynamic,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CM + "_successor_load_accession_observations",
+        )
+        count("census_accession_observations")
+    elif kind == _KIND_EDGES:
+        add(
+            _OP_CANDIDATE_EDGES_SELECT,
+            mode=dynamic,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CENSUS + "_candidate_edges",
+            prefix=_PREFIX_CANDIDATE_EDGES_SELECT,
+            expected=2,
+        )
+        add(
+            _OP_MARK_CONFLICTS,
+            mode=dynamic,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CENSUS + "_mark_accession_conflicts",
+            prefix=_PREFIX_MARK_CONFLICTS,
+        )
+        count("census_candidate_lineage_edges")
+    elif kind == _KIND_PARSER_STATE:
+        add(
+            "parser_state.update",
+            mode=static,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CM + "_stage_parser_state",
+            static_sql=_SQL_S15P_UPDATE,
+        )
+    elif kind == _KIND_INDEX_REBUILD:
+        add(
+            "index_rebuild.create",
+            mode=dynamic,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CM + "_stage_index_rebuild",
+        )
+    elif kind in {_KIND_COUNTER_CATALOG, _KIND_COUNTER_LEDGER}:
+        batch = int(cast("int", stage.batch))
+        size = min(MERGE_FAN_IN, counter_source_count - batch * MERGE_FAN_IN)
+        if kind == _KIND_COUNTER_CATALOG:
+            add(
+                "counter_catalog.insert",
+                mode=dynamic,
+                kind=STATEMENT_KIND_EXECUTE,
+                source=_CM + "_stage_counter_catalog_batch",
+                expected=size,
+            )
+            count(L2_PLAN_WITNESS_TABLE)
+        else:
+            add(
+                "counter_ledger.insert",
+                mode=dynamic,
+                kind=STATEMENT_KIND_EXECUTE,
+                source=_CM + "_stage_counter_ledger_batch",
+                expected=size,
+            )
+            count(L2_PLAN_LEDGER_TABLE)
+    elif kind == _KIND_COUNTERS_FINALIZE:
+        count(L2_PLAN_WITNESS_RANK_TABLE, 2)
+        count(L2_MEMBER_DELTA_TABLE)
+        source = _CM + "_stage_counters_finalize"
+        add(
+            "counters.insert_rank",
+            mode=static,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=source,
+            static_sql=_SQL_S17C_INSERT_RANK,
+        )
+        add(
+            "counters.orphaned_winners",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=source,
+            static_sql=_SQL_S17C_ORPHANED_WINNERS,
+        )
+        add(
+            "counters.orphaned_rivals",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=source,
+            static_sql=_SQL_S17C_ORPHANED_RIVALS,
+        )
+        add(
+            "counters.contested",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=source,
+            static_sql=_SQL_S17C_CONTESTED,
+        )
+        add(
+            "counters.winner_rows",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=source,
+            static_sql=_SQL_S17C_WINNER_ROWS,
+        )
+        add(
+            "counters.rival_rows",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=source,
+            static_sql=_SQL_S17C_RIVAL_ROWS,
+        )
+        add(
+            "counters.insert_member_delta",
+            mode=static,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=source,
+            static_sql=_SQL_S17C_INSERT_MEMBER_DELTA,
+        )
+        add(
+            "counters.deltas",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=source,
+            static_sql=_SQL_S17C_DELTAS,
+        )
+    elif kind == _KIND_SIDECAR:
+        sidecar = _ROLE_COMPACT_EVIDENCE
+        add(
+            _OP_PATH_DECISION,
+            mode=_MODE_CALLABLE_NON_SQL,
+            kind=_KIND_PATH_DECISION,
+            source=_CM + "_prepare_sidecar",
+            role=sidecar,
+            phase=_PHASE_PREPARE,
+        )
+        add(
+            "member_deltas.create_temp",
+            mode=dynamic,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CC + "_member_deltas",
+            role=sidecar,
+            path=_S18_PATH_BUILD,
+            phase=_PHASE_PREPARE,
+        )
+        add(
+            "member_deltas.summary",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CC + "_member_deltas",
+            role=sidecar,
+            static_sql=MEMBER_DELTA_SUMMARY_SQL,
+            path=_S18_PATH_BUILD,
+            phase=_PHASE_PREPARE,
+        )
+        add(
+            "merge_sidecar.insert_members",
+            mode=dynamic,
+            kind=STATEMENT_KIND_EXECUTE,
+            source=_CC + "_merge_sidecar",
+            role=sidecar,
+            path=_S18_PATH_BUILD,
+            phase=_PHASE_PREPARE,
+        )
+        add(
+            "merge_sidecar.summary",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CC + "_merge_sidecar",
+            role=sidecar,
+            static_sql=SIDECAR_MEMBER_SUMMARY_SQL,
+            path=_S18_PATH_BUILD,
+            phase=_PHASE_PREPARE,
+        )
+        add(
+            "merge_sidecar.digest_replay",
+            mode=static,
+            kind=STATEMENT_KIND_ITERATE,
+            source=_CC + "_merge_sidecar",
+            role=sidecar,
+            static_sql=SIDECAR_DIGEST_REPLAY_SQL,
+            path=_S18_PATH_BUILD,
+            phase=_PHASE_PREPARE,
+        )
+        add(
+            "sidecar.member_manifest_rows",
+            mode=static,
+            kind=STATEMENT_KIND_FETCHALL,
+            source=_CE + "member_manifest_digest",
+            role=sidecar,
+            static_sql=MEMBER_MANIFEST_ROWS_SQL,
+            phase=_PHASE_PREPARE,
+        )
+        for table, sql in IDENTITY_FOLD_STATEMENTS:
+            add(
+                f"sidecar.identity_fold:{table}",
+                mode=static,
+                kind=STATEMENT_KIND_FETCHALL,
+                source=_CE + "identity",
+                role=sidecar,
+                static_sql=sql,
+                phase=_PHASE_PREPARE,
+            )
+    elif kind == _KIND_REAUTHENTICATE:
+        add(
+            _OP_REAUTHENTICATE,
+            mode=_MODE_CALLABLE_NON_SQL,
+            kind=_KIND_CALLABLE,
+            source=_CM + "_prepare_reauthentication",
+            role=_ROLE_INTERMEDIATES,
+            phase=_PHASE_PREPARE,
+        )
+    elif kind in {_KIND_FINAL_RECEIPT, _KIND_CALIBRATION_RESULT}:
+        add(
+            _OP_TABLE_ROW_COUNTS,
+            mode=dynamic,
+            kind=STATEMENT_KIND_FETCHALL,
+            source="disclosure_drift.m3.chunk_execution.table_row_counts",
+            prefix=_PREFIX_TABLE_ROW_COUNTS,
+            expected=len(F0_WRITTEN_TABLES),
+        )
+        add(
+            _OP_BUILD_MANIFEST,
+            mode=_MODE_CALLABLE_NON_SQL,
+            kind=_KIND_CALLABLE,
+            source=_CM + "_finish_terminal",
+            role=_ROLE_WORLD,
+            phase=_PHASE_POST_COMMIT,
+        )
+    return tuple(items)
+
+
+def successor_statement_registry(
+    route: str, counter_source_count: int
+) -> tuple[Mapping[str, object], ...]:
+    """The exact ordered registry of every material operation of one route -- §20, §21."""
+    records: list[Mapping[str, object]] = []
+    for stage in successor_stage_graph(route, counter_source_count):
+        records.extend(
+            item.as_record() for item in _declared_operations(stage, counter_source_count)
+        )
+    return tuple(records)
+
+
+def _registry_identity(
+    route: str, counter_source_count: int, registry: Sequence[Mapping[str, object]]
+) -> str:
+    return _identity_of(
+        {
+            "contract": L2_STATEMENT_REGISTRY_CONTRACT,
+            "route": route,
+            "counter_source_count": counter_source_count,
+            "descriptors": [dict(item) for item in registry],
+        }
+    )
+
+
+def registry_counts(registry: Sequence[Mapping[str, object]]) -> Mapping[str, int]:
+    """The four counts §21 asks for, over one registry."""
+    modes = [str(item["sql_identity_mode"]) for item in registry]
+    return {
+        "MATERIAL_OPERATION_COUNT": len(registry),
+        "MATERIAL_SQL_STATEMENT_COUNT": sum(1 for mode in modes if mode in _SQL_MODES),
+        "STATIC_SQL_DESCRIPTOR_COUNT": modes.count(_MODE_STATIC_SQL),
+        "DYNAMIC_SQL_CAPTURE_DESCRIPTOR_COUNT": modes.count(_MODE_DYNAMIC_SQL_CAPTURE),
+        "CALLABLE_NON_SQL_DESCRIPTOR_COUNT": modes.count(_MODE_CALLABLE_NON_SQL),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The successor StagePlan -- §18 (/2 since D151-C31R2-R19B-C2 §19)
+# --------------------------------------------------------------------------- #
+_STAGE_PLAN_V2_FIELDS: Final[tuple[str, ...]] = (
+    "statement_registry",
+    "statement_registry_identity",
+    "statement_progress_root",
+    "statement_progress_interval_seconds",
+    "progress_handler_vm_steps",
+    "wal_watchdog_max_uncommitted_frames",
+    "wal_watchdog_storage_ceiling_bytes",
+    "expected_page_size_bytes",
+)
+
+
+def _require_watchdog_within_ceiling(terms: StatementObservabilityTerms, ceiling: int) -> None:
+    """``frames x (page_size + 24) <= wal_watchdog_storage_ceiling_bytes`` -- §26, §36."""
+    _require(
+        terms.derived_watchdog_bytes <= ceiling,
+        f"wal_watchdog_max_uncommitted_frames = {terms.wal_watchdog_max_uncommitted_frames} at "
+        f"page size {terms.expected_page_size_bytes} derives {terms.derived_watchdog_bytes} "
+        f"bytes, above the Level-Two transient ceiling of {ceiling} bytes; refused",
+    )
+
+
+def _require_stage_plan_v2_fields(body: Mapping[str, object]) -> None:
+    """Every /2 field present, exact, and consistent with the body it sits in."""
+    missing = [name for name in _STAGE_PLAN_V2_FIELDS if name not in body]
+    _require(not missing, f"a /2 StagePlan lacks {missing}; refused")
+    terms = require_statement_observability_terms(
+        {name: body[name] for name in _OBSERVABILITY_TERM_KEYS}
+    )
+    ceiling = _exact_int(
+        body["wal_watchdog_storage_ceiling_bytes"],
+        "wal_watchdog_storage_ceiling_bytes",
+        (1, 1 << 62),
+    )
+    _require_watchdog_within_ceiling(terms, ceiling)
+    root = Path(str(body["statement_progress_root"]))
+    expected_root = Path(str(body["stage_receipt_root"])) / STATEMENT_PROGRESS_DIRECTORY
+    _require(
+        root == expected_root and ".." not in root.parts and root.is_absolute(),
+        f"statement_progress_root must be exactly {expected_root.name!r} beneath the stage "
+        "receipt root, with no traversal component; refused",
+    )
+    registry = body["statement_registry"]
+    _require(isinstance(registry, list) and bool(registry), "a /2 StagePlan binds a registry")
+    records = cast("list[Mapping[str, object]]", registry)
+    route = str(body["route"])
+    count = _stored_int(body["counter_source_count"], "counter_source_count")
+    _require(
+        [dict(item) for item in records]
+        == [dict(item) for item in successor_statement_registry(route, count)]
+        and str(body["statement_registry_identity"]) == _registry_identity(route, count, records),
+        "a /2 StagePlan's statement registry is not the one this build derives for its route "
+        "and chunk count, or its identity does not describe it; refused",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class L2StagePlan:
     """The generic, variable-count successor StagePlan: its canonical body and its identity.
@@ -7767,6 +8741,55 @@ class L2StagePlan:
         return str(self.body["tool_manifest_identity"])
 
     @property
+    def contract(self) -> str:
+        """The contract this plan was sealed under: ``/1`` (historical) or ``/2``."""
+        return str(self.body["contract"])
+
+    @property
+    def executable(self) -> bool:
+        """Only a ``/2`` plan is executable; a ``/1`` plan is readable for forensics only."""
+        return self.contract == L2_STAGE_PLAN_CONTRACT_V2
+
+    @property
+    def observability_terms(self) -> StatementObservabilityTerms:
+        """The four bound observability terms (``/2`` only)."""
+        _require(self.executable, "a /1 StagePlan carries no observability terms")
+        return require_statement_observability_terms(
+            {name: self.body[name] for name in _OBSERVABILITY_TERM_KEYS}
+        )
+
+    @property
+    def wal_watchdog_storage_ceiling_bytes(self) -> int:
+        """The per-active-transaction WAL storage ceiling (``/2`` only)."""
+        _require(self.executable, "a /1 StagePlan carries no watchdog ceiling")
+        return _exact_int(
+            self.body["wal_watchdog_storage_ceiling_bytes"],
+            "wal_watchdog_storage_ceiling_bytes",
+            (1, 1 << 62),
+        )
+
+    @property
+    def statement_progress_root(self) -> Path:
+        """Where this plan's statement journals live (``/2`` only)."""
+        _require(self.executable, "a /1 StagePlan carries no statement progress root")
+        return Path(str(self.body["statement_progress_root"]))
+
+    @property
+    def statement_registry(self) -> tuple[Mapping[str, object], ...]:
+        """The bound operation registry (``/2`` only)."""
+        _require(self.executable, "a /1 StagePlan carries no statement registry")
+        return tuple(
+            cast("Mapping[str, object]", item)
+            for item in cast("list[object]", self.body["statement_registry"])
+        )
+
+    @property
+    def statement_registry_identity(self) -> str:
+        """The bound registry identity (``/2`` only)."""
+        _require(self.executable, "a /1 StagePlan carries no statement registry")
+        return str(self.body["statement_registry_identity"])
+
+    @property
     def stages(self) -> tuple[L2Stage, ...]:
         """The exact ordered stage graph."""
         graph = self.body["stage_graph"]
@@ -7801,7 +8824,7 @@ class L2StagePlan:
         recorded = record.get("stage_plan_identity")
         plan = cls(body=body, identity=_identity_of(body))
         _require(
-            str(body.get("contract")) == L2_STAGE_PLAN_CONTRACT,
+            str(body.get("contract")) in {L2_STAGE_PLAN_CONTRACT, L2_STAGE_PLAN_CONTRACT_V2},
             f"a successor StagePlan carrying contract {body.get('contract')!r} is refused",
         )
         _require(plan.route in SUCCESSOR_ROUTES, f"a StagePlan names route {plan.route!r}; refused")
@@ -7825,6 +8848,8 @@ class L2StagePlan:
             tuple(stage.ordinal for stage in plan.stages) == tuple(range(len(plan.stages))),
             "a successor StagePlan's stage graph is not contiguous from ordinal 0; refused",
         )
+        if plan.executable:
+            _require_stage_plan_v2_fields(body)
         return plan
 
 
@@ -7860,8 +8885,17 @@ def _build_successor_stage_plan(
         for ordinal, name, table, sql in expected_index_records
     ]
     world = Path(request.world_directory)
+    terms = request.observability_terms
+    ceiling = requirements.transient_for(MERGE_LEVEL_TWO)
+    _require(
+        type(ceiling) is int and ceiling > 0,
+        "a /2 StagePlan derives its WAL watchdog storage ceiling from the Level-Two transient "
+        f"allowance, which must be a positive integer; the requirement carries {ceiling!r}",
+    )
+    _require_watchdog_within_ceiling(terms, ceiling)
+    registry = successor_statement_registry(request.route, counter_source_count)
     body: dict[str, object] = {
-        "contract": L2_STAGE_PLAN_CONTRACT,
+        "contract": L2_STAGE_PLAN_CONTRACT_V2,
         "route": request.route,
         "successor_run_id": request.run_id,
         "predecessor_run_id": request.predecessor_run_id,
@@ -7900,6 +8934,15 @@ def _build_successor_stage_plan(
         ),
         "internal_relation_names": list(L2_CONTROL_TABLES + L2_PERSISTENT_RELATIONS),
         "cache_bytes": request.cache_bytes,
+        "statement_registry": [dict(item) for item in registry],
+        "statement_registry_identity": _registry_identity(
+            request.route, counter_source_count, registry
+        ),
+        "statement_progress_root": str(
+            Path(request.stage_receipt_root) / STATEMENT_PROGRESS_DIRECTORY
+        ),
+        **dict(terms.as_record()),
+        "wal_watchdog_storage_ceiling_bytes": ceiling,
         "stage_receipt_root": str(Path(request.stage_receipt_root)),
         "canonical_world_path": str(world),
         "initialization_attempt_parent": str(world.parent),
@@ -8081,6 +9124,13 @@ def _establish_successor_connection_state(
         f"PRAGMA cache_size reads {observed_pragma} where the StagePlan's {cache_bytes} bytes "
         f"require {expected_pragma}",
     )
+    page_size = int(connection.execute("PRAGMA main.page_size").fetchone()[0])
+    expected_page_size = expected_stage_plan.observability_terms.expected_page_size_bytes
+    _require(
+        page_size == expected_page_size,
+        f"PRAGMA page_size reads {page_size} where the StagePlan expects "
+        f"{expected_page_size}; the WAL frame boundary cannot be derived and the world is refused",
+    )
     _register_correction_functions(connection)
     registered = {
         str(row["name"]): (int(row["narg"]), int(row["flags"]))
@@ -8115,6 +9165,7 @@ def _establish_successor_connection_state(
         "foreign_keys": foreign_keys,
         "cache_bytes": cache_bytes,
         "cache_size_pragma": observed_pragma,
+        "page_size_bytes": page_size,
         "functions": functions,
         "tool_manifest_identity": tool_manifest.identity,
         "source_file_digests": dict(tool_manifest.source_file_digests()),
@@ -8159,6 +9210,9 @@ CREATE TABLE {L2_APPLIED_UNITS_TABLE} (
     rows_written                        INTEGER NOT NULL CHECK (rows_written >= 0),
     outcome_witness_json                TEXT NOT NULL,
     committed_at_utc                    TEXT NOT NULL,
+    statement_registry_identity         TEXT NOT NULL,
+    statement_execution_set_identity    TEXT NOT NULL,
+    statement_execution_set_json        TEXT NOT NULL,
     unit_identity                       TEXT NOT NULL UNIQUE,
     UNIQUE (stage_id, unit_id)
 ) STRICT;
@@ -8249,14 +9303,27 @@ class AppliedUnit:
     committed_at_utc: str
     unit_identity: str
     body: Mapping[str, object]
+    statement_registry_identity: str = ""
+    statement_execution_set_identity: str = ""
+    statement_execution_set: Mapping[str, object] | None = None
+
+    @property
+    def contract(self) -> str:
+        """The applied-unit contract this row was committed under."""
+        return str(self.body["contract"])
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> AppliedUnit:
         """Rebuild one row and recompute its identity over the body it carries.
 
+        A ``/1`` row (no statement columns) stays readable; a ``/2`` row binds its registry
+        and execution-set identities and the execution set itself inside the identity.
+
         Raises:
             ChunkMultipassError: the stored identity does not describe the row.
         """
+        columns = set(row.keys())
+        versioned = "statement_execution_set_json" in columns
         body: dict[str, object] = {
             "contract": str(row["contract"]),
             "route": str(row["route"]),
@@ -8282,15 +9349,30 @@ class AppliedUnit:
             "outcome_witness": json.loads(str(row["outcome_witness_json"])),
             "committed_at_utc": str(row["committed_at_utc"]),
         }
+        execution_set: Mapping[str, object] | None = None
+        if versioned:
+            execution_set = _json_object(
+                str(row["statement_execution_set_json"]), "statement execution set"
+            )
+            body["statement_registry_identity"] = str(row["statement_registry_identity"])
+            body["statement_execution_set_identity"] = str(row["statement_execution_set_identity"])
+            body["statement_execution_set"] = dict(execution_set)
         identity = _identity_of(body)
+        expected_contract = L2_APPLIED_UNIT_CONTRACT_V2 if versioned else L2_APPLIED_UNIT_CONTRACT
         _require(
-            str(row["unit_identity"]) == identity
-            and str(row["contract"]) == L2_APPLIED_UNIT_CONTRACT,
+            str(row["unit_identity"]) == identity and str(row["contract"]) == expected_contract,
             f"applied unit {row['stage_id']!r} carries identity {row['unit_identity']!r} where "
             f"its body recomputes to {identity!r}; refused",
         )
         witness = body["outcome_witness"]
         _require(isinstance(witness, Mapping), "an applied unit's outcome witness is not a mapping")
+        if versioned:
+            _require(
+                str(row["statement_execution_set_identity"])
+                == str(cast("Mapping[str, object]", execution_set).get("execution_set_identity")),
+                f"applied unit {row['stage_id']!r} binds an execution-set identity its own "
+                "execution set does not carry; refused",
+            )
         return cls(
             stage_ordinal=int(row["stage_ordinal"]),
             stage_id=str(row["stage_id"]),
@@ -8306,6 +9388,9 @@ class AppliedUnit:
             committed_at_utc=str(row["committed_at_utc"]),
             unit_identity=identity,
             body=body,
+            statement_registry_identity=str(body.get("statement_registry_identity", "")),
+            statement_execution_set_identity=str(body.get("statement_execution_set_identity", "")),
+            statement_execution_set=execution_set,
         )
 
 
@@ -8335,24 +9420,34 @@ def _insert_applied_unit(
     connection_state: SuccessorConnectionState,
     rows_written: int,
     outcome_witness: Mapping[str, object],
+    execution_set: Mapping[str, object],
 ) -> AppliedUnit:
     """Insert one applied-unit row INSIDE the caller's open transaction, outside containment.
 
-    The row binds everything §25 names and is sealed by ``unit_identity``; the table's primary
-    key and uniqueness constraints refuse a duplicate ordinal, a duplicate stage and a
-    duplicate unit, and the caller has already held the predecessor to the expected identity.
+    The row binds everything §25 names plus (D151-C31R2-R19B-C2 §29) the StagePlan's statement
+    registry identity and the stage attempt's statement execution set, and is sealed by
+    ``unit_identity``; the table's primary key and uniqueness constraints refuse a duplicate
+    ordinal, a duplicate stage and a duplicate unit, and the caller has already held the
+    predecessor to the expected identity.
 
     Raises:
-        ChunkMultipassError: the connection is not inside a transaction.
+        ChunkMultipassError: the connection is not inside a transaction, or the execution set
+            does not carry its own identity.
     """
     _require(
         connection.in_transaction,
         "an applied-unit row is inserted inside the transaction that wrote the stage's data, "
         "never in a transaction of its own",
     )
+    execution_set_identity = str(execution_set.get("execution_set_identity", ""))
+    _require(
+        len(execution_set_identity) == 64
+        and str(execution_set.get("contract")) == L2_STATEMENT_EXECUTION_SET_CONTRACT,
+        "an applied unit binds a sealed statement execution set carrying its own identity",
+    )
     committed_at = utc_now()
     body: dict[str, object] = {
-        "contract": L2_APPLIED_UNIT_CONTRACT,
+        "contract": L2_APPLIED_UNIT_CONTRACT_V2,
         "route": stage_plan.route,
         "successor_run_id": stage_plan.successor_run_id,
         "stage_ordinal": stage.ordinal,
@@ -8375,6 +9470,9 @@ def _insert_applied_unit(
         "rows_written": rows_written,
         "outcome_witness": dict(outcome_witness),
         "committed_at_utc": committed_at,
+        "statement_registry_identity": stage_plan.statement_registry_identity,
+        "statement_execution_set_identity": execution_set_identity,
+        "statement_execution_set": dict(execution_set),
     }
     identity = _identity_of(body)
     connection.execute(
@@ -8384,14 +9482,15 @@ def _insert_applied_unit(
         "receipt_identities_json, request_provenance_identities_json, repository_head_sha, "
         "repository_tree_sha, tool_manifest_identity, connection_state_identity, "
         "source_file_digests_json, stage_operation_identity, rows_written, "
-        "outcome_witness_json, committed_at_utc, unit_identity) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "outcome_witness_json, committed_at_utc, statement_registry_identity, "
+        "statement_execution_set_identity, statement_execution_set_json, unit_identity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             stage.ordinal,
             stage.stage_id,
             stage.unit_id,
             stage.kind,
-            L2_APPLIED_UNIT_CONTRACT,
+            L2_APPLIED_UNIT_CONTRACT_V2,
             stage_plan.route,
             stage_plan.successor_run_id,
             stage_plan.identity,
@@ -8408,6 +9507,9 @@ def _insert_applied_unit(
             rows_written,
             _json_text(dict(outcome_witness)),
             committed_at,
+            stage_plan.statement_registry_identity,
+            execution_set_identity,
+            _json_text(dict(execution_set)),
             identity,
         ),
     )
@@ -8517,7 +9619,7 @@ def read_stage_receipt(path: Path) -> Mapping[str, object]:
     )
     body = {key: value for key, value in record.items() if key != "receipt_identity"}
     _require(
-        str(record.get("contract")) == L2_STAGE_RECEIPT_CONTRACT
+        str(record.get("contract")) in {L2_STAGE_RECEIPT_CONTRACT, L2_STAGE_RECEIPT_CONTRACT_V2}
         and str(record.get("receipt_identity")) == _identity_of(body),
         f"stage receipt {path.name!r} carries contract {record.get('contract')!r} or an "
         "identity that does not describe its body; refused",
@@ -8533,10 +9635,13 @@ def _publish_stage_receipt(
     unit: AppliedUnit,
     main_state: _FileState,
     normalized_wal: int,
+    observability: Mapping[str, object],
+    entry_classification: str,
+    wal_residue_disposition: Mapping[str, object],
 ) -> Mapping[str, object]:
-    """Publish one stage's immutable receipt and read it back -- §30 steps 15-16."""
+    """Publish one stage's immutable receipt and read it back -- §30 steps 15-16 (/2)."""
     body: dict[str, object] = {
-        "contract": L2_STAGE_RECEIPT_CONTRACT,
+        "contract": L2_STAGE_RECEIPT_CONTRACT_V2,
         "route": stage_plan.route,
         "successor_run_id": stage_plan.successor_run_id,
         "stage_ordinal": stage.ordinal,
@@ -8556,6 +9661,13 @@ def _publish_stage_receipt(
         "main_file_byte_length": main_state.byte_length,
         "main_file_inode": main_state.inode,
         "normalized_wal_bytes": normalized_wal,
+        "statement_registry_identity": unit.statement_registry_identity,
+        "statement_execution_set_identity": unit.statement_execution_set_identity,
+        "statement_execution_set": dict(unit.statement_execution_set or {}),
+        "observability_status": str(observability["status"]),
+        "observability_gap": dict(observability),
+        "entry_classification": entry_classification,
+        "wal_residue_disposition": dict(wal_residue_disposition),
         "published_at_utc": utc_now(),
     }
     body["receipt_identity"] = _identity_of(body)
@@ -8749,6 +9861,51 @@ def _normalized_wal_class(snapshot: _WorldSnapshot) -> int:
 # --------------------------------------------------------------------------- #
 # The bounded world session -- §22 STEP 4-6 and §35, one per stage
 # --------------------------------------------------------------------------- #
+class _WalPreservationGuard:
+    """A ``mode=ro`` handle held across a writer's close so nothing is folded implicitly.
+
+    SQLite checkpoints and deletes a write-ahead log when the LAST connection to a database
+    closes. Whenever a session opens over a nonzero log, this guard is opened first and released
+    only after the engine has explicitly disposed of the log -- a residue TRUNCATE or the stage
+    boundary's own checkpoint. A session that ends without such a disposition (a conflict, an
+    abort before classification) therefore leaves the log exactly as it found it: the guard
+    outlives the writer's close, and a read-only handle folds nothing when it closes itself.
+    """
+
+    __slots__ = ("_connection", "released")
+
+    def __init__(self, catalog_path: Path) -> None:
+        self._connection: sqlite3.Connection | None = sqlite3.connect(
+            f"{catalog_path.absolute().as_uri()}?mode=ro", uri=True, isolation_level=None
+        )
+        self._connection.execute("SELECT 1").fetchone()
+        self.released = False
+
+    def release(self) -> None:
+        """The log was explicitly disposed of: the writer's close may now delete an empty log."""
+        self.released = True
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+
+
+class _NoGuard:
+    """The guard's shape when the pre-state log was absent or zero: nothing to preserve."""
+
+    __slots__ = ("released",)
+
+    def __init__(self) -> None:
+        self.released = True
+
+    def release(self) -> None:
+        self.released = True
+
+    def close(self) -> None:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class _WorldSession:
     """One boundedly reopened world: catalog, connection, state and the authenticated plan."""
@@ -8758,6 +9915,11 @@ class _WorldSession:
     connection_state: SuccessorConnectionState
     stage_plan: L2StagePlan
     prestate: _MinimalStagePlanIdentity
+    guard: _WalPreservationGuard | _NoGuard
+
+    @property
+    def catalog_path(self) -> Path:
+        return self.world.path
 
 
 def _read_stored_stage_plan(connection: sqlite3.Connection) -> L2StagePlan:
@@ -8772,7 +9934,7 @@ def _read_stored_stage_plan(connection: sqlite3.Connection) -> L2StagePlan:
         and plan.route == str(row["route"])
         and plan.successor_run_id == str(row["successor_run_id"])
         and plan.canonical_world_path == str(row["canonical_world_path"])
-        and str(row["contract"]) == L2_STAGE_PLAN_CONTRACT,
+        and str(row["contract"]) == plan.contract,
         "the stored StagePlan row's identifying columns do not describe its own body; refused",
     )
     return plan
@@ -8801,8 +9963,13 @@ def _successor_world_session(
     )
     catalog_path = world_directory / WORKING_CATALOG_FILENAME
     prestate = _prestate_stage_plan_identity(catalog_path)
+    if prestate.contract == L2_STAGE_PLAN_CONTRACT:
+        _stage_conflict(
+            "the world carries a historical /1 StagePlan, which is readable for forensics and "
+            "is NEVER executed after D151-C31R2-R19B-C2; nothing is converted"
+        )
     _require(
-        prestate.contract == L2_STAGE_PLAN_CONTRACT
+        prestate.contract == L2_STAGE_PLAN_CONTRACT_V2
         and prestate.route == expected.route
         and prestate.successor_run_id == expected.successor_run_id
         and prestate.canonical_world_path == expected.canonical_world_path
@@ -8813,28 +9980,47 @@ def _successor_world_session(
         f"is not the expected invocation ({expected.route!r}, {expected.successor_run_id!r}, "
         f"{expected.identity[:16]}...); nothing is repaired or reinitialized",
     )
-    with WorkingCatalog(
-        Path(request.operational_catalog),
-        world_directory,
-        cache_bytes=expected.cache_bytes,
-        attach=True,
-    ) as world:
-        connection = world.connection
-        connection_state = _establish_successor_connection_state(connection, expected, proof)
-        stored = _read_stored_stage_plan(connection)
-        if stored.identity != prestate.stage_plan_identity or stored.identity != expected.identity:
-            _stage_conflict(
-                f"the complete in-world StagePlan recomputes to {stored.identity[:16]}... where "
-                f"the mode=ro read saw {prestate.stage_plan_identity[:16]}... and this invocation "
-                f"expects {expected.identity[:16]}..."
+    _require(expected.executable, "only a /2 StagePlan opens a world; a /1 plan is read-only")
+    guard: _WalPreservationGuard | _NoGuard = (
+        _WalPreservationGuard(catalog_path)
+        if prestate.snapshot_before.wal_class == _WAL_NONZERO
+        else _NoGuard()
+    )
+    try:
+        with WorkingCatalog(
+            Path(request.operational_catalog),
+            world_directory,
+            cache_bytes=require_executable_level_two_cache_bytes(expected.cache_bytes),
+            attach=True,
+        ) as world:
+            connection = world.connection
+            connection_state = _establish_successor_connection_state(connection, expected, proof)
+            stored = _read_stored_stage_plan(connection)
+            if (
+                stored.identity != prestate.stage_plan_identity
+                or stored.identity != expected.identity
+            ):
+                _stage_conflict(
+                    f"the complete in-world StagePlan recomputes to {stored.identity[:16]}... "
+                    f"where the mode=ro read saw {prestate.stage_plan_identity[:16]}... and this "
+                    f"invocation expects {expected.identity[:16]}..."
+                )
+            _require(stored.executable, "the stored StagePlan is not executable")
+            yield _WorldSession(
+                world=world,
+                connection=connection,
+                connection_state=connection_state,
+                stage_plan=stored,
+                prestate=prestate,
+                guard=guard,
             )
-        yield _WorldSession(
-            world=world,
-            connection=connection,
-            connection_state=connection_state,
-            stage_plan=stored,
-            prestate=prestate,
-        )
+            if guard.released:
+                # An explicit disposition ran: the writer's close may delete an EMPTY log.
+                guard.close()
+    finally:
+        # A session that ends without an explicit disposition keeps the guard across the
+        # writer's close, so an unexplained or pending log is never folded implicitly.
+        guard.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -8918,6 +10104,1384 @@ def _require_not_derived(units: Sequence[AppliedUnit], stage: L2Stage) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Statement instrumentation -- D151-C31R2-R19B-C2 §22-§37: journals, sampler, watchdog
+# --------------------------------------------------------------------------- #
+_ABORT_WATCHDOG: Final = "WATCHDOG_ABORT"
+_ABORT_INSTRUMENTATION: Final = "INSTRUMENTATION_FAILURE"
+_ABORT_RECORD_CONTRACT: Final = "m3.3-chunked-f0-l2-instrumentation-abort/1"
+_STAGE_ID_PATTERN: Final = re.compile(r"^S[0-9]+[A-Z]?(\.[0-9]+)?$")
+_ATTEMPT_NAME_PATTERN: Final = re.compile(r"^attempt-([0-9]{3})$")
+_ABORT_NAME_PATTERN: Final = re.compile(r"^abort-attempt-[0-9]{3}\.json$")
+_JOURNAL_NAME_PATTERN: Final = re.compile(r"^statement-([0-9]{4})\.jsonl$")
+_OBSERVABILITY_COMPLETE: Final = "OBSERVABILITY_COMPLETE"
+_OBSERVABILITY_GAP_MISSING: Final = "OBSERVABILITY_GAP_MISSING"
+_OBSERVABILITY_GAP_CHANGED: Final = "OBSERVABILITY_GAP_CHANGED"
+_NANOSECONDS_PER_SECOND: Final = 1_000_000_000
+
+#: The monotonic clock the sampler and the journals read. A module attribute rather than a
+#: direct call so a test can drive the sampling interval deterministically; production never
+#: rebinds it.
+_monotonic_ns: Callable[[], int] = time.monotonic_ns
+
+
+class _InstrumentationAbortError(ChunkMultipassError):
+    """A fail-closed instrumentation or watchdog abort: the statement was interrupted.
+
+    Raised after sqlite3 returned from the interrupted statement, never inside the callback,
+    and never for an unrelated ``OperationalError``.
+    """
+
+    def __init__(self, cause: str, detail: str) -> None:
+        super().__init__(f"{cause}: {detail}")
+        self.cause = cause
+        self.detail = detail
+
+
+def _stage_directory_name(stage: L2Stage) -> str:
+    """``stage-NNN-<id>`` from validated identifiers only; a ``.`` becomes ``_``."""
+    _require(
+        bool(_STAGE_ID_PATTERN.match(stage.stage_id)),
+        f"stage identifier {stage.stage_id!r} is not a valid successor stage id",
+    )
+    return f"stage-{stage.ordinal:03d}-{stage.stage_id.replace('.', '_')}"
+
+
+def _require_real_directory(path: Path, label: str) -> None:
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError as exc:
+        message = f"{label} {path.name!r} is absent"
+        raise ChunkMultipassError(message) from exc
+    _require(stat.S_ISDIR(status.st_mode), f"{label} {path.name!r} is not a real directory")
+
+
+def _require_progress_root(ctx: _StageContext) -> Path:
+    """The one statement-progress root: exactly ``<receipt root>/statement-progress``."""
+    root = ctx.stage_plan.statement_progress_root
+    expected = ctx.receipt_root / STATEMENT_PROGRESS_DIRECTORY
+    _require(
+        root == expected and ".." not in root.parts,
+        f"the StagePlan's statement progress root is not {expected.name!r} beneath the stage "
+        "receipt root; refused",
+    )
+    _require_real_directory(ctx.receipt_root, "stage receipt root")
+    root.mkdir(mode=_DIRECTORY_MODE, exist_ok=True)
+    _require_real_directory(root, "statement progress root")
+    return root
+
+
+def _allocate_stage_attempt(ctx: _StageContext, stage: L2Stage) -> tuple[int, Path]:
+    """The next create-once stage-attempt directory: a crashed attempt is never reused."""
+    root = _require_progress_root(ctx)
+    stage_directory = root / _stage_directory_name(stage)
+    stage_directory.mkdir(mode=_DIRECTORY_MODE, exist_ok=True)
+    _require_real_directory(stage_directory, "stage progress directory")
+    ordinals: list[int] = []
+    for name in sorted(entry.name for entry in stage_directory.iterdir()):
+        match = _ATTEMPT_NAME_PATTERN.match(name)
+        if match is None:
+            if _ABORT_NAME_PATTERN.match(name):
+                continue
+            _stage_conflict(
+                f"stage progress directory {stage_directory.name!r} holds an entry {name!r} "
+                "this build never writes"
+            )
+        _require_real_directory(stage_directory / name, "stage attempt")
+        ordinals.append(int(match.group(1)))
+    ordinal = max(ordinals, default=-1) + 1
+    attempt = stage_directory / f"attempt-{ordinal:03d}"
+    try:
+        attempt.mkdir(mode=_DIRECTORY_MODE)
+    except FileExistsError as exc:
+        message = f"stage attempt {attempt.name!r} already exists; an attempt is create-once"
+        raise ChunkMultipassError(message) from exc
+    return ordinal, attempt
+
+
+def _representable(value: object) -> object:
+    """A JSON-carriable rendering of one parameter value, or a refusal marker."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, bytes | bytearray | memoryview):
+        return {"bytes_sha256": hashlib.sha256(bytes(value)).hexdigest(), "bytes": len(value)}
+    return {"unrepresentable": type(value).__name__}
+
+
+def _parameter_evidence(parameters: object) -> Mapping[str, object]:
+    """Canonical shape and, where bounded, a value digest of one ``execute`` binding -- §23."""
+    if isinstance(parameters, Mapping):
+        items = [(str(key), value) for key, value in sorted(parameters.items())]
+        shape = [[key, type(value).__name__] for key, value in items]
+        values: object = {key: _representable(value) for key, value in items}
+        count = len(items)
+    elif isinstance(parameters, tuple | list):
+        shape = [[str(index), type(value).__name__] for index, value in enumerate(parameters)]
+        values = [_representable(value) for value in parameters]
+        count = len(parameters)
+    else:
+        return {
+            "kind": "unrepresentable",
+            "count": None,
+            "shape_identity": None,
+            "value_sha256": None,
+        }
+    rendered = cast("Mapping[str, object]", {"values": values})
+    return {
+        "kind": "bound",
+        "count": count,
+        "shape_identity": _identity_of({"shape": shape}),
+        "value_sha256": _identity_of(rendered),
+    }
+
+
+class _StreamingParameterEvidence:
+    """Bounded evidence over an ``executemany`` iterable as sqlite3 consumes it -- §23.
+
+    The exact iterable is forwarded row by row; nothing is buffered, nothing is consumed twice:
+    each row's canonical rendering feeds a streaming SHA-256 and its shape is held to the first
+    row's. A row a canonical rendering cannot represent marks the digest unrepresentable and the
+    count and shape evidence stand alone.
+    """
+
+    __slots__ = ("_digest", "_iterable", "representable", "rows", "shape", "shape_consistent")
+
+    def __init__(self, iterable: object) -> None:
+        self._iterable = iterable
+        self._digest = hashlib.sha256()
+        self.rows = 0
+        self.shape: list[str] | None = None
+        self.shape_consistent = True
+        self.representable = True
+
+    def __iter__(self) -> Iterator[object]:
+        for row in cast("Iterable[object]", self._iterable):
+            self.rows += 1
+            values = list(row) if isinstance(row, tuple | list) else [row]
+            shape = [type(value).__name__ for value in values]
+            if self.shape is None:
+                self.shape = shape
+            elif shape != self.shape:
+                self.shape_consistent = False
+            if self.representable:
+                try:
+                    self._digest.update(canonical_json_bytes({"row": values}))
+                except (ChunkPlanError, TypeError, ValueError):
+                    self.representable = False
+            yield row
+
+    def record(self) -> Mapping[str, object]:
+        return {
+            "kind": "streamed",
+            "count": self.rows,
+            "shape_identity": _identity_of({"shape": self.shape or []}),
+            "shape_consistent": self.shape_consistent,
+            "value_sha256": self._digest.hexdigest() if self.representable else None,
+            "representable": self.representable,
+        }
+
+
+class _MaterializedRows:
+    """The rows of one proxy-observed statement, fetched under the progress handler."""
+
+    __slots__ = ("_rows", "rowcount")
+
+    def __init__(self, rows: Sequence[sqlite3.Row]) -> None:
+        self._rows = list(rows)
+        self.rowcount = len(self._rows)
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        return list(self._rows)
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self._rows[0] if self._rows else None
+
+    def __iter__(self) -> Iterator[sqlite3.Row]:
+        return iter(self._rows)
+
+
+class _TransactionWatch:
+    """One watchdog-applicable database's WAL, watched over one active transaction -- §36."""
+
+    __slots__ = (
+        "baseline_frames",
+        "connection_id",
+        "database_path",
+        "page_size",
+        "peak_growth_frames",
+        "role",
+        "shm_path",
+        "wal_path",
+    )
+
+    def __init__(self, role: str, database_path: Path, page_size: int) -> None:
+        self.role = role
+        self.database_path = database_path
+        self.wal_path = database_path.with_name(database_path.name + "-wal")
+        self.shm_path = database_path.with_name(database_path.name + "-shm")
+        self.page_size = page_size
+        self.baseline_frames: int | None = None
+        self.peak_growth_frames = 0
+        self.connection_id: int | None = None
+
+    def observe(self) -> WalObservation:
+        return observe_wal(self.wal_path, expected_page_size=self.page_size)
+
+    def begin(self, observation: WalObservation) -> None:
+        """Record the transaction baseline ONCE; never reset per statement."""
+        self.baseline_frames = observation.conservative_frames
+        self.peak_growth_frames = 0
+
+    def growth(self, observation: WalObservation) -> int:
+        _require(self.baseline_frames is not None, "no transaction baseline was recorded")
+        assert self.baseline_frames is not None  # noqa: S101 - narrowed above
+        growth = observation.conservative_frames - self.baseline_frames
+        self.peak_growth_frames = max(self.peak_growth_frames, growth)
+        return growth
+
+
+class _ProgressSampler:
+    """The ``set_progress_handler`` callback -- §33, §36, §37.
+
+    The fast path is a counter, a monotonic read and a comparison. The slow path, on the
+    configured interval, stats the already-validated database files, reads free space and the
+    process peak RSS, appends one bounded ``STATEMENT_SAMPLE`` and evaluates the watchdog. Any
+    failure on the slow path sets the abort cause and returns nonzero; the exception never
+    escapes the callback (sqlite3 would silently swallow it) and is translated after sqlite3
+    returns. Nothing here issues SQL, opens a connection, creates or deletes a file.
+    """
+
+    __slots__ = (
+        "_bound",
+        "_instrumentation",
+        "_interval_ns",
+        "_journal",
+        "_next_sample_ns",
+        "_watch",
+        "abort_cause",
+        "abort_detail",
+        "abort_journaled",
+        "last_growth_frames",
+        "max_peak_rss_bytes",
+        "samples",
+        "ticks",
+    )
+
+    def __init__(
+        self,
+        instrumentation: _StageInstrumentation,
+        journal: StatementJournalWriter,
+        watch: _TransactionWatch,
+        *,
+        started_ns: int,
+    ) -> None:
+        self._instrumentation = instrumentation
+        self._journal = journal
+        self._watch = watch
+        terms = instrumentation.terms
+        self._interval_ns = terms.statement_progress_interval_seconds * _NANOSECONDS_PER_SECOND
+        self._bound = terms.wal_watchdog_max_uncommitted_frames
+        self._next_sample_ns = started_ns + self._interval_ns
+        self.ticks = 0
+        self.samples = 0
+        self.abort_cause: str | None = None
+        self.abort_detail = ""
+        self.abort_journaled = False
+        self.max_peak_rss_bytes: int | None = None
+        self.last_growth_frames = 0
+
+    def __call__(self) -> int:
+        try:
+            self.ticks += 1
+            now = _monotonic_ns()
+            if now < self._next_sample_ns:
+                return 0
+            self._next_sample_ns = now + self._interval_ns
+            return self._sample(now)
+        except BaseException as exc:  # noqa: BLE001 - nothing may escape the callback
+            if self.abort_cause is None:
+                self.abort_cause = _ABORT_INSTRUMENTATION
+                self.abort_detail = f"{type(exc).__name__}: {exc}"[:600]
+            return 1
+
+    def _sample(self, now_ns: int) -> int:
+        observation = self._watch.observe()
+        growth = self._watch.growth(observation)
+        self.last_growth_frames = growth
+        main_bytes = self._watch.database_path.stat().st_size
+        try:
+            shm_bytes: int | None = os.lstat(self._watch.shm_path).st_size
+        except FileNotFoundError:
+            shm_bytes = None
+        free = self._instrumentation.free_space()
+        peak_rss = process_peak_resident_bytes()
+        if peak_rss is None:
+            message = "the peak-RSS helper returned None"
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        self.max_peak_rss_bytes = max(self.max_peak_rss_bytes or 0, peak_rss)
+        self.samples += 1
+        self._journal.append(
+            EVENT_STATEMENT_SAMPLE,
+            {
+                "sample_ordinal": self.samples,
+                "utc": utc_now(),
+                "monotonic_ns": now_ns,
+                "vm_step_ticks": self.ticks,
+                "wal": dict(observation.as_record()),
+                "main_file_bytes": main_bytes,
+                "shm_bytes": shm_bytes,
+                "transaction_baseline_frames": self._watch.baseline_frames,
+                "observed_growth_frames": growth,
+                "wal_watchdog_max_uncommitted_frames": self._bound,
+                "free_bytes": dict(free),
+                "process_peak_rss_bytes": peak_rss,
+            },
+        )
+        if growth > self._bound:
+            self.abort_cause = _ABORT_WATCHDOG
+            self.abort_detail = (
+                f"observed uncommitted WAL growth of {growth} frames exceeds the bound of "
+                f"{self._bound} frames on {self._watch.role} (baseline "
+                f"{self._watch.baseline_frames}, conservative frames "
+                f"{observation.conservative_frames})"
+            )
+            terms = self._instrumentation.terms
+            self._journal.append(
+                EVENT_WATCHDOG_ABORT,
+                {
+                    "utc": utc_now(),
+                    "monotonic_ns": now_ns,
+                    "database_role": self._watch.role,
+                    "observed_growth_frames": growth,
+                    "transaction_baseline_frames": self._watch.baseline_frames,
+                    "wal_watchdog_max_uncommitted_frames": self._bound,
+                    "page_size_bytes": self._watch.page_size,
+                    "frame_size_bytes": self._watch.page_size + WAL_FRAME_HEADER_BYTES,
+                    "derived_byte_ceiling": self._bound
+                    * (self._watch.page_size + WAL_FRAME_HEADER_BYTES),
+                    "wal_watchdog_storage_ceiling_bytes": self._instrumentation.ceiling,
+                    "wal": dict(observation.as_record()),
+                    "detail": self.abort_detail,
+                    "progress_handler_vm_steps": terms.progress_handler_vm_steps,
+                },
+            )
+            self.abort_journaled = True
+            return 1
+        return 0
+
+
+class _InstrumentedConnection:
+    """The connection-boundary proxy for modules R19B may not edit -- §20 (S14, terminal).
+
+    The only attribute it exposes is ``execute``: the exact SQL text a census derivation or the
+    accepted row counter hands to it is matched against this stage's registered prefixes and
+    executed through the instrumentation, or -- for the one bounded control prefix -- executed
+    directly and counted. Anything else is an unregistered statement and refuses before sqlite3
+    sees it. Rows of an observed ``fetchall`` statement are materialized under the progress
+    handler so the whole statement is observed, not only its first step.
+    """
+
+    __slots__ = ("_connection", "_instrumentation")
+
+    def __init__(
+        self, instrumentation: _StageInstrumentation, connection: sqlite3.Connection
+    ) -> None:
+        self._instrumentation = instrumentation
+        self._connection = connection
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._connection.in_transaction
+
+    def execute(self, sql: str, parameters: object = ()) -> object:
+        descriptor = self._instrumentation.proxy_descriptor(sql)
+        if descriptor is None:
+            self._instrumentation.note_bounded(sql)
+            return self._connection.execute(sql, cast("Any", parameters))
+        result = self._instrumentation.execute(
+            self._connection,
+            sql,
+            parameters,
+            operation=descriptor.operation,
+            kind=descriptor.operation_kind,
+            role=descriptor.database_role,
+        )
+        if descriptor.operation_kind == STATEMENT_KIND_FETCHALL:
+            return _MaterializedRows(cast("Sequence[sqlite3.Row]", result))
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class _CompletedStatement:
+    """One sealed, successful statement journal and everything the execution set binds."""
+
+    record: Mapping[str, object]
+
+    @property
+    def operation(self) -> str:
+        return str(self.record["operation"])
+
+
+class _StageInstrumentation:
+    """Everything one stage attempt observes: the runner, the proxy, the journals, the set.
+
+    Constructed once per stage attempt with the StagePlan's terms, this stage's registry
+    slice and the attempt's create-once directory. Every material statement of the attempt --
+    seam-routed, proxy-observed or issued here -- passes through :meth:`execute`, which
+    creates the statement's journal, appends and fsyncs ``STATEMENT_START`` before sqlite3
+    sees the SQL, installs the progress handler around exactly that statement, removes it in
+    ``finally``, journals the terminal event, seals the journal and records the execution.
+    """
+
+    def __init__(
+        self,
+        ctx: _StageContext,
+        stage: L2Stage,
+        prior_units: Sequence[AppliedUnit],
+        attempt_ordinal: int,
+        attempt_directory: Path,
+        *,
+        descriptors: Sequence[_OperationDescriptor] | None = None,
+    ) -> None:
+        self.ctx = ctx
+        self.stage = stage
+        self.terms = ctx.stage_plan.observability_terms
+        self.ceiling = ctx.stage_plan.wal_watchdog_storage_ceiling_bytes
+        self.registry_identity = ctx.stage_plan.statement_registry_identity
+        self.descriptors: tuple[_OperationDescriptor, ...] = tuple(
+            _declared_operations(stage, len(ctx.counter_sources))
+            if descriptors is None
+            else descriptors
+        )
+        self._by_operation = {item.operation: item for item in self.descriptors}
+        _require(
+            len(self._by_operation) == len(self.descriptors),
+            f"stage {stage.stage_id!r} declares an operation twice",
+        )
+        self.attempt_ordinal = attempt_ordinal
+        self.attempt_directory = attempt_directory
+        self.progress_root = ctx.stage_plan.statement_progress_root
+        self.prior_units = tuple(prior_units)
+        self.executions: list[_CompletedStatement] = []
+        self.bounded_executions: dict[str, int] = {}
+        self.selected_path: str | None = None
+        self.abort: _InstrumentationAbortError | None = None
+        self._next_ordinal = 0
+        self._watches: dict[str, _TransactionWatch] = {}
+        self.pid = os.getpid()
+        anchor = (
+            ctx.world_directory
+            if os.path.lexists(ctx.world_directory)
+            else ctx.world_directory.parent
+        )
+        self.world_device = anchor.stat().st_dev
+        self.same_device = self.world_device == ctx.binding.temp_root_device
+        self._sidecar_path = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
+
+    # -- registry ----------------------------------------------------------- #
+    def descriptor_for(self, operation: str) -> _OperationDescriptor:
+        descriptor = self._by_operation.get(operation)
+        if descriptor is None:
+            message = (
+                f"{operation!r} is not a registered material operation of stage "
+                f"{self.stage.stage_id!r}; an unregistered statement never executes"
+            )
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        if descriptor.path is not None and descriptor.path != self.selected_path:
+            message = (
+                f"{descriptor.statement_id} is declared for the {descriptor.path} path and the "
+                f"journaled path decision selected {self.selected_path!r}"
+            )
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        return descriptor
+
+    def proxy_descriptor(self, sql: str) -> _OperationDescriptor | None:
+        """The registered descriptor a proxy-observed statement matches, or ``None`` when the
+        statement is one of this stage's bounded control prefixes."""
+        for descriptor in self.descriptors:
+            if descriptor.sql_prefix is not None and sql.startswith(descriptor.sql_prefix):
+                return descriptor
+        for prefix in _BOUNDED_PROXY_PREFIXES.get(self.stage.kind, ()):
+            if sql.startswith(prefix):
+                return None
+        message = (
+            f"a statement reached the connection boundary of stage {self.stage.stage_id!r} that "
+            f"no registered operation or bounded control prefix names: {sql[:80]!r}"
+        )
+        raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+
+    def note_bounded(self, sql: str) -> None:
+        for prefix in _BOUNDED_PROXY_PREFIXES.get(self.stage.kind, ()):
+            if sql.startswith(prefix):
+                self.bounded_executions[prefix] = self.bounded_executions.get(prefix, 0) + 1
+                return
+
+    def proxy(self, connection: sqlite3.Connection) -> _InstrumentedConnection:
+        return _InstrumentedConnection(self, connection)
+
+    def expected_executions(self, descriptor: _OperationDescriptor) -> int | str:
+        expected = descriptor.expected_executions
+        if expected == _EXPECTED_S2_DUPLICATES:
+            witness = _witness_of(self.prior_units, _STAGE_REDUCED_PARSER_RUN)
+            return len(_stored_strings(witness["duplicate_identities"], "duplicate_identities"))
+        return expected
+
+    # -- measurement -------------------------------------------------------- #
+    def free_space(self) -> Mapping[str, object]:
+        """Free bytes on the world's filesystem, reported for both logical roles -- §34."""
+        world = free_bytes(self.ctx.world_directory)
+        if world is None:
+            message = "the free-space helper returned None for the world root"
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        if not self.same_device:
+            message = (
+                "the SQLite temporary root and the world are on different devices; the accepted "
+                "binding refuses that topology and no separate-device production route exists"
+            )
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        return _free_space_by_role(world, world, same_device=True)
+
+    def _watch(
+        self, role: str, connection: sqlite3.Connection, database_path: Path
+    ) -> _TransactionWatch:
+        watch = self._watches.get(role)
+        if watch is None:
+            watch = _TransactionWatch(role, database_path, self.terms.expected_page_size_bytes)
+            self._watches[role] = watch
+        if watch.connection_id != id(connection):
+            page_size = int(connection.execute("PRAGMA main.page_size").fetchone()[0])
+            if page_size != self.terms.expected_page_size_bytes:
+                message = (
+                    f"{role} reports page size {page_size} where the StagePlan expects "
+                    f"{self.terms.expected_page_size_bytes}; no material statement runs"
+                )
+                raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+            derived = self.terms.wal_watchdog_max_uncommitted_frames * (
+                page_size + WAL_FRAME_HEADER_BYTES
+            )
+            if derived > self.ceiling:
+                message = (
+                    f"{role}: the frame bound derives {derived} bytes at the actual page size, "
+                    f"above the storage ceiling of {self.ceiling}; no material statement runs"
+                )
+                raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+            if role == _ROLE_COMPACT_EVIDENCE:
+                # The sidecar builds in autocommit statements; without an auto-checkpoint the
+                # log grows monotonically across them, so a per-statement baseline is exact.
+                connection.execute("PRAGMA wal_autocheckpoint = 0")
+            watch.connection_id = id(connection)
+        return watch
+
+    def begin_world_transaction(self, connection: sqlite3.Connection) -> WalObservation:
+        """Record the world transaction's baseline ONCE, right after BEGIN -- §36."""
+        _require(connection.in_transaction, "the transaction baseline is taken inside BEGIN")
+        watch = self._watch(_ROLE_WORKING_CATALOG, connection, self.ctx.catalog_path)
+        observation = watch.observe()
+        watch.begin(observation)
+        return observation
+
+    # -- journals ----------------------------------------------------------- #
+    def _bindings(
+        self,
+        descriptor: _OperationDescriptor,
+        ordinal: int,
+        sql_sha256: str | None,
+        kind: str,
+    ) -> dict[str, object]:
+        plan = self.ctx.stage_plan
+        return {
+            "journal_contract": L2_STATEMENT_JOURNAL_CONTRACT,
+            "successor_run_id": plan.successor_run_id,
+            "route": plan.route,
+            "stage_plan_identity": plan.identity,
+            "statement_registry_identity": self.registry_identity,
+            "descriptor_identity": descriptor.identity,
+            "stage_id": self.stage.stage_id,
+            "stage_ordinal": self.stage.ordinal,
+            "unit_id": self.stage.unit_id,
+            "unit_kind": self.stage.kind,
+            "stage_attempt_ordinal": self.attempt_ordinal,
+            "statement_id": descriptor.statement_id,
+            "statement_ordinal": ordinal,
+            "operation": descriptor.operation,
+            "database_role": descriptor.database_role,
+            "sql_identity_mode": descriptor.sql_identity_mode,
+            "runtime_sql_sha256": sql_sha256,
+            "execution_kind": kind,
+            "process_pid": self.pid,
+        }
+
+    def _open_journal(self, ordinal: int) -> StatementJournalWriter:
+        try:
+            return StatementJournalWriter.create(
+                self.attempt_directory / f"statement-{ordinal:04d}.jsonl"
+            )
+        except WorkingCatalogError as exc:
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, str(exc)) from exc
+
+    def _record(
+        self,
+        descriptor: _OperationDescriptor,
+        ordinal: int,
+        sql_sha256: str | None,
+        kind: str,
+        evidence: Mapping[str, object],
+        journal: StatementJournalWriter,
+        sealed: tuple[str, int],
+        rowcount: int | None,
+        elapsed_ns: int,
+    ) -> None:
+        sha256, length = sealed
+        self.executions.append(
+            _CompletedStatement(
+                {
+                    "statement_ordinal": ordinal,
+                    "statement_id": descriptor.statement_id,
+                    "operation": descriptor.operation,
+                    "descriptor_identity": descriptor.identity,
+                    "sql_identity_mode": descriptor.sql_identity_mode,
+                    "runtime_sql_sha256": sql_sha256,
+                    "execution_kind": kind,
+                    "parameter_identity": dict(evidence),
+                    "database_role": descriptor.database_role,
+                    "journal_relative_path": str(journal.path.relative_to(self.progress_root)),
+                    "journal_byte_length": length,
+                    "journal_sha256": sha256,
+                    "journal_chain_tip": journal.tip,
+                    "journal_event_count": journal.sequence,
+                    "stage_attempt_ordinal": self.attempt_ordinal,
+                    "rowcount": rowcount,
+                    "elapsed_ns": elapsed_ns,
+                }
+            )
+        )
+
+    def _seal(
+        self, journal: StatementJournalWriter, kind: str, body: Mapping[str, object]
+    ) -> tuple[str, int]:
+        try:
+            journal.append(kind, body)
+            return journal.seal()
+        except WorkingCatalogError as exc:
+            journal.abandon()
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, str(exc)) from exc
+
+    def _refuse_before_execution(
+        self,
+        journal: StatementJournalWriter,
+        bindings: Mapping[str, object],
+        started_ns: int,
+        detail: str,
+    ) -> NoReturn:
+        """A refusal BEFORE sqlite3 saw the statement: START, then ERROR, sealed, then raised."""
+        try:
+            journal.append(
+                EVENT_STATEMENT_START,
+                {**bindings, "utc": utc_now(), "monotonic_ns": started_ns, "refused": detail},
+            )
+        except WorkingCatalogError as exc:
+            journal.abandon()
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, str(exc)) from exc
+        self._seal(
+            journal,
+            EVENT_STATEMENT_ERROR,
+            {
+                "utc": utc_now(),
+                "monotonic_ns": _monotonic_ns(),
+                "error": detail,
+                "refused_before_execution": True,
+            },
+        )
+        raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, detail)
+
+    def _fail(
+        self,
+        journal: StatementJournalWriter,
+        sampler: _ProgressSampler | None,
+        watch: _TransactionWatch | None,
+        exc: BaseException,
+        started_ns: int,
+    ) -> BaseException:
+        """Journal a non-success terminal event, seal, and return the exception to raise."""
+        cause = None if sampler is None else sampler.abort_cause
+        body: dict[str, object] = {
+            "utc": utc_now(),
+            "monotonic_ns": _monotonic_ns(),
+            "elapsed_ns": _monotonic_ns() - started_ns,
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:600],
+            "samples": 0 if sampler is None else sampler.samples,
+            "vm_step_ticks": 0 if sampler is None else sampler.ticks,
+        }
+        if cause is not None:
+            assert sampler is not None  # noqa: S101 - cause comes from the sampler
+            body["abort_cause"] = cause
+            body["abort_detail"] = sampler.abort_detail
+            if cause == _ABORT_WATCHDOG and sampler.abort_journaled:
+                try:
+                    journal.seal()
+                except WorkingCatalogError as seal_error:
+                    journal.abandon()
+                    return _InstrumentationAbortError(
+                        _ABORT_WATCHDOG,
+                        f"{sampler.abort_detail} (journal seal failed: {seal_error})",
+                    )
+                abort = _InstrumentationAbortError(_ABORT_WATCHDOG, sampler.abort_detail)
+                self.abort = abort
+                return abort
+            self._seal(journal, EVENT_STATEMENT_ERROR, body)
+            abort = _InstrumentationAbortError(str(cause), sampler.abort_detail)
+            self.abort = abort
+            return abort
+        self._seal(journal, EVENT_STATEMENT_ERROR, body)
+        return exc
+
+    def execute(  # noqa: PLR0913, PLR0915
+        self,
+        connection: sqlite3.Connection,
+        sql: str,
+        parameters: object,
+        *,
+        operation: str,
+        kind: str,
+        role: str = _ROLE_WORKING_CATALOG,
+    ) -> object:
+        """Run one registered material statement under a sealed journal -- §22, §27, §33."""
+        descriptor = self.descriptor_for(operation)
+        for condition, detail in (
+            (descriptor.sql_identity_mode in _SQL_MODES, "is not a SQL operation"),
+            (
+                kind == descriptor.operation_kind,
+                f"is declared {descriptor.operation_kind!r}, executed as {kind!r}",
+            ),
+            (
+                role == descriptor.database_role,
+                f"is declared on {descriptor.database_role}, executed on {role}",
+            ),
+        ):
+            if not condition:
+                message = f"{descriptor.statement_id} {detail}"
+                raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        database_path = (
+            self.ctx.catalog_path if role == _ROLE_WORKING_CATALOG else self._sidecar_path
+        )
+        watch = self._watch(role, connection, database_path)
+        if role == _ROLE_COMPACT_EVIDENCE and not connection.in_transaction:
+            watch.begin(watch.observe())
+        if watch.baseline_frames is None:
+            message = f"{descriptor.statement_id}: no transaction baseline was recorded"
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        sql_sha256 = _sql_sha256(sql)
+        ordinal = self._next_ordinal
+        self._next_ordinal += 1
+        journal = self._open_journal(ordinal)
+        started_ns = _monotonic_ns()
+        bindings = self._bindings(descriptor, ordinal, sql_sha256, kind)
+        if (
+            descriptor.sql_identity_mode == _MODE_STATIC_SQL
+            and sql_sha256 != descriptor.static_sql_sha256
+        ):
+            detail = (
+                f"{descriptor.statement_id}: the runtime SQL hashes to {sql_sha256[:16]}... where "
+                f"the StagePlan binds {str(descriptor.static_sql_sha256)[:16]}...; refused before "
+                "sqlite3 saw it"
+            )
+            self._refuse_before_execution(journal, bindings, started_ns, detail)
+        streaming: _StreamingParameterEvidence | None = None
+        if kind == _KIND_EXECUTEMANY:
+            streaming = _StreamingParameterEvidence(parameters)
+            evidence: Mapping[str, object] = {"kind": "streamed", "count": None}
+        else:
+            evidence = _parameter_evidence(parameters)
+        observation = watch.observe()
+        peak_rss = process_peak_resident_bytes()
+        if peak_rss is None:
+            self._refuse_before_execution(
+                journal, bindings, started_ns, "the peak-RSS helper returned None"
+            )
+        try:
+            free = self.free_space()
+        except _InstrumentationAbortError as exc:
+            self._refuse_before_execution(journal, bindings, started_ns, exc.detail)
+        try:
+            journal.append(
+                EVENT_STATEMENT_START,
+                {
+                    **bindings,
+                    "utc": utc_now(),
+                    "monotonic_ns": started_ns,
+                    "parameter_evidence": dict(evidence),
+                    "measurements": {
+                        "wal": dict(observation.as_record()),
+                        "transaction_baseline_frames": watch.baseline_frames,
+                        "wal_watchdog_max_uncommitted_frames": (
+                            self.terms.wal_watchdog_max_uncommitted_frames
+                        ),
+                        "page_size_bytes": watch.page_size,
+                        "frame_size_bytes": watch.page_size + WAL_FRAME_HEADER_BYTES,
+                        "derived_byte_ceiling": self.terms.wal_watchdog_max_uncommitted_frames
+                        * (watch.page_size + WAL_FRAME_HEADER_BYTES),
+                        "wal_watchdog_storage_ceiling_bytes": self.ceiling,
+                        "progress_handler_vm_steps": self.terms.progress_handler_vm_steps,
+                        "statement_progress_interval_seconds": (
+                            self.terms.statement_progress_interval_seconds
+                        ),
+                        "free_bytes": dict(free),
+                        "process_peak_rss_bytes": peak_rss,
+                        "watchdog_applicable": descriptor.watchdog_applicable,
+                    },
+                },
+            )
+        except WorkingCatalogError as exc:
+            journal.abandon()
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, str(exc)) from exc
+        sampler = _ProgressSampler(self, journal, watch, started_ns=started_ns)
+        connection.set_progress_handler(sampler, self.terms.progress_handler_vm_steps)
+        if kind == STATEMENT_KIND_ITERATE:
+            return self._stream(
+                connection,
+                sql,
+                parameters,
+                descriptor,
+                ordinal,
+                sql_sha256,
+                evidence,
+                journal,
+                sampler,
+                watch,
+                started_ns,
+            )
+        result: object
+        rowcount: int | None
+        try:
+            if kind == STATEMENT_KIND_FETCHALL:
+                rows = connection.execute(sql, cast("Any", parameters)).fetchall()
+                result, rowcount = rows, len(rows)
+            elif kind == _KIND_EXECUTEMANY:
+                assert streaming is not None  # noqa: S101 - set above for this kind
+                cursor = connection.executemany(sql, cast("Any", streaming))
+                result, rowcount = cursor, int(cursor.rowcount)
+                evidence = streaming.record()
+            else:
+                cursor = connection.execute(sql, cast("Any", parameters))
+                result, rowcount = cursor, int(cursor.rowcount)
+        except BaseException as exc:
+            connection.set_progress_handler(None, 0)
+            raise self._fail(journal, sampler, watch, exc, started_ns) from exc
+        finally:
+            connection.set_progress_handler(None, 0)
+        sealed = self._complete(journal, sampler, watch, evidence, started_ns, rowcount)
+        self._record(
+            descriptor,
+            ordinal,
+            sql_sha256,
+            kind,
+            evidence,
+            journal,
+            sealed,
+            rowcount,
+            _monotonic_ns() - started_ns,
+        )
+        return result
+
+    def _complete(
+        self,
+        journal: StatementJournalWriter,
+        sampler: _ProgressSampler | None,
+        watch: _TransactionWatch | None,
+        evidence: Mapping[str, object],
+        started_ns: int,
+        rowcount: int | None,
+    ) -> tuple[str, int]:
+        now = _monotonic_ns()
+        observation = None if watch is None else watch.observe()
+        peak_rss = process_peak_resident_bytes()
+        body: dict[str, object] = {
+            "utc": utc_now(),
+            "monotonic_ns": now,
+            "elapsed_ns": now - started_ns,
+            "rowcount": rowcount,
+            "parameter_evidence": dict(evidence),
+            "samples": 0 if sampler is None else sampler.samples,
+            "vm_step_ticks": 0 if sampler is None else sampler.ticks,
+            "maximum_process_peak_rss_bytes": max(
+                [
+                    value
+                    for value in (
+                        (None if sampler is None else sampler.max_peak_rss_bytes),
+                        peak_rss,
+                    )
+                    if value is not None
+                ],
+                default=None,
+            ),
+        }
+        if observation is not None and watch is not None:
+            body["wal"] = dict(observation.as_record())
+            body["observed_growth_frames"] = watch.growth(observation)
+            body["peak_observed_growth_frames"] = watch.peak_growth_frames
+            body["transaction_baseline_frames"] = watch.baseline_frames
+        return self._seal(journal, EVENT_STATEMENT_END, body)
+
+    def _stream(  # noqa: PLR0913
+        self,
+        connection: sqlite3.Connection,
+        sql: str,
+        parameters: object,
+        descriptor: _OperationDescriptor,
+        ordinal: int,
+        sql_sha256: str,
+        evidence: Mapping[str, object],
+        journal: StatementJournalWriter,
+        sampler: _ProgressSampler,
+        watch: _TransactionWatch,
+        started_ns: int,
+    ) -> Iterator[sqlite3.Row]:
+        """An iterated statement: the handler stays installed until the last row is consumed."""
+        rows = 0
+        try:
+            cursor = connection.execute(sql, cast("Any", parameters))
+            for row in cursor:
+                rows += 1
+                yield row
+        except BaseException as exc:
+            connection.set_progress_handler(None, 0)
+            raise self._fail(journal, sampler, watch, exc, started_ns) from exc
+        finally:
+            connection.set_progress_handler(None, 0)
+        sealed = self._complete(journal, sampler, watch, evidence, started_ns, rows)
+        self._record(
+            descriptor,
+            ordinal,
+            sql_sha256,
+            STATEMENT_KIND_ITERATE,
+            evidence,
+            journal,
+            sealed,
+            rows,
+            _monotonic_ns() - started_ns,
+        )
+
+    def consolidation_runner(
+        self,
+        connection: sqlite3.Connection,
+        sql: str,
+        parameters: object,
+        kind: str,
+        operation: str,
+    ) -> object:
+        """The seam runner for the consolidator's helpers over the world catalog."""
+        return self.execute(
+            connection, sql, parameters, operation=operation, kind=kind, role=_ROLE_WORKING_CATALOG
+        )
+
+    def sidecar_runner(
+        self,
+        connection: sqlite3.Connection,
+        sql: str,
+        parameters: object,
+        kind: str,
+        operation: str,
+    ) -> object:
+        """The seam runner for the sidecar build and its folds over the compact-evidence file."""
+        return self.execute(
+            connection, sql, parameters, operation=operation, kind=kind, role=_ROLE_COMPACT_EVIDENCE
+        )
+
+    def count(self, connection: sqlite3.Connection, table: str) -> int:
+        """The exact main-table count, as a registered static statement of this stage."""
+        rows = cast(
+            "Sequence[sqlite3.Row]",
+            self.execute(
+                connection,
+                _count_sql(table),
+                (),
+                operation=f"count:{table}",
+                kind=STATEMENT_KIND_FETCHALL,
+            ),
+        )
+        return int(rows[0]["n"])
+
+    def record_callable(
+        self,
+        operation: str,
+        work: Callable[[], object],
+        *,
+        facts: Mapping[str, object] | None = None,
+    ) -> object:
+        """Journal one genuine non-SQL material operation: START, the work, END."""
+        descriptor = self.descriptor_for(operation)
+        _require(
+            descriptor.sql_identity_mode == _MODE_CALLABLE_NON_SQL
+            and descriptor.operation_kind == _KIND_CALLABLE,
+            f"{descriptor.statement_id} is not a callable operation",
+        )
+        ordinal = self._next_ordinal
+        self._next_ordinal += 1
+        journal = self._open_journal(ordinal)
+        started_ns = _monotonic_ns()
+        bindings = self._bindings(descriptor, ordinal, None, _KIND_CALLABLE)
+        try:
+            journal.append(
+                EVENT_STATEMENT_START,
+                {
+                    **bindings,
+                    "utc": utc_now(),
+                    "monotonic_ns": started_ns,
+                    "facts": dict(facts or {}),
+                    "process_peak_rss_bytes": process_peak_resident_bytes(),
+                },
+            )
+        except WorkingCatalogError as exc:
+            journal.abandon()
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, str(exc)) from exc
+        try:
+            result = work()
+        except BaseException as exc:
+            raise self._fail(journal, None, None, exc, started_ns) from exc
+        evidence: Mapping[str, object] = {"kind": "callable", "count": None}
+        sealed = self._complete(journal, None, None, evidence, started_ns, None)
+        self._record(
+            descriptor,
+            ordinal,
+            None,
+            _KIND_CALLABLE,
+            evidence,
+            journal,
+            sealed,
+            None,
+            _monotonic_ns() - started_ns,
+        )
+        return result
+
+    def record_path_decision(
+        self,
+        *,
+        sidecar_state: Mapping[str, object],
+        selected: str | None,
+        expected_path: str | None,
+    ) -> None:
+        """Journal S18's path decision FIRST -- C2-R2; a conflicting sidecar selects nothing."""
+        descriptor = self.descriptor_for(_OP_PATH_DECISION)
+        ordinal = self._next_ordinal
+        self._next_ordinal += 1
+        journal = self._open_journal(ordinal)
+        started_ns = _monotonic_ns()
+        bindings = self._bindings(descriptor, ordinal, None, _KIND_PATH_DECISION)
+        decision = {
+            "sidecar_file_state": dict(sidecar_state),
+            "file_state_identity": _identity_of({"sidecar_file_state": dict(sidecar_state)}),
+            "expected_path": expected_path,
+            "selected_path": selected,
+        }
+        try:
+            journal.append(
+                EVENT_STATEMENT_START,
+                {**bindings, "utc": utc_now(), "monotonic_ns": started_ns, "decision": decision},
+            )
+        except WorkingCatalogError as exc:
+            journal.abandon()
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, str(exc)) from exc
+        evidence: Mapping[str, object] = {
+            "kind": "path_decision",
+            "count": None,
+            "selected_path": selected,
+        }
+        sealed = self._complete(journal, None, None, evidence, started_ns, None)
+        self._record(
+            descriptor,
+            ordinal,
+            None,
+            _KIND_PATH_DECISION,
+            evidence,
+            journal,
+            sealed,
+            None,
+            _monotonic_ns() - started_ns,
+        )
+        self.selected_path = selected
+
+    # -- the execution set -------------------------------------------------- #
+    def coverage(self, phases: frozenset[str]) -> tuple[Mapping[str, object], ...]:
+        """Exact coverage of the required descriptors of ``phases`` on the selected path."""
+        report: list[Mapping[str, object]] = []
+        for descriptor in self.descriptors:
+            if descriptor.phase not in phases:
+                continue
+            if descriptor.path is not None:
+                _require(
+                    self.selected_path is not None,
+                    f"stage {self.stage.stage_id!r} declares conditional paths and no path "
+                    "decision was journaled",
+                )
+                if descriptor.path != self.selected_path:
+                    continue
+            observed = sum(1 for item in self.executions if item.operation == descriptor.operation)
+            expected = self.expected_executions(descriptor)
+            report.append(
+                {
+                    "statement_id": descriptor.statement_id,
+                    "expected": expected,
+                    "observed": observed,
+                }
+            )
+            if expected == _EXPECTED_DATA_DEPENDENT:
+                continue
+            _require(
+                observed == expected,
+                f"coverage: {descriptor.statement_id} has {observed} sealed successful journal(s) "
+                f"where exactly {expected} are required on the "
+                f"{self.selected_path or 'unconditional'} path",
+            )
+        return tuple(report)
+
+    def execution_set(self, phases: frozenset[str]) -> Mapping[str, object]:
+        """The ordered, sealed statement execution set and its identity -- §29."""
+        coverage = self.coverage(phases)
+        body: dict[str, object] = {
+            "contract": L2_STATEMENT_EXECUTION_SET_CONTRACT,
+            "successor_run_id": self.ctx.stage_plan.successor_run_id,
+            "stage_plan_identity": self.ctx.stage_plan.identity,
+            "statement_registry_identity": self.registry_identity,
+            "stage_id": self.stage.stage_id,
+            "stage_ordinal": self.stage.ordinal,
+            "stage_attempt_ordinal": self.attempt_ordinal,
+            "selected_path": self.selected_path,
+            "phases": sorted(phases),
+            "coverage": [dict(item) for item in coverage],
+            "bounded_control_executions": dict(sorted(self.bounded_executions.items())),
+            "statements": [dict(item.record) for item in self.executions],
+        }
+        body["execution_set_identity"] = _identity_of(body)
+        return body
+
+    def publish_abort_record(self, normalized: bool, checkpoint: object) -> Path:
+        """The durable record of an instrumentation or watchdog abort, create-once."""
+        abort = self.abort
+        record: dict[str, object] = {
+            "contract": _ABORT_RECORD_CONTRACT,
+            "successor_run_id": self.ctx.stage_plan.successor_run_id,
+            "stage_plan_identity": self.ctx.stage_plan.identity,
+            "stage_id": self.stage.stage_id,
+            "stage_ordinal": self.stage.ordinal,
+            "stage_attempt_ordinal": self.attempt_ordinal,
+            "cause": None if abort is None else abort.cause,
+            "detail": None if abort is None else abort.detail,
+            "statements_sealed": len(self.executions),
+            "ABORT_WAL_NORMALIZED": normalized,
+            "checkpoint_result": checkpoint,
+            "applied_unit_inserted": False,
+            "stage_receipt_published": False,
+            "utc": utc_now(),
+        }
+        record["abort_record_identity"] = _identity_of(record)
+        path = self.attempt_directory.parent / f"abort-attempt-{self.attempt_ordinal:03d}.json"
+        write_once_canonical_json(path, record)
+        return path
+
+
+def _free_space_by_role(
+    world_free: int, temp_free: int, *, same_device: bool
+) -> Mapping[str, object]:
+    """Both logical roles' free bytes, never summed -- §34 (pure; unit-testable for two devices)."""
+    return {
+        "world_free_bytes": world_free,
+        "sqlite_temp_free_bytes": temp_free,
+        "same_device": same_device,
+        "drawdowns_summed": False,
+    }
+
+
+def _stage_instrumentation_for(
+    ctx: _StageContext, stage: L2Stage, prior: Sequence[AppliedUnit]
+) -> _StageInstrumentation:
+    ordinal, directory = _allocate_stage_attempt(ctx, stage)
+    return _StageInstrumentation(ctx, stage, prior, ordinal, directory)
+
+
+# --------------------------------------------------------------------------- #
+# Observability -- §30-§32: journals are observational after COMMIT
+# --------------------------------------------------------------------------- #
+def _journal_observability(
+    progress_root: Path, execution_set: Mapping[str, object] | None
+) -> Mapping[str, object]:
+    """Re-authenticate every journal an execution set binds; report, never repair or rerun."""
+    if execution_set is None:
+        return {
+            "status": _OBSERVABILITY_GAP_MISSING,
+            "expected_journal_count": 0,
+            "missing": [],
+            "changed": [],
+            "detail": "the applied unit binds no execution set",
+        }
+    statements = cast("list[Mapping[str, object]]", execution_set.get("statements", []))
+    missing: list[Mapping[str, object]] = []
+    changed: list[Mapping[str, object]] = []
+    for item in statements:
+        relative = str(item["journal_relative_path"])
+        expected_sha = str(item["journal_sha256"])
+        expected_length = _stored_int(item["journal_byte_length"], "journal_byte_length")
+        path = progress_root / relative
+        if ".." in Path(relative).parts:
+            changed.append(
+                {
+                    "journal_relative_path": relative,
+                    "expected_sha256": expected_sha,
+                    "expected_byte_length": expected_length,
+                    "observed": "traversal",
+                }
+            )
+            continue
+        status = authenticate_statement_journal(
+            path, expected_sha256=expected_sha, expected_byte_length=expected_length
+        )
+        if status == JOURNAL_AUTHENTIC:
+            continue
+        entry: dict[str, object] = {
+            "journal_relative_path": relative,
+            "expected_sha256": expected_sha,
+            "expected_byte_length": expected_length,
+        }
+        if status == JOURNAL_MISSING:
+            missing.append(entry)
+            continue
+        try:
+            observed_sha, observed_length = file_sha256(path)
+            entry["observed_sha256"] = observed_sha
+            entry["observed_byte_length"] = observed_length
+        except ChunkEvidenceError as exc:
+            entry["observed"] = str(exc)[:200]
+        changed.append(entry)
+    if missing:
+        status_label = _OBSERVABILITY_GAP_MISSING
+    elif changed:
+        status_label = _OBSERVABILITY_GAP_CHANGED
+    else:
+        status_label = _OBSERVABILITY_COMPLETE
+    return {
+        "status": status_label,
+        "expected_journal_count": len(statements),
+        "missing": missing,
+        "changed": changed,
+        "detail": "observational: a gap revokes no committed semantics and triggers no rerun",
+    }
+
+
+def _unit_observability(ctx: _StageContext, unit: AppliedUnit) -> Mapping[str, object]:
+    return _journal_observability(
+        ctx.stage_plan.statement_progress_root, unit.statement_execution_set
+    )
+
+
+def observability_stage_statuses(
+    progress_root: Path, units: Sequence[AppliedUnit]
+) -> tuple[Mapping[str, object], ...]:
+    """The canonical ordered per-stage observability statuses over committed units -- §32."""
+    statuses: list[Mapping[str, object]] = []
+    for unit in units:
+        report = _journal_observability(progress_root, unit.statement_execution_set)
+        statuses.append(
+            {
+                "stage_id": unit.stage_id,
+                "stage_ordinal": unit.stage_ordinal,
+                "applied_unit_identity": unit.unit_identity,
+                "statement_execution_set_identity": unit.statement_execution_set_identity,
+                "observability_status": report["status"],
+                "expected_journal_count": report["expected_journal_count"],
+                "missing": [
+                    dict(item) for item in cast("list[Mapping[str, object]]", report["missing"])
+                ],
+                "changed": [
+                    dict(item) for item in cast("list[Mapping[str, object]]", report["changed"])
+                ],
+            }
+        )
+    return tuple(statuses)
+
+
+def _observability_summary(statuses: Sequence[Mapping[str, object]]) -> tuple[str, int]:
+    identity = _identity_of({"observability_stage_statuses": [dict(item) for item in statuses]})
+    gaps = sum(1 for item in statuses if item["observability_status"] != _OBSERVABILITY_COMPLETE)
+    return identity, gaps
+
+
+def read_observability_closeout(path: Path) -> Mapping[str, object]:
+    """One durable observability closeout, canonical, with its identity recomputed.
+
+    Raises:
+        ChunkMultipassError: absent, a link, not canonical, wrong contract, or its identity
+            does not describe its body.
+    """
+    _require(not path.is_symlink(), f"closeout {path.name!r} is a symbolic link; refused")
+    _require(path.is_file(), f"no observability closeout exists at {path.name!r}")
+    payload = path.read_bytes()
+    record = _json_object(payload.decode("utf-8"), f"closeout {path.name!r}")
+    body = {key: value for key, value in record.items() if key != "closeout_identity"}
+    _require(
+        canonical_json_bytes(record) == payload
+        and str(record.get("contract")) == L2_OBSERVABILITY_CLOSEOUT_CONTRACT
+        and str(record.get("closeout_identity")) == _identity_of(body),
+        f"closeout {path.name!r} is not canonical, carries another contract, or does not "
+        "describe its own body; refused",
+    )
+    return record
+
+
+def require_r21_observability_ready(
+    terminal_record: Mapping[str, object], *, stage_receipt_root: Path
+) -> Mapping[str, object]:
+    """The R21 qualification gate -- C2-R3: terminal gap count zero AND a fresh recheck of zero.
+
+    Reads the terminal record's bound observability, the closeout it names beneath the receipt
+    root, holds the closeout's identity to the binding, and re-authenticates every journal the
+    closeout's execution sets name NOW. Post-terminal evidence loss therefore refuses.
+
+    Raises:
+        ChunkMultipassError: no observability binding, a gap at terminal time, a closeout that
+            is absent or does not match, or a current gap.
+    """
+    bound = terminal_record.get("successor_observability")
+    _require(
+        isinstance(bound, Mapping),
+        "the terminal record binds no successor observability; not R21-ready",
+    )
+    binding = cast("Mapping[str, object]", bound)
+    terminal_gaps = _stored_int(binding["observability_gap_count"], "observability_gap_count")
+    _require(
+        terminal_gaps == 0,
+        f"the terminal record recorded {terminal_gaps} observability gap(s); not R21-ready",
+    )
+    closeout = read_observability_closeout(
+        stage_receipt_root / str(binding["closeout_relative_filename"])
+    )
+    _require(
+        str(closeout["closeout_identity"]) == str(binding["closeout_identity"])
+        and str(closeout["observability_summary_identity"])
+        == str(binding["observability_summary_identity"]),
+        "the closeout beneath the receipt root is not the one the terminal record binds",
+    )
+    progress_root = stage_receipt_root / STATEMENT_PROGRESS_DIRECTORY
+    current_gaps = 0
+    rechecked: list[Mapping[str, object]] = []
+    for entry in cast("list[Mapping[str, object]]", closeout["observability_stage_statuses"]):
+        execution_set = cast("Mapping[str, object] | None", entry.get("statement_execution_set"))
+        report = _journal_observability(progress_root, execution_set)
+        if report["status"] != _OBSERVABILITY_COMPLETE:
+            current_gaps += 1
+        rechecked.append({"stage_id": entry["stage_id"], "current_status": report["status"]})
+    _require(
+        current_gaps == 0,
+        f"{current_gaps} stage(s) lost or changed a journal since the terminal record; "
+        "not R21-ready",
+    )
+    return {
+        "terminal_observability_gap_count": terminal_gaps,
+        "current_observability_gap_count": current_gaps,
+        "stages_rechecked": rechecked,
+        "r21_observability_ready": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Same-database stage semantics -- each returns (rows_written, outcome witness)
 # --------------------------------------------------------------------------- #
 def _stage_capture_and_drop_indexes(
@@ -8971,11 +11535,19 @@ def _stage_capture_and_drop_indexes(
 
 
 def _stage_reduced_parser_run(
-    connection: sqlite3.Connection, aliases: Sequence[str], ctx: _StageContext
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    ctx: _StageContext,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S2: the accepted reduced parser-run row, under containment, witnessed durably."""
     with write_containment(connection):
-        reduced = _reduced_parser_run(connection, aliases, contract=ctx.contract)
+        reduced = _reduced_parser_run(
+            connection,
+            aliases,
+            contract=ctx.contract,
+            statement_runner=instr.consolidation_runner,
+        )
     return 1, {
         "parser_run_id": reduced.parser_run_id,
         "parser_id": reduced.parser_id,
@@ -8985,7 +11557,7 @@ def _stage_reduced_parser_run(
         "quarantined": reduced.quarantined,
         "parser_state": reduced.parser_state,
         "duplicate_identities": list(reduced.duplicate_identities),
-        "row_count": _count(connection, "census_parser_runs"),
+        "row_count": instr.count(connection, "census_parser_runs"),
     }
 
 
@@ -8995,19 +11567,32 @@ def _stage_table_load(
     ctx: _StageContext,
     stage: L2Stage,
     units: Sequence[AppliedUnit],
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S3..S10: one table's accepted key-sorted load or first/last reduction, under containment."""
     table = str(stage.table)
+    runner = instr.consolidation_runner
     with write_containment(connection):
         if _MERGE_STRATEGY[table] == "keyed_first_last":
-            _keyed_first_last_load(connection, table, aliases)
+            _keyed_first_last_load(connection, table, aliases, statement_runner=runner)
         else:
-            _sorted_bulk_load(connection, table, aliases)
+            _sorted_bulk_load(connection, table, aliases, statement_runner=runner)
         if table == "census_parsed_records":
             reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
-            _apply_duplicate_identities(connection, reduced)
-    count = _count(connection, table)
+            _apply_duplicate_identities(connection, reduced, statement_runner=runner)
+    count = instr.count(connection, table)
     return count, {"table": table, "row_count": count}
+
+
+def _fetched(
+    instr: _StageInstrumentation, connection: sqlite3.Connection, sql: str, operation: str
+) -> sqlite3.Row:
+    """One registered static ``fetchall`` statement's first row, executed under a journal."""
+    rows = cast(
+        "Sequence[sqlite3.Row]",
+        instr.execute(connection, sql, (), operation=operation, kind=STATEMENT_KIND_FETCHALL),
+    )
+    return rows[0]
 
 
 def _stage_witness_rank(
@@ -9015,11 +11600,12 @@ def _stage_witness_rank(
     aliases: Sequence[str],
     units: Sequence[AppliedUnit],
     stage: L2Stage,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S11: the level-2 witness ranking, persisted -- the same window function, durable."""
     _require_not_derived(units, stage)
     _require(
-        _count(connection, L2_WITNESS_RANK_TABLE) == 0,
+        instr.count(connection, L2_WITNESS_RANK_TABLE) == 0,
         f"{L2_WITNESS_RANK_TABLE} is not empty before S11; refused rather than appended to",
     )
     union = _union_all(
@@ -9028,7 +11614,8 @@ def _stage_witness_rank(
         "accession_plain, source_observation_id, parsed_record_id, first_observed_at_utc",
         extra=" AS chunk_ordinal",
     )
-    connection.execute(
+    instr.execute(
+        connection,
         f"INSERT INTO main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
         "(accession_plain, source_observation_id, parsed_record_id, first_observed_at_utc, "
         "chunk_ordinal, witness_rank, witnesses) "
@@ -9036,18 +11623,21 @@ def _stage_witness_rank(
         "chunk_ordinal, "
         "ROW_NUMBER() OVER (PARTITION BY accession_plain ORDER BY chunk_ordinal) AS witness_rank, "
         "COUNT(*) OVER (PARTITION BY accession_plain) AS witnesses "
-        f"FROM ({union})"
+        f"FROM ({union})",
+        (),
+        operation="witness_rank.insert",
+        kind=STATEMENT_KIND_EXECUTE,
     )
-    count = _count(connection, L2_WITNESS_RANK_TABLE)
-    contested = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
-        "WHERE witness_rank = 1 AND witnesses > 1"
-    ).fetchone()
+    count = instr.count(connection, L2_WITNESS_RANK_TABLE)
+    contested = _fetched(instr, connection, _SQL_S11_CONTESTED, "witness_rank.contested")
     return count, {"row_count": count, "contested": int(contested["n"])}
 
 
 def _stage_observation_corrections(
-    connection: sqlite3.Connection, units: Sequence[AppliedUnit], stage: L2Stage
+    connection: sqlite3.Connection,
+    units: Sequence[AppliedUnit],
+    stage: L2Stage,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S12: the additive global loser upgrade, persisted -- the accepted statements, durable.
 
@@ -9057,59 +11647,40 @@ def _stage_observation_corrections(
     """
     _require_not_derived(units, stage)
     _require(
-        _count(connection, L2_CORRECTIONS_TABLE) == 0,
+        instr.count(connection, L2_CORRECTIONS_TABLE) == 0,
         f"{L2_CORRECTIONS_TABLE} is not empty before S12; refused rather than appended to",
     )
-    orphaned_winners = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} AS w "  # noqa: S608
-        "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
-        "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
-    ).fetchone()
+    orphaned_winners = _fetched(
+        instr, connection, _SQL_S12_ORPHANED_WINNERS, "corrections.orphaned_winners"
+    )
     _require(
         int(orphaned_winners["n"]) == 0,
         "a contested accession has no loaded canonical row between load and correction; the "
         "consolidation is refused rather than corrected against a row that is not there",
     )
-    orphaned_rivals = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_WITNESS_RANK_TABLE} AS w "  # noqa: S608
-        "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
-        "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
-    ).fetchone()
+    orphaned_rivals = _fetched(
+        instr, connection, _SQL_S12_ORPHANED_RIVALS, "corrections.orphaned_rivals"
+    )
     _require(
         int(orphaned_rivals["n"]) == 0,
         "a rival witness's parsed record is absent at correction time; the consolidation is "
         "refused rather than materialized from nothing",
     )
-    connection.execute(
-        f"INSERT INTO main.{L2_CORRECTIONS_TABLE} "  # noqa: S608
-        f"SELECT {_FUNCTION_STABLE_ID}('accession-observation', a.accession_plain, "
-        "a.source_observation_id, a.parsed_record_id, je.key), "
-        "a.accession_plain, a.source_observation_id, a.parsed_record_id, je.key, je.value, "
-        "a.first_observed_at_utc, 0 "
-        f"FROM main.{L2_WITNESS_RANK_TABLE} AS w "
-        "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
-        f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
-        "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
-        "ELSE printf('%010d', a.registrant_cik_numeric) END, "
-        "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
-        "WHERE w.witness_rank = 1 AND w.witnesses > 1"
+    instr.execute(
+        connection,
+        _SQL_S12_INSERT_WINNERS,
+        (),
+        operation="corrections.insert_winners",
+        kind=STATEMENT_KIND_EXECUTE,
     )
-    connection.execute(
-        f"INSERT INTO main.{L2_CORRECTIONS_TABLE} "  # noqa: S608
-        f"SELECT {_FUNCTION_STABLE_ID}('accession-observation', w.accession_plain, "
-        "w.source_observation_id, w.parsed_record_id, je.key), "
-        "w.accession_plain, w.source_observation_id, w.parsed_record_id, je.key, je.value, "
-        "w.first_observed_at_utc, 0 "
-        f"FROM main.{L2_WITNESS_RANK_TABLE} AS w "
-        "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
-        f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
-        "WHERE w.witness_rank > 1"
+    instr.execute(
+        connection,
+        _SQL_S12_INSERT_RIVALS,
+        (),
+        operation="corrections.insert_rivals",
+        kind=STATEMENT_KIND_EXECUTE,
     )
-    summary = connection.execute(
-        f"SELECT (SELECT COUNT(*) FROM main.{L2_WITNESS_RANK_TABLE} "  # noqa: S608
-        "WHERE witness_rank = 1 AND witnesses > 1) AS contested, "
-        f"(SELECT COUNT(*) FROM main.{L2_CORRECTIONS_TABLE}) AS staged"
-    ).fetchone()
+    summary = _fetched(instr, connection, _SQL_S12_SUMMARY, "corrections.summary")
     staged = int(summary["staged"])
     return staged, {
         "contested": int(summary["contested"]),
@@ -9119,7 +11690,7 @@ def _stage_observation_corrections(
 
 
 def _successor_load_accession_observations(
-    connection: sqlite3.Connection, aliases: Sequence[str]
+    connection: sqlite3.Connection, aliases: Sequence[str], instr: _StageInstrumentation
 ) -> None:
     """S13's load: the accepted single sorted load, reading the PERSISTED corrections."""
     columns = _columns(connection, "census_accession_observations")
@@ -9134,48 +11705,64 @@ def _successor_load_accession_observations(
         f"FROM main.{L2_CORRECTIONS_TABLE}"
     )
     union = " UNION ALL ".join(parts)
-    connection.execute(
+    instr.execute(
+        connection,
         f"INSERT OR IGNORE INTO census_accession_observations ({projection}) "  # noqa: S608
         f"SELECT {projection} FROM ({union}) "
-        "ORDER BY accession_observation_id, priority, chunk_ordinal"
+        "ORDER BY accession_observation_id, priority, chunk_ordinal",
+        (),
+        operation="load_accession_observations.insert",
+        kind=STATEMENT_KIND_EXECUTE,
     )
 
 
 def _stage_accession_observations(
-    connection: sqlite3.Connection, aliases: Sequence[str]
+    connection: sqlite3.Connection, aliases: Sequence[str], instr: _StageInstrumentation
 ) -> tuple[int, Mapping[str, object]]:
     """S13: the observation load over the intermediates plus the persisted corrections."""
     with write_containment(connection):
-        _successor_load_accession_observations(connection, aliases)
-    count = _count(connection, "census_accession_observations")
+        _successor_load_accession_observations(connection, aliases, instr)
+    count = instr.count(connection, "census_accession_observations")
     return count, {"table": "census_accession_observations", "row_count": count}
 
 
 def _stage_edges_and_conflicts(
-    connection: sqlite3.Connection, ctx: _StageContext
+    connection: sqlite3.Connection, ctx: _StageContext, instr: _StageInstrumentation
 ) -> tuple[int, Mapping[str, object]]:
-    """S14: the two accepted whole-observation derivations, once, under containment."""
+    """S14: the two accepted whole-observation derivations, once, under containment.
+
+    The census derivations live in a module R19B may not edit; they receive the connection
+    boundary proxy, which captures each statement's exact SQL immediately before sqlite3 sees it
+    and performs the execution under a journal (D151-C31R2-R19B-C2 §20).
+    """
+    observed = cast("sqlite3.Connection", instr.proxy(connection))
     with write_containment(connection):
         CensusCatalog._candidate_edges(  # noqa: SLF001 - the accepted derivation
-            connection, ctx.plan.source_observation_id, kind="company_name"
+            observed, ctx.plan.source_observation_id, kind="company_name"
         )
         CensusCatalog._candidate_edges(  # noqa: SLF001
-            connection, ctx.plan.source_observation_id, kind="ticker"
+            observed, ctx.plan.source_observation_id, kind="ticker"
         )
-        CensusCatalog._mark_accession_conflicts(connection)  # noqa: SLF001
-    count = _count(connection, "census_candidate_lineage_edges")
+        CensusCatalog._mark_accession_conflicts(observed)  # noqa: SLF001
+    count = instr.count(connection, "census_candidate_lineage_edges")
     return count, {"table": "census_candidate_lineage_edges", "row_count": count}
 
 
 def _stage_parser_state(
-    connection: sqlite3.Connection, ctx: _StageContext, units: Sequence[AppliedUnit]
+    connection: sqlite3.Connection,
+    ctx: _StageContext,
+    units: Sequence[AppliedUnit],
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S15P: the accepted parser_state update -- production only, the one permitted column."""
     reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
     with write_containment(connection):
-        connection.execute(
-            "UPDATE census_plan_sources SET parser_state = ? WHERE source_instance_id = ?",
+        instr.execute(
+            connection,
+            _SQL_S15P_UPDATE,
             (reduced.parser_state, ctx.plan.source_instance_id),
+            operation="parser_state.update",
+            kind=STATEMENT_KIND_EXECUTE,
         )
     row = connection.execute(
         "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
@@ -9187,7 +11774,7 @@ def _stage_parser_state(
 
 
 def _stage_index_rebuild(
-    connection: sqlite3.Connection, ctx: _StageContext, stage: L2Stage
+    connection: sqlite3.Connection, ctx: _StageContext, stage: L2Stage, instr: _StageInstrumentation
 ) -> tuple[int, Mapping[str, object]]:
     """S16.k: rebuild exactly one index from its PERSISTED DDL -- never from sqlite_master."""
     row = connection.execute(
@@ -9217,7 +11804,13 @@ def _stage_index_rebuild(
             f"StagePlan bound {expected_identity[:16]}...; a rebuild never executes DDL the "
             "plan did not seal"
         )
-    connection.execute(str(row["create_sql"]))
+    instr.execute(
+        connection,
+        str(row["create_sql"]),
+        (),
+        operation="index_rebuild.create",
+        kind=STATEMENT_KIND_EXECUTE,
+    )
     stored = connection.execute(
         "SELECT sql, tbl_name FROM main.sqlite_master WHERE type = 'index' AND name = ?",
         (stage.unit_id,),
@@ -9242,54 +11835,79 @@ def _counter_batch(ctx: _StageContext, stage: L2Stage) -> tuple[PlanWitnessSourc
 
 
 def _stage_counter_catalog_batch(
-    connection: sqlite3.Connection, aliases: Sequence[str], ctx: _StageContext, stage: L2Stage
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    ctx: _StageContext,
+    stage: L2Stage,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S17A[n]: every chunk's canonical accession rows for one fan-in batch, persisted."""
     batch = _counter_batch(ctx, stage)
     _require(len(aliases) == len(batch), "the catalog batch attachments do not match the batch")
     rows = 0
     for alias, item in zip(aliases, batch, strict=True):
-        cursor = connection.execute(
-            f"INSERT INTO main.{L2_PLAN_WITNESS_TABLE} "  # noqa: S608
-            "(accession_plain, parsed_record_id, chunk_ordinal) "
-            "SELECT accession_plain, parsed_record_id, ? "
-            f"FROM {alias}.census_accessions",
-            (item.ordinal,),
+        cursor = cast(
+            "sqlite3.Cursor",
+            instr.execute(
+                connection,
+                f"INSERT INTO main.{L2_PLAN_WITNESS_TABLE} "  # noqa: S608
+                "(accession_plain, parsed_record_id, chunk_ordinal) "
+                "SELECT accession_plain, parsed_record_id, ? "
+                f"FROM {alias}.census_accessions",
+                (item.ordinal,),
+                operation="counter_catalog.insert",
+                kind=STATEMENT_KIND_EXECUTE,
+            ),
         )
         rows += int(cursor.rowcount)
     return rows, {
         "batch": stage.batch,
         "chunk_ordinals": [item.ordinal for item in batch],
         "rows": rows,
-        "row_count": _count(connection, L2_PLAN_WITNESS_TABLE),
+        "row_count": instr.count(connection, L2_PLAN_WITNESS_TABLE),
     }
 
 
 def _stage_counter_ledger_batch(
-    connection: sqlite3.Connection, aliases: Sequence[str], ctx: _StageContext, stage: L2Stage
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    ctx: _StageContext,
+    stage: L2Stage,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S17B[n]: every chunk's first-witness ledger for one fan-in batch, persisted."""
     batch = _counter_batch(ctx, stage)
     _require(len(aliases) == len(batch), "the ledger batch attachments do not match the batch")
     rows = 0
     for alias in aliases:
-        cursor = connection.execute(
-            f"INSERT INTO main.{L2_PLAN_LEDGER_TABLE} "  # noqa: S608
-            "(native_identity, member_ordinal, record_ordinal, delta_materialized) "
-            "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "
-            f"FROM {alias}.chunk_first_witness"
+        cursor = cast(
+            "sqlite3.Cursor",
+            instr.execute(
+                connection,
+                f"INSERT INTO main.{L2_PLAN_LEDGER_TABLE} "  # noqa: S608
+                "(native_identity, member_ordinal, record_ordinal, delta_materialized) "
+                "SELECT native_identity, member_ordinal, record_ordinal, delta_materialized "
+                f"FROM {alias}.chunk_first_witness",
+                (),
+                operation="counter_ledger.insert",
+                kind=STATEMENT_KIND_EXECUTE,
+            ),
         )
         rows += int(cursor.rowcount)
     return rows, {
         "batch": stage.batch,
         "chunk_ordinals": [item.ordinal for item in batch],
         "rows": rows,
-        "row_count": _count(connection, L2_PLAN_LEDGER_TABLE),
+        "row_count": instr.count(connection, L2_PLAN_LEDGER_TABLE),
     }
 
 
 def _stage_counters_finalize(
-    connection: sqlite3.Connection, ctx: _StageContext, units: Sequence[AppliedUnit], stage: L2Stage
+    connection: sqlite3.Connection,
+    ctx: _StageContext,
+    units: Sequence[AppliedUnit],
+    stage: L2Stage,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """S17C: the four whole-F0 counters over the persisted plan witnesses -- D151-C15 R1.
 
@@ -9300,8 +11918,8 @@ def _stage_counters_finalize(
     """
     _require_not_derived(units, stage)
     _require(
-        _count(connection, L2_PLAN_WITNESS_RANK_TABLE) == 0
-        and _count(connection, L2_MEMBER_DELTA_TABLE) == 0,
+        instr.count(connection, L2_PLAN_WITNESS_RANK_TABLE) == 0
+        and instr.count(connection, L2_MEMBER_DELTA_TABLE) == 0,
         "the counter relations are not empty before S17C; refused rather than appended to",
     )
     expected_batches = -(-len(ctx.counter_sources) // MERGE_FAN_IN)
@@ -9314,68 +11932,41 @@ def _stage_counters_finalize(
         len(seen) == 2 * expected_batches,
         f"S17C requires every counter batch committed; {len(seen)} of {2 * expected_batches} are",
     )
-    connection.execute(
-        f"INSERT INTO main.{L2_PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
-        "(accession_plain, parsed_record_id, witness_rank, witnesses) "
-        "SELECT accession_plain, parsed_record_id, "
-        "ROW_NUMBER() OVER (PARTITION BY accession_plain ORDER BY chunk_ordinal) AS witness_rank, "
-        "COUNT(*) OVER (PARTITION BY accession_plain) AS witnesses "
-        f"FROM main.{L2_PLAN_WITNESS_TABLE}"
+    instr.execute(
+        connection,
+        _SQL_S17C_INSERT_RANK,
+        (),
+        operation="counters.insert_rank",
+        kind=STATEMENT_KIND_EXECUTE,
     )
-    orphaned_winners = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
-        "LEFT JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain "
-        "WHERE w.witness_rank = 1 AND w.witnesses > 1 AND a.accession_plain IS NULL"
-    ).fetchone()
+    orphaned_winners = _fetched(
+        instr, connection, _SQL_S17C_ORPHANED_WINNERS, "counters.orphaned_winners"
+    )
     _require(
         int(orphaned_winners["n"]) == 0,
         "a contested accession of the plan has no canonical row in the final world; the whole-F0 "
         "counters are refused rather than derived against a row that is not there",
     )
-    orphaned_rivals = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
-        "LEFT JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id "
-        "WHERE w.witness_rank > 1 AND p.parsed_record_id IS NULL"
-    ).fetchone()
+    orphaned_rivals = _fetched(
+        instr, connection, _SQL_S17C_ORPHANED_RIVALS, "counters.orphaned_rivals"
+    )
     _require(
         int(orphaned_rivals["n"]) == 0,
         "a chunk's local-first witness has no parsed record in the final world; the whole-F0 "
         "counters are refused rather than derived from nothing",
     )
-    contested = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} "  # noqa: S608
-        "WHERE witness_rank = 1 AND witnesses > 1"
-    ).fetchone()
-    winner_rows = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
-        "JOIN main.census_accessions AS a ON a.accession_plain = w.accession_plain, "
-        f"json_each({_FUNCTION_RECONSTRUCTED_FIELDS}(a.acceptance_datetime_sec_raw, "
-        "CASE WHEN a.registrant_cik_numeric IS NULL THEN NULL "
-        "ELSE printf('%010d', a.registrant_cik_numeric) END, "
-        "a.filing_date_sec, a.form_type, a.primary_document_name, a.report_date)) AS je "
-        "WHERE w.witness_rank = 1 AND w.witnesses > 1"
-    ).fetchone()
-    rival_rows = connection.execute(
-        f"SELECT COUNT(*) AS n FROM main.{L2_PLAN_WITNESS_RANK_TABLE} AS w "  # noqa: S608
-        "JOIN main.census_parsed_records AS p ON p.parsed_record_id = w.parsed_record_id, "
-        f"json_each({_FUNCTION_RIVAL_FIELDS}(p.payload_json)) AS je "
-        "WHERE w.witness_rank > 1"
-    ).fetchone()
-    connection.execute(
-        f"INSERT INTO main.{L2_MEMBER_DELTA_TABLE} (member_ordinal, delta) "  # noqa: S608
-        "WITH ranked AS ("
-        "  SELECT member_ordinal, delta_materialized,"
-        "    ROW_NUMBER() OVER (PARTITION BY native_identity "
-        "                       ORDER BY member_ordinal, record_ordinal) AS rn"
-        f"  FROM main.{L2_PLAN_LEDGER_TABLE})"
-        "SELECT member_ordinal, SUM(delta_materialized) AS delta FROM ranked "
-        "WHERE rn > 1 GROUP BY member_ordinal"
+    contested = _fetched(instr, connection, _SQL_S17C_CONTESTED, "counters.contested")
+    winner_rows = _fetched(instr, connection, _SQL_S17C_WINNER_ROWS, "counters.winner_rows")
+    rival_rows = _fetched(instr, connection, _SQL_S17C_RIVAL_ROWS, "counters.rival_rows")
+    instr.execute(
+        connection,
+        _SQL_S17C_INSERT_MEMBER_DELTA,
+        (),
+        operation="counters.insert_member_delta",
+        kind=STATEMENT_KIND_EXECUTE,
     )
-    deltas = connection.execute(
-        "SELECT COUNT(*) AS members, COALESCE(SUM(delta), 0) AS total "  # noqa: S608
-        f"FROM main.{L2_MEMBER_DELTA_TABLE}"
-    ).fetchone()
-    rank_rows = _count(connection, L2_PLAN_WITNESS_RANK_TABLE)
+    deltas = _fetched(instr, connection, _SQL_S17C_DELTAS, "counters.deltas")
+    rank_rows = instr.count(connection, L2_PLAN_WITNESS_RANK_TABLE)
     return rank_rows, {
         "first_witness_accessions_corrected": int(contested["n"]),
         "first_witness_rows_staged": int(winner_rows["n"]) + int(rival_rows["n"]),
@@ -9423,19 +12014,38 @@ def _sidecar_is_complete_readonly(path: Path, ctx: _StageContext) -> bool:
     )
 
 
-def _prepare_sidecar(ctx: _StageContext) -> Mapping[str, object]:
-    """S18's out-of-catalog half: build or authenticate the sidecar, never overwrite one."""
+def _prepare_sidecar(ctx: _StageContext, instr: _StageInstrumentation) -> Mapping[str, object]:
+    """S18's out-of-catalog half: build or authenticate the sidecar, never overwrite one.
+
+    The path decision is journaled FIRST (D151-R19B-C2-R2): the sidecar's file state selects
+    BUILD (absent) or AUTHENTICATE (present and complete); a present, incomplete sidecar selects
+    nothing and is a conflict. Every material BUILD statement and both authenticate-time folds
+    run through the sidecar runner under the same watchdog model as the working catalog.
+    """
     path = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
     state = _file_state(path, digest=False)
+    complete = state.lstat_class == "file" and _sidecar_is_complete_readonly(path, ctx)
     if state.lstat_class == "absent":
+        selected: str | None = _S18_PATH_BUILD
+    elif complete:
+        selected = _S18_PATH_AUTHENTICATE
+    else:
+        selected = None
+    instr.record_path_decision(
+        sidecar_state={**dict(state.as_record()), "complete": complete},
+        selected=selected,
+        expected_path=_S18_PATH_BUILD if state.lstat_class == "absent" else _S18_PATH_AUTHENTICATE,
+    )
+    if selected == _S18_PATH_BUILD:
         completeness, manifest_digest, totals, _level_two_evidence = _merge_sidecar(
             sidecar_path=path,
             inputs=cast("Sequence[ChunkInput]", ctx.intermediates),
             plan=ctx.plan,
             source_id=ctx.plan.source_id,
+            statement_runner=instr.sidecar_runner,
         )
-    elif state.lstat_class == "file" and _sidecar_is_complete_readonly(path, ctx):
-        reopened = CompactEvidenceSidecar(path)
+    elif selected == _S18_PATH_AUTHENTICATE:
+        reopened = CompactEvidenceSidecar(path, statement_runner=instr.sidecar_runner)
         try:
             evidence = reopened.source_evidence(ctx.plan.source_observation_id)
             manifest_digest = reopened.member_manifest_digest(ctx.plan.source_observation_id)
@@ -9455,7 +12065,7 @@ def _prepare_sidecar(ctx: _StageContext) -> Mapping[str, object]:
             f"the sidecar {path.name!r} is present but is {state.lstat_class} or incomplete; a "
             "partial or conflicting sidecar is preserved exactly as it is and never rebuilt"
         )
-    reopened = CompactEvidenceSidecar(path)
+    reopened = CompactEvidenceSidecar(path, statement_runner=instr.sidecar_runner)
     try:
         identity = reopened.identity()
     finally:
@@ -9591,9 +12201,18 @@ def _prepare_mark_parsed(ctx: _StageContext, units: Sequence[AppliedUnit]) -> Ma
     }
 
 
-def _prepare_reauthentication(ctx: _StageContext) -> Mapping[str, object]:
+def _prepare_reauthentication(
+    ctx: _StageContext, instr: _StageInstrumentation
+) -> Mapping[str, object]:
     """S21P / S20C's out-of-catalog half: every StagePlan intermediate and selected request."""
-    resolved = _resolve_route_intermediates(ctx.request, ctx.plan, ctx.schedule, ctx.route)
+    resolved = cast(
+        "tuple[IntermediateInput, ...]",
+        instr.record_callable(
+            _OP_REAUTHENTICATE,
+            lambda: _resolve_route_intermediates(ctx.request, ctx.plan, ctx.schedule, ctx.route),
+            facts={"input_group_count": len(ctx.intermediates)},
+        ),
+    )
     descriptors = [_successor_intermediate_descriptor(item) for item in resolved]
     bound = [dict(item) for item in ctx.stage_plan.intermediates]
     _require(
@@ -9707,14 +12326,17 @@ def _plan_counters(units: Sequence[AppliedUnit]) -> tuple[int, int, int, int]:
 
 
 def _result_ready_core(
-    ctx: _StageContext, units: Sequence[AppliedUnit], connection: sqlite3.Connection
+    ctx: _StageContext,
+    units: Sequence[AppliedUnit],
+    connection: sqlite3.Connection,
+    instr: _StageInstrumentation,
 ) -> Mapping[str, object]:
     """The semantic core the RESULT_READY binding seals: what the final record will say."""
     reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
     sidecar = _witness_of(units, _STAGE_SIDECAR)
     counters = _plan_counters(units)
     outcome = _witness_of(units, _STAGE_OUTCOME)
-    counts = table_row_counts(connection)
+    counts = table_row_counts(cast("sqlite3.Connection", instr.proxy(connection)))
     return {
         "stage_plan_identity": ctx.stage_plan.identity,
         "parser_run_id": reduced.parser_run_id,
@@ -9735,7 +12357,11 @@ def _result_ready_core(
 
 
 def _publish_final_receipt(
-    ctx: _StageContext, units: Sequence[AppliedUnit]
+    ctx: _StageContext,
+    units: Sequence[AppliedUnit],
+    *,
+    manifest: ArtifactManifest,
+    observability: Mapping[str, object],
 ) -> Mapping[str, object]:
     """S23P's LAST act: the accepted FinalWorldReceipt, create-once, over the closed world."""
     core = _witness_of(units, _STAGE_FINAL_RECEIPT)
@@ -9745,7 +12371,6 @@ def _publish_final_receipt(
         str(key): _stored_int(value, str(key))
         for key, value in cast("Mapping[str, object]", core["table_row_counts"]).items()
     }
-    manifest = build_artifact_manifest(ctx.world_directory, exclude=(FINAL_WORLD_RECEIPT_FILENAME,))
     chunk_inputs: list[Mapping[str, object]] = []
     for item in ctx.intermediates:
         chunk_inputs.extend(item.receipt.chunk_inputs)
@@ -9784,6 +12409,7 @@ def _publish_final_receipt(
         manifest=manifest,
         completed_at_utc=utc_now(),
         status="complete",
+        successor_observability=dict(observability),
     )
     path = ctx.world_directory / FINAL_WORLD_RECEIPT_FILENAME
     # LAST. Nothing is written after this.
@@ -9792,7 +12418,11 @@ def _publish_final_receipt(
 
 
 def _publish_calibration_result(
-    ctx: _StageContext, units: Sequence[AppliedUnit]
+    ctx: _StageContext,
+    units: Sequence[AppliedUnit],
+    *,
+    manifest: ArtifactManifest,
+    observability: Mapping[str, object],
 ) -> CalibrationSubsetResult:
     """S21C's LAST act: the accepted CalibrationSubsetResult, sealed and create-once."""
     core = _witness_of(units, _STAGE_CALIBRATION_RESULT)
@@ -9809,9 +12439,6 @@ def _publish_calibration_result(
     envelope = ctx.proof.envelope
     _require(envelope is not None, "the calibration result needs the child's envelope")
     assert envelope is not None  # noqa: S101 - narrowed above
-    manifest = build_artifact_manifest(
-        ctx.world_directory, exclude=(CALIBRATION_SUBSET_RESULT_FILENAME,)
-    )
     started_at_utc = min(item.receipt.earliest_input_started_at_utc for item in ctx.intermediates)
     result = CalibrationSubsetResult(
         contract=CALIBRATION_SUBSET_RESULT_CONTRACT,
@@ -9866,6 +12493,7 @@ def _publish_calibration_result(
         manifest=manifest,
         status="complete",
         result_identity="",
+        successor_observability=dict(observability),
     )
     sealed = replace(result, result_identity=result.identity())
     # LAST. Nothing is written after this.
@@ -9880,12 +12508,19 @@ def _publish_calibration_result(
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class _Progress:
-    """What the committed evidence says: every applied unit, and what comes next."""
+    """What the committed evidence says: every applied unit, what comes next, and its label.
+
+    ``classification`` is one of ``STAGE_EXECUTE`` (the next stage has no unit and no receipt),
+    ``STAGE_COMMITTED_RECEIPT_PENDING`` (the last unit is committed and its receipt is absent)
+    and ``STAGE_COMPLETE`` (every stage is applied and receipted); ``STAGE_CONFLICT`` is never a
+    label, it is raised.
+    """
 
     units: tuple[AppliedUnit, ...]
     next_stage: L2Stage | None
     pending: L2Stage | None
     terminal_complete: bool
+    classification: str
 
 
 def _terminal_record_present(ctx: _StageContext, stage: L2Stage) -> bool:
@@ -10080,11 +12715,18 @@ def _classify(session: _WorldSession, ctx: _StageContext) -> _Progress:
                 "outruns committed data"
             )
     next_stage = stages[len(units)] if len(units) < len(stages) else None
+    if pending is not None:
+        classification = _STAGE_COMMITTED_RECEIPT_PENDING
+    elif next_stage is None:
+        classification = _STAGE_COMPLETE
+    else:
+        classification = _STAGE_EXECUTE
     return _Progress(
         units=units,
         next_stage=next_stage,
         pending=pending,
         terminal_complete=next_stage is None and pending is None,
+        classification=classification,
     )
 
 
@@ -10134,6 +12776,7 @@ def _execute_semantics(
     units: Sequence[AppliedUnit],
     aliases: Sequence[str],
     prepared: Mapping[str, object] | None,
+    instr: _StageInstrumentation,
 ) -> tuple[int, Mapping[str, object]]:
     """The stage's exact semantic writes, inside the open transaction, before the applied row."""
     connection = session.connection
@@ -10141,27 +12784,27 @@ def _execute_semantics(
     if kind == _KIND_CAPTURE_DROP:
         return _stage_capture_and_drop_indexes(connection, ctx)
     if kind == _KIND_REDUCED_RUN:
-        return _stage_reduced_parser_run(connection, aliases, ctx)
+        return _stage_reduced_parser_run(connection, aliases, ctx, instr)
     if kind == _KIND_TABLE_LOAD:
-        return _stage_table_load(connection, aliases, ctx, stage, units)
+        return _stage_table_load(connection, aliases, ctx, stage, units, instr)
     if kind == _KIND_WITNESS_RANK:
-        return _stage_witness_rank(connection, aliases, units, stage)
+        return _stage_witness_rank(connection, aliases, units, stage, instr)
     if kind == _KIND_CORRECTIONS:
-        return _stage_observation_corrections(connection, units, stage)
+        return _stage_observation_corrections(connection, units, stage, instr)
     if kind == _KIND_OBSERVATION_LOAD:
-        return _stage_accession_observations(connection, aliases)
+        return _stage_accession_observations(connection, aliases, instr)
     if kind == _KIND_EDGES:
-        return _stage_edges_and_conflicts(connection, ctx)
+        return _stage_edges_and_conflicts(connection, ctx, instr)
     if kind == _KIND_PARSER_STATE:
-        return _stage_parser_state(connection, ctx, units)
+        return _stage_parser_state(connection, ctx, units, instr)
     if kind == _KIND_INDEX_REBUILD:
-        return _stage_index_rebuild(connection, ctx, stage)
+        return _stage_index_rebuild(connection, ctx, stage, instr)
     if kind == _KIND_COUNTER_CATALOG:
-        return _stage_counter_catalog_batch(connection, aliases, ctx, stage)
+        return _stage_counter_catalog_batch(connection, aliases, ctx, stage, instr)
     if kind == _KIND_COUNTER_LEDGER:
-        return _stage_counter_ledger_batch(connection, aliases, ctx, stage)
+        return _stage_counter_ledger_batch(connection, aliases, ctx, stage, instr)
     if kind == _KIND_COUNTERS_FINALIZE:
-        return _stage_counters_finalize(connection, ctx, units, stage)
+        return _stage_counters_finalize(connection, ctx, units, stage, instr)
     if kind == _KIND_OUTCOME:
         return _stage_outcome(ctx, units)
     _require(prepared is not None, f"stage {stage.stage_id!r} needs its cross-store half")
@@ -10215,7 +12858,7 @@ def _execute_semantics(
         )
         return 0, {**dict(prepared), "binding_identity": identity}
     if kind in {_KIND_FINAL_RECEIPT, _KIND_CALIBRATION_RESULT}:
-        core = dict(_result_ready_core(ctx, units, connection))
+        core = dict(_result_ready_core(ctx, units, connection, instr))
         if kind == _KIND_CALIBRATION_RESULT:
             row = connection.execute(
                 "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
@@ -10243,15 +12886,18 @@ def _execute_semantics(
 
 
 def _prepare_stage(
-    ctx: _StageContext, stage: L2Stage, units: Sequence[AppliedUnit]
+    ctx: _StageContext,
+    stage: L2Stage,
+    units: Sequence[AppliedUnit],
+    instr: _StageInstrumentation,
 ) -> Mapping[str, object] | None:
     """The cross-store half of a stage, BEFORE the world is boundedly reopened -- §36."""
     if stage.kind == _KIND_SIDECAR:
-        return _prepare_sidecar(ctx)
+        return _prepare_sidecar(ctx, instr)
     if stage.kind == _KIND_MARK_PARSED:
         return _prepare_mark_parsed(ctx, units)
     if stage.kind == _KIND_REAUTHENTICATE:
-        return _prepare_reauthentication(ctx)
+        return _prepare_reauthentication(ctx, instr)
     if stage.kind == _KIND_F0_CHECKPOINT:
         return _prepare_f0_checkpoint(ctx, units)
     if _is_terminal(stage):
@@ -10259,16 +12905,97 @@ def _prepare_stage(
     return None
 
 
+def _publish_observability_closeout(
+    ctx: _StageContext,
+    units: Sequence[AppliedUnit],
+    *,
+    stage: L2Stage,
+    post_commit_set: Mapping[str, object],
+    attempt_ordinal: int,
+) -> Mapping[str, object]:
+    """The durable per-run observability closeout, create-once, before the terminal -- C2-R3."""
+    statuses = observability_stage_statuses(ctx.stage_plan.statement_progress_root, units)
+    summary_identity, gaps = _observability_summary(statuses)
+    entries = [
+        {**dict(status), "statement_execution_set": dict(unit.statement_execution_set or {})}
+        for status, unit in zip(statuses, units, strict=True)
+    ]
+    record: dict[str, object] = {
+        "contract": L2_OBSERVABILITY_CLOSEOUT_CONTRACT,
+        "successor_run_id": ctx.stage_plan.successor_run_id,
+        "route": ctx.route,
+        "stage_plan_identity": ctx.stage_plan.identity,
+        "statement_registry_identity": ctx.stage_plan.statement_registry_identity,
+        "terminal_stage_id": stage.stage_id,
+        "terminal_attempt_ordinal": attempt_ordinal,
+        "observability_stage_statuses": entries,
+        "observability_summary_identity": summary_identity,
+        "observability_gap_count": gaps,
+        "terminal_statement_execution_set_identity": units[-1].statement_execution_set_identity,
+        "post_commit_execution_set": dict(post_commit_set),
+        "utc": utc_now(),
+    }
+    record["closeout_identity"] = _identity_of(record)
+    name = f"observability-closeout-{stage.stage_id}-attempt-{attempt_ordinal:03d}.json"
+    try:
+        write_once_canonical_json(ctx.receipt_root / name, record)
+    except ChunkExecutionError as exc:
+        message = f"the observability closeout {name!r} could not be published: {exc}"
+        raise ChunkMultipassError(message) from exc
+    return {
+        "contract": L2_OBSERVABILITY_CLOSEOUT_CONTRACT,
+        "closeout_relative_filename": name,
+        "closeout_identity": str(record["closeout_identity"]),
+        "observability_summary_identity": summary_identity,
+        "observability_gap_count": gaps,
+        "observability_stage_statuses": [
+            {"stage_id": item["stage_id"], "observability_status": item["observability_status"]}
+            for item in statuses
+        ],
+        "terminal_statement_execution_set_identity": units[-1].statement_execution_set_identity,
+        "post_commit_execution_set_identity": str(post_commit_set["execution_set_identity"]),
+    }
+
+
 def _finish_terminal(ctx: _StageContext, stage: L2Stage, units: Sequence[AppliedUnit]) -> None:
-    """Publish the final semantic record LAST, over the closed world -- never before."""
+    """Publish the final semantic record LAST, over the closed world -- never before.
+
+    The world's artifact manifest is a journaled post-commit callable, the observability of
+    every committed stage is re-evaluated and published as the closeout, and only then is the
+    terminal record written, binding the closeout's identities (D151-C31R2-R19B-C2 §32).
+    """
+    instr = _stage_instrumentation_for(ctx, stage, units)
+    terminal_name = (
+        FINAL_WORLD_RECEIPT_FILENAME
+        if stage.kind == _KIND_FINAL_RECEIPT
+        else CALIBRATION_SUBSET_RESULT_FILENAME
+    )
+    manifest = cast(
+        "ArtifactManifest",
+        instr.record_callable(
+            _OP_BUILD_MANIFEST,
+            lambda: build_artifact_manifest(ctx.world_directory, exclude=(terminal_name,)),
+            facts={"world": ctx.world_directory.name, "excluded": terminal_name},
+        ),
+    )
+    post_commit = instr.execution_set(frozenset({_PHASE_POST_COMMIT}))
+    binding = _publish_observability_closeout(
+        ctx, units, stage=stage, post_commit_set=post_commit, attempt_ordinal=instr.attempt_ordinal
+    )
     if stage.kind == _KIND_FINAL_RECEIPT:
-        _publish_final_receipt(ctx, units)
+        _publish_final_receipt(ctx, units, manifest=manifest, observability=binding)
     else:
-        _publish_calibration_result(ctx, units)
+        _publish_calibration_result(ctx, units, manifest=manifest, observability=binding)
 
 
 def _seal_stage(
-    session: _WorldSession, ctx: _StageContext, stage: L2Stage, unit: AppliedUnit
+    session: _WorldSession,
+    ctx: _StageContext,
+    stage: L2Stage,
+    unit: AppliedUnit,
+    *,
+    entry_classification: str,
+    wal_residue_disposition: Mapping[str, object],
 ) -> Mapping[str, object] | None:
     """§30 steps 9-16 after COMMIT: no transaction, no attachment, checkpoint, validate, receipt."""
     connection = session.connection
@@ -10278,6 +13005,7 @@ def _seal_stage(
     _require_no_attachments(connection)
     checkpoint_main_truncate(connection)
     normalized = normalized_wal_bytes(ctx.catalog_path)
+    session.guard.release()
     units = _applied_units(connection)
     _require(
         bool(units) and units[-1].unit_identity == unit.unit_identity,
@@ -10287,6 +13015,7 @@ def _seal_stage(
     main_state = _file_state(ctx.catalog_path)
     if _is_terminal(stage):
         return None
+    observability = _unit_observability(ctx, units[-1])
     return _publish_stage_receipt(
         receipt_root=ctx.receipt_root,
         stage_plan=session.stage_plan,
@@ -10294,12 +13023,148 @@ def _seal_stage(
         unit=units[-1],
         main_state=main_state,
         normalized_wal=normalized,
+        observability=observability,
+        entry_classification=entry_classification,
+        wal_residue_disposition=wal_residue_disposition,
     )
 
 
-def _run_stage(ctx: _StageContext, stage: L2Stage, prior: Sequence[AppliedUnit]) -> None:
-    """One stage, end to end: prepare, reopen, authenticate, attach, write, seal, publish."""
-    prepared = _prepare_stage(ctx, stage, prior)
+def _dispose_wal_residue(
+    session: _WorldSession, ctx: _StageContext, progress: _Progress
+) -> Mapping[str, object]:
+    """The WAL disposition AFTER classification and predecessor revalidation -- C1-R2 (§38).
+
+    A nonzero pre-state log is one of three things. Explained by a committed applied unit whose
+    receipt is absent: left for the receipt convergence, which checkpoints it explicitly.
+    Holding committed frames that no applied unit explains: a terminal conflict -- the engine
+    commits nothing without an applied-unit row in the same transaction, so committed frames
+    without one are foreign, and they are never checkpointed merely because a log exists.
+    Holding no committed frame at all -- a rollback, an interruption, a SIGKILL or a timeout's
+    uncommitted tail -- a residue: checkpointed to exactly ``(0, 0, 0)``, held to a zero-length
+    log, the predecessor revalidated again, and the next transaction's baseline is 0.
+    """
+    before = session.prestate.snapshot_before
+    if before.wal_class != _WAL_NONZERO:
+        return {
+            "class": _RESIDUE_NONE,
+            "residue_bytes": 0,
+            "committed_frames": None,
+            "normalized": False,
+        }
+    residue_bytes = _normalized_wal_class(before)
+    if progress.pending is not None:
+        return {
+            "class": _RESIDUE_PENDING,
+            "residue_bytes": residue_bytes,
+            "committed_frames": None,
+            "normalized": False,
+            "detail": "explained by the committed applied unit whose receipt is pending; the "
+            "receipt convergence checkpoints it explicitly",
+        }
+    shm = session.catalog_path.with_name(session.catalog_path.name + "-shm")
+    try:
+        committed = wal_index_committed_frames(shm)
+    except WorkingCatalogError as exc:
+        _stage_conflict(
+            f"the world's write-ahead log holds {residue_bytes} bytes and its committed frames "
+            f"cannot be counted ({exc}); nothing is checkpointed"
+        )
+    if committed > 0:
+        _stage_conflict(
+            f"the world's write-ahead log holds {committed} committed frame(s) that no applied "
+            f"unit explains (log {residue_bytes} bytes, classification {progress.classification}); "
+            "an unexplained committed mutation is never checkpointed merely because a log exists"
+        )
+    connection = session.connection
+    _require(not connection.in_transaction, "a residue is disposed of outside any transaction")
+    _require_no_attachments(connection)
+    result = checkpoint_main_truncate(connection)
+    _require(
+        normalized_wal_bytes(session.catalog_path) == 0,
+        "the residue checkpoint did not leave a zero-length log; refused",
+    )
+    again = _classify(session, ctx)
+    _require(
+        again.classification == progress.classification
+        and again.pending is None
+        and (again.next_stage is None) == (progress.next_stage is None)
+        and (
+            again.next_stage is None
+            or progress.next_stage is None
+            or again.next_stage.ordinal == progress.next_stage.ordinal
+        )
+        and [item.unit_identity for item in again.units]
+        == [item.unit_identity for item in progress.units],
+        "the predecessor revalidation after the residue checkpoint disagrees with the "
+        "classification before it; refused",
+    )
+    session.guard.release()
+    return {
+        "class": _RESIDUE_ROLLBACK,
+        "residue_bytes": residue_bytes,
+        "committed_frames": 0,
+        "checkpoint_result": list(result),
+        "normalized": True,
+        "transaction_baseline_frames": 0,
+    }
+
+
+def _normalize_after_abort(
+    session: _WorldSession, ctx: _StageContext, instr: _StageInstrumentation, prior_count: int
+) -> None:
+    """After a watchdog or instrumentation abort: prove nothing durable, then try to normalize.
+
+    The interrupted transaction was rolled back (by SQLite on interruption, or by the accepted
+    transaction context); the attachments are detached; no applied unit, receipt or terminal
+    record exists for this stage. Then one graceful ``PRAGMA main.wal_checkpoint(TRUNCATE)`` is
+    attempted and its outcome recorded as ``ABORT_WAL_NORMALIZED``; a failure to normalize never
+    turns the uncommitted, interrupted stage into a semantic conflict -- the next process
+    disposes of the residue.
+    """
+    connection = session.connection
+    normalized = False
+    outcome: object = None
+    try:
+        _require(not connection.in_transaction, "the aborted transaction is still open")
+        _require_no_attachments(connection)
+        _require(
+            len(_applied_units(connection)) == prior_count,
+            "an applied unit exists for an aborted stage; refused",
+        )
+        _require(
+            not os.path.lexists(stage_receipt_path(ctx.receipt_root, instr.stage)),
+            "a stage receipt exists for an aborted stage; refused",
+        )
+        outcome = list(checkpoint_main_truncate(connection))
+        _require(normalized_wal_bytes(ctx.catalog_path) == 0, "the log is not zero after TRUNCATE")
+        normalized = True
+        session.guard.release()
+    except (ChunkMultipassError, WorkingCatalogError, sqlite3.Error) as exc:
+        outcome = f"{type(exc).__name__}: {exc}"[:400]
+    instr.publish_abort_record(normalized, outcome)
+
+
+def _run_stage(
+    ctx: _StageContext,
+    stage: L2Stage,
+    prior: Sequence[AppliedUnit],
+    carried_disposition: Mapping[str, object] | None = None,
+) -> None:
+    """One stage, end to end: prepare, reopen, authenticate, attach, write, seal, publish.
+
+    ``carried_disposition`` is the WAL disposition the stage loop's classification session
+    made just before this stage; the stage's own session records its own disposition, and the
+    receipt carries whichever was not ``NONE`` so a residue recovery stays observable.
+    """
+    instr = _stage_instrumentation_for(ctx, stage, prior)
+    try:
+        prepared = _prepare_stage(ctx, stage, prior, instr)
+    except BaseException:
+        if instr.abort is not None:
+            sidecar = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
+            wal = sidecar.with_name(sidecar.name + "-wal")
+            instr.publish_abort_record(not os.path.lexists(wal) or wal.stat().st_size == 0, None)
+        raise
     with _successor_world_session(
         request=ctx.request, expected=ctx.stage_plan, proof=ctx.proof
     ) as session:
@@ -10310,6 +13175,9 @@ def _run_stage(ctx: _StageContext, stage: L2Stage, prior: Sequence[AppliedUnit])
             and progress.next_stage.ordinal == stage.ordinal,
             f"the world's committed evidence no longer names {stage.stage_id!r} as the next stage",
         )
+        disposition = _dispose_wal_residue(session, ctx, progress)
+        if disposition["class"] == _RESIDUE_NONE and carried_disposition is not None:
+            disposition = carried_disposition
         units = progress.units
         predecessor = units[-1].unit_identity if units else session.stage_plan.identity
         input_identities = [
@@ -10325,25 +13193,42 @@ def _run_stage(ctx: _StageContext, stage: L2Stage, prior: Sequence[AppliedUnit])
         connection = session.connection
         aliases = _attach_for_stage(connection, ctx, stage)
         try:
-            with transaction(connection):
-                rows_written, witness = _execute_semantics(
-                    session, ctx, stage, units, aliases, prepared
-                )
-                unit = _insert_applied_unit(
-                    connection,
-                    stage_plan=session.stage_plan,
-                    stage=stage,
-                    predecessor_unit_identity=predecessor,
-                    input_identities=input_identities,
-                    receipt_identities=receipt_identities,
-                    request_provenance_identities=provenance,
-                    connection_state=session.connection_state,
-                    rows_written=rows_written,
-                    outcome_witness=witness,
-                )
-        finally:
-            _detach_all(connection, aliases)
-        _seal_stage(session, ctx, stage, unit)
+            try:
+                with transaction(connection):
+                    instr.begin_world_transaction(connection)
+                    rows_written, witness = _execute_semantics(
+                        session, ctx, stage, units, aliases, prepared, instr
+                    )
+                    execution_set = instr.execution_set(
+                        frozenset({_PHASE_PREPARE, _PHASE_TRANSACTION})
+                    )
+                    unit = _insert_applied_unit(
+                        connection,
+                        stage_plan=session.stage_plan,
+                        stage=stage,
+                        predecessor_unit_identity=predecessor,
+                        input_identities=input_identities,
+                        receipt_identities=receipt_identities,
+                        request_provenance_identities=provenance,
+                        connection_state=session.connection_state,
+                        rows_written=rows_written,
+                        outcome_witness=witness,
+                        execution_set=execution_set,
+                    )
+            finally:
+                _detach_all(connection, aliases)
+        except BaseException:
+            if instr.abort is not None:
+                _normalize_after_abort(session, ctx, instr, len(units))
+            raise
+        _seal_stage(
+            session,
+            ctx,
+            stage,
+            unit,
+            entry_classification=progress.classification,
+            wal_residue_disposition=disposition,
+        )
     if _is_terminal(stage):
         _finish_terminal(ctx, stage, [*prior, unit])
 
@@ -10358,49 +13243,141 @@ def _converge_receipt(ctx: _StageContext, stage: L2Stage) -> None:
             progress.pending is not None and progress.pending.ordinal == stage.ordinal,
             f"stage {stage.stage_id!r} is no longer receipt-pending",
         )
+        disposition = _dispose_wal_residue(session, ctx, progress)
         unit = progress.units[-1]
         _require(
             unit.stage_ordinal == stage.ordinal, "the pending stage is not the last applied unit"
         )
-        _seal_stage(session, ctx, stage, unit)
+        _seal_stage(
+            session,
+            ctx,
+            stage,
+            unit,
+            entry_classification=progress.classification,
+            wal_residue_disposition=disposition,
+        )
         units = progress.units
     if _is_terminal(stage):
         _finish_terminal(ctx, stage, units)
 
 
-def _attempt_directories_for(world: Path) -> list[Path]:
-    parent = world.parent
-    prefix = f"{world.name}.init-attempt-"
-    if not parent.is_dir():
-        return []
-    return sorted(
-        path
-        for path in parent.iterdir()
-        if path.name.startswith(prefix) and path.is_dir() and not path.is_symlink()
-    )
+_ATTEMPT_COMPLETE: Final = "COMPLETE"
+_ATTEMPT_INCOMPLETE: Final = "INCOMPLETE"
+_ATTEMPT_INCOMPLETE_NONZERO_WAL: Final = "INCOMPLETE_NONZERO_WAL"
+_ATTEMPT_MALFORMED_SIDECAR: Final = "MALFORMED_SIDECAR"
 
 
-def _attempt_is_complete(attempt: Path, expected: L2StagePlan) -> bool:
-    """A complete attempt carries the expected StagePlan and a committed S0 unit, read mode=ro."""
+def _attempt_bytes(attempt: Path) -> tuple[int, int, int]:
+    """``(files, logical bytes, allocated bytes)`` of one attempt, by lstat alone."""
+    files = logical = allocated = 0
+    for dirpath, _dirnames, filenames in os.walk(attempt):
+        for name in filenames:
+            status = os.lstat(Path(dirpath) / name)
+            if stat.S_ISREG(status.st_mode):
+                files += 1
+                logical += status.st_size
+                allocated += status.st_blocks * 512
+    return files, logical, allocated
+
+
+def _classify_one_attempt(
+    attempt: Path, ordinal: int, expected: L2StagePlan
+) -> Mapping[str, object]:
+    """Classify one initialization attempt without opening it through anything but
+    ``immutable=1`` -- R19A-R1 MINOR-1 (D151-C31R2-R19B-C2 §13).
+
+    COMPLETE requires a regular non-link main catalog and ledger, a write-ahead log that is
+    absent or zero, no malformed sidecar, and -- read through ``immutable=1``, which creates
+    nothing -- the expected StagePlan identity beside a committed S0 unit. A nonzero log is
+    interrupted residue: preserved, never checkpointed, never promoted, never complete.
+    """
     catalog = attempt / WORKING_CATALOG_FILENAME
-    if not (catalog.is_file() and (attempt / PROGRESS_LEDGER_FILENAME).is_file()):
-        return False
+    main = _file_state(catalog, digest=False)
+    wal = _file_state(catalog.with_name(catalog.name + "-wal"), digest=False)
+    shm = _file_state(catalog.with_name(catalog.name + "-shm"), digest=False)
+    ledger = _file_state(attempt / PROGRESS_LEDGER_FILENAME, digest=False)
+    files, logical, allocated = _attempt_bytes(attempt)
+    record: dict[str, object] = {
+        "name": attempt.name,
+        "ordinal": ordinal,
+        "main": dict(main.as_record()),
+        "wal": dict(wal.as_record()),
+        "shm": dict(shm.as_record()),
+        "ledger": dict(ledger.as_record()),
+        "file_count": files,
+        "logical_bytes": logical,
+        "allocated_bytes": allocated,
+    }
+    if main.lstat_class != "file" or ledger.lstat_class != "file":
+        classification, reason = _ATTEMPT_INCOMPLETE, "no regular catalog and ledger"
+    elif wal.lstat_class not in {"absent", "file"} or shm.lstat_class not in {"absent", "file"}:
+        classification, reason = _ATTEMPT_MALFORMED_SIDECAR, "a log or index sidecar is not a file"
+    elif wal.lstat_class == "file" and wal.byte_length:
+        classification, reason = _ATTEMPT_INCOMPLETE_NONZERO_WAL, "interrupted residue: nonzero log"
+    else:
+        classification, reason = _authenticate_attempt_immutable(catalog, expected)
+    record["classification"] = classification
+    record["reason"] = reason
+    return record
+
+
+def _authenticate_attempt_immutable(catalog: Path, expected: L2StagePlan) -> tuple[str, str]:
+    """Read the attempt's StagePlan row and S0 unit through ``immutable=1``: no side effect."""
     try:
-        with connect(catalog, read_only=True) as probe:
-            plan_row = probe.execute(
-                f"SELECT stage_plan_identity FROM main.{L2_STAGE_PLAN_TABLE} WHERE singleton = 1"  # noqa: S608
-            ).fetchone()
-            unit_row = probe.execute(
-                f"SELECT stage_id FROM main.{L2_APPLIED_UNITS_TABLE} WHERE stage_ordinal = 0"  # noqa: S608
-            ).fetchone()
-    except (sqlite3.Error, DisclosureDriftError):
-        return False
-    return (
-        plan_row is not None
-        and str(plan_row["stage_plan_identity"]) == expected.identity
-        and unit_row is not None
-        and str(unit_row["stage_id"]) == _STAGE_INITIALIZE
-    )
+        probe = sqlite3.connect(f"{catalog.absolute().as_uri()}?immutable=1", uri=True)
+    except sqlite3.Error as exc:
+        return _ATTEMPT_INCOMPLETE, f"not openable: {exc}"
+    try:
+        probe.row_factory = sqlite3.Row
+        plan_row = probe.execute(
+            f"SELECT stage_plan_identity FROM main.{L2_STAGE_PLAN_TABLE} WHERE singleton = 1"  # noqa: S608
+        ).fetchone()
+        unit_row = probe.execute(
+            f"SELECT stage_id FROM main.{L2_APPLIED_UNITS_TABLE} WHERE stage_ordinal = 0"  # noqa: S608
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return _ATTEMPT_INCOMPLETE, f"no readable successor rows: {exc}"
+    finally:
+        probe.close()
+    if plan_row is None or unit_row is None:
+        return _ATTEMPT_INCOMPLETE, "no StagePlan row or no S0 unit"
+    if str(plan_row["stage_plan_identity"]) != expected.identity:
+        return _ATTEMPT_INCOMPLETE, "another StagePlan identity"
+    if str(unit_row["stage_id"]) != _STAGE_INITIALIZE:
+        return _ATTEMPT_INCOMPLETE, "ordinal 0 is not S0"
+    return _ATTEMPT_COMPLETE, "expected StagePlan and committed S0 through immutable=1"
+
+
+def _classify_attempt_residue(
+    world: Path, expected: L2StagePlan
+) -> tuple[Mapping[str, object], ...]:
+    """Every sibling initialization attempt of ``world``, classified by lstat and immutable reads.
+
+    A symbolic link, a non-directory or a malformed ordinal beside the world is a conflict; a
+    duplicate ordinal cannot arise from distinct names but is refused all the same. Nothing here
+    alters an inventory, inode, length, digest or mtime.
+    """
+    parent = world.parent
+    if not parent.is_dir():
+        return ()
+    prefix = f"{world.name}.init-attempt-"
+    records: list[Mapping[str, object]] = []
+    for name in sorted(entry.name for entry in parent.iterdir()):
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix) :]
+        status = os.lstat(parent / name)
+        if len(suffix) != 3 or not suffix.isdigit():
+            _stage_conflict(f"initialization attempt {name!r} carries a malformed ordinal")
+        if stat.S_ISLNK(status.st_mode):
+            _stage_conflict(f"initialization attempt {name!r} is a symbolic link")
+        if not stat.S_ISDIR(status.st_mode):
+            _stage_conflict(f"initialization attempt {name!r} is not a directory")
+        records.append(_classify_one_attempt(parent / name, int(suffix), expected))
+    ordinals = [int(cast("int", item["ordinal"])) for item in records]
+    if len(set(ordinals)) != len(ordinals):
+        _stage_conflict("two initialization attempts carry the same ordinal")
+    return tuple(records)
 
 
 def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
@@ -10441,6 +13418,8 @@ def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
     }
     record["admission_identity"] = _identity_of(record)
     ctx.receipt_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    stage = ctx.stages[0]
+    instr = _stage_instrumentation_for(ctx, stage, ())
     try:
         write_once_canonical_json(
             ctx.receipt_root / f"admission-attempt-{attempt_ordinal:03d}.json", record
@@ -10466,9 +13445,10 @@ def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
         )
         event_identity = event.event_identity
     attempt.mkdir(mode=_DIRECTORY_MODE)
-    stage = ctx.stages[0]
     with WorkingCatalog(
-        Path(ctx.request.operational_catalog), attempt, cache_bytes=ctx.stage_plan.cache_bytes
+        Path(ctx.request.operational_catalog),
+        attempt,
+        cache_bytes=require_executable_level_two_cache_bytes(ctx.stage_plan.cache_bytes),
     ) as world_catalog:
         connection = world_catalog.connection
         _require(
@@ -10490,7 +13470,7 @@ def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
                 "route, canonical_world_path, stage_plan_identity, body_json) "
                 "VALUES (1, ?, ?, ?, ?, ?, ?)",
                 (
-                    L2_STAGE_PLAN_CONTRACT,
+                    L2_STAGE_PLAN_CONTRACT_V2,
                     ctx.stage_plan.successor_run_id,
                     ctx.stage_plan.route,
                     ctx.stage_plan.canonical_world_path,
@@ -10526,6 +13506,7 @@ def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
                     "attempt_directory_name": attempt.name,
                     "begin_source": True,
                 },
+                execution_set=instr.execution_set(frozenset({_PHASE_PREPARE, _PHASE_TRANSACTION})),
             )
         checkpoint_main_truncate(connection)
         normalized_wal_bytes(attempt / WORKING_CATALOG_FILENAME)
@@ -10539,30 +13520,39 @@ def _initialize_world_attempt(ctx: _StageContext, attempt_ordinal: int) -> None:
     promote_world_directory(attempt, world)
 
 
-def _ensure_world(ctx: _StageContext) -> None:
-    """§28 states: initialize, preserve an incomplete attempt, promote a complete one."""
+def _ensure_world(ctx: _StageContext) -> tuple[Mapping[str, object], ...]:
+    """§28 states: initialize, preserve an incomplete attempt, promote a complete one.
+
+    R19A-R1 MINOR-1: a canonical world's sibling attempts are classified too. A complete,
+    authenticated attempt beside an existing canonical world is a conflict; incomplete residue
+    is preserved, never invalidates an authentic world, and is returned -- allocated bytes
+    measured after classification -- as storage-planning evidence.
+    """
     world = ctx.world_directory
+    residue = _classify_attempt_residue(world, ctx.stage_plan)
+    complete = [item for item in residue if item["classification"] == _ATTEMPT_COMPLETE]
     if os.path.lexists(world):
         _require(
             not world.is_symlink() and world.is_dir(),
             f"the canonical successor world {world.name!r} exists and is not a directory",
         )
-        return
-    attempts = _attempt_directories_for(world)
-    complete = [attempt for attempt in attempts if _attempt_is_complete(attempt, ctx.stage_plan)]
+        if complete:
+            _stage_conflict(
+                f"{len(complete)} complete, authenticated initialization attempt(s) "
+                f"({[item['name'] for item in complete]}) sit beside the canonical world "
+                f"{world.name!r}; a second complete world under one StagePlan is never continued"
+            )
+        return residue
     if len(complete) > 1:
         _stage_conflict(
             f"{len(complete)} complete initialization attempts exist beside an absent world"
         )
     if complete:
-        promote_world_directory(complete[0], world)
-        return
-    ordinals = []
-    for attempt in attempts:
-        suffix = attempt.name.rsplit("-", 1)[-1]
-        if suffix.isdigit():
-            ordinals.append(int(suffix))
+        promote_world_directory(world.parent / str(complete[0]["name"]), world)
+        return tuple(item for item in residue if item["classification"] != _ATTEMPT_COMPLETE)
+    ordinals = [int(cast("int", item["ordinal"])) for item in residue]
     _initialize_world_attempt(ctx, max(ordinals, default=-1) + 1)
+    return residue
 
 
 @dataclass(frozen=True, slots=True)
@@ -10578,9 +13568,13 @@ class SuccessorRunOutcome:
     terminal_reached: bool
     final_receipt: Mapping[str, object] | None
     calibration_result: CalibrationSubsetResult | None
+    observability: Mapping[str, object] | None = None
+    retained_attempt_residue: tuple[Mapping[str, object], ...] = ()
 
 
-def _successor_outcome_from_disk(request: SuccessorFinalRequest) -> SuccessorRunOutcome:
+def _successor_outcome_from_disk(
+    request: SuccessorFinalRequest, *, residue: Sequence[Mapping[str, object]] = ()
+) -> SuccessorRunOutcome:
     """The outcome as the receipts and the terminal record on disk describe it."""
     world = Path(request.world_directory)
     receipt_root = Path(request.stage_receipt_root)
@@ -10625,6 +13619,13 @@ def _successor_outcome_from_disk(request: SuccessorFinalRequest) -> SuccessorRun
             world, calibration_result.manifest, exclude=(CALIBRATION_SUBSET_RESULT_FILENAME,)
         )
         completed.append((len(completed) + 1_000_000, _STAGE_CALIBRATION_RESULT))
+    observability: Mapping[str, object] | None = None
+    if final_receipt is not None and isinstance(
+        final_receipt.get("successor_observability"), Mapping
+    ):
+        observability = cast("Mapping[str, object]", final_receipt["successor_observability"])
+    elif calibration_result is not None and calibration_result.successor_observability is not None:
+        observability = calibration_result.successor_observability
     return SuccessorRunOutcome(
         route=request.route,
         successor_run_id=request.run_id,
@@ -10635,6 +13636,8 @@ def _successor_outcome_from_disk(request: SuccessorFinalRequest) -> SuccessorRun
         terminal_reached=final_receipt is not None or calibration_result is not None,
         final_receipt=final_receipt,
         calibration_result=calibration_result,
+        observability=observability,
+        retained_attempt_residue=tuple(dict(item) for item in residue),
     )
 
 
@@ -10789,13 +13792,14 @@ def _resolve_successor_context(
 
 def _run_successor_stages(ctx: _StageContext) -> SuccessorRunOutcome:
     """The stage loop: classify committed evidence, converge a pending receipt, or run the next."""
-    _ensure_world(ctx)
+    residue = _ensure_world(ctx)
     stop_after = ctx.request.stop_after_stage
     while True:
         with _successor_world_session(
             request=ctx.request, expected=ctx.stage_plan, proof=ctx.proof
         ) as session:
             progress = _classify(session, ctx)
+            disposition = _dispose_wal_residue(session, ctx, progress)
         if progress.pending is not None:
             _converge_receipt(ctx, progress.pending)
             continue
@@ -10803,8 +13807,8 @@ def _run_successor_stages(ctx: _StageContext) -> SuccessorRunOutcome:
             break
         if stop_after is not None and progress.units and progress.units[-1].stage_id == stop_after:
             break
-        _run_stage(ctx, progress.next_stage, progress.units)
-    return _successor_outcome_from_disk(ctx.request)
+        _run_stage(ctx, progress.next_stage, progress.units, disposition)
+    return _successor_outcome_from_disk(ctx.request, residue=residue)
 
 
 def _run_successor_final(

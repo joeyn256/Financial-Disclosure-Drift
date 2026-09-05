@@ -55,6 +55,28 @@ from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
 from disclosure_drift.m3.offline_parse import E0_PERMITTED_TABLES  # noqa: E402
 from disclosure_drift.m3.working_catalog import WORKING_CATALOG_FILENAME  # noqa: E402
 
+#: The synthetic statement-observability terms every R19 request carries -- D151-C31R2-R19B-C2
+#: §19. Not production values: a one-second sampling interval, the smallest admissible
+#: progress-handler granularity, a 128-frame uncommitted-WAL bound (527,360 bytes at the
+#: 4096-byte page every synthetic world uses) and that page size.
+SYNTHETIC_OBSERVABILITY: dict[str, int] = {
+    "statement_progress_interval_seconds": 1,
+    "progress_handler_vm_steps": 1000,
+    "wal_watchdog_max_uncommitted_frames": 128,
+    "expected_page_size_bytes": 4096,
+}
+
+#: The R19 default storage terms: the accepted synthetic terms plus a nonzero Level-Two
+#: transient allowance, because a /2 StagePlan derives its WAL watchdog storage ceiling from
+#: exactly that allowance and refuses zero. Level one stays at zero.
+R19B_REQUIREMENTS = ct.MultipassStorageRequirements(
+    internal_reserve_bytes=0,
+    level_one_peak_ratio=1.0,
+    level_two_peak_ratio=1.0,
+    level_one_transient_bytes=0,
+    level_two_transient_bytes=64 * 1024 * 1024,
+)
+
 #: The exact production stage graph over a ten-chunk world (two intermediates, two batches).
 PRODUCTION_STAGE_IDS_10 = (
     "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14",
@@ -109,7 +131,7 @@ class SuccessorWorld:
     legacy: dict[str, Any] | None
     world: Path
     receipt_root: Path
-    requirements: ct.MultipassStorageRequirements = c13.REQUIREMENTS
+    requirements: ct.MultipassStorageRequirements = R19B_REQUIREMENTS
 
     @property
     def schedule(self) -> cm.MergeSchedule:
@@ -145,7 +167,7 @@ def prepare(
     *,
     legacy: bool = True,
     label: str = "successor",
-    requirements: ct.MultipassStorageRequirements = c13.REQUIREMENTS,
+    requirements: ct.MultipassStorageRequirements = R19B_REQUIREMENTS,
     **shape: Any,
 ) -> SuccessorWorld:
     """Chunks, level-1 intermediates with their requests, and (optionally) the legacy final."""
@@ -196,6 +218,7 @@ def production_request(
         "repository_tree_sha": c1.PINNED.tree_sha,
         "storage_requirements": dict(estate.requirements.as_record()),
         "expected_sqlite_temp_binding": c13.synthetic_expected_binding(estate.world),
+        "statement_observability": dict(SYNTHETIC_OBSERVABILITY),
         "stop_after_stage": stop_after,
     }
     fields.update(overrides)

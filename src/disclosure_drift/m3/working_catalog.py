@@ -30,8 +30,11 @@ A committed batch is execution progress and is never a source disposition.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
+import stat
+import struct
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -62,6 +65,17 @@ __all__ = [
     "normalized_wal_bytes",
     "promote_working_catalog",
     "promote_world_directory",
+    "STATEMENT_JOURNAL_CONTRACT",
+    "STATEMENT_EVENT_CONTRACT",
+    "STATEMENT_EVENT_MAX_BYTES",
+    "StatementJournalReading",
+    "StatementJournalWriter",
+    "WalObservation",
+    "authenticate_statement_journal",
+    "observe_wal",
+    "read_statement_journal",
+    "require_sqlite_page_size",
+    "wal_index_committed_frames",
 ]
 
 
@@ -924,3 +938,609 @@ def promote_world_directory(attempt: Path, canonical: Path) -> None:
     _fsync_directory(attempt)
     attempt.rename(canonical)
     _fsync_directory(canonical.parent)
+
+
+# --------------------------------------------------------------------------- #
+# D151-C31R2-R19B-C2: WAL observation, the wal-index reader and statement journals
+# --------------------------------------------------------------------------- #
+#: The statement-journal contract: one create-once, append-only, canonical-line file per
+#: material statement execution of one durable Level-Two stage attempt.
+STATEMENT_JOURNAL_CONTRACT: Final = "m3.3-chunked-f0-l2-statement-journal/1"
+
+#: The contract every journal event line carries.
+STATEMENT_EVENT_CONTRACT: Final = "m3.3-chunked-f0-l2-statement-event/1"
+
+#: The largest encoded event line a journal accepts; an oversize event is an instrumentation
+#: failure and interrupts the statement rather than being truncated or dropped.
+STATEMENT_EVENT_MAX_BYTES: Final = 4096
+
+#: The previous-event identity of a journal's first event.
+JOURNAL_GENESIS_IDENTITY: Final = "0" * 64
+
+EVENT_STATEMENT_START: Final = "STATEMENT_START"
+EVENT_STATEMENT_SAMPLE: Final = "STATEMENT_SAMPLE"
+EVENT_STATEMENT_END: Final = "STATEMENT_END"
+EVENT_STATEMENT_ERROR: Final = "STATEMENT_ERROR"
+EVENT_WATCHDOG_ABORT: Final = "WATCHDOG_ABORT"
+STATEMENT_EVENT_KINDS: Final[tuple[str, ...]] = (
+    EVENT_STATEMENT_START,
+    EVENT_STATEMENT_SAMPLE,
+    EVENT_STATEMENT_END,
+    EVENT_STATEMENT_ERROR,
+    EVENT_WATCHDOG_ABORT,
+)
+#: The kinds that end a journal; a journal is sealed only after one of them.
+TERMINAL_EVENT_KINDS: Final[frozenset[str]] = frozenset(
+    {EVENT_STATEMENT_END, EVENT_STATEMENT_ERROR, EVENT_WATCHDOG_ABORT}
+)
+#: The event keys the writer owns; a body carrying one of them is refused.
+_RESERVED_EVENT_KEYS: Final[frozenset[str]] = frozenset(
+    {"contract", "event_kind", "sequence", "previous_event_identity", "event_identity"}
+)
+JOURNAL_OPEN_MODE: Final = 0o600
+JOURNAL_SEALED_MODE: Final = 0o444
+
+JOURNAL_SEALED_SUCCESS: Final = "SEALED_SUCCESS"
+JOURNAL_SEALED_FAILURE: Final = "SEALED_FAILURE"
+JOURNAL_INCOMPLETE: Final = "INCOMPLETE"
+JOURNAL_MALFORMED: Final = "MALFORMED"
+JOURNAL_ABSENT: Final = "ABSENT"
+
+JOURNAL_AUTHENTIC: Final = "AUTHENTIC"
+JOURNAL_MISSING: Final = "MISSING"
+JOURNAL_CHANGED: Final = "CHANGED"
+
+#: The SQLite write-ahead log format: a 32-byte header, then frames of 24-byte header plus one
+#: page. The magic selects the checksum byte order; the version is fixed.
+WAL_HEADER_BYTES: Final = 32
+WAL_FRAME_HEADER_BYTES: Final = 24
+WAL_MAGIC_VALUES: Final[frozenset[int]] = frozenset({0x377F0682, 0x377F0683})
+WAL_FORMAT_VERSION: Final = 3007000
+#: Every page size SQLite accepts: the powers of two from 512 to 65536.
+SQLITE_PAGE_SIZES: Final[frozenset[int]] = frozenset(1 << power for power in range(9, 17))
+
+WAL_STATE_ABSENT: Final = "WAL_ABSENT"
+WAL_STATE_ZERO: Final = "WAL_ZERO"
+WAL_STATE_NONZERO: Final = "WAL_NONZERO"
+
+#: The wal-index (``-shm``) header: two identical 48-byte copies, host byte order --
+#: iVersion, unused, iChange, isInit, bigEndCksum, szPage, mxFrame, nPage, aFrameCksum[2],
+#: aSalt[2], aCksum[2]. ``mxFrame`` counts the frames a committed transaction made valid.
+_WAL_INDEX_HEADER_BYTES: Final = 48
+_WAL_INDEX_HEADER_FORMAT: Final = "=IIIBBHIIIIIIII"
+
+
+def require_sqlite_page_size(value: object) -> int:
+    """An exact SQLite page size -- ``type(value) is int`` and one of the accepted sizes.
+
+    Raises:
+        WorkingCatalogError: the value is a bool, not an int, or not a SQLite page size.
+    """
+    if type(value) is not int or value not in SQLITE_PAGE_SIZES:
+        message = (
+            f"expected_page_size_bytes must be one of the SQLite page sizes "
+            f"{sorted(SQLITE_PAGE_SIZES)}; got {value!r}"
+        )
+        raise WorkingCatalogError(message)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class WalObservation:
+    """One bounded observation of a write-ahead log: state, bytes and conservative frames."""
+
+    state: str
+    byte_length: int
+    page_size: int
+    frame_size: int
+    complete_frames: int
+    trailing_bytes: int
+    conservative_frames: int
+    header_page_size: int | None
+    checkpoint_sequence: int | None
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "state": self.state,
+            "byte_length": self.byte_length,
+            "page_size": self.page_size,
+            "frame_size": self.frame_size,
+            "complete_frames": self.complete_frames,
+            "trailing_bytes": self.trailing_bytes,
+            "conservative_frames": self.conservative_frames,
+            "header_page_size": self.header_page_size,
+            "checkpoint_sequence": self.checkpoint_sequence,
+        }
+
+
+def observe_wal(wal_path: Path, *, expected_page_size: int) -> WalObservation:
+    """The pure bounded WAL observation -- D151-C31R2-R19B-C2 §35.
+
+    Absent and zero-length logs carry zero frames. A nonzero log must hold at least the
+    32-byte header, whose magic, format version and declared page size are authenticated
+    against ``expected_page_size`` -- the exact frame stride is ``page_size + 24``. The frame
+    count is conservative: every complete frame counts, and a trailing partial frame counts as
+    one more. Nothing here reads a frame header, so the cost never scales with the log.
+
+    Raises:
+        WorkingCatalogError: the log is a link or not a regular file, is shorter than its
+            header, or its header is not a WAL header declaring the expected page size.
+    """
+    page_size = require_sqlite_page_size(expected_page_size)
+    frame_size = page_size + WAL_FRAME_HEADER_BYTES
+    try:
+        status = os.lstat(wal_path)
+    except FileNotFoundError:
+        return WalObservation(WAL_STATE_ABSENT, 0, page_size, frame_size, 0, 0, 0, None, None)
+    if stat.S_ISLNK(status.st_mode):
+        message = f"{wal_path.name!r} is a symbolic link; a write-ahead log is never a link"
+        raise WorkingCatalogError(message)
+    if not stat.S_ISREG(status.st_mode):
+        message = f"{wal_path.name!r} exists and is not a regular file; refused"
+        raise WorkingCatalogError(message)
+    length = int(status.st_size)
+    if length == 0:
+        return WalObservation(WAL_STATE_ZERO, 0, page_size, frame_size, 0, 0, 0, None, None)
+    if length < WAL_HEADER_BYTES:
+        message = (
+            f"{wal_path.name!r} holds {length} bytes, fewer than the {WAL_HEADER_BYTES}-byte "
+            "header a nonzero write-ahead log must carry; its boundary cannot be authenticated"
+        )
+        raise WorkingCatalogError(message)
+    with wal_path.open("rb") as handle:
+        header = handle.read(WAL_HEADER_BYTES)
+    if len(header) != WAL_HEADER_BYTES:
+        message = f"{wal_path.name!r} header could not be read completely; refused"
+        raise WorkingCatalogError(message)
+    magic = int.from_bytes(header[0:4], "big")
+    version = int.from_bytes(header[4:8], "big")
+    header_page_size = int.from_bytes(header[8:12], "big")
+    checkpoint_sequence = int.from_bytes(header[12:16], "big")
+    if magic not in WAL_MAGIC_VALUES or version != WAL_FORMAT_VERSION:
+        message = (
+            f"{wal_path.name!r} does not carry a SQLite write-ahead log header (magic "
+            f"{magic:#x}, version {version}); refused"
+        )
+        raise WorkingCatalogError(message)
+    if header_page_size != page_size:
+        message = (
+            f"{wal_path.name!r} declares page size {header_page_size} where the StagePlan "
+            f"expects {page_size}; the frame boundary cannot be derived and is refused"
+        )
+        raise WorkingCatalogError(message)
+    complete, trailing = divmod(length - WAL_HEADER_BYTES, frame_size)
+    return WalObservation(
+        state=WAL_STATE_NONZERO,
+        byte_length=length,
+        page_size=page_size,
+        frame_size=frame_size,
+        complete_frames=complete,
+        trailing_bytes=trailing,
+        conservative_frames=complete + (1 if trailing else 0),
+        header_page_size=header_page_size,
+        checkpoint_sequence=checkpoint_sequence,
+    )
+
+
+def wal_index_committed_frames(shm_path: Path) -> int:
+    """The number of committed, valid frames the wal-index reports -- ``mxFrame``.
+
+    SQLite's own recovery writes this header when a connection opens over a log: it counts
+    exactly the frames a committed transaction made valid, and it does not move while an
+    uncommitted transaction appends frames. Read from the ``-shm`` file after a writer has
+    opened, it answers the one question the file length cannot: whether any of a nonzero log
+    is committed content.
+
+    Raises:
+        WorkingCatalogError: the wal-index is absent, a link, not a regular file, too short,
+            its two header copies disagree, or it is not an initialized version-3007000 header.
+    """
+    try:
+        status = os.lstat(shm_path)
+    except FileNotFoundError as exc:
+        message = f"{shm_path.name!r} is absent; committed frames cannot be counted"
+        raise WorkingCatalogError(message) from exc
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+        message = f"{shm_path.name!r} is not a regular file; refused"
+        raise WorkingCatalogError(message)
+    if status.st_size < 2 * _WAL_INDEX_HEADER_BYTES:
+        message = f"{shm_path.name!r} holds {status.st_size} bytes, too few for a wal-index header"
+        raise WorkingCatalogError(message)
+    with shm_path.open("rb") as handle:
+        payload = handle.read(2 * _WAL_INDEX_HEADER_BYTES)
+    first = payload[:_WAL_INDEX_HEADER_BYTES]
+    second = payload[_WAL_INDEX_HEADER_BYTES : 2 * _WAL_INDEX_HEADER_BYTES]
+    if first != second:
+        message = f"{shm_path.name!r} carries two different wal-index header copies; refused"
+        raise WorkingCatalogError(message)
+    fields = struct.unpack(_WAL_INDEX_HEADER_FORMAT, first)
+    version, is_init, mx_frame = int(fields[0]), int(fields[3]), int(fields[6])
+    if version != WAL_FORMAT_VERSION or is_init != 1:
+        message = (
+            f"{shm_path.name!r} is not an initialized version-{WAL_FORMAT_VERSION} wal-index "
+            f"(version {version}, isInit {is_init}); refused"
+        )
+        raise WorkingCatalogError(message)
+    return mx_frame
+
+
+def _canonical_line(document: Mapping[str, object]) -> bytes:
+    """UTF-8, sorted keys, compact separators, no NaN or Infinity, one trailing newline.
+
+    The estate's one canonical serialization, restated here so this module stays free of any
+    other module's name; the identity of a record is the SHA-256 over exactly these bytes.
+    """
+    try:
+        rendered = json.dumps(
+            document, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=False
+        )
+    except (TypeError, ValueError) as exc:
+        message = f"a journal event holds a value JSON cannot represent: {exc}"
+        raise WorkingCatalogError(message) from exc
+    return rendered.encode("utf-8") + b"\n"
+
+
+def _event_identity(event: Mapping[str, object]) -> str:
+    body = {key: value for key, value in event.items() if key != "event_identity"}
+    return hashlib.sha256(_canonical_line(body)).hexdigest()
+
+
+class StatementJournalWriter:
+    """One create-once, append-only statement journal -- D151-C31R2-R19B-C2 §27.
+
+    Created ``O_CREAT | O_EXCL | O_WRONLY | O_APPEND`` at mode 0600 with one link; every event
+    is one canonical JSON line carrying its sequence, the previous event's identity and its own
+    recomputed identity, appended and fsynced before the call returns; sealing fsyncs, closes,
+    sets mode 0444, fsyncs the parent directory and returns the final SHA-256 and byte length.
+    A crash leaves a 0600 file with no terminal event and possibly a partial last line, which
+    the reader classifies as incomplete and never repairs.
+    """
+
+    __slots__ = (
+        "_byte_length",
+        "_descriptor",
+        "_last_kind",
+        "_path",
+        "_sealed",
+        "_sequence",
+        "_tip",
+    )
+
+    def __init__(self, path: Path, descriptor: int) -> None:
+        self._path = path
+        self._descriptor: int | None = descriptor
+        self._sequence = 0
+        self._tip = JOURNAL_GENESIS_IDENTITY
+        self._byte_length = 0
+        self._sealed = False
+        self._last_kind: str | None = None
+
+    @classmethod
+    def create(cls, path: Path) -> StatementJournalWriter:
+        """Create the journal exactly once.
+
+        Raises:
+            WorkingCatalogError: the parent is not a real directory, the path already exists
+                (as anything), or the created file is not a regular single-link file.
+        """
+        parent = path.parent
+        if parent.is_symlink() or not parent.is_dir():
+            message = f"journal parent {parent.name!r} is not a real directory; refused"
+            raise WorkingCatalogError(message)
+        if os.path.lexists(path):
+            message = (
+                f"journal {path.name!r} already exists; a statement journal is create-once and a "
+                "later attempt uses a new path"
+            )
+            raise WorkingCatalogError(message)
+        try:
+            descriptor = os.open(
+                path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND, JOURNAL_OPEN_MODE
+            )
+        except OSError as exc:
+            message = f"journal {path.name!r} could not be created: {exc}"
+            raise WorkingCatalogError(message) from exc
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            os.close(descriptor)
+            message = f"journal {path.name!r} is not a regular single-link file; refused"
+            raise WorkingCatalogError(message)
+        return cls(path, descriptor)
+
+    @property
+    def path(self) -> Path:
+        """Where the journal lives."""
+        return self._path
+
+    @property
+    def sequence(self) -> int:
+        """The next event's sequence number: the number of events appended so far."""
+        return self._sequence
+
+    @property
+    def tip(self) -> str:
+        """The identity of the last appended event, or the genesis identity."""
+        return self._tip
+
+    @property
+    def byte_length(self) -> int:
+        """The bytes appended so far."""
+        return self._byte_length
+
+    @property
+    def sealed(self) -> bool:
+        """Whether :meth:`seal` completed."""
+        return self._sealed
+
+    def append(self, kind: str, body: Mapping[str, object]) -> str:
+        """Append one event, fsynced before returning; return its identity.
+
+        Raises:
+            WorkingCatalogError: the journal is sealed or abandoned, the kind is unknown, the
+                body carries a reserved key, the encoded line exceeds the bound, or the write
+                or fsync fails.
+        """
+        if self._descriptor is None:
+            message = f"journal {self._path.name!r} is closed; no event can be appended"
+            raise WorkingCatalogError(message)
+        if kind not in STATEMENT_EVENT_KINDS:
+            message = f"journal event kind {kind!r} is not one this build writes"
+            raise WorkingCatalogError(message)
+        if self._last_kind in TERMINAL_EVENT_KINDS:
+            message = f"journal {self._path.name!r} already holds a terminal event; refused"
+            raise WorkingCatalogError(message)
+        reserved = sorted(_RESERVED_EVENT_KEYS & set(body))
+        if reserved:
+            message = f"a journal event body may not carry the reserved keys {reserved}"
+            raise WorkingCatalogError(message)
+        event: dict[str, object] = {
+            "contract": STATEMENT_EVENT_CONTRACT,
+            "event_kind": kind,
+            "sequence": self._sequence,
+            "previous_event_identity": self._tip,
+            **body,
+        }
+        identity = _event_identity(event)
+        event["event_identity"] = identity
+        line = _canonical_line(event)
+        if len(line) > STATEMENT_EVENT_MAX_BYTES:
+            message = (
+                f"a journal event encodes to {len(line)} bytes where at most "
+                f"{STATEMENT_EVENT_MAX_BYTES} are admitted; refused"
+            )
+            raise WorkingCatalogError(message)
+        try:
+            view = memoryview(line)
+            while view:
+                written = os.write(self._descriptor, view)
+                view = view[written:]
+            os.fsync(self._descriptor)
+        except OSError as exc:
+            message = f"journal {self._path.name!r} could not be appended: {exc}"
+            raise WorkingCatalogError(message) from exc
+        self._sequence += 1
+        self._tip = identity
+        self._byte_length += len(line)
+        self._last_kind = kind
+        return identity
+
+    def seal(self) -> tuple[str, int]:
+        """Seal the journal after its terminal event: fsync, close, 0444, fsync parent, digest.
+
+        Raises:
+            WorkingCatalogError: no terminal event was appended, or a step fails.
+        """
+        if self._descriptor is None:
+            message = f"journal {self._path.name!r} is closed and cannot be sealed"
+            raise WorkingCatalogError(message)
+        if self._last_kind not in TERMINAL_EVENT_KINDS:
+            message = f"journal {self._path.name!r} has no terminal event and cannot be sealed"
+            raise WorkingCatalogError(message)
+        descriptor = self._descriptor
+        try:
+            os.fsync(descriptor)
+            os.close(descriptor)
+            self._descriptor = None
+            self._path.chmod(JOURNAL_SEALED_MODE)
+            _fsync_directory(self._path.parent)
+        except OSError as exc:
+            self._descriptor = None
+            message = f"journal {self._path.name!r} could not be sealed: {exc}"
+            raise WorkingCatalogError(message) from exc
+        sha256, length = file_digest(self._path)
+        if length != self._byte_length:
+            message = (
+                f"journal {self._path.name!r} holds {length} bytes where {self._byte_length} "
+                "were appended; refused"
+            )
+            raise WorkingCatalogError(message)
+        self._sealed = True
+        return sha256, length
+
+    def abandon(self) -> None:
+        """Close the descriptor without sealing: the journal stays 0600 and incomplete."""
+        if self._descriptor is not None:
+            with suppress(OSError):
+                os.close(self._descriptor)
+            self._descriptor = None
+
+
+@dataclass(frozen=True, slots=True)
+class StatementJournalReading:
+    """What one journal on disk says, classified without repair."""
+
+    name: str
+    status: str
+    events: tuple[Mapping[str, object], ...]
+    terminal_kind: str | None
+    tip_identity: str
+    sha256: str | None
+    byte_length: int | None
+    mode: int | None
+    partial_tail_bytes: int
+    detail: str
+
+    @property
+    def successful(self) -> bool:
+        """Whether this journal records one sealed, successful execution."""
+        return self.status == JOURNAL_SEALED_SUCCESS
+
+
+def read_statement_journal(path: Path) -> StatementJournalReading:
+    """Read and classify one journal: sealed success, sealed failure, incomplete or malformed.
+
+    Every complete line must be a canonical event whose sequence, previous identity and own
+    identity chain exactly; bytes after the last newline are a partial tail; a journal whose
+    last event is not terminal, or that was never sealed to mode 0444, is incomplete. Nothing
+    is repaired, truncated or appended.
+    """
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return StatementJournalReading(
+            path.name,
+            JOURNAL_ABSENT,
+            (),
+            None,
+            JOURNAL_GENESIS_IDENTITY,
+            None,
+            None,
+            None,
+            0,
+            "absent",
+        )
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+        return StatementJournalReading(
+            path.name,
+            JOURNAL_MALFORMED,
+            (),
+            None,
+            JOURNAL_GENESIS_IDENTITY,
+            None,
+            None,
+            None,
+            0,
+            "not a regular file",
+        )
+    payload = path.read_bytes()
+    mode = status.st_mode & 0o7777
+    sha256 = hashlib.sha256(payload).hexdigest()
+    pieces = payload.split(b"\n")
+    tail = pieces[-1]
+    events: list[Mapping[str, object]] = []
+    tip = JOURNAL_GENESIS_IDENTITY
+
+    def malformed(detail: str) -> StatementJournalReading:
+        return StatementJournalReading(
+            path.name,
+            JOURNAL_MALFORMED,
+            tuple(events),
+            None,
+            tip,
+            sha256,
+            len(payload),
+            mode,
+            len(tail),
+            detail,
+        )
+
+    for index, raw in enumerate(pieces[:-1]):
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return malformed(f"line {index} is not decodable JSON")
+        if not isinstance(decoded, dict):
+            return malformed(f"line {index} is not a JSON object")
+        event: Mapping[str, object] = decoded
+        if (
+            event.get("contract") != STATEMENT_EVENT_CONTRACT
+            or event.get("event_kind") not in STATEMENT_EVENT_KINDS
+            or event.get("sequence") != index
+            or event.get("previous_event_identity") != tip
+        ):
+            return malformed(
+                f"line {index} does not chain (contract, kind, sequence or predecessor)"
+            )
+        identity = event.get("event_identity")
+        if identity != _event_identity(event) or _canonical_line(event) != raw + b"\n":
+            return malformed(f"line {index} is not its own canonical identity")
+        tip = str(identity)
+        events.append(event)
+    if tail:
+        return StatementJournalReading(
+            path.name,
+            JOURNAL_INCOMPLETE,
+            tuple(events),
+            None,
+            tip,
+            sha256,
+            len(payload),
+            mode,
+            len(tail),
+            "partial final line",
+        )
+    if not events:
+        return StatementJournalReading(
+            path.name, JOURNAL_INCOMPLETE, (), None, tip, sha256, len(payload), mode, 0, "no event"
+        )
+    last_kind = str(events[-1]["event_kind"])
+    if last_kind not in TERMINAL_EVENT_KINDS:
+        return StatementJournalReading(
+            path.name,
+            JOURNAL_INCOMPLETE,
+            tuple(events),
+            None,
+            tip,
+            sha256,
+            len(payload),
+            mode,
+            0,
+            "no terminal event",
+        )
+    if mode != JOURNAL_SEALED_MODE:
+        return StatementJournalReading(
+            path.name,
+            JOURNAL_INCOMPLETE,
+            tuple(events),
+            last_kind,
+            tip,
+            sha256,
+            len(payload),
+            mode,
+            0,
+            "terminal event present but the journal was never sealed",
+        )
+    status_label = (
+        JOURNAL_SEALED_SUCCESS if last_kind == EVENT_STATEMENT_END else JOURNAL_SEALED_FAILURE
+    )
+    return StatementJournalReading(
+        path.name,
+        status_label,
+        tuple(events),
+        last_kind,
+        tip,
+        sha256,
+        len(payload),
+        mode,
+        0,
+        "sealed",
+    )
+
+
+def authenticate_statement_journal(
+    path: Path, *, expected_sha256: str, expected_byte_length: int
+) -> str:
+    """Whether a sealed journal still holds exactly the bound bytes: authentic, missing, changed."""
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return JOURNAL_MISSING
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+        return JOURNAL_CHANGED
+    if status.st_size != expected_byte_length:
+        return JOURNAL_CHANGED
+    sha256, length = file_digest(path)
+    if length != expected_byte_length or sha256 != expected_sha256:
+        return JOURNAL_CHANGED
+    return JOURNAL_AUTHENTIC

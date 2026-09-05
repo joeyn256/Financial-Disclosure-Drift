@@ -81,11 +81,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from disclosure_drift.sec.accession_resolution import (
     RESOLUTION_POLICY_VERSION,
@@ -97,6 +97,8 @@ __all__ = [
     "ALWAYS_ABSENT_RESOLUTION_FIELDS",
     "COMPACT_EVIDENCE_CONTRACT",
     "COMPACT_EVIDENCE_CONTRACT_V1",
+    "IDENTITY_FOLD_STATEMENTS",
+    "MEMBER_MANIFEST_ROWS_SQL",
     "DEFAULT_CANONICAL_RESOLUTION",
     "EVIDENCE_CONTRACT_KEY",
     "GOVERNED_ACCESSION_FIELDS",
@@ -109,6 +111,7 @@ __all__ = [
     "MemberManifestEntry",
     "ProjectionDigest",
     "ResolutionDigest",
+    "SidecarStatementRunner",
     "canonical_projection",
     "compact_index_payload",
     "corroboration_observations",
@@ -850,6 +853,30 @@ CREATE TABLE IF NOT EXISTS compact_corroboration_evidence (
 """
 
 
+#: An optional successor statement runner -- D151-C31R2-R19B-C2 §25. It receives
+#: ``(connection, sql, parameters, execution_kind, operation)`` and returns the rows a
+#: ``fetchall`` would have returned. ``None`` executes exactly as before: the accepted SQL text
+#: is composed here either way, and the runner only observes and performs the same execution.
+SidecarStatementRunner = Callable[[sqlite3.Connection, str, object, str, str], object]
+
+#: The exact member-manifest statement :meth:`CompactEvidenceSidecar.member_manifest_digest`
+#: folds, stated once so a successor registry can bind its SHA-256 before execution.
+MEMBER_MANIFEST_ROWS_SQL: Final = (
+    "SELECT * FROM compact_source_members WHERE source_observation_id = ? ORDER BY member_ordinal"
+)
+
+#: The four exact statements :meth:`CompactEvidenceSidecar.identity` folds, in fold order.
+IDENTITY_FOLD_STATEMENTS: Final[tuple[tuple[str, str], ...]] = tuple(
+    (table, f"SELECT * FROM {table} ORDER BY {order}")  # noqa: S608 - fixed literals
+    for table, order in (
+        ("compact_source_evidence", "source_observation_id"),
+        ("compact_source_members", "source_observation_id, member_ordinal"),
+        ("compact_resolution_evidence", "resolution_scope"),
+        ("compact_corroboration_evidence", "source_observation_id"),
+    )
+)
+
+
 class CompactEvidenceSidecar:
     """The run-local compact evidence: manifest, digests, and both compaction rules' results.
 
@@ -873,11 +900,15 @@ class CompactEvidenceSidecar:
     later needs its own owner-approved bridge.
     """
 
-    __slots__ = ("_connection", "_path")
+    __slots__ = ("_connection", "_path", "_statement_runner")
 
-    def __init__(self, path: Path) -> None:
-
+    def __init__(
+        self, path: Path, *, statement_runner: SidecarStatementRunner | None = None
+    ) -> None:
         self._path = path
+        #: D151-C31R2-R19B-C2 §25: the successor's material statement runner, or ``None`` for
+        #: the accepted execution. Only the two volume-scaled folds go through it.
+        self._statement_runner = statement_runner
         self._connection = sqlite3.connect(path, isolation_level=None)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode = WAL")
@@ -901,6 +932,17 @@ class CompactEvidenceSidecar:
     def close(self) -> None:
         """Close the sidecar connection."""
         self._connection.close()
+
+    def _material_rows(
+        self, sql: str, parameters: tuple[object, ...], operation: str
+    ) -> Sequence[sqlite3.Row]:
+        """One volume-scaled fold's rows: through the runner when one is bound, else direct."""
+        if self._statement_runner is None:
+            return self._connection.execute(sql, parameters).fetchall()
+        return cast(
+            "Sequence[sqlite3.Row]",
+            self._statement_runner(self._connection, sql, parameters, "fetchall", operation),
+        )
 
     def record_member(self, source_observation_id: str, entry: MemberManifestEntry) -> None:
         """Persist one member's manifest row."""
@@ -1114,11 +1156,11 @@ class CompactEvidenceSidecar:
         )
         self._fold(
             digest,
-            self._connection.execute(
-                "SELECT * FROM compact_source_members WHERE source_observation_id = ? "
-                "ORDER BY member_ordinal",
+            self._material_rows(
+                MEMBER_MANIFEST_ROWS_SQL,
                 (source_observation_id,),
-            ).fetchall(),
+                "sidecar.member_manifest_rows",
+            ),
         )
         return digest.hexdigest()
 
@@ -1131,18 +1173,8 @@ class CompactEvidenceSidecar:
         """
         digest = hashlib.sha256()
         digest.update(f"{COMPACT_EVIDENCE_CONTRACT}\x1f{COMPACT_EVIDENCE_SCHEMA_VERSION}".encode())
-        for table, order in (
-            ("compact_source_evidence", "source_observation_id"),
-            ("compact_source_members", "source_observation_id, member_ordinal"),
-            ("compact_resolution_evidence", "resolution_scope"),
-            ("compact_corroboration_evidence", "source_observation_id"),
-        ):
-            self._fold(
-                digest,
-                self._connection.execute(
-                    f"SELECT * FROM {table} ORDER BY {order}"  # noqa: S608 - fixed literals
-                ).fetchall(),
-            )
+        for table, sql in IDENTITY_FOLD_STATEMENTS:
+            self._fold(digest, self._material_rows(sql, (), f"sidecar.identity_fold:{table}"))
         return digest.hexdigest()
 
     @staticmethod

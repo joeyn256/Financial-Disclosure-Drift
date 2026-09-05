@@ -37,20 +37,19 @@ def test_m01_the_runtime_tool_manifest_is_recomputed_from_disk_and_bound_everywh
         "disclosure_drift.m3.working_catalog",
         "disclosure_drift.m3.chunk_tiering",
     }
+    # R19A-R1 MINOR-3 closed: every entry's digest and length are recomputed from the source
+    # file on disk by the accepted hashing helper and compared with the manifest record.
+    package_root = Path(str(cm.__file__)).parent.parent
     for entry in manifest.entries:
-        assert (
-            entry["sha256"]
-            == file_sha256(
-                Path(str(cm.__file__)).parent.parent.parent
-                / "disclosure_drift"
-                / str(entry["module"])
-                .removeprefix("disclosure_drift.")
-                .replace(".", "/")
-                .__add__(".py")
-            )[0]
-            if False
-            else True
-        )
+        relative = str(entry["module"]).removeprefix("disclosure_drift.").replace(".", "/")
+        sha256, length = file_sha256(package_root / f"{relative}.py")
+        assert entry["sha256"] == sha256, entry["module"]
+        assert entry["byte_length"] == length, entry["module"]
+    assert {entry["module"] for entry in manifest.entries} >= {
+        "disclosure_drift.m3.canary_runtime",
+        "disclosure_drift.errors",
+    }
+    assert manifest.as_record()["contract"] == cm.L2_TOOL_MANIFEST_CONTRACT
     plan = cm._read_stored_stage_plan(r19.readonly(estate.catalog))
     assert plan.tool_manifest_identity == manifest.identity
     tool_manifest = plan.body["tool_manifest"]
@@ -107,7 +106,7 @@ def test_m03_the_stage_plan_reader_recomputes_its_identity_and_refuses_every_bro
     # Every shape rule is checked on the body itself, so a body without its identity is read.
     record = {key: value for key, value in record.items() if key != "stage_plan_identity"}
     with pytest.raises(cm.ChunkMultipassError, match="carrying contract"):
-        cm.L2StagePlan.from_record({**record, "contract": "m3.3-chunked-f0-l2-stage-plan/2"})
+        cm.L2StagePlan.from_record({**record, "contract": "m3.3-chunked-f0-l2-stage-plan/3"})
     with pytest.raises(cm.ChunkMultipassError, match="names route"):
         cm.L2StagePlan.from_record({**record, "route": "legacy"})
     with pytest.raises(cm.ChunkMultipassError, match="input_group_count"):

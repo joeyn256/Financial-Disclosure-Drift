@@ -176,10 +176,10 @@ def test_x04_a_changed_input_is_caught_before_any_checkpoint_and_a_retained_requ
     # re-derives every descriptor and refuses before any checkpoint exists.
     prepare = cm._prepare_stage
 
-    def change_then_prepare(ctx: Any, stage: Any, units: Any) -> Any:
+    def change_then_prepare(ctx: Any, stage: Any, units: Any, instr: Any) -> Any:
         if stage.stage_id == "S21P":
             receipt.write_bytes(original + b"\n")
-        return prepare(ctx, stage, units)
+        return prepare(ctx, stage, units, instr)
 
     monkeypatch.setattr(cm, "_prepare_stage", change_then_prepare)
     with pytest.raises(cm.ChunkMultipassError, match="changed after the merge"):
@@ -310,6 +310,7 @@ def calibration_request(
         repository_tree_sha=c1.PINNED.tree_sha,
         storage_requirements=dict(c13.LEVEL_DISTINCT_REQUIREMENTS.as_record()),
         expected_sqlite_temp_binding=c13.synthetic_expected_binding(world),
+        statement_observability=dict(r19.SYNTHETIC_OBSERVABILITY),
         stop_after_stage=stop_after,
     )
 

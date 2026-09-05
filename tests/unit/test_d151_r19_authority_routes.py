@@ -94,8 +94,9 @@ def _nonexistent_request(route: str = cm.SUCCESSOR_ROUTE_PRODUCTION) -> cm.Succe
         cache_bytes=cm.DEFAULT_SYNTHETIC_CACHE_BYTES,
         repository_head_sha="a" * 40,
         repository_tree_sha="b" * 40,
-        storage_requirements=dict(c13.REQUIREMENTS.as_record()),
+        storage_requirements=dict(r19.R19B_REQUIREMENTS.as_record()),
         expected_sqlite_temp_binding=dict(c13.INERT_BINDING_RECORD),
+        statement_observability=dict(r19.SYNTHETIC_OBSERVABILITY),
     )
 
 
@@ -304,8 +305,10 @@ def test_f08_a_withdrawn_authority_refuses_at_the_next_stage_and_the_world_stays
     # is undone inside the test, never through the fixture-ordered ``monkeypatch``.
     local = pytest.MonkeyPatch()
 
-    def withdraw_after_s3(ctx: Any, stage: Any, prior: Any) -> None:
-        original(ctx, stage, prior)
+    def withdraw_after_s3(ctx: Any, stage: Any, prior: Any, *args: Any, **kwargs: Any) -> None:
+        # D151-C31R2-R19B-C2: the stage loop also hands _run_stage the classification
+        # session's WAL disposition; the wrapper forwards whatever it is given.
+        original(ctx, stage, prior, *args, **kwargs)
         if stage.stage_id == "S3":
             local.setattr(cm, "REAL_MULTIPASS_F0_AUTHORITY", None)
 

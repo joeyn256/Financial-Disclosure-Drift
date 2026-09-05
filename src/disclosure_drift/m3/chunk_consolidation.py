@@ -53,7 +53,7 @@ import json
 import os
 import shutil
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
@@ -811,9 +811,76 @@ def _deferrable_index_records(
 
 
 # --------------------------------------------------------------------------- #
+# The successor statement seam -- D151-C31R2-R19B-C2 §22 (owner ruling D151-R19B-C2-R1)
+# --------------------------------------------------------------------------- #
+#: An optional successor statement runner: ``(connection, sql, parameters, execution_kind,
+#: operation)``. Every helper below composes the accepted SQL exactly as before and, when a
+#: runner is bound, hands that exact text, its parameters and the execution kind to the runner
+#: BEFORE sqlite3 sees it; the runner performs the actual execution and the helper consumes the
+#: result as before. ``None`` -- the legacy default -- executes here, unchanged. Nothing in this
+#: module reads a clock, free space, a process or a host variable; those live with the runner.
+StatementRunner = Callable[[sqlite3.Connection, str, object, str, str], object]
+
+#: The three execution kinds the seam names: a statement whose work completes at ``execute``
+#: (DDL and DML), one whose rows are fetched in full, and one whose rows are iterated.
+STATEMENT_KIND_EXECUTE: Final = "execute"
+STATEMENT_KIND_FETCHALL: Final = "fetchall"
+STATEMENT_KIND_ITERATE: Final = "execute_iterate"
+
+#: The exact static statements the successor registry binds by SHA-256 before execution.
+REDUCED_PARSER_RUN_INSERT_SQL: Final = (
+    "INSERT INTO census_parser_runs (parser_run_id, source_observation_id, parser_id, "
+    "parser_version, started_at_utc, finished_at_utc, parsed_count, quarantined_count, "
+    "outcome, summary_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+DUPLICATE_IDENTITY_UPDATE_SQL: Final = (
+    "UPDATE census_parsed_records SET duplicate_indicator = 1 "
+    "WHERE parser_run_id = ? AND native_identity = ?"
+)
+MEMBER_DELTA_SUMMARY_SQL: Final = (
+    "SELECT COUNT(*) AS members, COALESCE(SUM(delta), 0) AS total FROM chunk_member_delta"
+)
+SIDECAR_MEMBER_SUMMARY_SQL: Final = (
+    "SELECT COUNT(*) AS n, COUNT(DISTINCT member_ordinal) AS d, "
+    "MIN(member_ordinal) AS lo, MAX(member_ordinal) AS hi, "
+    "SUM(parsed_registrants + parsed_accessions + parsed_other) AS records, "
+    "SUM(omitted_field_observations) AS omitted, "
+    "SUM(materialized_field_observations) AS materialized "
+    "FROM main.compact_source_members"
+)
+SIDECAR_DIGEST_REPLAY_SQL: Final = (
+    "SELECT parsed_registrants, parsed_accessions, parsed_other, projection_digest "
+    "FROM main.compact_source_members ORDER BY member_ordinal"
+)
+
+
+def _run_statement(
+    runner: StatementRunner | None,
+    connection: sqlite3.Connection,
+    sql: str,
+    parameters: tuple[object, ...],
+    kind: str,
+    operation: str,
+) -> object:
+    """Execute one composed statement here, or hand it to the bound successor runner."""
+    if runner is None:
+        cursor = connection.execute(sql, parameters)
+        if kind == STATEMENT_KIND_FETCHALL:
+            return cursor.fetchall()
+        return cursor
+    return runner(connection, sql, parameters, kind, operation)
+
+
+# --------------------------------------------------------------------------- #
 # The merge
 # --------------------------------------------------------------------------- #
-def _sorted_bulk_load(connection: sqlite3.Connection, table: str, aliases: Sequence[str]) -> None:
+def _sorted_bulk_load(
+    connection: sqlite3.Connection,
+    table: str,
+    aliases: Sequence[str],
+    *,
+    statement_runner: StatementRunner | None = None,
+) -> None:
     """One table's key-sorted bulk load, read straight from every chunk in one statement.
 
     **There is no staging copy.** An earlier shape of this merge appended every chunk's rows into
@@ -839,14 +906,23 @@ def _sorted_bulk_load(connection: sqlite3.Connection, table: str, aliases: Seque
     key = ", ".join(_MERGE_KEY[table])
     verb = "INSERT OR IGNORE INTO" if strategy == "or_ignore" else "INSERT INTO"
     union = _union_all(aliases, table, projection, extra=" AS chunk_ordinal")
-    connection.execute(
+    _run_statement(
+        statement_runner,
+        connection,
         f"{verb} {table} ({projection}) "  # noqa: S608
-        f"SELECT {projection} FROM ({union}) ORDER BY {key}, chunk_ordinal"
+        f"SELECT {projection} FROM ({union}) ORDER BY {key}, chunk_ordinal",
+        (),
+        STATEMENT_KIND_EXECUTE,
+        "sorted_bulk_load.insert",
     )
 
 
 def _keyed_first_last_load(
-    connection: sqlite3.Connection, table: str, aliases: Sequence[str]
+    connection: sqlite3.Connection,
+    table: str,
+    aliases: Sequence[str],
+    *,
+    statement_runner: StatementRunner | None = None,
 ) -> None:
     """The accepted upsert, reduced over chunks -- ``census_registrants``, ``census_accessions``.
 
@@ -862,7 +938,9 @@ def _keyed_first_last_load(
     selected = ", ".join(f"f.{column}" for column in columns if column != "latest_observed_at_utc")
     key = _MERGE_KEY[table][0]
     union = _union_all(aliases, table, projection, extra=" AS chunk_ordinal")
-    connection.execute(
+    _run_statement(
+        statement_runner,
+        connection,
         f"INSERT INTO {table} ({projection}) "  # noqa: S608
         "WITH ranked AS ("
         "  SELECT *,"
@@ -872,7 +950,11 @@ def _keyed_first_last_load(
         f"SELECT {selected}, l.latest_observed_at_utc "
         f"FROM ranked AS f JOIN ranked AS l ON l.{key} = f.{key} AND l.rn_last = 1 "
         f"WHERE f.rn_first = 1 ORDER BY f.{key} "
-        f"ON CONFLICT({key}) DO UPDATE SET latest_observed_at_utc = excluded.latest_observed_at_utc"
+        f"ON CONFLICT({key}) DO UPDATE SET "
+        "latest_observed_at_utc = excluded.latest_observed_at_utc",
+        (),
+        STATEMENT_KIND_EXECUTE,
+        "keyed_first_last_load.insert",
     )
 
 
@@ -1038,7 +1120,11 @@ def _load_accession_observations(connection: sqlite3.Connection, aliases: Sequen
 
 
 def _reduced_parser_run(
-    connection: sqlite3.Connection, aliases: Sequence[str], *, contract: ExecutionContract
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    *,
+    contract: ExecutionContract,
+    statement_runner: StatementRunner | None = None,
 ) -> _ReducedRun:
     """Reduce every chunk's run row to the one row the source's single parser run implies.
 
@@ -1067,7 +1153,17 @@ def _reduced_parser_run(
         "finished_at_utc, parsed_count, quarantined_count, outcome, summary_json"
     )
     union = _union_all(aliases, "census_parser_runs", projection, extra=" AS chunk_ordinal")
-    rows = connection.execute(f"SELECT * FROM ({union}) ORDER BY chunk_ordinal").fetchall()  # noqa: S608
+    rows = cast(
+        "Sequence[sqlite3.Row]",
+        _run_statement(
+            statement_runner,
+            connection,
+            f"SELECT * FROM ({union}) ORDER BY chunk_ordinal",  # noqa: S608
+            (),
+            STATEMENT_KIND_FETCHALL,
+            "reduced_parser_run.select_chunk_runs",
+        ),
+    )
     if not rows:
         message = "no chunk carries a parser run row; consolidation is refused"
         raise ChunkConsolidationError(message)
@@ -1150,10 +1246,10 @@ def _reduced_parser_run(
             },
         }
     )
-    connection.execute(
-        "INSERT INTO census_parser_runs (parser_run_id, source_observation_id, parser_id, "
-        "parser_version, started_at_utc, finished_at_utc, parsed_count, quarantined_count, "
-        "outcome, summary_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    _run_statement(
+        statement_runner,
+        connection,
+        REDUCED_PARSER_RUN_INSERT_SQL,
         (
             parser_run_id,
             str(rows[0]["source_observation_id"]),
@@ -1166,6 +1262,8 @@ def _reduced_parser_run(
             outcome,
             summary_json,
         ),
+        STATEMENT_KIND_EXECUTE,
+        "reduced_parser_run.insert_run_row",
     )
     duplicate_identities = tuple(
         sorted({str(cast("Sequence[object]", item)[0]) for item in duplicates if item})
@@ -1233,7 +1331,12 @@ def _require_parser_run_truth(
     )
 
 
-def _apply_duplicate_identities(connection: sqlite3.Connection, reduced: _ReducedRun) -> None:
+def _apply_duplicate_identities(
+    connection: sqlite3.Connection,
+    reduced: _ReducedRun,
+    *,
+    statement_runner: StatementRunner | None = None,
+) -> None:
     """Raise the run-level duplicate flag for every identity any chunk reported.
 
     The accepted streamed path applies this once, at the end, over the identities its parts
@@ -1243,10 +1346,13 @@ def _apply_duplicate_identities(connection: sqlite3.Connection, reduced: _Reduce
     measured **zero** duplicate identities and nineteen distinct unknown field paths.
     """
     for identity in reduced.duplicate_identities:
-        connection.execute(
-            "UPDATE census_parsed_records SET duplicate_indicator = 1 "
-            "WHERE parser_run_id = ? AND native_identity = ?",
+        _run_statement(
+            statement_runner,
+            connection,
+            DUPLICATE_IDENTITY_UPDATE_SQL,
             (reduced.parser_run_id, identity),
+            STATEMENT_KIND_EXECUTE,
+            "apply_duplicate_identities.update",
         )
 
 
@@ -1274,7 +1380,12 @@ class _StoredMemberDigest:
         return self._value
 
 
-def _member_deltas(connection: sqlite3.Connection, aliases: Sequence[str]) -> tuple[int, int]:
+def _member_deltas(
+    connection: sqlite3.Connection,
+    aliases: Sequence[str],
+    *,
+    statement_runner: StatementRunner | None = None,
+) -> tuple[int, int]:
     """Correct every member's compact-evidence counters for the cross-chunk first-witness rule.
 
     ``CompactSourceEvidence`` counts a governed field as *omitted* when the canonical accession
@@ -1297,7 +1408,9 @@ def _member_deltas(connection: sqlite3.Connection, aliases: Sequence[str]) -> tu
         "chunk_first_witness",
         "native_identity, member_ordinal, record_ordinal, delta_materialized",
     )
-    connection.execute(
+    _run_statement(
+        statement_runner,
+        connection,
         "CREATE TEMP TABLE chunk_member_delta AS "  # noqa: S608
         "WITH ranked AS ("
         "  SELECT member_ordinal, delta_materialized,"
@@ -1305,11 +1418,22 @@ def _member_deltas(connection: sqlite3.Connection, aliases: Sequence[str]) -> tu
         "                       ORDER BY member_ordinal, record_ordinal) AS rn"
         f"  FROM ({union}))"  # noqa: S608
         "SELECT member_ordinal, SUM(delta_materialized) AS delta FROM ranked "
-        "WHERE rn > 1 GROUP BY member_ordinal"
+        "WHERE rn > 1 GROUP BY member_ordinal",
+        (),
+        STATEMENT_KIND_EXECUTE,
+        "member_deltas.create_temp",
     )
-    row = connection.execute(
-        "SELECT COUNT(*) AS members, COALESCE(SUM(delta), 0) AS total FROM chunk_member_delta"
-    ).fetchone()
+    row = cast(
+        "Sequence[sqlite3.Row]",
+        _run_statement(
+            statement_runner,
+            connection,
+            MEMBER_DELTA_SUMMARY_SQL,
+            (),
+            STATEMENT_KIND_FETCHALL,
+            "member_deltas.summary",
+        ),
+    )[0]
     return int(row["members"]), int(row["total"])
 
 
@@ -1319,6 +1443,7 @@ def _merge_sidecar(
     inputs: Sequence[ChunkInput],
     plan: ChunkPlan,
     source_id: str,
+    statement_runner: StatementRunner | None = None,
 ) -> tuple[str, str, Mapping[str, int], tuple[int, int]]:
     """Build the consolidated compact-evidence sidecar and replay the completeness digest.
 
@@ -1344,7 +1469,9 @@ def _merge_sidecar(
         connection.execute("PRAGMA synchronous = FULL")
         witness_aliases = _attach_all(connection, [item.witness_path for item in inputs], "w")
         try:
-            corrected = _member_deltas(connection, witness_aliases)
+            corrected = _member_deltas(
+                connection, witness_aliases, statement_runner=statement_runner
+            )
         finally:
             _detach_all(connection, witness_aliases)
         sidecar_aliases = _attach_all(connection, [item.sidecar_path for item in inputs], "s")
@@ -1362,22 +1489,30 @@ def _merge_sidecar(
                 for column in columns
             )
             union = _union_all(sidecar_aliases, "compact_source_members", projection)
-            connection.execute(
+            _run_statement(
+                statement_runner,
+                connection,
                 f"INSERT INTO main.compact_source_members ({projection}) "  # noqa: S608
                 f"SELECT {corrected_projection} FROM ({union}) AS m "
                 "LEFT JOIN chunk_member_delta AS d ON d.member_ordinal = m.member_ordinal "
-                "ORDER BY m.member_ordinal"
+                "ORDER BY m.member_ordinal",
+                (),
+                STATEMENT_KIND_EXECUTE,
+                "merge_sidecar.insert_members",
             )
         finally:
             _detach_all(connection, sidecar_aliases)
-        summary = connection.execute(
-            "SELECT COUNT(*) AS n, COUNT(DISTINCT member_ordinal) AS d, "
-            "MIN(member_ordinal) AS lo, MAX(member_ordinal) AS hi, "
-            "SUM(parsed_registrants + parsed_accessions + parsed_other) AS records, "
-            "SUM(omitted_field_observations) AS omitted, "
-            "SUM(materialized_field_observations) AS materialized "
-            "FROM main.compact_source_members"
-        ).fetchone()
+        summary = cast(
+            "Sequence[sqlite3.Row]",
+            _run_statement(
+                statement_runner,
+                connection,
+                SIDECAR_MEMBER_SUMMARY_SQL,
+                (),
+                STATEMENT_KIND_FETCHALL,
+                "merge_sidecar.summary",
+            ),
+        )[0]
         total = int(summary["n"])
         _require(
             total == int(summary["d"]),
@@ -1398,10 +1533,18 @@ def _merge_sidecar(
             "which cannot be true of any real parse. The consolidation is refused, not clamped",
         )
         chain = ProjectionDigest(source_id)
-        for row in connection.execute(
-            "SELECT parsed_registrants, parsed_accessions, parsed_other, projection_digest "
-            "FROM main.compact_source_members ORDER BY member_ordinal"
-        ):
+        replay = cast(
+            "Iterable[sqlite3.Row]",
+            _run_statement(
+                statement_runner,
+                connection,
+                SIDECAR_DIGEST_REPLAY_SQL,
+                (),
+                STATEMENT_KIND_ITERATE,
+                "merge_sidecar.digest_replay",
+            ),
+        )
+        for row in replay:
             chain._records = (  # noqa: SLF001 - the accepted fold, replayed
                 int(row["parsed_registrants"])
                 + int(row["parsed_accessions"])
@@ -1420,7 +1563,7 @@ def _merge_sidecar(
         }
     finally:
         connection.close()
-    reopened = CompactEvidenceSidecar(sidecar_path)
+    reopened = CompactEvidenceSidecar(sidecar_path, statement_runner=statement_runner)
     try:
         reopened.record_source(
             source_observation_id=plan.source_observation_id,
@@ -1488,10 +1631,13 @@ class FinalWorldReceipt:
     manifest: ArtifactManifest
     completed_at_utc: str
     status: str
+    #: D151-C31R2-R19B-C2 §32: the successor terminal binds its observability closeout here. A
+    #: legacy receipt never sets it and its serialization is byte for byte what it was.
+    successor_observability: Mapping[str, object] | None = None
 
     def as_record(self) -> Mapping[str, object]:
         """The complete receipt as a plain mapping, carrying no absolute path."""
-        return {
+        record: dict[str, object] = {
             "contract": self.contract,
             "consolidation_contract": self.consolidation_contract,
             "plan_digest": self.plan_digest,
@@ -1525,6 +1671,9 @@ class FinalWorldReceipt:
             "completed_at_utc": self.completed_at_utc,
             "status": self.status,
         }
+        if self.successor_observability is not None:
+            record["successor_observability"] = dict(self.successor_observability)
+        return record
 
 
 #: Every key the accepted :func:`~disclosure_drift.m3.single_source_canary._phase_f0_body`

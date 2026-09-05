@@ -104,7 +104,7 @@ def test_k01_the_probe_on_a_clean_world_preserves_main_and_leaves_only_housekeep
     identity = cm._prestate_stage_plan_identity(estate.catalog)
     after = _files(estate.world)
     assert _sha(estate.catalog) == main_before
-    assert identity.contract == cm.L2_STAGE_PLAN_CONTRACT
+    assert identity.contract == cm.L2_STAGE_PLAN_CONTRACT_V2
     assert identity.route == cm.SUCCESSOR_ROUTE_PRODUCTION
     assert identity.snapshot_before.wal_class == cm._WAL_ABSENT
     assert identity.snapshot_after.wal_class in {cm._WAL_ABSENT, cm._WAL_ZERO}
@@ -192,7 +192,10 @@ def test_k03_an_immutable_substitution_cannot_see_a_plan_committed_only_in_the_l
     finally:
         connection.close()
     placeholders = ", ".join("?" for _ in values)
-    rendered = ", ".join(repr(v) for v in values)
+    # SQL literals, not Python reprs: the /2 body carries the registry's quoted SQL text.
+    rendered = ", ".join(
+        "'" + v.replace("'", "''") + "'" if isinstance(v, str) else repr(v) for v in values
+    )
     _killed_committer(catalog, f"INSERT INTO main.{cm.L2_STAGE_PLAN_TABLE} VALUES ({rendered})")  # noqa: S608
     assert placeholders  # the row shape is what was moved
     assert cm._prestate_stage_plan_identity(catalog).stage_plan_identity == str(
@@ -222,9 +225,10 @@ def test_k04_a_writer_killed_mid_stage_leaves_a_tail_the_next_process_reclassifi
     extra = (
         "import os, signal;"
         "_orig = cm._stage_table_load;"
-        "cm._stage_table_load = (lambda connection, aliases, ctx, stage, units: "
-        "(_orig(connection, aliases, ctx, stage, units), os.kill(os.getpid(), signal.SIGKILL))[0] "
-        "if stage.stage_id == 'S3' else _orig(connection, aliases, ctx, stage, units));"
+        "cm._stage_table_load = (lambda connection, aliases, ctx, stage, units, instr: "
+        "(_orig(connection, aliases, ctx, stage, units, instr), "
+        "os.kill(os.getpid(), signal.SIGKILL))[0] "
+        "if stage.stage_id == 'S3' else _orig(connection, aliases, ctx, stage, units, instr));"
     )
     killed = r19.spawn_production(tmp_path, request, label="killed", extra=extra)
     assert killed["returncode"] == -signal.SIGKILL
@@ -375,10 +379,12 @@ def test_k08_s12_in_one_process_and_s13_in_another_both_reestablish_the_function
 # §40: the one dedicated 512 MiB cache test, and the cache validator
 # ==========================================================================
 def _minimal_plan(cache_bytes: int) -> cm.L2StagePlan:
+    """A minimal EXECUTABLE (/2) plan: every /2 field, over a one-chunk production registry."""
     assert c1.PINNED is not None
+    registry = cm.successor_statement_registry(cm.SUCCESSOR_ROUTE_PRODUCTION, 1)
     return cm.L2StagePlan.from_record(
         {
-            "contract": cm.L2_STAGE_PLAN_CONTRACT,
+            "contract": cm.L2_STAGE_PLAN_CONTRACT_V2,
             "route": cm.SUCCESSOR_ROUTE_PRODUCTION,
             "successor_run_id": "cache-test",
             "canonical_world_path": "/nonexistent/world",
@@ -386,10 +392,19 @@ def _minimal_plan(cache_bytes: int) -> cm.L2StagePlan:
             "input_group_count": 0,
             "intermediates": [],
             "predecessor_completed_group_count": 0,
+            "counter_source_count": 1,
             "stage_graph": [],
             "tool_manifest_identity": cm._runtime_tool_manifest().identity,
             "repository_head_sha": c1.PINNED.head_sha,
             "repository_tree_sha": c1.PINNED.tree_sha,
+            "stage_receipt_root": "/nonexistent/receipts",
+            "statement_progress_root": "/nonexistent/receipts/statement-progress",
+            "statement_registry": [dict(item) for item in registry],
+            "statement_registry_identity": cm._registry_identity(
+                cm.SUCCESSOR_ROUTE_PRODUCTION, 1, registry
+            ),
+            **r19.SYNTHETIC_OBSERVABILITY,
+            "wal_watchdog_storage_ceiling_bytes": r19.R19B_REQUIREMENTS.level_two_transient_bytes,
         }
     )
 
@@ -449,6 +464,7 @@ def test_k10_the_cache_validator_refuses_every_wrong_shape_independently() -> No
         "repository_tree_sha": "b" * 40,
         "storage_requirements": {},
         "expected_sqlite_temp_binding": {},
+        "statement_observability": dict(r19.SYNTHETIC_OBSERVABILITY),
         "capacity_observations": [],
         "stop_after_stage": None,
     }

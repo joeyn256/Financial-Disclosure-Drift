@@ -202,7 +202,18 @@ def test_a03_the_tool_manifest_binds_canary_runtime_and_errors_under_its_own_con
         "disclosure_drift.sec.census",
         "disclosure_drift.m3.chunk_execution",
     } <= set(modules)
-    assert len(modules) == len(set(modules)) == 18
+    # D151-C31R2-R20-C1 (R20-MAJOR-2): the declared set is stated as the dependency set it must
+    # cover, not as a number. R20 falsified R19B's completeness claim by tracing five further
+    # first-party modules executing inside one successor invocation; the count moved with them
+    # and would move again, so what is asserted here is coverage and uniqueness.
+    assert len(modules) == len(set(modules))
+    assert {
+        "disclosure_drift.m3.capacity_plan",
+        "disclosure_drift.m3.external_working_root",
+        "disclosure_drift.sec.identifiers",
+        "disclosure_drift.sec.observation_catalog",
+        "disclosure_drift.sec.snapshots",
+    } <= set(modules)
     assert cm.L2_TOOL_MANIFEST_CONTRACT == "m3.3-chunked-f0-l2-tool-manifest/1"
     assert manifest.as_record()["contract"] == cm.L2_TOOL_MANIFEST_CONTRACT
     assert cm.L2_TOOL_MANIFEST_CONTRACT not in {

@@ -65,6 +65,9 @@ __all__ = [
     "normalized_wal_bytes",
     "promote_working_catalog",
     "promote_world_directory",
+    "CLOSED_DATABASE_SIDECAR_SUFFIXES",
+    "STAGED_ARTIFACT_PUBLICATION_PROTOCOL",
+    "publish_staged_artifact",
     "STATEMENT_JOURNAL_CONTRACT",
     "STATEMENT_EVENT_CONTRACT",
     "STATEMENT_EVENT_MAX_BYTES",
@@ -938,6 +941,130 @@ def promote_world_directory(attempt: Path, canonical: Path) -> None:
     _fsync_directory(attempt)
     attempt.rename(canonical)
     _fsync_directory(canonical.parent)
+
+
+#: The publication protocol :func:`publish_staged_artifact` implements, named in every record it
+#: returns so a reader never has to infer which discipline produced a canonical artifact.
+STAGED_ARTIFACT_PUBLICATION_PROTOCOL: Final = "m3.3-chunked-f0-l2-staged-artifact-hard-link/1"
+
+#: The sidecar suffixes a completed, closed SQLite artifact must not carry when it is published.
+#: A log or an index beside the file means the database is not self-contained, so the name the
+#: publication exposes would depend on files the publication does not move.
+CLOSED_DATABASE_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = ("-wal", "-shm", "-journal")
+
+
+def publish_staged_artifact(staged: Path, canonical: Path) -> Mapping[str, object]:
+    """Publish one completed, closed artifact to an absent canonical name by a hard link.
+
+    D151-C31R2-R20-C1 §5. The staged artifact was built under the successor's own attempt
+    estate rather than at the canonical name, so an interrupted build never leaves a partial
+    file where a later attempt would find one and refuse. Publication is the one step that
+    makes the finished artifact canonical, and it is a hard link rather than a rename for a
+    single reason: ``link`` fails with ``EEXIST`` **in the kernel** when the destination
+    exists, so an unexpected canonical target cannot be overwritten even by a caller whose
+    prior existence check raced. ``rename`` would replace it silently. This is the same
+    same-filesystem, atomic, cannot-overwrite promotion the accepted raw store uses.
+
+    Every boundary is recoverable, and the two names are equal in every respect while both
+    exist because they are one inode:
+
+    * interrupted before the link -- the canonical name is absent and the complete staged
+      artifact remains, so a later authorized invocation reuses and publishes it;
+    * interrupted between the link and the removal of the staging name -- the canonical
+      artifact is complete and durable, and the staging name is a second link to the same
+      inode costing no further bytes, so a later invocation authenticates the canonical one;
+    * interrupted after the removal -- the canonical artifact alone remains.
+
+    The staging name is removed only after the published inode is proved to be the staged one,
+    and a failure to remove it never revokes a proved publication: it is reported instead.
+
+    Args:
+        staged: The completed, closed artifact under the caller's own attempt estate.
+        canonical: The absent name it becomes.
+
+    Returns:
+        The publication record: the protocol, both inodes, the byte length, and whether the
+        redundant staging name was removed.
+
+    Raises:
+        WorkingCatalogError: the staged artifact is not a real self-contained regular file, the
+            two paths are not on one filesystem, the canonical name already exists, or the
+            published inode is not the staged one.
+    """
+    try:
+        staged_status = os.lstat(staged)
+    except OSError as exc:
+        message = f"the staged artifact {staged.name!r} could not be measured: {exc}"
+        raise WorkingCatalogError(message) from exc
+    if not stat.S_ISREG(staged_status.st_mode):
+        message = (
+            f"the staged artifact {staged.name!r} is not a regular file and is never published"
+        )
+        raise WorkingCatalogError(message)
+    for suffix in CLOSED_DATABASE_SIDECAR_SUFFIXES:
+        if os.path.lexists(staged.with_name(staged.name + suffix)):
+            message = (
+                f"the staged artifact {staged.name!r} carries a {suffix} beside it; only a "
+                "closed, self-contained database is published"
+            )
+            raise WorkingCatalogError(message)
+    parent = canonical.parent
+    if parent.is_symlink() or not parent.is_dir():
+        message = f"the canonical parent {parent.name!r} is not a real directory; refused"
+        raise WorkingCatalogError(message)
+    if parent.stat().st_dev != staged_status.st_dev:
+        message = (
+            "a staged artifact is published by one hard link, which cannot cross a filesystem; "
+            f"{staged.parent} and {parent} are on different devices"
+        )
+        raise WorkingCatalogError(message)
+    if os.path.lexists(canonical):
+        message = (
+            f"the canonical artifact {canonical.name!r} already exists; it is NEVER overwritten "
+            "by a publication -- the staged artifact is left exactly where it is"
+        )
+        raise WorkingCatalogError(message)
+    _fsync_file(staged)
+    _fsync_directory(staged.parent)
+    try:
+        os.link(staged, canonical)
+    except FileExistsError as exc:
+        message = (
+            f"the canonical artifact {canonical.name!r} appeared before this publication linked "
+            "it; nothing is overwritten and the staged artifact is left exactly where it is"
+        )
+        raise WorkingCatalogError(message) from exc
+    except OSError as exc:
+        message = f"the staged artifact {staged.name!r} could not be published: {exc}"
+        raise WorkingCatalogError(message) from exc
+    _fsync_directory(parent)
+    published = os.lstat(canonical)
+    if (
+        not stat.S_ISREG(published.st_mode)
+        or published.st_dev != staged_status.st_dev
+        or published.st_ino != staged_status.st_ino
+        or published.st_size != staged_status.st_size
+    ):
+        message = (
+            f"the published artifact {canonical.name!r} is not the staged inode that was "
+            "verified; the staging name is left in place and nothing is removed"
+        )
+        raise WorkingCatalogError(message)
+    removal_error: str | None = None
+    try:
+        staged.unlink()
+        _fsync_directory(staged.parent)
+    except OSError as exc:
+        removal_error = f"{type(exc).__name__}: {exc}"[:200]
+    return {
+        "protocol": STAGED_ARTIFACT_PUBLICATION_PROTOCOL,
+        "staged_inode": staged_status.st_ino,
+        "canonical_inode": published.st_ino,
+        "byte_length": published.st_size,
+        "device": published.st_dev,
+        "staging_name_removed": removal_error is None,
+        "staging_name_removal_error": removal_error,
+    }
 
 
 # --------------------------------------------------------------------------- #

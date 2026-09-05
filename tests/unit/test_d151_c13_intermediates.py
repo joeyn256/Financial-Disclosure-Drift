@@ -1870,10 +1870,62 @@ def test_z03_no_new_module_can_delete_copy_or_reach_a_transport() -> None:
         for needle in ("SecClient", "HttpxTransport", "socket", "urlopen", "create_connection"):
             assert needle not in names, (module.__name__, needle)
     assert "shutil" not in Path(ct.__file__).read_text(encoding="utf-8")
-    # D151-C17 R6: chunk_tiering reaches external_working_root, and chunk_multipass still does
-    # not. The ban is an allowlist of exactly the accepted D137-R8 names plus the ONE shared
-    # candidate validator D151-C19 R2 added.
-    assert "external_working_root" not in Path(cm.__file__).read_text(encoding="utf-8")
+    # D151-C17 R6: chunk_tiering reaches external_working_root's CAPABILITY, and chunk_multipass
+    # still does not. D151-C31R2-R20-C1 (R20-MAJOR-2) makes chunk_multipass DECLARE that module
+    # in its runtime tool manifest, because a traced successor invocation genuinely executes
+    # `require_usable_sqlite_temp_root` inside it and the provenance record was incomplete
+    # without it. Declaring a module's source bytes and reaching its capability are different
+    # things, and a substring ban cannot tell them apart -- so the ban is now exact: the only
+    # reference chunk_multipass may hold is a plain module import whose sole use is the
+    # `__file__` the manifest hashes. No name may be imported FROM it and no attribute of it may
+    # be called, which is strictly stronger than the substring rule it replaces.
+    multipass_source = Path(cm.__file__).read_text(encoding="utf-8")
+    multipass_tree = ast.parse(multipass_source)
+    assert [
+        alias.name
+        for node in ast.walk(multipass_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "disclosure_drift.m3.external_working_root"
+        for alias in node.names
+    ] == []
+    aliases = {
+        alias.asname
+        for node in ast.walk(multipass_tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "disclosure_drift.m3.external_working_root"
+    }
+    assert aliases == {"_external_working_root_module"}
+    attributes = sorted(
+        node.attr
+        for node in ast.walk(multipass_tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "_external_working_root_module"
+    )
+    assert attributes == ["__file__"]
+    assert not [
+        node
+        for node in ast.walk(multipass_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_external_working_root_module"
+    ]
+    # And the module still REFERENCES none of its capability names -- AST, not substring, for
+    # the reason this test already gives above: chunk_multipass now describes, in prose, which
+    # dependency the manifest declaration closes, and a text ban cannot tell that prose from a
+    # call. The reference can.
+    referenced = {node.id for node in ast.walk(multipass_tree) if isinstance(node, ast.Name)} | {
+        node.attr for node in ast.walk(multipass_tree) if isinstance(node, ast.Attribute)
+    }
+    for capability in (
+        "SQLITE_TMPDIR_ENV",
+        "require_usable_sqlite_temp_root",
+        "macos_volume_identity",
+        "ExternalWorkingRootError",
+    ):
+        assert capability not in referenced, capability
     tiering_source = Path(ct.__file__).read_text(encoding="utf-8")
     imported = {
         alias.name

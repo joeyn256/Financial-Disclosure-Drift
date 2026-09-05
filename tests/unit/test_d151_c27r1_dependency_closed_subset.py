@@ -1502,5 +1502,15 @@ def test_p9_every_production_value_stays_closed_and_no_new_module_joined_the_fam
         "chunk_tiering",
         "chunk_transfer",
     ]
-    for name in ("build_calibration_chunk_plan", "DISCLOSURE_DRIFT", "external_working_root"):
+    for name in ("build_calibration_chunk_plan", "DISCLOSURE_DRIFT"):
         assert name not in Path(cm.__file__).read_text(encoding="utf-8"), name
+    # D151-C31R2-R20-C1 (R20-MAJOR-2): `external_working_root` left this substring list because
+    # chunk_multipass now DECLARES that module's source bytes in its runtime tool manifest. The
+    # property this list protects -- that chunk_multipass reaches no temp-root selection
+    # capability of its own -- is asserted exactly, by AST, in
+    # `test_d151_c13_intermediates.py::test_z03_no_new_module_can_delete_copy_or_reach_a_transport`.
+    multipass_tree = ast.parse(Path(cm.__file__).read_text(encoding="utf-8"))
+    assert "require_usable_sqlite_temp_root" not in (
+        {node.id for node in ast.walk(multipass_tree) if isinstance(node, ast.Name)}
+        | {node.attr for node in ast.walk(multipass_tree) if isinstance(node, ast.Attribute)}
+    )

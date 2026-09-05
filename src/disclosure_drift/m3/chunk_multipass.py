@@ -174,6 +174,7 @@ from typing import Any, Final, NoReturn, Protocol, cast
 import disclosure_drift.errors as _errors_module
 import disclosure_drift.m3.canary_phases as _canary_phases_module
 import disclosure_drift.m3.canary_runtime as _canary_runtime_module
+import disclosure_drift.m3.capacity_plan as _capacity_plan_module
 import disclosure_drift.m3.chunk_consolidation as _chunk_consolidation_module
 import disclosure_drift.m3.chunk_evidence as _chunk_evidence_module
 import disclosure_drift.m3.chunk_execution as _chunk_execution_module
@@ -181,11 +182,15 @@ import disclosure_drift.m3.chunk_plan as _chunk_plan_module
 import disclosure_drift.m3.chunk_storage as _chunk_storage_module
 import disclosure_drift.m3.chunk_tiering as _chunk_tiering_module
 import disclosure_drift.m3.compact_evidence as _compact_evidence_module
+import disclosure_drift.m3.external_working_root as _external_working_root_module
 import disclosure_drift.m3.offline_parse as _offline_parse_module
 import disclosure_drift.m3.repository_identity as _repository_identity_module
 import disclosure_drift.m3.single_source_canary as _single_source_canary_module
 import disclosure_drift.m3.working_catalog as _working_catalog_module
 import disclosure_drift.sec.census as _census_module
+import disclosure_drift.sec.identifiers as _identifiers_module
+import disclosure_drift.sec.observation_catalog as _observation_catalog_module
+import disclosure_drift.sec.snapshots as _snapshots_module
 import disclosure_drift.storage.catalog as _storage_catalog_module
 import disclosure_drift.storage.sqlite as _storage_sqlite_module
 from disclosure_drift.errors import DisclosureDriftError
@@ -344,6 +349,7 @@ from disclosure_drift.m3.single_source_canary import (
     require_f0_success,
 )
 from disclosure_drift.m3.working_catalog import (
+    CLOSED_DATABASE_SIDECAR_SUFFIXES,
     EVENT_STATEMENT_END,
     EVENT_STATEMENT_ERROR,
     EVENT_STATEMENT_SAMPLE,
@@ -352,6 +358,7 @@ from disclosure_drift.m3.working_catalog import (
     JOURNAL_AUTHENTIC,
     JOURNAL_MISSING,
     PROGRESS_LEDGER_FILENAME,
+    STAGED_ARTIFACT_PUBLICATION_PROTOCOL,
     WAL_FRAME_HEADER_BYTES,
     WORKING_CATALOG_FILENAME,
     RunProgressLedger,
@@ -367,6 +374,7 @@ from disclosure_drift.m3.working_catalog import (
     normalized_wal_bytes,
     observe_wal,
     promote_world_directory,
+    publish_staged_artifact,
     require_sqlite_page_size,
     wal_index_committed_frames,
 )
@@ -7574,11 +7582,27 @@ _TOOL_MANIFEST_MODULES: Final[tuple[tuple[str, str], ...]] = (
     ("disclosure_drift.storage.sqlite", _storage_sqlite_module.__file__),
     ("disclosure_drift.storage.catalog", _storage_catalog_module.__file__),
     ("disclosure_drift.sec.census", _census_module.__file__),
-    # D151-C31R2-R19B-C2 (R19A-R1 MINOR-2): the two further modules the successor region
-    # reaches -- the peak-RSS and free-space readers, and the error base every refusal derives
-    # from -- so the declared influence set is the complete one.
+    # D151-C31R2-R19B-C2 (R19A-R1 MINOR-2): the peak-RSS and free-space readers, and the error
+    # base every refusal derives from. Declared error-path dependencies stay declared even when
+    # a happy-path trace never reaches them.
     ("disclosure_drift.m3.canary_runtime", _canary_runtime_module.__file__),
     ("disclosure_drift.errors", _errors_module.__file__),
+    # D151-C31R2-R20-C1 (R20-MAJOR-2): the five further first-party modules a traced successor
+    # invocation actually executes, which the eighteen above did not name. R19B claimed the
+    # declared set was complete and it was not: `capacity_plan.plan_fingerprint` produces the
+    # plan fingerprint the applied-unit witness and the terminal record carry;
+    # `external_working_root.require_usable_sqlite_temp_root` is reached through
+    # `chunk_tiering.require_sqlite_temp_binding` when the request's expected binding is
+    # validated; `sec.identifiers.normalize_cik` is reached through
+    # `compact_evidence._padded_cik` inside the UDF that renders the values the registered S12
+    # `corrections.insert_winners` statement writes; and `sec.observation_catalog` and
+    # `sec.snapshots` load and qualify the observations that UDF reads. Completeness is a
+    # property of the covered dependency set, not of this tuple's length.
+    ("disclosure_drift.m3.capacity_plan", _capacity_plan_module.__file__),
+    ("disclosure_drift.m3.external_working_root", _external_working_root_module.__file__),
+    ("disclosure_drift.sec.identifiers", _identifiers_module.__file__),
+    ("disclosure_drift.sec.observation_catalog", _observation_catalog_module.__file__),
+    ("disclosure_drift.sec.snapshots", _snapshots_module.__file__),
 )
 
 
@@ -7984,6 +8008,24 @@ _PHASE_POST_COMMIT: Final = "post_commit"
 _S18_PATH_BUILD: Final = "BUILD"
 _S18_PATH_AUTHENTICATE: Final = "AUTHENTICATE"
 _S18_PATHS: Final[tuple[str, ...]] = (_S18_PATH_BUILD, _S18_PATH_AUTHENTICATE)
+
+# S18's staging estate -- D151-C31R2-R20-C1 §5. The sidecar is built inside the stage attempt
+# directory the successor already allocates create-once, and becomes canonical only by
+# publication. Both names are fixed, so an attempt's contents are named rather than discovered.
+#: The staged compact-evidence sidecar's name inside one S18 stage-attempt directory.
+_S18_STAGING_SIDECAR_FILENAME: Final = "sidecar-staging.sqlite3"
+
+#: The create-once completion manifest written beside a staged sidecar once it is finished. Its
+#: presence is what distinguishes a complete staged attempt from an interrupted one; an
+#: interrupted attempt has no manifest and is preserved, never promoted.
+_S18_STAGING_MANIFEST_FILENAME: Final = "sidecar-staging-complete.json"
+
+#: The contract that manifest carries.
+_S18_STAGING_CONTRACT: Final = "m3.3-chunked-f0-l2-s18-staging/1"
+
+#: Which artifact an S18 attempt operated on, recorded in the journaled path decision.
+_S18_SOURCE_CANONICAL: Final = "CANONICAL"
+_S18_SOURCE_STAGED: Final = "STAGED"
 
 _KIND_EXECUTEMANY: Final = "executemany"
 _KIND_CALLABLE: Final = "callable"
@@ -10577,6 +10619,33 @@ class _StageInstrumentation:
         self.same_device = self.world_device == ctx.binding.temp_root_device
         self._sidecar_path = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
 
+    # -- the compact-evidence database this stage actually operates on -------- #
+    @property
+    def sidecar_database_path(self) -> Path:
+        """The compact-evidence database every ``COMPACT_EVIDENCE`` statement runs against.
+
+        D151-C31R2-R20-C1 §6. The watchdog samples this file's write-ahead log, so it must be
+        the file the statements actually grow -- the canonical sidecar when a present one is
+        being authenticated, and the staged artifact when S18 is building one. Watching an
+        absent canonical log while writing a staged one measures nothing.
+        """
+        return self._sidecar_path
+
+    def bind_sidecar_database(self, path: Path) -> None:
+        """Bind the compact-evidence database BEFORE any statement runs against it.
+
+        Raises:
+            _InstrumentationAbortError: a ``COMPACT_EVIDENCE`` statement already ran, so a
+                rebind would move the watchdog off the log it has been sampling.
+        """
+        if _ROLE_COMPACT_EVIDENCE in self._watches:
+            message = (
+                "the compact-evidence database is bound before the first statement runs against "
+                "it and is never rebound under a live watch"
+            )
+            raise _InstrumentationAbortError(_ABORT_INSTRUMENTATION, message)
+        self._sidecar_path = path
+
     # -- registry ----------------------------------------------------------- #
     def descriptor_for(self, operation: str) -> _OperationDescriptor:
         descriptor = self._by_operation.get(operation)
@@ -11159,8 +11228,14 @@ class _StageInstrumentation:
         sidecar_state: Mapping[str, object],
         selected: str | None,
         expected_path: str | None,
+        staging: Mapping[str, object] | None = None,
     ) -> None:
-        """Journal S18's path decision FIRST -- C2-R2; a conflicting sidecar selects nothing."""
+        """Journal S18's path decision FIRST -- C2-R2; a conflicting sidecar selects nothing.
+
+        ``staging`` carries D151-C31R2-R20-C1 §5's evidence: which artifact this attempt
+        authenticates, the database the watchdog is therefore bound to, and every retained
+        staging attempt with its preserved bytes.
+        """
         descriptor = self.descriptor_for(_OP_PATH_DECISION)
         ordinal = self._next_ordinal
         self._next_ordinal += 1
@@ -11172,6 +11247,7 @@ class _StageInstrumentation:
             "file_state_identity": _identity_of({"sidecar_file_state": dict(sidecar_state)}),
             "expected_path": expected_path,
             "selected_path": selected,
+            "staging": None if staging is None else dict(staging),
         }
         try:
             journal.append(
@@ -11254,8 +11330,15 @@ class _StageInstrumentation:
         body["execution_set_identity"] = _identity_of(body)
         return body
 
-    def publish_abort_record(self, normalized: bool, checkpoint: object) -> Path:
-        """The durable record of an instrumentation or watchdog abort, create-once."""
+    def publish_abort_record(
+        self, normalized: bool, checkpoint: object, *, probed_database: str
+    ) -> Path:
+        """The durable record of an instrumentation or watchdog abort, create-once.
+
+        ``probed_database`` names the database whose log ``ABORT_WAL_NORMALIZED`` reports on --
+        D151-C31R2-R20-C1 §6, so a reader never has to infer whether an S18 abort was measured
+        against the canonical sidecar or the staged one the statements were actually growing.
+        """
         abort = self.abort
         record: dict[str, object] = {
             "contract": _ABORT_RECORD_CONTRACT,
@@ -11268,6 +11351,7 @@ class _StageInstrumentation:
             "detail": None if abort is None else abort.detail,
             "statements_sealed": len(self.executions),
             "ABORT_WAL_NORMALIZED": normalized,
+            "abort_wal_probed_database": probed_database,
             "checkpoint_result": checkpoint,
             "applied_unit_inserted": False,
             "stage_receipt_published": False,
@@ -11980,18 +12064,32 @@ def _stage_counters_finalize(
 # --------------------------------------------------------------------------- #
 # Cross-store stages -- §36: never atomic across stores, always convergent
 # --------------------------------------------------------------------------- #
-def _sidecar_is_complete_readonly(path: Path, ctx: _StageContext) -> bool:
-    """Whether a present sidecar holds the finished source row, read through ``mode=ro``.
+def _sidecar_is_complete(path: Path, ctx: _StageContext) -> bool:
+    """Whether a present sidecar holds the finished source row, without changing its inventory.
 
-    A raw read-only handle rather than the accepted class: the class constructor upserts its
-    schema rows and would rewrite bytes of an artifact this classification must preserve.
+    D151-C31R2-R20-C1 §7. Classification is metadata-first and side-effect-free. A log or an
+    index beside the file means the artifact is not a closed, self-contained database, and that
+    is decided by ``lstat`` alone: the candidate is classified conservatively as incomplete and
+    is never opened, so a refusal cannot add a file to the directory it is refusing over, and a
+    log-blind read can never declare a logged artifact complete. Nothing here checkpoints,
+    repairs or reinitializes a retained candidate.
+
+    Only a candidate proved to carry no log at all is opened, and then through ``immutable=1``
+    rather than ``mode=ro``: a ``mode=ro`` handle recreates the ``-wal`` and ``-shm`` a closed
+    database does not have, which is exactly the residue this classification must not leave.
+    An immutable handle is the accepted side-effect-free pattern this package already attaches
+    completed chunk databases with, and its promise -- that the file cannot change underneath
+    it -- is one a closed, logless artifact genuinely keeps.
+
+    A raw handle rather than the accepted class: the class constructor upserts its schema rows
+    and would rewrite bytes of an artifact this classification must preserve.
     """
-    for suffix in ("-wal", "-shm"):
+    for suffix in CLOSED_DATABASE_SIDECAR_SUFFIXES:
         if os.path.lexists(path.with_name(path.name + suffix)):
             return False
     try:
         reader = sqlite3.connect(
-            f"{path.absolute().as_uri()}?mode=ro", uri=True, isolation_level=None
+            f"file:{path.absolute()}?immutable=1", uri=True, isolation_level=None
         )
     except sqlite3.Error:
         return False
@@ -12014,38 +12112,164 @@ def _sidecar_is_complete_readonly(path: Path, ctx: _StageContext) -> bool:
     )
 
 
+def _s18_staging_binding(ctx: _StageContext, stage: L2Stage) -> Mapping[str, object]:
+    """The exact identities one S18 staging attempt is bound to -- D151-C31R2-R20-C1 §5.
+
+    A staged artifact is reusable only under the run, StagePlan, stage, unit and inputs that
+    produced it. Anything else is another attempt's artifact and is preserved, never adopted.
+    """
+    return {
+        "contract": _S18_STAGING_CONTRACT,
+        "successor_run_id": ctx.stage_plan.successor_run_id,
+        "route": ctx.route,
+        "stage_plan_identity": ctx.stage_plan.identity,
+        "statement_registry_identity": ctx.stage_plan.statement_registry_identity,
+        "stage_id": stage.stage_id,
+        "stage_ordinal": stage.ordinal,
+        "unit_id": stage.unit_id,
+        "canonical_target_name": COMPACT_EVIDENCE_SIDECAR_FILENAME,
+        "source_observation_id": ctx.plan.source_observation_id,
+        "total_members": ctx.plan.total_members,
+        "input_identities": [str(item["manifest_digest"]) for item in ctx.stage_plan.intermediates],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _S18StagedCandidate:
+    """One retained S18 staging attempt, classified without changing it."""
+
+    attempt_ordinal: int
+    path: Path
+    state: _FileState
+    has_manifest: bool
+    bound: bool
+    complete: bool
+
+    def as_record(self) -> Mapping[str, object]:
+        return {
+            "attempt_ordinal": self.attempt_ordinal,
+            "state": dict(self.state.as_record()),
+            "has_completion_manifest": self.has_manifest,
+            "binds_this_attempt": self.bound,
+            "complete": self.complete,
+        }
+
+
+def _s18_staged_candidates(
+    ctx: _StageContext, stage: L2Stage, instr: _StageInstrumentation
+) -> tuple[_S18StagedCandidate, ...]:
+    """Every retained staging attempt of this stage, in ascending attempt order.
+
+    Deterministic by construction: the ordinals are parsed out of the create-once
+    ``attempt-NNN`` names and sorted numerically, never taken from ``mtime`` or from the order
+    the filesystem enumerates. This inspects and preserves; it opens nothing that carries a
+    log and repairs nothing.
+    """
+    stage_directory = _require_progress_root(ctx) / _stage_directory_name(stage)
+    if not stage_directory.is_dir():
+        return ()
+    binding = _s18_staging_binding(ctx, stage)
+    ordinals: list[int] = []
+    for name in sorted(entry.name for entry in stage_directory.iterdir()):
+        match = _ATTEMPT_NAME_PATTERN.match(name)
+        if match is not None and int(match.group(1)) != instr.attempt_ordinal:
+            ordinals.append(int(match.group(1)))
+    candidates: list[_S18StagedCandidate] = []
+    for ordinal in sorted(ordinals):
+        attempt = stage_directory / f"attempt-{ordinal:03d}"
+        staged = attempt / _S18_STAGING_SIDECAR_FILENAME
+        state = _file_state(staged, digest=False)
+        if state.lstat_class == "absent":
+            continue
+        manifest = _read_optional_json_object(attempt / _S18_STAGING_MANIFEST_FILENAME)
+        bound = manifest is not None and all(
+            manifest.get(key) == value for key, value in binding.items()
+        )
+        candidates.append(
+            _S18StagedCandidate(
+                attempt_ordinal=ordinal,
+                path=staged,
+                state=state,
+                has_manifest=manifest is not None,
+                bound=bound,
+                complete=(
+                    bound and state.lstat_class == "file" and _sidecar_is_complete(staged, ctx)
+                ),
+            )
+        )
+    return tuple(candidates)
+
+
+def _read_optional_json_object(path: Path) -> Mapping[str, object] | None:
+    """One JSON object, or ``None`` when the file is absent, not a file, or unreadable."""
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        document = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
 def _prepare_sidecar(ctx: _StageContext, instr: _StageInstrumentation) -> Mapping[str, object]:
     """S18's out-of-catalog half: build or authenticate the sidecar, never overwrite one.
 
-    The path decision is journaled FIRST (D151-R19B-C2-R2): the sidecar's file state selects
-    BUILD (absent) or AUTHENTICATE (present and complete); a present, incomplete sidecar selects
-    nothing and is a conflict. Every material BUILD statement and both authenticate-time folds
-    run through the sidecar runner under the same watchdog model as the working catalog.
+    The path decision is journaled FIRST (D151-R19B-C2-R2): BUILD when no finished artifact
+    exists, AUTHENTICATE when one does; a present, incomplete canonical sidecar selects nothing
+    and is a conflict. Every material BUILD statement and both authenticate-time folds run
+    through the sidecar runner under the same watchdog model as the working catalog.
+
+    D151-C31R2-R20-C1 §5. A BUILD no longer writes at the canonical name. It builds inside this
+    stage attempt's own create-once directory and the finished artifact becomes canonical by
+    one publication, so an interrupted build leaves a preserved staged attempt rather than a
+    partial canonical sidecar that makes every later legitimate attempt terminal. The three
+    states a later invocation can meet are exactly:
+
+    * a complete canonical sidecar -- authenticate it and bind it, the accepted recovery;
+    * no canonical sidecar and a complete staged attempt of this same run, StagePlan, stage and
+      inputs -- authenticate that artifact and publish it, with no material construction; this
+      is AUTHENTICATE, and no BUILD journal is fabricated for it;
+    * no canonical sidecar and no complete staged attempt -- BUILD a new one, preserving every
+      incomplete staged attempt exactly where it is.
+
+    A partial or conflicting canonical sidecar still refuses, and still refuses without
+    repairing, deleting or overwriting it -- and now, §7, without adding a file beside it.
     """
+    stage = instr.stage
     path = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
     state = _file_state(path, digest=False)
-    complete = state.lstat_class == "file" and _sidecar_is_complete_readonly(path, ctx)
-    if state.lstat_class == "absent":
-        selected: str | None = _S18_PATH_BUILD
+    complete = state.lstat_class == "file" and _sidecar_is_complete(path, ctx)
+    candidates = _s18_staged_candidates(ctx, stage, instr)
+    reusable = next((item for item in candidates if item.complete), None)
+    staged = instr.attempt_directory / _S18_STAGING_SIDECAR_FILENAME
+    source = _S18_SOURCE_CANONICAL
+    if state.lstat_class == "absent" and reusable is not None:
+        selected: str | None = _S18_PATH_AUTHENTICATE
+        source, working = _S18_SOURCE_STAGED, reusable.path
+    elif state.lstat_class == "absent":
+        selected, source, working = _S18_PATH_BUILD, _S18_SOURCE_STAGED, staged
     elif complete:
-        selected = _S18_PATH_AUTHENTICATE
+        selected, working = _S18_PATH_AUTHENTICATE, path
     else:
-        selected = None
+        selected, working = None, path
+    if selected is not None:
+        instr.bind_sidecar_database(working)
     instr.record_path_decision(
         sidecar_state={**dict(state.as_record()), "complete": complete},
         selected=selected,
         expected_path=_S18_PATH_BUILD if state.lstat_class == "absent" else _S18_PATH_AUTHENTICATE,
+        staging=_s18_staging_evidence(ctx, stage, instr, candidates, source, working),
     )
     if selected == _S18_PATH_BUILD:
         completeness, manifest_digest, totals, _level_two_evidence = _merge_sidecar(
-            sidecar_path=path,
+            sidecar_path=working,
             inputs=cast("Sequence[ChunkInput]", ctx.intermediates),
             plan=ctx.plan,
             source_id=ctx.plan.source_id,
             statement_runner=instr.sidecar_runner,
         )
     elif selected == _S18_PATH_AUTHENTICATE:
-        reopened = CompactEvidenceSidecar(path, statement_runner=instr.sidecar_runner)
+        reopened = CompactEvidenceSidecar(working, statement_runner=instr.sidecar_runner)
         try:
             evidence = reopened.source_evidence(ctx.plan.source_observation_id)
             manifest_digest = reopened.member_manifest_digest(ctx.plan.source_observation_id)
@@ -12065,25 +12289,154 @@ def _prepare_sidecar(ctx: _StageContext, instr: _StageInstrumentation) -> Mappin
             f"the sidecar {path.name!r} is present but is {state.lstat_class} or incomplete; a "
             "partial or conflicting sidecar is preserved exactly as it is and never rebuilt"
         )
-    reopened = CompactEvidenceSidecar(path, statement_runner=instr.sidecar_runner)
+    reopened = CompactEvidenceSidecar(working, statement_runner=instr.sidecar_runner)
     try:
         identity = reopened.identity()
     finally:
         reopened.close()
-    for suffix in ("-wal", "-shm"):
+    for suffix in CLOSED_DATABASE_SIDECAR_SUFFIXES:
         _require(
-            not os.path.lexists(path.with_name(path.name + suffix)),
+            not os.path.lexists(working.with_name(working.name + suffix)),
             f"the sidecar left a {suffix} beside it after close; refused",
         )
-    sha256, length = file_sha256(path)
-    _fsync_path(path)
-    return {
+    sha256, length = file_sha256(working)
+    _fsync_path(working)
+    witness: dict[str, object] = {
         "completeness_digest": completeness,
         "member_manifest_digest": manifest_digest,
         "totals": dict(totals),
         "sidecar_identity": identity,
         "sidecar_sha256": sha256,
         "sidecar_byte_length": length,
+    }
+    if working == path:
+        return {**witness, "sidecar_publication": _s18_already_canonical(candidates)}
+    return {
+        **witness,
+        "sidecar_publication": _publish_sidecar(
+            ctx,
+            stage,
+            instr,
+            working=working,
+            canonical=path,
+            witness=witness,
+            reused=reusable,
+            candidates=candidates,
+        ),
+    }
+
+
+def _s18_staging_evidence(
+    ctx: _StageContext,
+    stage: L2Stage,
+    instr: _StageInstrumentation,
+    candidates: Sequence[_S18StagedCandidate],
+    source: str,
+    working: Path,
+) -> Mapping[str, object]:
+    """What the journaled path decision records about the staging estate -- §5, §6.
+
+    The retained bytes are reported rather than reclaimed: a preserved failed attempt is
+    storage this correction knowingly keeps, and R21's storage planning reads it from here
+    and from the committed applied-unit witness.
+    """
+    return {
+        "contract": _S18_STAGING_CONTRACT,
+        "binding": dict(_s18_staging_binding(ctx, stage)),
+        "authenticated_artifact": source,
+        "watched_database_name": working.name,
+        "watched_database_is_canonical": working.parent == ctx.world_directory,
+        "attempt_ordinal": instr.attempt_ordinal,
+        "retained_attempts": [dict(item.as_record()) for item in candidates],
+        "retained_attempt_bytes": _s18_retained_bytes(candidates),
+        "reused_attempt_ordinal": next(
+            (item.attempt_ordinal for item in candidates if item.complete), None
+        ),
+    }
+
+
+def _s18_already_canonical(candidates: Sequence[_S18StagedCandidate]) -> Mapping[str, object]:
+    """The publication record of an attempt that authenticated the canonical artifact itself."""
+    return {
+        "protocol": STAGED_ARTIFACT_PUBLICATION_PROTOCOL,
+        "published": False,
+        "reason": "the canonical artifact was already present and was authenticated in place",
+        "retained_attempt_bytes": _s18_retained_bytes(candidates),
+    }
+
+
+def _s18_retained_bytes(candidates: Sequence[_S18StagedCandidate]) -> int:
+    """The bytes the preserved staging attempts hold, measured now.
+
+    Reported, never reclaimed: this correction keeps a failed attempt exactly where it is, so
+    the storage it holds is a fact R21's planning needs rather than something to tidy away.
+    A publication measures it again afterwards, because a published or reused attempt no
+    longer holds its staging name.
+    """
+    return sum(int(_file_state(item.path, digest=False).byte_length or 0) for item in candidates)
+
+
+def _publish_sidecar(
+    ctx: _StageContext,
+    stage: L2Stage,
+    instr: _StageInstrumentation,
+    *,
+    working: Path,
+    canonical: Path,
+    witness: Mapping[str, object],
+    reused: _S18StagedCandidate | None,
+    candidates: Sequence[_S18StagedCandidate],
+) -> Mapping[str, object]:
+    """Seal the finished staged artifact, then publish it to the canonical name -- §5.
+
+    The completion manifest is written FIRST and create-once: it is the durable statement that
+    this staged artifact is finished and is the one to publish, so an interruption anywhere in
+    the publication leaves a later invocation able to find it, re-authenticate it and finish.
+    A reused attempt already carries its manifest and is not re-sealed.
+    """
+    if reused is None:
+        record = {
+            **dict(_s18_staging_binding(ctx, stage)),
+            "attempt_ordinal": instr.attempt_ordinal,
+            "staged_filename": _S18_STAGING_SIDECAR_FILENAME,
+            **dict(witness),
+            "utc": utc_now(),
+        }
+        try:
+            write_once_canonical_json(
+                working.with_name(_S18_STAGING_MANIFEST_FILENAME), dict(record)
+            )
+        except ChunkExecutionError as exc:
+            message = f"the staged sidecar's completion manifest could not be sealed: {exc}"
+            raise ChunkMultipassError(message) from exc
+    else:
+        sealed = _read_optional_json_object(working.with_name(_S18_STAGING_MANIFEST_FILENAME))
+        _require(sealed is not None, "the reused staged sidecar lost its completion manifest")
+        assert sealed is not None  # noqa: S101 - narrowed by the refusal above
+        for key in ("completeness_digest", "member_manifest_digest", "totals"):
+            _require(
+                sealed.get(key) == witness[key],
+                f"the reused staged sidecar's {key} is not the one its completion manifest "
+                "sealed; it is preserved and never published",
+            )
+    try:
+        published = publish_staged_artifact(working, canonical)
+    except WorkingCatalogError as exc:
+        raise ChunkMultipassError(str(exc)) from exc
+    canonical_state = _file_state(canonical, digest=False)
+    _require(
+        canonical_state.lstat_class == "file"
+        and canonical_state.inode == published["canonical_inode"]
+        and canonical_state.byte_length == witness["sidecar_byte_length"],
+        "the published sidecar is not the artifact this stage sealed",
+    )
+    _fsync_path(canonical)
+    return {
+        **dict(published),
+        "published": True,
+        "from_attempt_ordinal": instr.attempt_ordinal if reused is None else reused.attempt_ordinal,
+        "reused_without_rebuild": reused is not None,
+        "retained_attempt_bytes": _s18_retained_bytes(candidates),
     }
 
 
@@ -13141,7 +13494,7 @@ def _normalize_after_abort(
         session.guard.release()
     except (ChunkMultipassError, WorkingCatalogError, sqlite3.Error) as exc:
         outcome = f"{type(exc).__name__}: {exc}"[:400]
-    instr.publish_abort_record(normalized, outcome)
+    instr.publish_abort_record(normalized, outcome, probed_database=ctx.catalog_path.name)
 
 
 def _run_stage(
@@ -13161,9 +13514,15 @@ def _run_stage(
         prepared = _prepare_stage(ctx, stage, prior, instr)
     except BaseException:
         if instr.abort is not None:
-            sidecar = ctx.world_directory / COMPACT_EVIDENCE_SIDECAR_FILENAME
+            # D151-C31R2-R20-C1 §6: the log this abort reports on is the one the aborted
+            # statements were growing, which is the staged sidecar's when S18 was building.
+            sidecar = instr.sidecar_database_path
             wal = sidecar.with_name(sidecar.name + "-wal")
-            instr.publish_abort_record(not os.path.lexists(wal) or wal.stat().st_size == 0, None)
+            instr.publish_abort_record(
+                not os.path.lexists(wal) or wal.stat().st_size == 0,
+                None,
+                probed_database=sidecar.name,
+            )
         raise
     with _successor_world_session(
         request=ctx.request, expected=ctx.stage_plan, proof=ctx.proof

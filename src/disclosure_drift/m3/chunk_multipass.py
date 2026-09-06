@@ -418,7 +418,10 @@ __all__ = [
     "MULTIPASS_REQUEST_KIND_GROUP",
     "REAL_MULTIPASS_F0_AUTHORITY",
     "STORAGE_PLAN_FILENAME",
+    "SUCCESSOR_COMPATIBILITY_BRIDGE_ID",
+    "SUCCESSOR_COMPATIBILITY_CERTIFICATE_CONTRACT",
     "SUCCESSOR_REQUEST_KIND_FINAL",
+    "SuccessorCompatibilityCertificate",
     "SUCCESSOR_ROUTE_CALIBRATION",
     "SUCCESSOR_ROUTE_PRODUCTION",
     "SUCCESSOR_ROUTES",
@@ -485,6 +488,7 @@ __all__ = [
     "read_calibration_subset_result",
     "read_observability_closeout",
     "read_stage_receipt",
+    "read_successor_compatibility_certificate",
     "require_executable_level_two_cache_bytes",
     "require_multipass_plan",
     "require_r21_observability_ready",
@@ -2067,6 +2071,303 @@ def select_group_inputs(inputs: Sequence[ChunkInput], group: MergeGroup) -> tupl
     return tuple(selected)
 
 
+# --------------------------------------------------------------------------- #
+# The successor compatibility certificate -- owner ruling
+# D151_R21_E6R3_R1_SUCCESSOR_COMPATIBILITY_CERTIFICATE
+# --------------------------------------------------------------------------- #
+#: The certificate contract. A certificate is the ONLY way a successor final may consume level-1
+#: inputs produced under a different repository revision, and it authorizes exactly ONE
+#: (producer, consumer, plan, schedule, predecessor, input estate) tuple.
+SUCCESSOR_COMPATIBILITY_CERTIFICATE_CONTRACT: Final = "m3.3-successor-compatibility-certificate/1"
+
+#: The owner ruling a certificate must cite. A certificate citing anything else is refused.
+SUCCESSOR_COMPATIBILITY_BRIDGE_ID: Final = "D151_R21_E6R3_R1_SUCCESSOR_COMPATIBILITY_CERTIFICATE"
+
+_CERTIFICATE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "contract",
+        "bridge_id",
+        "producer_head_sha",
+        "producer_tree_sha",
+        "consumer_head_sha",
+        "consumer_tree_sha",
+        "plan_digest",
+        "schedule_digest",
+        "predecessor_run_id",
+        "predecessor_tip_identity",
+        "intermediate_receipt_identities",
+        "retained_witness_identities",
+        "compatibility_audit_sha256",
+        "created_at_utc",
+        "certificate_identity",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessorCompatibilityCertificate:
+    """One owner-sealed statement that ONE producer revision's level-1 outputs may be consumed by
+    ONE consumer revision's successor final -- owner ruling
+    :data:`SUCCESSOR_COMPATIBILITY_BRIDGE_ID`.
+
+    Exact producer/consumer repository equality remains the DEFAULT for every merge. This is a
+    separately authenticated alternate path, and it is deliberately not general: there is no
+    ancestor wildcard, no "newer revision is compatible" rule, no branch rule and no version
+    range. A certificate binds the exact producer pair, the exact consumer pair, the exact plan
+    and schedule, the exact predecessor run and terminal checkpoint tip, the SHA-256 of every
+    level-1 intermediate receipt it covers, the identity of every retained witness it covers, and
+    the SHA-256 of the compatibility audit that justified it. Any other estate, plan, schedule,
+    predecessor or revision refuses.
+
+    It never rewrites history: the level-1 receipts continue to state their own producer revision
+    for ever, and a bridged successor records BOTH identities (see
+    :func:`_compatibility_provenance`).
+    """
+
+    contract: str
+    bridge_id: str
+    producer_head_sha: str
+    producer_tree_sha: str
+    consumer_head_sha: str
+    consumer_tree_sha: str
+    plan_digest: str
+    schedule_digest: str
+    predecessor_run_id: str
+    predecessor_tip_identity: str
+    #: ``group_id -> SHA-256 of that group's intermediate_receipt.json``.
+    intermediate_receipt_identities: Mapping[str, str]
+    #: ``chunk_id -> that chunk's retained witness identity``.
+    retained_witness_identities: Mapping[str, str]
+    compatibility_audit_sha256: str
+    created_at_utc: str
+    certificate_identity: str
+
+    def _identity_inputs(self) -> dict[str, object]:
+        return {
+            "contract": self.contract,
+            "bridge_id": self.bridge_id,
+            "producer_head_sha": self.producer_head_sha,
+            "producer_tree_sha": self.producer_tree_sha,
+            "consumer_head_sha": self.consumer_head_sha,
+            "consumer_tree_sha": self.consumer_tree_sha,
+            "plan_digest": self.plan_digest,
+            "schedule_digest": self.schedule_digest,
+            "predecessor_run_id": self.predecessor_run_id,
+            "predecessor_tip_identity": self.predecessor_tip_identity,
+            "intermediate_receipt_identities": dict(
+                sorted(self.intermediate_receipt_identities.items())
+            ),
+            "retained_witness_identities": dict(sorted(self.retained_witness_identities.items())),
+            "compatibility_audit_sha256": self.compatibility_audit_sha256,
+            "created_at_utc": self.created_at_utc,
+        }
+
+    def as_record(self) -> Mapping[str, object]:
+        """The exact persisted rendering."""
+        record = self._identity_inputs()
+        record["certificate_identity"] = self.certificate_identity
+        return record
+
+    def identity(self) -> str:
+        """The identity the record implies -- over everything but the identity field."""
+        return _record_identity(self._identity_inputs(), "certificate_identity")
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> SuccessorCompatibilityCertificate:
+        """Rebuild a certificate from its EXACT mapping and re-derive its identity.
+
+        Raises:
+            ChunkMultipassError: the shape, contract, ruling or identity refuses.
+        """
+        present = {str(key) for key in record}
+        if present != _CERTIFICATE_KEYS:
+            message = (
+                "a successor compatibility certificate is exact; this one is missing "
+                f"{sorted(_CERTIFICATE_KEYS - present)} and carries unexpected "
+                f"{sorted(present - _CERTIFICATE_KEYS)}; refused"
+            )
+            raise ChunkMultipassError(message)
+        receipts = record["intermediate_receipt_identities"]
+        witnesses = record["retained_witness_identities"]
+        if not isinstance(receipts, Mapping) or not isinstance(witnesses, Mapping):
+            message = (
+                "a successor compatibility certificate's intermediate and witness identities "
+                "must both be mappings; refused"
+            )
+            raise ChunkMultipassError(message)
+        certificate = cls(
+            contract=str(record["contract"]),
+            bridge_id=str(record["bridge_id"]),
+            producer_head_sha=str(record["producer_head_sha"]),
+            producer_tree_sha=str(record["producer_tree_sha"]),
+            consumer_head_sha=str(record["consumer_head_sha"]),
+            consumer_tree_sha=str(record["consumer_tree_sha"]),
+            plan_digest=str(record["plan_digest"]),
+            schedule_digest=str(record["schedule_digest"]),
+            predecessor_run_id=str(record["predecessor_run_id"]),
+            predecessor_tip_identity=str(record["predecessor_tip_identity"]),
+            intermediate_receipt_identities={
+                str(key): str(value) for key, value in receipts.items()
+            },
+            retained_witness_identities={str(key): str(value) for key, value in witnesses.items()},
+            compatibility_audit_sha256=str(record["compatibility_audit_sha256"]),
+            created_at_utc=str(record["created_at_utc"]),
+            certificate_identity=str(record["certificate_identity"]),
+        )
+        _require(
+            certificate.contract == SUCCESSOR_COMPATIBILITY_CERTIFICATE_CONTRACT,
+            f"a successor compatibility certificate names contract {certificate.contract!r}; "
+            f"this build serves {SUCCESSOR_COMPATIBILITY_CERTIFICATE_CONTRACT!r} only",
+        )
+        _require(
+            certificate.bridge_id == SUCCESSOR_COMPATIBILITY_BRIDGE_ID,
+            f"a successor compatibility certificate cites ruling {certificate.bridge_id!r}; this "
+            f"build serves {SUCCESSOR_COMPATIBILITY_BRIDGE_ID!r} only",
+        )
+        _require(
+            certificate.certificate_identity == certificate.identity(),
+            "a successor compatibility certificate's sealed identity is not the identity its "
+            "own record implies; it was altered after sealing and is refused",
+        )
+        return certificate
+
+
+def read_successor_compatibility_certificate(
+    path: Path, *, sealed_sha256: str
+) -> SuccessorCompatibilityCertificate:
+    """Read one certificate from ``path``, holding its BYTES to the digest the request sealed.
+
+    The digest is checked before the JSON is parsed: a certificate is admitted by the bytes the
+    execution request committed to, never by its path and never by its content alone.
+
+    Raises:
+        ChunkMultipassError: the file is absent, is not a regular file, its digest is not the
+            sealed one, or the record refuses.
+    """
+    _require(
+        path.is_file() and not path.is_symlink(),
+        f"the successor compatibility certificate {str(path)!r} must be an existing regular file "
+        "that is not a link",
+    )
+    measured, _size = file_digest(path)
+    _require(
+        measured == sealed_sha256,
+        f"the successor compatibility certificate at {str(path)!r} digests to {measured!r} and "
+        f"the execution request sealed {sealed_sha256!r}; refused",
+    )
+    return SuccessorCompatibilityCertificate.from_record(
+        _json_object(path.read_bytes().decode("utf-8"), "compatibility certificate")
+    )
+
+
+def _authenticate_successor_compatibility_certificate(
+    certificate: SuccessorCompatibilityCertificate,
+    *,
+    route: str,
+    plan: ChunkPlan,
+    schedule: MergeSchedule,
+    request: SuccessorFinalRequest,
+    intermediates: Sequence[IntermediateInput],
+    witnesses: Sequence[RetainedWitnessInput],
+) -> None:
+    """Hold an already-parsed certificate to THIS run's plan, schedule, predecessor and inputs.
+
+    Every binding is exact and every input the merge will consume must be named. A certificate
+    issued for another estate, plan, schedule, predecessor, group set or witness set refuses here,
+    before :func:`_require_seed_identity` is reached and before any world exists.
+
+    Raises:
+        ChunkMultipassError: any binding fails.
+    """
+    _require(
+        route == SUCCESSOR_ROUTE_CALIBRATION,
+        f"a successor compatibility certificate serves the {SUCCESSOR_ROUTE_CALIBRATION!r} route "
+        f"only; this request names {route!r}. The production route has no bridge",
+    )
+    _require(
+        certificate.plan_digest == plan.plan_digest,
+        f"the compatibility certificate binds plan {certificate.plan_digest!r} and this merge "
+        f"resolves plan {plan.plan_digest!r}; refused",
+    )
+    _require(
+        certificate.schedule_digest == schedule.schedule_digest,
+        f"the compatibility certificate binds schedule {certificate.schedule_digest!r} and this "
+        f"merge resolves schedule {schedule.schedule_digest!r}; refused",
+    )
+    _require(
+        certificate.predecessor_run_id == request.predecessor_run_id,
+        f"the compatibility certificate binds predecessor run "
+        f"{certificate.predecessor_run_id!r} and this request names "
+        f"{request.predecessor_run_id!r}; refused",
+    )
+    _require(
+        certificate.predecessor_tip_identity == request.predecessor_tip_identity,
+        "the compatibility certificate binds a different predecessor checkpoint tip than this "
+        "request names; refused",
+    )
+    measured_receipts = {
+        item.group_id: file_digest(item.directory / INTERMEDIATE_RECEIPT_FILENAME)[0]
+        for item in intermediates
+    }
+    certified_receipts = dict(certificate.intermediate_receipt_identities)
+    receipt_drift = sorted(
+        key for key in measured_receipts if certified_receipts.get(key) != measured_receipts[key]
+    )
+    _require(
+        measured_receipts == certified_receipts,
+        "the compatibility certificate does not name exactly this merge's level-1 intermediate "
+        f"receipts: it certifies {sorted(certified_receipts)} and this merge resolved "
+        f"{sorted(measured_receipts)}, with {receipt_drift} differing by digest; refused",
+    )
+    measured_witnesses = {item.chunk_id: item.witness.witness_identity for item in witnesses}
+    certified_witnesses = dict(certificate.retained_witness_identities)
+    witness_drift = sorted(
+        key for key in measured_witnesses if certified_witnesses.get(key) != measured_witnesses[key]
+    )
+    _require(
+        measured_witnesses == certified_witnesses,
+        "the compatibility certificate does not name exactly this merge's retained witnesses: it "
+        f"certifies {len(certified_witnesses)} and this merge resolved "
+        f"{len(measured_witnesses)}, with {witness_drift} differing by identity; refused",
+    )
+    recorded = {
+        (item.receipt.repository_head_sha, item.receipt.repository_tree_sha)
+        for item in intermediates
+    }
+    _require(
+        recorded == {(certificate.producer_head_sha, certificate.producer_tree_sha)},
+        f"the compatibility certificate certifies producer {certificate.producer_head_sha}/"
+        f"{certificate.producer_tree_sha} and this merge's level-1 receipts record "
+        f"{sorted(recorded)}; every input must carry the ONE certified producer revision and a "
+        "mixed set is refused",
+    )
+
+
+def _compatibility_provenance(
+    certificate: SuccessorCompatibilityCertificate | None,
+    *,
+    repository: RepositoryIdentity,
+    intermediates: Sequence[IntermediateInput],
+) -> Mapping[str, object] | None:
+    """The dual-revision provenance a bridged successor persists, or ``None`` when exact.
+
+    A bridged successor NEVER claims its inputs were built under the consumer revision: both
+    identities are recorded side by side, together with the ruling and the certificate digest.
+    """
+    if certificate is None:
+        return None
+    return {
+        "compatibility_bridge_id": certificate.bridge_id,
+        "compatibility_certificate_sha256": certificate.certificate_identity,
+        "l1_producer_head": certificate.producer_head_sha,
+        "l1_producer_tree": certificate.producer_tree_sha,
+        "successor_consumer_head": repository.head_sha,
+        "successor_consumer_tree": repository.tree_sha,
+        "compatibility_audit_sha256": certificate.compatibility_audit_sha256,
+        "certified_intermediate_count": len(intermediates),
+    }
+
+
 def _require_seed_identity(
     *,
     label: str,
@@ -2075,13 +2376,47 @@ def _require_seed_identity(
     recorded_tree: str,
     contract: ExecutionContract,
     catalog_sha256: str,
+    certificate: SuccessorCompatibilityCertificate | None = None,
 ) -> None:
-    _require(
-        repository.head_sha == recorded_head and repository.tree_sha == recorded_tree,
-        f"the inputs of {label!r} executed under repository {recorded_head}/{recorded_tree} and "
-        f"this merge is running from {repository.head_sha}/{repository.tree_sha}, measured from "
-        "the checkout this code was imported from. Nothing was merged",
-    )
+    """Hold this merge to the revision its inputs executed under.
+
+    ``certificate`` is ``None`` everywhere except the successor calibration final that was handed
+    an authenticated compatibility certificate -- owner ruling
+    :data:`SUCCESSOR_COMPATIBILITY_BRIDGE_ID`. Exact producer/consumer equality remains the
+    DEFAULT and is the only path any chunk, level-1 or production caller can reach: nothing in
+    those paths accepts a certificate, so none can present one.
+
+    The alternate path is not weaker equality -- it is a DIFFERENT, separately authenticated
+    equality. The certificate names one exact producer pair and one exact consumer pair, and both
+    must match exactly. There is no ancestry rule, no version range and no "newer is compatible"
+    rule. The caller must already have authenticated the certificate against this run's plan,
+    schedule, predecessor and inputs through
+    :func:`_authenticate_successor_compatibility_certificate`.
+    """
+    if certificate is None:
+        _require(
+            repository.head_sha == recorded_head and repository.tree_sha == recorded_tree,
+            f"the inputs of {label!r} executed under repository {recorded_head}/{recorded_tree} "
+            f"and this merge is running from {repository.head_sha}/{repository.tree_sha}, "
+            "measured from the checkout this code was imported from. Nothing was merged",
+        )
+    else:
+        _require(
+            certificate.producer_head_sha == recorded_head
+            and certificate.producer_tree_sha == recorded_tree,
+            f"the compatibility certificate certifies producer "
+            f"{certificate.producer_head_sha}/{certificate.producer_tree_sha} and the inputs of "
+            f"{label!r} executed under {recorded_head}/{recorded_tree}; a certificate is valid "
+            "for exactly one producer revision. Nothing was merged",
+        )
+        _require(
+            certificate.consumer_head_sha == repository.head_sha
+            and certificate.consumer_tree_sha == repository.tree_sha,
+            f"the compatibility certificate certifies consumer "
+            f"{certificate.consumer_head_sha}/{certificate.consumer_tree_sha} and this merge is "
+            f"running from {repository.head_sha}/{repository.tree_sha}, measured from the "
+            "checkout this code was imported from. Nothing was merged",
+        )
     _require(
         catalog_sha256 == contract.catalog_source_sha256,
         f"the accepted catalog this merge would seed from digests to {catalog_sha256!r} and every "
@@ -3603,6 +3938,12 @@ class CalibrationSubsetResult:
     #: D151-C31R2-R19B-C2 §32: the successor terminal binds its observability closeout here; a
     #: legacy calibration result never carries the key and its identity is unchanged.
     successor_observability: Mapping[str, object] | None = None
+    #: Owner ruling D151_R21_E6R3_R1: present ONLY on a result whose level-1 inputs were consumed
+    #: cross-revision under an authenticated compatibility certificate. It records BOTH the
+    #: immutable level-1 producer revision and the exact successor consumer revision, so a bridged
+    #: result can never be mistaken for one whose inputs were built under the consumer revision.
+    #: A result without a bridge never carries the key and its identity is unchanged.
+    compatibility_provenance: Mapping[str, object] | None = None
 
     def _identity_inputs(self) -> dict[str, object]:
         inputs: dict[str, object] = {
@@ -3658,6 +3999,8 @@ class CalibrationSubsetResult:
         }
         if self.successor_observability is not None:
             inputs["successor_observability"] = dict(self.successor_observability)
+        if self.compatibility_provenance is not None:
+            inputs["compatibility_provenance"] = dict(self.compatibility_provenance)
         return inputs
 
     def as_record(self) -> Mapping[str, object]:
@@ -3677,7 +4020,10 @@ class CalibrationSubsetResult:
         Raises:
             ChunkMultipassError: the shape, contract, labels, status or identity refuses.
         """
-        present = {str(key) for key in record} - {"successor_observability"}
+        present = {str(key) for key in record} - {
+            "successor_observability",
+            "compatibility_provenance",
+        }
         if present != _RESULT_KEYS:
             message = (
                 "a calibration-subset result is exact; this one is missing "
@@ -3689,11 +4035,13 @@ class CalibrationSubsetResult:
         admission = record["storage_admission"]
         manifest = record["manifest"]
         observability = record.get("successor_observability")
+        provenance = record.get("compatibility_provenance")
         if (
             not isinstance(counts, Mapping)
             or not isinstance(admission, Mapping)
             or not isinstance(manifest, Mapping)
             or not (observability is None or isinstance(observability, Mapping))
+            or not (provenance is None or isinstance(provenance, Mapping))
         ):
             message = "a calibration-subset result's counts, admission or manifest are not mappings"
             raise ChunkMultipassError(message)
@@ -3774,6 +4122,9 @@ class CalibrationSubsetResult:
                 successor_observability=None
                 if observability is None
                 else {str(key): value for key, value in observability.items()},
+                compatibility_provenance=None
+                if provenance is None
+                else {str(key): value for key, value in provenance.items()},
             )
         except ChunkEvidenceError as exc:
             message = f"a calibration-subset result's manifest is refused: {exc}"
@@ -7440,6 +7791,12 @@ class SuccessorFinalRequest:
     capacity_observations: tuple[Mapping[str, object], ...] = ()
     stop_after_stage: str | None = None
     kind: str = SUCCESSOR_REQUEST_KIND_FINAL
+    #: Owner ruling D151_R21_E6R3_R1: the optional compatibility certificate this successor is
+    #: authorized to consume cross-revision level-1 inputs under. BOTH must be present or BOTH
+    #: absent. Absent -- the default -- is the exact producer/consumer equality path, and a
+    #: request that carries neither renders byte for byte as it did before the bridge existed.
+    compatibility_certificate_path: str | None = None
+    compatibility_certificate_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind != SUCCESSOR_REQUEST_KIND_FINAL:
@@ -7447,6 +7804,15 @@ class SuccessorFinalRequest:
             raise ChunkMultipassError(message)
         if self.route not in SUCCESSOR_ROUTES:
             message = f"a successor request names route {self.route!r}; refused"
+            raise ChunkMultipassError(message)
+        if (self.compatibility_certificate_path is None) != (
+            self.compatibility_certificate_sha256 is None
+        ):
+            message = (
+                "a successor request must carry BOTH the compatibility certificate path and its "
+                "sealed SHA-256, or neither; a path without a sealed digest could be swapped and "
+                "a digest without a path names nothing"
+            )
             raise ChunkMultipassError(message)
         require_successor_cache_bytes(self.cache_bytes)
         require_statement_observability_terms(self.statement_observability)
@@ -7458,8 +7824,13 @@ class SuccessorFinalRequest:
             _stored_int(getattr(self, name), name)
 
     def as_record(self) -> Mapping[str, object]:
-        """A deterministic rendering. Paths are the caller's; nothing is discovered."""
-        return {
+        """A deterministic rendering. Paths are the caller's; nothing is discovered.
+
+        The two compatibility-certificate keys appear ONLY when the request carries one, so an
+        ordinary exact-revision request renders exactly as it did before the bridge existed and
+        its envelope is issued over the same bytes.
+        """
+        record: dict[str, object] = {
             "kind": self.kind,
             "route": self.route,
             "plan_path": self.plan_path,
@@ -7485,6 +7856,10 @@ class SuccessorFinalRequest:
             "capacity_observations": [dict(item) for item in self.capacity_observations],
             "stop_after_stage": self.stop_after_stage,
         }
+        if self.compatibility_certificate_path is not None:
+            record["compatibility_certificate_path"] = self.compatibility_certificate_path
+            record["compatibility_certificate_sha256"] = self.compatibility_certificate_sha256
+        return record
 
     @property
     def observability_terms(self) -> StatementObservabilityTerms:
@@ -7506,6 +7881,10 @@ class SuccessorFinalRequest:
             observability = record["statement_observability"]
             observations = record["capacity_observations"]
             stop_after = record["stop_after_stage"]
+            # Optional and absent by default: a request written before this build, or by an
+            # ordinary exact-revision run, carries neither key.
+            certificate_path = record.get("compatibility_certificate_path")
+            certificate_sha = record.get("compatibility_certificate_sha256")
             if (
                 not isinstance(storage, Mapping)
                 or not isinstance(expected, Mapping)
@@ -7553,6 +7932,12 @@ class SuccessorFinalRequest:
                     if isinstance(item, Mapping)
                 ),
                 stop_after_stage=None if stop_after is None else str(stop_after),
+                compatibility_certificate_path=(
+                    None if certificate_path is None else str(certificate_path)
+                ),
+                compatibility_certificate_sha256=(
+                    None if certificate_sha is None else str(certificate_sha)
+                ),
             )
         except KeyError as exc:
             message = f"a successor request could not be read as this build writes them: {exc}"
@@ -10090,6 +10475,10 @@ class _StageContext:
     stage_plan: L2StagePlan
     world_directory: Path
     receipt_root: Path
+    #: Owner ruling D151_R21_E6R3_R1. ``None`` for every exact-revision run -- the default -- and
+    #: the authenticated dual-revision record for a bridged one. It is provenance the terminal
+    #: persists, never an authority a stage re-reads.
+    compatibility_provenance: Mapping[str, object] | None = None
 
     @property
     def catalog_path(self) -> Path:
@@ -12847,6 +13236,9 @@ def _publish_calibration_result(
         status="complete",
         result_identity="",
         successor_observability=dict(observability),
+        compatibility_provenance=(
+            None if ctx.compatibility_provenance is None else dict(ctx.compatibility_provenance)
+        ),
     )
     sealed = replace(result, result_identity=result.identity())
     # LAST. Nothing is written after this.
@@ -14059,6 +14451,9 @@ def _resolve_successor_context(
     operational = Path(request.operational_catalog)
     seed_sha256, seed_bytes = file_digest(operational)
     counter_sources: tuple[PlanWitnessSource, ...]
+    #: Empty on the production route, which resolves chunks rather than retained witnesses and
+    #: has no compatibility bridge.
+    witnesses: tuple[RetainedWitnessInput, ...] = ()
     if request.route == SUCCESSOR_ROUTE_PRODUCTION:
         chunks = resolve_chunk_inputs(
             plan,
@@ -14093,6 +14488,26 @@ def _resolve_successor_context(
         identities = tuple(f"{item.chunk_id}:{item.witness.witness_identity}" for item in witnesses)
     require_attachable(len(intermediates))
     contract = intermediates[0].receipt.execution_contract
+    # Owner ruling D151_R21_E6R3_R1. Absent -- the default -- leaves the exact producer/consumer
+    # equality path below untouched. Present, the certificate is admitted by the BYTES the
+    # request sealed and then held to this run's plan, schedule, predecessor and every input it
+    # will consume, BEFORE the identity gate and before any world exists.
+    certificate: SuccessorCompatibilityCertificate | None = None
+    if request.compatibility_certificate_path is not None:
+        assert request.compatibility_certificate_sha256 is not None  # noqa: S101 - paired
+        certificate = read_successor_compatibility_certificate(
+            Path(request.compatibility_certificate_path),
+            sealed_sha256=request.compatibility_certificate_sha256,
+        )
+        _authenticate_successor_compatibility_certificate(
+            certificate,
+            route=request.route,
+            plan=plan,
+            schedule=schedule,
+            request=request,
+            intermediates=intermediates,
+            witnesses=witnesses,
+        )
     _require_seed_identity(
         label="successor-final",
         repository=repository,
@@ -14100,6 +14515,7 @@ def _resolve_successor_context(
         recorded_tree=intermediates[0].receipt.repository_tree_sha,
         contract=contract,
         catalog_sha256=seed_sha256,
+        certificate=certificate,
     )
     state = _accepted_plan_state(operational, plan)
     tool_manifest = _runtime_tool_manifest()
@@ -14146,6 +14562,9 @@ def _resolve_successor_context(
         stage_plan=stage_plan,
         world_directory=world,
         receipt_root=receipt_root,
+        compatibility_provenance=_compatibility_provenance(
+            certificate, repository=repository, intermediates=intermediates
+        ),
     )
 
 

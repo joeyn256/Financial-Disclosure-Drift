@@ -2235,28 +2235,62 @@ class SuccessorCompatibilityCertificate:
 def read_successor_compatibility_certificate(
     path: Path, *, sealed_sha256: str
 ) -> SuccessorCompatibilityCertificate:
-    """Read one certificate from ``path``, holding its BYTES to the digest the request sealed.
+    """Read one certificate from ``path``, holding THE BYTES IT PARSES to the sealed digest.
 
-    The digest is checked before the JSON is parsed: a certificate is admitted by the bytes the
-    execution request committed to, never by its path and never by its content alone.
+    R21-E6R3-C1 MAJOR-2. The file is opened ONCE, without following its final component, and
+    the whole of it is captured into one buffer. That single buffer is what is hashed, what the
+    sealed digest is compared against, and what is decoded and parsed. The path is never opened
+    a second time, so there is no window in which the bytes that were authenticated and the
+    bytes that became the certificate could differ: a pathname replaced, relinked or rewritten
+    between the two reads cannot alter the authenticated object, because there is only one read.
+
+    A certificate is therefore admitted by the bytes the execution request committed to -- never
+    by its path, and never by its content alone.
 
     Raises:
-        ChunkMultipassError: the file is absent, is not a regular file, its digest is not the
-            sealed one, or the record refuses.
+        ChunkMultipassError: the file is absent, is a link, is not a regular file, its digest is
+            not the sealed one, or the record refuses.
     """
     _require(
-        path.is_file() and not path.is_symlink(),
-        f"the successor compatibility certificate {str(path)!r} must be an existing regular file "
-        "that is not a link",
+        not path.is_symlink(),
+        f"the successor compatibility certificate {str(path)!r} is a symbolic link and is "
+        "refused rather than followed to whatever it currently points at",
     )
-    measured, _size = file_digest(path)
+    # The flags are spelled here, inline and literally, rather than built into a local: this is
+    # a read-only open and the accepted capability audit must be able to SEE that it is. A
+    # variable flags expression is unauditable and is classified as a write site, and a dynamic
+    # ``getattr(os, ...)`` is an unaudited route into the module -- neither is used.
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        message = (
+            f"the successor compatibility certificate {str(path)!r} could not be opened as an "
+            f"existing regular file that is not a link: {exc}"
+        )
+        raise ChunkMultipassError(message) from exc
+    try:
+        _require(
+            stat.S_ISREG(os.fstat(descriptor).st_mode),
+            f"the opened successor compatibility certificate {str(path)!r} is not a regular file",
+        )
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read()
+    finally:
+        os.close(descriptor)
+    measured = hashlib.sha256(payload).hexdigest()
     _require(
         measured == sealed_sha256,
         f"the successor compatibility certificate at {str(path)!r} digests to {measured!r} and "
         f"the execution request sealed {sealed_sha256!r}; refused",
     )
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        message = f"the successor compatibility certificate is not decodable UTF-8: {exc}"
+        raise ChunkMultipassError(message) from exc
+    # THE SAME BUFFER the digest above was taken over. Nothing re-reads ``path``.
     return SuccessorCompatibilityCertificate.from_record(
-        _json_object(path.read_bytes().decode("utf-8"), "compatibility certificate")
+        _json_object(text, "compatibility certificate")
     )
 
 
@@ -2346,19 +2380,44 @@ def _authenticate_successor_compatibility_certificate(
 def _compatibility_provenance(
     certificate: SuccessorCompatibilityCertificate | None,
     *,
+    request: SuccessorFinalRequest,
     repository: RepositoryIdentity,
     intermediates: Sequence[IntermediateInput],
 ) -> Mapping[str, object] | None:
     """The dual-revision provenance a bridged successor persists, or ``None`` when exact.
 
     A bridged successor NEVER claims its inputs were built under the consumer revision: both
-    identities are recorded side by side, together with the ruling and the certificate digest.
+    identities are recorded side by side, together with the ruling and BOTH certificate digests.
+
+    R21-E6R3-C1 MAJOR-1. A certificate has two distinct digests and this record names each one
+    for what it is, because conflating them would make the persisted provenance unverifiable:
+
+    * ``compatibility_certificate_sha256`` is the SHA-256 of the certificate FILE'S BYTES. It is
+      taken from ``request.compatibility_certificate_sha256`` -- the value the execution request
+      sealed, and the value
+      :func:`read_successor_compatibility_certificate` has already proved to be the digest of
+      the single buffer it authenticated and parsed. It is never recomputed from the
+      certificate's semantic fields, which cannot yield it: a document's bytes are one of many
+      renderings of its record.
+    * ``compatibility_certificate_identity`` is the certificate's own sealed self-identity, the
+      SHA-256 over its canonical record without that field. It identifies WHAT was certified,
+      independently of how the file was rendered.
+
+    Both are recorded because they answer different questions, and for any real certificate they
+    are different values.
     """
     if certificate is None:
         return None
+    sealed = request.compatibility_certificate_sha256
+    _require(
+        sealed is not None,
+        "a bridged successor records the certificate FILE digest its request sealed, and this "
+        "request carries a certificate with no sealed digest; refused",
+    )
     return {
         "compatibility_bridge_id": certificate.bridge_id,
-        "compatibility_certificate_sha256": certificate.certificate_identity,
+        "compatibility_certificate_sha256": sealed,
+        "compatibility_certificate_identity": certificate.certificate_identity,
         "l1_producer_head": certificate.producer_head_sha,
         "l1_producer_tree": certificate.producer_tree_sha,
         "successor_consumer_head": repository.head_sha,
@@ -3938,10 +3997,13 @@ class CalibrationSubsetResult:
     #: D151-C31R2-R19B-C2 §32: the successor terminal binds its observability closeout here; a
     #: legacy calibration result never carries the key and its identity is unchanged.
     successor_observability: Mapping[str, object] | None = None
-    #: Owner ruling D151_R21_E6R3_R1: present ONLY on a result whose level-1 inputs were consumed
-    #: cross-revision under an authenticated compatibility certificate. It records BOTH the
-    #: immutable level-1 producer revision and the exact successor consumer revision, so a bridged
-    #: result can never be mistaken for one whose inputs were built under the consumer revision.
+    #: Owner ruling D151_R21_E6R3_R1, corrected by R21-E6R3-C1 MAJOR-1: present ONLY on a result
+    #: whose level-1 inputs were consumed cross-revision under an authenticated compatibility
+    #: certificate. It records BOTH the immutable level-1 producer revision and the exact
+    #: successor consumer revision, so a bridged result can never be mistaken for one whose
+    #: inputs were built under the consumer revision, and BOTH of the certificate's two distinct
+    #: digests under their own names -- ``compatibility_certificate_sha256`` for the certificate
+    #: FILE's bytes and ``compatibility_certificate_identity`` for its sealed self-identity.
     #: A result without a bridge never carries the key and its identity is unchanged.
     compatibility_provenance: Mapping[str, object] | None = None
 
@@ -14563,7 +14625,7 @@ def _resolve_successor_context(
         world_directory=world,
         receipt_root=receipt_root,
         compatibility_provenance=_compatibility_provenance(
-            certificate, repository=repository, intermediates=intermediates
+            certificate, request=request, repository=repository, intermediates=intermediates
         ),
     )
 

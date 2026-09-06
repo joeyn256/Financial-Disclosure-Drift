@@ -15,19 +15,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from disclosure_drift.m3.chunk_evidence import ExecutionContract
+from disclosure_drift.m3 import chunk_multipass as cm
+from disclosure_drift.m3.chunk_evidence import ArtifactManifest, ExecutionContract
 from disclosure_drift.m3.chunk_multipass import (
+    CALIBRATION_SUBSET_CLASSIFICATIONS,
+    CALIBRATION_SUBSET_RESULT_CONTRACT,
     INTERMEDIATE_RECEIPT_FILENAME,
     SUCCESSOR_COMPATIBILITY_BRIDGE_ID,
     SUCCESSOR_COMPATIBILITY_CERTIFICATE_CONTRACT,
     SUCCESSOR_ROUTE_CALIBRATION,
     SUCCESSOR_ROUTE_PRODUCTION,
+    CalibrationSubsetResult,
     ChunkMultipassError,
     SuccessorCompatibilityCertificate,
     SuccessorFinalRequest,
@@ -190,6 +196,91 @@ def _request(tmp_path: Path, **overrides: Any) -> SuccessorFinalRequest:
     }
     fields.update(overrides)
     return SuccessorFinalRequest(**fields)
+
+
+def _sealed_certificate_file(
+    tmp_path: Path, certificate: SuccessorCompatibilityCertificate, name: str = "certificate.json"
+) -> tuple[Path, str]:
+    """Write one certificate as a real file and return it with the SHA-256 of its BYTES."""
+    path = tmp_path / name
+    path.write_text(json.dumps(dict(certificate.as_record())))
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bridged_request(tmp_path: Path, sealed: str, **overrides: Any) -> SuccessorFinalRequest:
+    """A request that seals ``sealed`` as the certificate FILE digest -- the R21-E6R3-C1 source."""
+    return _request(
+        tmp_path,
+        compatibility_certificate_path=str(tmp_path / "certificate.json"),
+        compatibility_certificate_sha256=sealed,
+        **overrides,
+    )
+
+
+def _sealed_result(
+    provenance: Any, *, head: str = CONSUMER_HEAD, tree: str = CONSUMER_TREE
+) -> CalibrationSubsetResult:
+    """One sealed terminal result, the shape ``_publish_calibration_result`` writes.
+
+    Every field is a placeholder except the ones this file is about: the successor's own
+    repository identity -- which is always the CONSUMER revision -- and the compatibility
+    provenance beside it.
+    """
+    result = CalibrationSubsetResult(
+        contract=CALIBRATION_SUBSET_RESULT_CONTRACT,
+        classifications=CALIBRATION_SUBSET_CLASSIFICATIONS,
+        plan_digest=PLAN_DIGEST,
+        merge_schedule_digest=SCHEDULE_DIGEST,
+        run_id="d151-fixture-successor",
+        source_instance_id="fixture-instance",
+        source_observation_id="fixture-observation",
+        source_sha256="1" * 64,
+        source_byte_length=1,
+        member_order_digest="2" * 64,
+        selected_member_order_digest="3" * 64,
+        shard_parent_binding_digest="4" * 64,
+        primary_prefix_members=1,
+        selected_shard_members=1,
+        excluded_shard_members=0,
+        selected_members=2,
+        full_total_members=3,
+        repository_head_sha=head,
+        repository_tree_sha=tree,
+        catalog_source_sha256=CATALOG_SHA,
+        execution_contract_identity="f" * 64,
+        chunk_count=34,
+        intermediate_count=5,
+        parser_run_id="fixture-parser-run",
+        run_outcome="ok",
+        parser_state_after="chunk_local",
+        world_parser_state="chunk_local",
+        members=1,
+        records=1,
+        parsed_records=1,
+        quarantined_records=0,
+        omitted_field_observations=0,
+        materialized_field_observations=0,
+        completeness_digest="5" * 64,
+        member_manifest_digest="6" * 64,
+        table_row_counts={"fixture_table": 1},
+        first_witness_accessions_corrected=0,
+        first_witness_rows_staged=0,
+        evidence_members_corrected=0,
+        evidence_delta=0,
+        storage_admission={"level": "level_two"},
+        admission_event_identity="7" * 64,
+        envelope_sha256="8" * 64,
+        pid=1,
+        rss_peak_bytes=1,
+        started_at_utc="2026-09-06T00:00:00Z",
+        completed_at_utc="2026-09-06T01:00:00Z",
+        manifest=ArtifactManifest.from_record({"entries": []}),
+        status="complete",
+        result_identity="",
+        successor_observability={"status": "clean"},
+        compatibility_provenance=provenance,
+    )
+    return replace(result, result_identity=result.identity())
 
 
 def _authenticate(
@@ -450,12 +541,17 @@ def test_n_a_bridged_result_records_both_producer_and_consumer_identity(tmp_path
     """N: a bridged successor never pretends its inputs were built under the consumer."""
     intermediates, witnesses = _estate(tmp_path)
     certificate = _certificate(intermediates, witnesses)
+    _path, sealed = _sealed_certificate_file(tmp_path, certificate)
     provenance = _compatibility_provenance(
-        certificate, repository=_repository(), intermediates=intermediates
+        certificate,
+        request=_bridged_request(tmp_path, sealed),
+        repository=_repository(),
+        intermediates=intermediates,
     )
     assert provenance == {
         "compatibility_bridge_id": SUCCESSOR_COMPATIBILITY_BRIDGE_ID,
-        "compatibility_certificate_sha256": certificate.certificate_identity,
+        "compatibility_certificate_sha256": sealed,
+        "compatibility_certificate_identity": certificate.certificate_identity,
         "l1_producer_head": PRODUCER_HEAD,
         "l1_producer_tree": PRODUCER_TREE,
         "successor_consumer_head": CONSUMER_HEAD,
@@ -470,7 +566,12 @@ def test_n2_an_exact_revision_run_records_no_bridge_provenance(tmp_path: Path) -
     """An unbridged run carries no provenance key at all, so it cannot look bridged."""
     intermediates, _ = _estate(tmp_path)
     assert (
-        _compatibility_provenance(None, repository=_repository(), intermediates=intermediates)
+        _compatibility_provenance(
+            None,
+            request=_request(tmp_path),
+            repository=_repository(),
+            intermediates=intermediates,
+        )
         is None
     )
 
@@ -577,3 +678,234 @@ def test_request_refuses_a_half_specified_certificate(tmp_path: Path, overrides:
 def test_absent_certificate_file_refuses(tmp_path: Path) -> None:
     with pytest.raises(ChunkMultipassError, match="existing regular file"):
         read_successor_compatibility_certificate(tmp_path / "missing.json", sealed_sha256="1" * 64)
+
+
+# --------------------------------------------------- Q: R21-E6R3-C1 MAJOR-1, the two digests
+#: The two digests of the certificate the owner accepted for the historical bridge. They are
+#: pinned here as a regression anchor precisely because they are DIFFERENT values that a single
+#: mislabelled key once conflated: the first is the SHA-256 of the certificate FILE's bytes, the
+#: second is the certificate's own sealed self-identity over its canonical record.
+HISTORICAL_CERTIFICATE_FILE_SHA256 = (
+    "2be2641b55faacee8de75f8c67d321835d4e3e1e60c5675c286cab89b14bfc2e"
+)
+HISTORICAL_CERTIFICATE_SELF_IDENTITY = (
+    "e51c94d82669c96077de113ddcd2b00bf9f23f6c7d951e1522c15b7866725175"
+)
+
+
+def test_q_a_certificate_file_digest_is_never_its_self_identity(tmp_path: Path) -> None:
+    """MAJOR-1: the two digests answer different questions and are different values.
+
+    The file digest identifies the exact BYTES the request sealed; the self-identity identifies
+    the RECORD those bytes decode to. One rendering of a record is not the record.
+    """
+    intermediates, witnesses = _estate(tmp_path)
+    certificate = _certificate(intermediates, witnesses)
+    _path, sealed = _sealed_certificate_file(tmp_path, certificate)
+    assert sealed != certificate.certificate_identity
+    # and for the certificate the owner actually accepted
+    assert HISTORICAL_CERTIFICATE_FILE_SHA256 != HISTORICAL_CERTIFICATE_SELF_IDENTITY
+
+
+def test_q2_provenance_takes_the_file_digest_from_the_sealed_request(tmp_path: Path) -> None:
+    """MAJOR-1: the persisted file digest is the sealed request value, not a re-derivation.
+
+    ``read_successor_compatibility_certificate`` refuses unless the bytes it captured digest to
+    the request's sealed value, so that value IS the digest of the authenticated buffer. The
+    provenance carries exactly it, and carries the self-identity separately.
+    """
+    intermediates, witnesses = _estate(tmp_path)
+    certificate = _certificate(intermediates, witnesses)
+    path, sealed = _sealed_certificate_file(tmp_path, certificate)
+    request = _bridged_request(tmp_path, sealed)
+    parsed = read_successor_compatibility_certificate(path, sealed_sha256=sealed)
+    provenance = _compatibility_provenance(
+        parsed, request=request, repository=_repository(), intermediates=intermediates
+    )
+    assert provenance is not None
+    assert (
+        provenance["compatibility_certificate_sha256"] == request.compatibility_certificate_sha256
+    )
+    assert provenance["compatibility_certificate_identity"] == parsed.certificate_identity
+    assert (
+        provenance["compatibility_certificate_sha256"]
+        != provenance["compatibility_certificate_identity"]
+    )
+
+
+def test_q3_the_file_digest_cannot_be_derived_from_the_certificate_record(tmp_path: Path) -> None:
+    """MAJOR-1: two renderings of ONE record share a self-identity and differ in file digest.
+
+    This is why the file digest must flow from the sealed, authenticated bytes: nothing in the
+    certificate's semantic fields determines it.
+    """
+    intermediates, witnesses = _estate(tmp_path)
+    certificate = _certificate(intermediates, witnesses)
+    compact = tmp_path / "compact.json"
+    compact.write_text(json.dumps(dict(certificate.as_record()), separators=(",", ":")))
+    spaced = tmp_path / "spaced.json"
+    spaced.write_text(json.dumps(dict(certificate.as_record()), indent=2))
+    compact_sha = hashlib.sha256(compact.read_bytes()).hexdigest()
+    spaced_sha = hashlib.sha256(spaced.read_bytes()).hexdigest()
+    assert compact_sha != spaced_sha
+    one = read_successor_compatibility_certificate(compact, sealed_sha256=compact_sha)
+    other = read_successor_compatibility_certificate(spaced, sealed_sha256=spaced_sha)
+    assert one == other
+    # each run persists the digest of the bytes ITS request sealed
+    for path, sha in ((compact, compact_sha), (spaced, spaced_sha)):
+        parsed = read_successor_compatibility_certificate(path, sealed_sha256=sha)
+        provenance = _compatibility_provenance(
+            parsed,
+            request=_bridged_request(tmp_path, sha),
+            repository=_repository(),
+            intermediates=intermediates,
+        )
+        assert provenance is not None
+        assert provenance["compatibility_certificate_sha256"] == sha
+        assert provenance["compatibility_certificate_identity"] == certificate.certificate_identity
+
+
+def test_q4_a_certificate_without_a_sealed_request_digest_refuses(tmp_path: Path) -> None:
+    """MAJOR-1: provenance is never published with a certificate whose digest was never sealed."""
+    intermediates, witnesses = _estate(tmp_path)
+    certificate = _certificate(intermediates, witnesses)
+    with pytest.raises(ChunkMultipassError, match="no sealed digest"):
+        _compatibility_provenance(
+            certificate,
+            request=_request(tmp_path),
+            repository=_repository(),
+            intermediates=intermediates,
+        )
+
+
+def test_q5_the_terminal_result_durably_persists_both_digests(tmp_path: Path) -> None:
+    """MAJOR-1, durability: both keys survive the terminal's canonical write and re-read.
+
+    ``_publish_calibration_result`` seals the result, writes its canonical bytes and reads them
+    back through :func:`read_calibration_subset_result` as its LAST act. This exercises exactly
+    that round trip, so a provenance block that could not be re-read would fail here rather than
+    at the end of a real merge.
+    """
+    intermediates, witnesses = _estate(tmp_path)
+    certificate = _certificate(intermediates, witnesses)
+    _path, sealed = _sealed_certificate_file(tmp_path, certificate)
+    provenance = _compatibility_provenance(
+        certificate,
+        request=_bridged_request(tmp_path, sealed),
+        repository=_repository(),
+        intermediates=intermediates,
+    )
+    bridged = _sealed_result(provenance)
+    path = tmp_path / cm.CALIBRATION_SUBSET_RESULT_FILENAME
+    cm.write_once_canonical_json(path, dict(bridged.as_record()))
+    reread = cm.read_calibration_subset_result(path)
+    assert reread == bridged
+    recorded = reread.compatibility_provenance
+    assert recorded is not None
+    assert recorded["compatibility_certificate_sha256"] == sealed
+    assert recorded["compatibility_certificate_identity"] == certificate.certificate_identity
+    assert sealed != certificate.certificate_identity
+    # the durable record states both revisions, so it can never read as a same-revision run
+    assert recorded["l1_producer_head"] == PRODUCER_HEAD
+    assert recorded["successor_consumer_head"] == CONSUMER_HEAD
+    assert reread.repository_head_sha == CONSUMER_HEAD
+
+
+def test_q6_an_unbridged_terminal_result_keeps_its_pre_bridge_shape(tmp_path: Path) -> None:
+    """An exact-revision terminal carries neither key and keeps its pre-bridge identity."""
+    unbridged = _sealed_result(None)
+    record = dict(unbridged.as_record())
+    assert "compatibility_provenance" not in record
+    path = tmp_path / cm.CALIBRATION_SUBSET_RESULT_FILENAME
+    cm.write_once_canonical_json(path, record)
+    assert cm.read_calibration_subset_result(path) == unbridged
+    bridged = _sealed_result({"compatibility_bridge_id": SUCCESSOR_COMPATIBILITY_BRIDGE_ID})
+    assert unbridged.result_identity != bridged.result_identity
+
+
+# ------------------------------------------ R: R21-E6R3-C1 MAJOR-2, hash and parse one buffer
+def test_r_the_parsed_record_comes_from_the_bytes_that_were_authenticated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-2: a second read of the path can never reach the parser.
+
+    The certificate on disk is authentic and digests to the sealed value. Any attempt to obtain
+    its content through a SECOND read is poisoned here with a different -- but internally
+    self-consistent, so otherwise admissible -- certificate. A reader that hashed one read and
+    parsed another would return the poisoned producer; this one returns the authentic estate,
+    because it hashes and parses the same captured buffer.
+    """
+    intermediates, witnesses = _estate(tmp_path)
+    certificate = _certificate(intermediates, witnesses)
+    path, sealed = _sealed_certificate_file(tmp_path, certificate)
+    poison = json.dumps(
+        dict(_certificate(intermediates, witnesses, producer_head_sha="0" * 40).as_record())
+    ).encode("utf-8")
+    real_read_bytes = Path.read_bytes
+
+    def poisoned(self: Path) -> bytes:
+        return poison if self == path else real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", poisoned)
+    parsed = read_successor_compatibility_certificate(path, sealed_sha256=sealed)
+    assert parsed == certificate
+    assert parsed.producer_head_sha == PRODUCER_HEAD
+
+
+def test_r2_the_certificate_path_is_read_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-2: one open of the certificate, however opened; there is no second window."""
+    intermediates, witnesses = _estate(tmp_path)
+    path, sealed = _sealed_certificate_file(tmp_path, _certificate(intermediates, witnesses))
+    opens: list[str] = []
+    real_os_open = os.open
+    real_path_open = Path.open
+    real_read_bytes = Path.read_bytes
+
+    def counted_os_open(file: Any, *args: Any, **kwargs: Any) -> int:
+        if str(file) == str(path):
+            opens.append("os.open")
+        return real_os_open(file, *args, **kwargs)
+
+    def counted_path_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == path:
+            opens.append("Path.open")
+        return real_path_open(self, *args, **kwargs)
+
+    def counted_read_bytes(self: Path) -> bytes:
+        if self == path:
+            opens.append("Path.read_bytes")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(os, "open", counted_os_open)
+    monkeypatch.setattr(Path, "open", counted_path_open)
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    read_successor_compatibility_certificate(path, sealed_sha256=sealed)
+    assert opens == ["os.open"], opens
+
+
+def test_r3_a_symlinked_certificate_refuses(tmp_path: Path) -> None:
+    """MAJOR-2: the final component is never followed, so a link is refused, not resolved."""
+    intermediates, witnesses = _estate(tmp_path)
+    real, sealed = _sealed_certificate_file(tmp_path, _certificate(intermediates, witnesses))
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    with pytest.raises(ChunkMultipassError, match="symbolic link"):
+        read_successor_compatibility_certificate(link, sealed_sha256=sealed)
+
+
+def test_r4_a_directory_standing_in_for_a_certificate_refuses(tmp_path: Path) -> None:
+    directory = tmp_path / "certificate.json"
+    directory.mkdir()
+    with pytest.raises(ChunkMultipassError, match="regular file"):
+        read_successor_compatibility_certificate(directory, sealed_sha256="0" * 64)
+
+
+def test_r5_undecodable_certificate_bytes_refuse_after_the_digest_passes(tmp_path: Path) -> None:
+    """The captured buffer is what is decoded; bytes that are not UTF-8 refuse, never coerce."""
+    path = tmp_path / "certificate.json"
+    path.write_bytes(bytes([0xFF, 0xFE]) + b" not utf-8")
+    sealed = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ChunkMultipassError, match="not decodable UTF-8"):
+        read_successor_compatibility_certificate(path, sealed_sha256=sealed)

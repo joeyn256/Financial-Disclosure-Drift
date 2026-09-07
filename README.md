@@ -300,9 +300,9 @@ A failure is useful only if the system preserves enough evidence to explain it.
 
 ## Tech stack
 
-**Core:** Python 3.12, SQLite, Pydantic, PyYAML, argparse  
-**Quality:** pytest, pytest-xdist, mypy, Ruff, GitHub Actions  
-**Data / systems:** SEC EDGAR source data, deterministic JSON/JSONL evidence, SQLite WAL instrumentation, external-SSD execution  
+**Core:** Python 3.12, SQLite, Pydantic, PyYAML, argparse
+**Quality:** pytest, pytest-xdist, mypy, Ruff, GitHub Actions
+**Data / systems:** SEC EDGAR source data, deterministic JSON/JSONL evidence, SQLite WAL instrumentation, external-SSD execution
 **Engineering workflow:** Git, GitHub, Claude Code, ChatGPT, OpenClaw, Tailscale
 
 ---

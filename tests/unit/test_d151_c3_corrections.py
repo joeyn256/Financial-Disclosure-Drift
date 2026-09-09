@@ -32,6 +32,7 @@ import sqlite3
 import subprocess
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -161,53 +162,93 @@ def edit_receipt(path: Path, mutate: Any) -> None:
 # ==========================================================================
 # MAJOR-1: R01-R06, A01-A05
 # ==========================================================================
+def refuse_at_admission(run: Any, database: Path) -> Path:
+    """Consolidate a blocking chunk set: refused at admission, and no world exists afterwards.
+
+    Decision 151 Boundary 2 (FailFast-D) moved the refusal of a failed chunk from the accepted
+    D140-R12 gate at the END of the merge -- where D151-C3 MAJOR-1 placed it, over a world that
+    had already been built -- to admission, BEFORE the world directory, the attach, the load and
+    the merge exist. The gate is still there and is still load-bearing (R06 below reaches it
+    through an injected failed reduction); a failed chunk simply never gets that far.
+    """
+    world = run["base"] / "final"
+    with pytest.raises(cc.ChunkConsolidationError, match="BLOCKING parser terminal") as raised:
+        consolidate(run, database)
+    assert "status 'complete' is artifact completion" in str(raised.value)
+    assert not world.exists()
+    return world
+
+
+def inject_failed_reduction(patch: pytest.MonkeyPatch) -> None:
+    """Make the consolidator's reduced run reach ``failed`` over HEALTHY inputs.
+
+    The accepted reduction runs unchanged and writes its row; the row's outcome is then moved to
+    ``failed`` inside the same transaction and the returned reduction says so. That is the only
+    way a blocking reduced run can reach the consolidator's gate since Decision 151: a failed
+    chunk is refused at admission, so the gate's own proof needs a failed reduction that admission
+    could not have seen.
+    """
+    original = cc._reduced_parser_run
+
+    def failed(
+        connection: Any, aliases: Any, *, contract: Any, statement_runner: Any = None
+    ) -> Any:
+        reduced = original(
+            connection, aliases, contract=contract, statement_runner=statement_runner
+        )
+        connection.execute(
+            "UPDATE census_parser_runs SET outcome = 'failed' WHERE parser_run_id = ?",
+            (reduced.parser_run_id,),
+        )
+        return replace(reduced, outcome="failed", parser_state="failed")
+
+    patch.setattr(cc, "_reduced_parser_run", failed)
+
+
 def test_r01_a_failed_reduced_f0_cannot_mark_the_source_parsed(tmp_path: Path) -> None:
-    """R01/A01/A04: the run-local ledger never reaches ``parsed`` for a blocking terminal."""
+    """R01/A01/A04: a blocking chunk never marks anything parsed -- it never merges at all.
+
+    The failed chunks stay exactly where they are: resolvable read-only through the accepted
+    resolution, their receipts ``complete`` (artifact completion), their manifest-bound run rows
+    ``failed`` and readable through the Decision 151 semantics reader, and nothing derived from
+    them exists.
+    """
     database, tree = blocking_world(tmp_path)
     run = run_chunks(tmp_path, database, tree)
-    world = run["base"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        consolidate(run, database)
-    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
-    try:
-        progress = ledger.progress(c1.INSTANCE)
-        assert progress is not None
-        assert progress.state == "in_progress"
-        assert progress.state != "parsed"
-    finally:
-        ledger.close()
-    # And the durable rows are still there, for diagnosis. Nothing was cleaned or deleted.
-    with connect(world / WORKING_CATALOG_FILENAME, writer=False) as connection:
-        counts = ce.table_row_counts(connection)
-        state = connection.execute(
-            "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
-            (c1.INSTANCE,),
-        ).fetchone()
-    assert counts["census_parsed_records"] > 0
-    assert str(state["parser_state"]) == "failed"
+    world = refuse_at_admission(run, database)
+    assert not (world / PROGRESS_LEDGER_FILENAME).exists()
+    inputs = cc.resolve_chunk_inputs(run["plan"], internal_root=run["chunk_root"])
+    semantics = [cc.chunk_semantics(item) for item in inputs]
+    failed = [item for item in semantics if item.blocking]
+    assert failed and all(item.run_outcome == "failed" for item in failed)
+    assert all(item.receipt.status == "complete" for item in inputs)
+    # The chunk worlds themselves are untouched: every receipt still verifies.
+    for item in inputs:
+        assert ce.completed_chunk_receipt(run["chunk_root"], item.chunk_id) is not None
 
 
 def test_r02_a_failed_reduced_f0_writes_no_f0_checkpoint(tmp_path: Path) -> None:
     """R02/A02: no durable F0 terminal exists, so nothing can be continued from it."""
     database, tree = blocking_world(tmp_path)
     run = run_chunks(tmp_path, database, tree)
-    world = run["base"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        consolidate(run, database)
-    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
-    try:
-        assert read_phase_checkpoint(ledger, PHASE_F0) is None
-    finally:
-        ledger.close()
+    world = refuse_at_admission(run, database)
+    assert not (world / PROGRESS_LEDGER_FILENAME).exists()
+    # Nor does any chunk world carry one: a chunk establishes no source-level terminal.
+    for bounds in run["plan"].chunks:
+        found = ce.completed_chunk_receipt(run["chunk_root"], bounds.chunk_id)
+        assert found is not None
+        ledger = RunProgressLedger(found[1] / PROGRESS_LEDGER_FILENAME)
+        try:
+            assert read_phase_checkpoint(ledger, PHASE_F0) is None
+        finally:
+            ledger.close()
 
 
 def test_r03_a_failed_reduced_f0_has_no_valid_final_receipt(tmp_path: Path) -> None:
     """R03: an absent terminal receipt is the refusal, not a gap."""
     database, tree = blocking_world(tmp_path)
     run = run_chunks(tmp_path, database, tree)
-    world = run["base"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        consolidate(run, database)
+    world = refuse_at_admission(run, database)
     assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
     with pytest.raises(ChunkEvidenceError, match="no receipt exists"):
         read_receipt_document(
@@ -216,13 +257,18 @@ def test_r03_a_failed_reduced_f0_has_no_valid_final_receipt(tmp_path: Path) -> N
 
 
 def test_r04_a05_a_failed_reduced_f0_cannot_admit_f1(tmp_path: Path) -> None:
-    """R04/A05: the accepted admission rule refuses the refused world, for the accepted reason."""
+    """R04/A05: nothing F1 could admit exists, and the accepted rule refuses for its reason.
+
+    There is no consolidated world to lay a ledger in, so the accepted admission rule is asked
+    over a fresh, test-owned ledger that carries exactly what a refused run left F1: no source
+    row and no F0 checkpoint.
+    """
     database, tree = blocking_world(tmp_path)
     run = run_chunks(tmp_path, database, tree)
-    world = run["base"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        consolidate(run, database)
-    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
+    world = refuse_at_admission(run, database)
+    assert not world.exists()
+    (tmp_path / "no-world").mkdir()
+    ledger = RunProgressLedger(tmp_path / "no-world" / PROGRESS_LEDGER_FILENAME)
     try:
         with pytest.raises(CanaryPhaseError, match="no durable terminal checkpoint"):
             require_phase_admission(
@@ -261,24 +307,46 @@ def test_r05_a_successful_reduced_f0_still_writes_the_accepted_terminal(tmp_path
 
 
 def test_r06_the_accepted_require_f0_success_is_load_bearing(tmp_path: Path) -> None:
-    """R06/M1: with the accepted predicate neutralised, the blocking run completes.
+    """R06/M1: with the accepted predicate neutralised, a blocking reduced run completes.
 
-    This is the mutation stated as a test: the consolidator's refusal comes from the accepted
-    gate and from nowhere else. Neutralise that one call and a world that must never be reported
-    as complete is reported as complete -- which is the D139 finding D140-R12 exists to close,
-    reappearing on the chunked path.
+    This is the mutation stated as a test: the consolidator's END-of-merge refusal comes from
+    the accepted gate and from nowhere else. Since Decision 151 a failed CHUNK never reaches the
+    gate (Boundary 2 refuses it at admission), so the blocking reduced run is injected over
+    healthy inputs; neutralise the one gate call and a world that must never be reported as
+    complete is reported as complete -- the D139 finding D140-R12 exists to close.
     """
-    database, tree = blocking_world(tmp_path)
+    database, tree = healthy_world(tmp_path)
     run = run_chunks(tmp_path, database, tree)
     with pytest.MonkeyPatch.context() as patch:
+        inject_failed_reduction(patch)
         patch.setattr(cc, "require_f0_success", lambda outcome: outcome)
         bypassed = consolidate(run, database)
     assert bypassed.receipt.status == "complete"
     assert bypassed.receipt.parser_state_after == "failed"
-    # ... and with it in place, the same world is refused.
-    second = run_chunks(tmp_path, database, tree, label="again")
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        consolidate(second, database, run_id="c3-again")
+    # ... and with the gate in place, the same injected reduction is refused AFTER the merge:
+    # the world's durable diagnostic rows are there, its ledger never reached ``parsed``, and no
+    # checkpoint and no receipt exist -- the accepted monolithic diagnostic state.
+    world = run["base"] / "final-guarded"
+    with pytest.MonkeyPatch.context() as patch:
+        inject_failed_reduction(patch)
+        with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+            consolidate(run, database, suffix="-guarded", run_id="c3-guarded")
+    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
+    try:
+        progress = ledger.progress(c1.INSTANCE)
+        assert progress is not None and progress.state == "in_progress"
+        assert read_phase_checkpoint(ledger, PHASE_F0) is None
+    finally:
+        ledger.close()
+    with connect(world / WORKING_CATALOG_FILENAME, writer=False) as connection:
+        counts = ce.table_row_counts(connection)
+        state = connection.execute(
+            "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
+            (c1.INSTANCE,),
+        ).fetchone()
+    assert counts["census_parsed_records"] > 0
+    assert str(state["parser_state"]) == "failed"
+    assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
 
 
 def test_a03_a_caller_cannot_declare_the_parser_state(tmp_path: Path) -> None:

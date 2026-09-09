@@ -38,6 +38,17 @@ columns of differing length       ``malformed``      unknown
 Only the first two permit a record count to be believed. Every other state carries a
 release-blocking reason code, retains the raw payload and the exact field location,
 and therefore prevents required-source success and census completion.
+
+**The current company name is data quality, not document identity (parser 1.3, Decision
+151 R1/R2).** A document's identity is its CIK. A canonically usable CIK with a current
+``name`` that is absent, null, not a string, or blank after stripping is a *company-name
+data-quality defect*: the registrant is persisted by CIK, the deficient value is quarantined
+FIELD-LEVEL at ``record_path="name"`` under ``PARSER_REGISTRANT_NAME_DEFICIENT`` (review
+required, non-blocking) with the deficiency class in its detail, no ``company_name``
+observation is emitted for it, ``formerNames`` never becomes the current name, and
+``filings``, ``filings.recent`` and ``filings.files`` are evaluated on their own supplied
+values exactly as they would be for a named registrant. An unusable CIK remains blocking and
+is treated structurally, as before; a name defect beside an unusable CIK rescues nothing.
 """
 
 from __future__ import annotations
@@ -63,22 +74,53 @@ __all__ = [
     "ACCESSION_ARRAY_FIELDS",
     "HISTORICAL_FILE_NAME_PATTERN",
     "KNOWN_OPTIONAL_RECENT_FIELDS",
+    "NAME_DEFICIENCY_ABSENT",
+    "NAME_DEFICIENCY_BLANK",
+    "NAME_DEFICIENCY_CLASSES",
+    "NAME_DEFICIENCY_NON_STRING",
+    "NAME_DEFICIENCY_NULL",
     "PARSER_ID",
     "PARSER_VERSION",
     "RECOGNIZED_RECENT_FIELDS",
     "REGION_FILES",
     "REGION_FILINGS",
+    "REGION_NAME",
     "REGION_RECENT",
+    "REGISTRANT_NAME_DEFICIENT_REASON",
     "HistoricalFileReference",
+    "classify_current_name",
     "parse_submissions_document",
 ]
 
 PARSER_ID: Final = "submissions-json"
-PARSER_VERSION: Final = "submissions-json/1.2"
+#: ``submissions-json/1.3`` -- Decision 151 R3. Version 1.2 treated a missing or blank current
+#: name as document-fatal (a blocking ``SEC_SCHEMA_REQUIRED_FIELD_MISSING`` quarantine of the
+#: whole document with indeterminate regions); 1.3 treats it as a field-level, non-blocking
+#: company-name data-quality defect. The emitted semantics moved, so the version moves with
+#: them: 1.2 output is never presented as 1.3 output and no compatibility bridge exists.
+PARSER_VERSION: Final = "submissions-json/1.3"
 
 REGION_FILINGS: Final = "filings"
 REGION_RECENT: Final = "filings.recent"
 REGION_FILES: Final = "filings.files"
+#: The field-level quarantine location of a deficient current company name -- Decision 151 R2.
+REGION_NAME: Final = "name"
+
+#: The one registered reason a deficient current name carries (Decision 151 §5): integrity,
+#: review required, NOT release-blocking. Never ``SEC_SCHEMA_REQUIRED_FIELD_MISSING``.
+REGISTRANT_NAME_DEFICIENT_REASON: Final = "PARSER_REGISTRANT_NAME_DEFICIENT"
+
+NAME_DEFICIENCY_ABSENT: Final = "absent"
+NAME_DEFICIENCY_NULL: Final = "null"
+NAME_DEFICIENCY_NON_STRING: Final = "non_string"
+NAME_DEFICIENCY_BLANK: Final = "blank"
+#: The four current-name deficiency classes, kept distinct in every quarantine detail.
+NAME_DEFICIENCY_CLASSES: Final[tuple[str, ...]] = (
+    NAME_DEFICIENCY_ABSENT,
+    NAME_DEFICIENCY_NULL,
+    NAME_DEFICIENCY_NON_STRING,
+    NAME_DEFICIENCY_BLANK,
+)
 
 HISTORICAL_FILE_NAME_PATTERN: Final = re.compile(r"^CIK[0-9]{10}-submissions-[0-9]{3}\.json$")
 """The only shape a historical submissions reference name may take.
@@ -111,10 +153,15 @@ _FLAG_KNOWN_KEYS: Final[frozenset[str]] = frozenset()
 
 _REQUIRED_TOP_LEVEL: Final[Mapping[str, type | tuple[type, ...]]] = {
     "cik": (str, int),
-    "name": str,
     "filings": dict,
 }
 _OPTIONAL_TOP_LEVEL: Final[tuple[str, ...]] = (
+    # ``name`` is a KNOWN, non-required top-level field since parser 1.3 (Decision 151 §4 A).
+    # Registering it here keeps an ordinary name AND a deficient one out of unknown-field
+    # drift, and keeps a missing, null or non-string name from being blocked by
+    # :func:`inspect_payload` before :func:`classify_current_name` sees it. Removing it from the
+    # required set alone would have reported every document's ``name`` as retained drift.
+    "name",
     "entityType",
     "sic",
     "sicDescription",
@@ -352,12 +399,13 @@ def parse_submissions_document(
 
     warnings: list[str] = []
     cik_padded = _normalized_cik(payload.get("cik"), warnings)
-    if cik_padded is None or not str(payload.get("name") or "").strip():
-        identity_failures: list[tuple[str, str]] = []
-        if cik_padded is None:
-            identity_failures.append(("cik", "CIK is not canonically usable"))
-        if not str(payload.get("name") or "").strip():
-            identity_failures.append(("name", "registrant name is empty"))
+    if cik_padded is None:
+        # Decision 151 §4 B: the CIK is the document's identity and an unusable one is still
+        # document-fatal and structural. It is decided alone -- a concurrent name defect neither
+        # rescues it nor suppresses it, and it is reported below the CIK refusal rather than
+        # folded into it.
+        identity_failures = (("cik", "CIK is not canonically usable"),)
+        rendered = "; ".join(f"{field}: {detail}" for field, detail in identity_failures)
         return (
             ParseOutcome(
                 parser_id=PARSER_ID,
@@ -368,27 +416,37 @@ def parse_submissions_document(
                         parser_id=PARSER_ID,
                         parser_version=PARSER_VERSION,
                         reason_codes=("SEC_SCHEMA_REQUIRED_FIELD_MISSING",),
-                        detail="; ".join(
-                            f"{field}: {detail}" for field, detail in identity_failures
-                        ),
+                        detail=rendered,
                         raw_excerpt=_excerpt(payload),
                     ),
                 ),
-                required_field_failures=tuple(identity_failures),
+                required_field_failures=identity_failures,
                 unknown_fields=drift.retained_unknown_fields,
                 normalization_warnings=tuple(warnings),
                 drift_reports=(drift,),
-                structural=_regions_when_document_unusable(
-                    payload,
-                    location,
-                    "; ".join(f"{field}: {detail}" for field, detail in identity_failures),
-                ),
+                structural=_regions_when_document_unusable(payload, location, rendered),
             ),
             (),
         )
+    # Decision 151 §4 C-D: the current name is classified by key membership and by its actual
+    # type and value -- never by truthiness and never through ``str()`` -- and a deficient one
+    # is a field-level, non-blocking quarantine beside an otherwise ordinary parse.
+    _usable_name, deficiency = classify_current_name(payload)
+    name_quarantine: tuple[QuarantinedRecord, ...] = ()
+    if deficiency is not None:
+        name_quarantine = (_name_deficiency_quarantine(payload, location, cik_padded, deficiency),)
+        warnings.append(
+            f"name: the current company name is {deficiency}; it is omitted from the registrant "
+            f"record (no company_name observation) and quarantined at record_path "
+            f"{REGION_NAME!r} under {REGISTRANT_NAME_DEFICIENT_REASON}"
+        )
     nested_unknown = _nested_unknown_paths(payload)
     all_unknown = tuple(sorted({*drift.retained_unknown_fields, *nested_unknown}))
-    registrant = _registrant_record(payload, location, cik_padded, all_unknown, warnings)
+    registrant = _registrant_record(
+        payload, location, cik_padded, all_unknown, warnings, omit_name=deficiency is not None
+    )
+    # Decision 151 §4 E: the nested regions are read from their actual supplied values whether
+    # or not the name was deficient; nothing here routes through the unusable-document path.
     block = _accession_records(payload, location, cik_padded)
     references, reference_rejects, files_structural = _historical_references(
         payload, location, cik_padded
@@ -399,7 +457,7 @@ def parse_submissions_document(
         parser_id=PARSER_ID,
         parser_version=PARSER_VERSION,
         records=(registrant, *block.records),
-        quarantined=(*block.quarantined, *reference_rejects),
+        quarantined=(*name_quarantine, *block.quarantined, *reference_rejects),
         duplicate_identities=count_duplicates(identities),
         unknown_fields=all_unknown,
         normalization_warnings=tuple(warnings),
@@ -407,6 +465,79 @@ def parse_submissions_document(
         structural=(*block.structural, *files_structural),
     )
     return outcome, references
+
+
+def classify_current_name(payload: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Classify a document's current ``name`` -- Decision 151 §4 C.
+
+    Returns ``(usable_name, deficiency_class)``: exactly one of the two is ``None``. The four
+    deficiency classes are decided in this order and kept apart:
+
+    * :data:`NAME_DEFICIENCY_ABSENT` -- the ``name`` key is not in the document at all;
+    * :data:`NAME_DEFICIENCY_NULL` -- the key is present and its value is JSON ``null``;
+    * :data:`NAME_DEFICIENCY_NON_STRING` -- the value is present and is not a string (a
+      number, a Boolean, a list, an object);
+    * :data:`NAME_DEFICIENCY_BLANK` -- the value is a string that is empty after stripping.
+
+    Membership, ``isinstance`` and ``str.strip`` are the only tests. Truthiness would collapse
+    ``0``, ``False``, ``[]`` and ``""`` into one class and ``str(value)`` would turn a number into
+    a "name"; neither is used, so a non-string can never validate and the classes never merge.
+    """
+    if "name" not in payload:
+        return None, NAME_DEFICIENCY_ABSENT
+    value = payload["name"]
+    if value is None:
+        return None, NAME_DEFICIENCY_NULL
+    if not isinstance(value, str):
+        return None, NAME_DEFICIENCY_NON_STRING
+    if not value.strip():
+        return None, NAME_DEFICIENCY_BLANK
+    return value, None
+
+
+def _name_deficiency_quarantine(
+    payload: Mapping[str, Any],
+    location: RecordLocation,
+    cik_padded: str,
+    deficiency: str,
+) -> QuarantinedRecord:
+    """The one field-level quarantine a deficient current name receives -- Decision 151 R2.
+
+    Located at ``record_path="name"`` and bound to the registrant by CIK. The detail names the
+    class and, for a present value, what was actually observed; the raw excerpt retains the
+    observed value verbatim (there is nothing to retain for an absent key). No name is
+    synthesized, no placeholder is written, and ``formerNames`` is never consulted.
+    """
+    identity = f"registrant:{cik_padded}"
+    if deficiency == NAME_DEFICIENCY_ABSENT:
+        observed_text = "the document carries no 'name' key"
+        excerpt = ""
+    else:
+        observed = payload["name"]
+        excerpt = _excerpt_value(observed)
+        if deficiency == NAME_DEFICIENCY_NULL:
+            observed_text = "'name' is present and null"
+        elif deficiency == NAME_DEFICIENCY_NON_STRING:
+            observed_text = f"'name' is a {type(observed).__name__}, not a string"
+        else:
+            observed_text = (
+                f"'name' is a string of {len(observed)} character(s) that is blank after "
+                "stripping whitespace"
+            )
+    return QuarantinedRecord(
+        location=_region_location(location, REGION_NAME),
+        parser_id=PARSER_ID,
+        parser_version=PARSER_VERSION,
+        reason_codes=(REGISTRANT_NAME_DEFICIENT_REASON,),
+        detail=(
+            f"current company name is {deficiency}: {observed_text}. Registrant identity is "
+            f"carried by CIK {cik_padded}; no company_name observation is emitted, no former "
+            "name substitutes for the current one, and the filing structure is evaluated on "
+            "its own values"
+        ),
+        raw_excerpt=excerpt,
+        native_identity=identity,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -418,14 +549,24 @@ def _registrant_record(
     cik_padded: str | None,
     unknown_fields: tuple[str, ...],
     warnings: list[str],
+    *,
+    omit_name: bool = False,
 ) -> ParsedRecord:
     """Build the source-native registrant record.
 
     Alias fields are copied verbatim. Tickers and exchanges are alias evidence for
     this CIK only: they never link one CIK to another.
+
+    ``omit_name`` is set for a deficient current name (Decision 151 §4 D): the registrant record
+    then carries no ``name`` at all, which is what keeps the census from materializing a
+    ``company_name`` observation out of a null, a number, or a blank string. The observed value
+    is not lost -- it is retained verbatim on the field-level quarantine record -- and nothing is
+    put in its place. ``formerNames`` stays exactly as the source declared it.
     """
     native = dict(payload)
     native.pop("filings", None)
+    if omit_name:
+        native.pop("name", None)
     former = payload.get("formerNames")
     if former is not None and not isinstance(former, list):
         warnings.append("formerNames was not a list; the raw value is retained as-is")

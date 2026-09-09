@@ -240,6 +240,29 @@ def test_x06_the_gate_cannot_be_bypassed_and_the_final_record_is_published_last(
     monkeypatch.setattr(cm, "require_f0_success", blocking)
     with pytest.raises(SingleSourceCanaryError, match="blocking terminal"):
         cm.run_successor_multipass_final(r19.production_request(estate))
+    # Decision 151 Boundary 4: the SAME accepted predicate is consulted over the committed S2
+    # reduced run before any statement of S3 begins, so an unconditional refusal stops the spine
+    # at S2 and publishes a create-once semantic-refusal record; nothing of S3 was executed.
+    assert r19.stage_ids(estate.catalog)[-1] == "S2"
+    refusals = sorted(
+        path.name for path in estate.receipt_root.iterdir() if path.name.startswith("semantic-")
+    )
+    assert refusals == ["semantic-refusal-S3-attempt-000.json"]
+    refusal = json.loads((estate.receipt_root / refusals[0]).read_text(encoding="utf-8"))
+    assert refusal["contract"] == cm.L2_SEMANTIC_REFUSAL_CONTRACT
+    assert refusal["refused_stage_id"] == "S3" and refusal["s3_statements_begun"] == 0
+
+    def blocking_at_s19(outcome: Any) -> Any:
+        # The Boundary 4 outcome carries no sidecar totals yet (S18 has not run); the complete
+        # S19 outcome does. Admitting the former and refusing the latter reaches the S19 gate.
+        if outcome.members > 0:
+            message = "injected blocking terminal"
+            raise SingleSourceCanaryError(message)
+        return outcome
+
+    monkeypatch.setattr(cm, "require_f0_success", blocking_at_s19)
+    with pytest.raises(SingleSourceCanaryError, match="blocking terminal"):
+        cm.run_successor_multipass_final(r19.production_request(estate))
     assert r19.stage_ids(estate.catalog)[-1] == "S18"
     assert not (estate.world / FINAL_WORLD_RECEIPT_FILENAME).exists()
     ledger = RunProgressLedger(estate.world / PROGRESS_LEDGER_FILENAME)

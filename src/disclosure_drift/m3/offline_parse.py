@@ -1152,6 +1152,30 @@ def _primary_document_declarations(payload: bytes) -> tuple[str | None, tuple[st
     work, and repeating it here would make the preflight cost what the run costs. The *rule* is
     not restated -- resolution goes through :func:`_resolve_shard_parent` exactly as F0's does;
     only the extraction is narrowed to the two fields that rule reads.
+
+    **Declaration consistency with the parser -- Decision 151 MAJOR-1, stated exactly.** Within
+    the cheap eligibility predicates this extractor checks -- a decodable JSON object, a
+    canonically usable ``cik``, ``filings`` an object, ``filings.files`` a list, each entry an
+    object whose ``name`` strips to a non-empty string that the archive actually carries -- a
+    primary the parser refuses is never certified as a governed parent, and a primary the
+    parser accepts declares here exactly what
+    :func:`~disclosure_drift.sec.parsers.submissions.parse_submissions_document` returns as
+    references. Under parser 1.3 that includes every valid-CIK document whose current ``name``
+    is absent, null, non-string or blank: the parser treats the name as a field-level
+    non-blocking defect and still returns its ``filings.files`` references, so extractor and
+    parser agree (under 1.2 they did not: the parser refused the whole document and declared
+    nothing while this extractor declared its shards). An unusable ``cik`` refuses on both
+    sides, and a non-object ``filings`` declares nothing on both sides.
+
+    **The one residual, named rather than hidden.** This extractor does not evaluate the
+    top-level array shapes (``tickers``, ``exchanges``, ``formerNames``), which the parser
+    refuses document-wide as ``malformed_nested_array`` when present and not a list. A primary
+    whose only document-fatal defect is such an array is therefore declared here and refused
+    by the parser. That residual cannot reach a merged world: F0 builds its parent map from the
+    parser's own references, so the shard such a primary "declared" arrives at
+    :func:`_resolve_shard_parent` undeclared and the traversal (or the shard chunk, before it
+    parses one member) refuses it. Planning declarations are provisional; the parser's actual
+    outcome is what merge admission consumes.
     """
     try:
         document = json.loads(payload)

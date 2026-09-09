@@ -219,7 +219,9 @@ from disclosure_drift.m3.chunk_consolidation import (
     STATEMENT_KIND_EXECUTE,
     STATEMENT_KIND_FETCHALL,
     STATEMENT_KIND_ITERATE,
+    ChunkConsolidationError,
     ChunkInput,
+    ChunkSemantics,
     FinalWorldReceipt,
     _accepted_plan_state,
     _AcceptedPlanState,
@@ -238,8 +240,10 @@ from disclosure_drift.m3.chunk_consolidation import (
     _ReducedRun,
     _sorted_bulk_load,
     _union_all,
+    chunk_semantics,
     derived_f0_outcome,
     derived_f0_payload,
+    require_admissible_chunk_semantics,
     require_attachable,
     resolve_chunk_inputs,
     resolve_contiguous_chunk_inputs,
@@ -339,12 +343,19 @@ from disclosure_drift.m3.compact_evidence import (
     materialized_fields,
     reconstructed_observations,
 )
-from disclosure_drift.m3.offline_parse import SingleSourceOutcome, write_containment
+from disclosure_drift.m3.offline_parse import (
+    _STREAMED_PARSER_STATE,
+    SingleSourceOutcome,
+    write_containment,
+)
 from disclosure_drift.m3.repository_identity import (
     RepositoryIdentity,
     require_clean_running_repository,
 )
 from disclosure_drift.m3.single_source_canary import (
+    BLOCKING_PARSER_STATES,
+    BLOCKING_SOURCE_DISPOSITIONS,
+    SingleSourceCanaryError,
     phase_execution_identity,
     require_f0_success,
 )
@@ -397,6 +408,8 @@ __all__ = [
     "INTERMEDIATE_RECEIPT_CONTRACT",
     "INTERMEDIATE_RECEIPT_FILENAME",
     "INTERMEDIATE_WITNESS_FILENAME",
+    "LEGACY_INTERMEDIATE_RECEIPT_CONTRACT",
+    "L2_SEMANTIC_REFUSAL_CONTRACT",
     "L2_APPLIED_UNIT_CONTRACT",
     "L2_APPLIED_UNITS_TABLE",
     "L2_CONNECTION_STATE_CONTRACT",
@@ -450,6 +463,7 @@ __all__ = [
     "GroupRequestProvenance",
     "IntermediateInput",
     "IntermediateReceipt",
+    "LegacyIntermediateReceipt",
     "L2Stage",
     "L2StagePlan",
     "MergeGroup",
@@ -486,9 +500,11 @@ __all__ = [
     "read_calibration_group_checkpoint",
     "read_calibration_group_deletion",
     "read_calibration_subset_result",
+    "read_legacy_intermediate_receipt",
     "read_observability_closeout",
     "read_stage_receipt",
     "read_successor_compatibility_certificate",
+    "require_admissible_intermediate_semantics",
     "require_executable_level_two_cache_bytes",
     "require_multipass_plan",
     "require_r21_observability_ready",
@@ -527,8 +543,24 @@ class ChunkMultipassError(DisclosureDriftError):
 #: The merge schedule's own contract identity, folded into every schedule digest.
 MERGE_SCHEDULE_CONTRACT: Final = "m3.3-chunked-f0-merge-schedule/1"
 
-#: The level-1 intermediate receipt's contract identity -- D151-C13 §8.
-INTERMEDIATE_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-intermediate-receipt/1"
+#: The level-1 intermediate receipt's contract identity -- D151-C13 §8, moved to ``/2`` by
+#: Decision 151 Boundary 3. A ``/2`` receipt carries the merge's own OBSERVED semantics
+#: (``observed_run_outcome``, ``observed_quarantined``, ``observed_blocking_structural``,
+#: ``inputs_reached_blocking_terminal``) as mandatory, consistency-checked fields; ordinary
+#: continuation, calibration and deletion admit ``/2`` only. This literal is folded into the
+#: reduced witness-ledger digest (:func:`_merge_group_evidence`), so ``witness_ledger_identity``
+#: moves for every NEW write by design -- expected provenance movement, not a migration.
+INTERMEDIATE_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-intermediate-receipt/2"
+
+#: The historical ``/1`` intermediate receipt, readable ONLY through
+#: :func:`read_legacy_intermediate_receipt` for forensics. It is never executed, never bridged
+#: and never converted: a ``/1`` document records no observed semantics, and none are invented.
+LEGACY_INTERMEDIATE_RECEIPT_CONTRACT: Final = "m3.3-chunked-f0-intermediate-receipt/1"
+
+#: The level-2 semantic refusal record's contract -- Decision 151 Boundary 4. Written
+#: create-once into the stage receipt root when the committed, authenticated S2 reduced run is
+#: a blocking terminal, BEFORE any statement of a later stage begins.
+L2_SEMANTIC_REFUSAL_CONTRACT: Final = "m3.3-chunked-f0-l2-semantic-refusal/1"
 
 #: The multipass consolidator's own contract identity, recorded on the final receipt beside the
 #: accepted final-receipt contract so a reader can tell HOW the world was built.
@@ -1303,6 +1335,22 @@ class IntermediateReceipt:
     the reduced witness ledger's identity, the compact evidence's identity, the resulting
     catalog's byte identity and what it counted. ``parser_state_after`` is deliberately absent:
     an intermediate establishes no source-level terminal.
+
+    **Since ``/2`` (Decision 151 Boundary 3) it also carries what the merge OBSERVED**, measured
+    in the merging process rather than copied from any claim:
+
+    * ``observed_run_outcome`` -- the reduced parser-run row this intermediate's own catalog
+      holds (``failed`` / ``completed_with_quarantine`` / ``completed``);
+    * ``observed_quarantined`` -- that row's quarantined count, the sum over the inputs;
+    * ``observed_blocking_structural`` -- the summed blocking structural count the reduction
+      decided the outcome from;
+    * ``inputs_reached_blocking_terminal`` -- whether any admitted input chunk's manifest-bound
+      parser-run row mapped to a state in ``BLOCKING_PARSER_STATES``.
+
+    The four are held to one another on every read (:func:`_validate_observed_semantics`) and
+    to the inputs at write time; a positive quarantined count alone is never blocking. A
+    receipt's ``status`` ``"complete"`` remains artifact completion -- the merge finished and
+    its artifacts are bound -- and says nothing about parser success on its own.
     """
 
     contract: str
@@ -1339,6 +1387,10 @@ class IntermediateReceipt:
     first_witness_rows_staged: int
     evidence_members_corrected: int
     evidence_delta: int
+    observed_run_outcome: str
+    observed_quarantined: int
+    observed_blocking_structural: int
+    inputs_reached_blocking_terminal: bool
     storage_admission: Mapping[str, object]
     earliest_input_started_at_utc: str
     attempt: int
@@ -1348,6 +1400,26 @@ class IntermediateReceipt:
     completed_at_utc: str
     manifest: ArtifactManifest
     status: str
+
+    @property
+    def observed_parser_state(self) -> str:
+        """The observed outcome through the accepted mapping; a refusal for an unknown one."""
+        _validate_observed_semantics(
+            outcome=self.observed_run_outcome,
+            quarantined=self.observed_quarantined,
+            blocking_structural=self.observed_blocking_structural,
+            inputs_reached_blocking_terminal=self.inputs_reached_blocking_terminal,
+            label=f"intermediate {self.group_id!r}",
+        )
+        return _STREAMED_PARSER_STATE[self.observed_run_outcome]
+
+    @property
+    def blocking(self) -> bool:
+        """Whether this intermediate's observed semantics are a blocking terminal."""
+        return (
+            self.inputs_reached_blocking_terminal
+            or self.observed_parser_state in BLOCKING_PARSER_STATES
+        )
 
     def as_record(self) -> Mapping[str, object]:
         """The complete receipt as a plain mapping, carrying no absolute path."""
@@ -1386,6 +1458,10 @@ class IntermediateReceipt:
             "first_witness_rows_staged": self.first_witness_rows_staged,
             "evidence_members_corrected": self.evidence_members_corrected,
             "evidence_delta": self.evidence_delta,
+            "observed_run_outcome": self.observed_run_outcome,
+            "observed_quarantined": self.observed_quarantined,
+            "observed_blocking_structural": self.observed_blocking_structural,
+            "inputs_reached_blocking_terminal": self.inputs_reached_blocking_terminal,
             "storage_admission": dict(self.storage_admission),
             "earliest_input_started_at_utc": self.earliest_input_started_at_utc,
             "attempt": self.attempt,
@@ -1423,6 +1499,26 @@ class IntermediateReceipt:
                 )
                 raise ChunkMultipassError(message)
             peak = record.get("rss_peak_bytes")
+            # Decision 151 Boundary 3: the four observed-semantics fields are MANDATORY and are
+            # held to one another before a receipt object exists. A ``/1`` document lacks them
+            # and is refused here by KeyError -- it is never widened into an admissible ``/2``.
+            observed_run_outcome = str(record["observed_run_outcome"])
+            observed_quarantined = _stored_int(
+                record["observed_quarantined"], "observed_quarantined"
+            )
+            observed_blocking = _stored_int(
+                record["observed_blocking_structural"], "observed_blocking_structural"
+            )
+            inputs_blocking = _stored_bool(
+                record["inputs_reached_blocking_terminal"], "inputs_reached_blocking_terminal"
+            )
+            _validate_observed_semantics(
+                outcome=observed_run_outcome,
+                quarantined=observed_quarantined,
+                blocking_structural=observed_blocking,
+                inputs_reached_blocking_terminal=inputs_blocking,
+                label=f"intermediate {record.get('group_id')!r}",
+            )
             return cls(
                 contract=str(record["contract"]),
                 plan_digest=str(record["plan_digest"]),
@@ -1479,6 +1575,10 @@ class IntermediateReceipt:
                     record["evidence_members_corrected"], "evidence_members_corrected"
                 ),
                 evidence_delta=_stored_int(record["evidence_delta"], "evidence_delta"),
+                observed_run_outcome=observed_run_outcome,
+                observed_quarantined=observed_quarantined,
+                observed_blocking_structural=observed_blocking,
+                inputs_reached_blocking_terminal=inputs_blocking,
                 storage_admission={str(key): value for key, value in admission.items()},
                 earliest_input_started_at_utc=str(record["earliest_input_started_at_utc"]),
                 attempt=_stored_int(record["attempt"], "attempt"),
@@ -1502,6 +1602,151 @@ def _stored_strings(value: object, field: str) -> tuple[str, ...]:
         message = f"intermediate field {field!r} is not a list and is refused"
         raise ChunkMultipassError(message)
     return tuple(str(item) for item in value)
+
+
+def _validate_observed_semantics(
+    *,
+    outcome: str,
+    quarantined: int,
+    blocking_structural: int,
+    inputs_reached_blocking_terminal: bool,
+    label: str,
+) -> None:
+    """Hold the four ``/2`` observed-semantics fields to the accepted reduction rule.
+
+    The accepted reduction (:func:`_reduced_parser_run`) decides ``failed`` from a positive
+    blocking count, ``completed_with_quarantine`` from a positive quarantined count with none
+    blocking, and ``completed`` otherwise; an input reached a blocking terminal exactly when its
+    blocking count was positive, so the flag agrees with the outcome. Unknown, malformed or
+    contradictory material semantics refuse here and are never read as success.
+
+    Raises:
+        ChunkMultipassError: the fields do not describe one another.
+    """
+    _require(
+        outcome in _STREAMED_PARSER_STATE,
+        f"{label} records observed_run_outcome {outcome!r}, outside the accepted vocabulary; an "
+        "unknown terminal is refused rather than read as success",
+    )
+    _require(
+        quarantined >= 0 and blocking_structural >= 0,
+        f"{label} records a negative observed count; refused",
+    )
+    consistent = (
+        (blocking_structural > 0) == (outcome == "failed")
+        and (blocking_structural == 0 and quarantined > 0)
+        == (outcome == "completed_with_quarantine")
+        and (blocking_structural == 0 and quarantined == 0) == (outcome == "completed")
+        and inputs_reached_blocking_terminal == (outcome == "failed")
+    )
+    _require(
+        consistent,
+        f"{label} records observed_run_outcome {outcome!r} with {blocking_structural} blocking "
+        f"structural, {quarantined} quarantined and inputs_reached_blocking_terminal="
+        f"{inputs_reached_blocking_terminal}; the four do not describe one another under the "
+        "accepted reduction rule and the receipt is refused as contradictory",
+    )
+
+
+def require_admissible_intermediate_semantics(receipt: IntermediateReceipt) -> str:
+    """Admit one intermediate to ordinary continuation, calibration or deletion -- Decision 151
+    Boundary 3 -- or refuse.
+
+    The receipt must be a complete ``/2`` receipt whose observed semantics are self-consistent
+    and NOT blocking. A ``/1`` document never reaches here as an :class:`IntermediateReceipt`
+    (its strict read refuses), an unknown contract refuses, and a ``/2`` receipt that observed a
+    blocking reduced run or a blocking input is refused -- it is forensic evidence, never an
+    input. A positive quarantined count alone is admissible.
+
+    Returns:
+        The observed parser state, through the accepted mapping.
+
+    Raises:
+        ChunkMultipassError: the receipt is not an admissible ``/2`` intermediate.
+    """
+    _require(
+        receipt.contract == INTERMEDIATE_RECEIPT_CONTRACT,
+        f"intermediate {receipt.group_id!r} carries contract {receipt.contract!r}; ordinary "
+        f"admission reads {INTERMEDIATE_RECEIPT_CONTRACT!r} only and bridges no other version",
+    )
+    _require(
+        receipt.status == "complete",
+        f"intermediate {receipt.group_id!r} carries status {receipt.status!r}; refused",
+    )
+    state = receipt.observed_parser_state
+    _require(
+        not receipt.blocking,
+        f"intermediate {receipt.group_id!r} observed a BLOCKING reduced run (outcome "
+        f"{receipt.observed_run_outcome!r}, parser_state {state!r}, "
+        f"{receipt.observed_blocking_structural} blocking structural, inputs_reached_blocking_"
+        f"terminal={receipt.inputs_reached_blocking_terminal}). Its status 'complete' is "
+        "artifact completion, not parser success; it is retained as forensic evidence and "
+        "refused as an input to any continuation, calibration or deletion",
+    )
+    return state
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyIntermediateReceipt:
+    """A historical ``/1`` intermediate receipt, read for forensics and nothing else.
+
+    It retains the document exactly as written -- its original fields, its ``/1`` version and
+    its byte identity -- and it is deliberately NOT an :class:`IntermediateReceipt`: no
+    observed-semantics field exists on it, none is invented as success or as zero, and no
+    admission, continuation, calibration or deletion path accepts it. Reading it writes nothing.
+    """
+
+    contract: str
+    document_sha256: str
+    document_byte_length: int
+    record: Mapping[str, object]
+
+    @property
+    def group_id(self) -> str:
+        """The group the historical receipt names."""
+        return str(self.record["group_id"])
+
+    @property
+    def witness_ledger_identity(self) -> str:
+        """The ``/1`` witness-ledger identity exactly as recorded (a ``/1`` digest)."""
+        return str(self.record["witness_ledger_identity"])
+
+    @property
+    def status(self) -> str:
+        """The recorded artifact status; artifact completion, never parser success."""
+        return str(self.record["status"])
+
+
+_OBSERVED_SEMANTICS_KEYS: Final[tuple[str, ...]] = (
+    "observed_run_outcome",
+    "observed_quarantined",
+    "observed_blocking_structural",
+    "inputs_reached_blocking_terminal",
+)
+
+
+def read_legacy_intermediate_receipt(path: Path) -> LegacyIntermediateReceipt:
+    """Read one historical ``/1`` intermediate receipt, read-only -- Decision 151 Boundary 3.
+
+    Raises:
+        ChunkEvidenceError: the document is absent, a link, undecodable, or not ``/1``.
+        ChunkMultipassError: the document carries an observed-semantics key, which a ``/1``
+            writer never produced.
+    """
+    document = read_receipt_document(path, contract=LEGACY_INTERMEDIATE_RECEIPT_CONTRACT)
+    present = [key for key in _OBSERVED_SEMANTICS_KEYS if key in document]
+    _require(
+        not present,
+        f"legacy receipt {path.name!r} carries {present}, which no /1 writer produced; a "
+        "document that is neither /1 nor /2 is refused",
+    )
+    sha256, length = file_sha256(path)
+    return LegacyIntermediateReceipt(
+        contract=str(document["contract"]),
+        document_sha256=sha256,
+        document_byte_length=length,
+        record=dict(document),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1692,6 +1937,9 @@ def resolve_intermediate_inputs(
         )
         assert found is not None  # noqa: S101 - narrowed by the refusal above
         receipt, directory = found
+        # Decision 151 Boundary 3: ordinary admission consumes a complete /2 receipt whose
+        # observed semantics are consistent and non-blocking; anything else is forensic.
+        require_admissible_intermediate_semantics(receipt)
         _require(
             receipt.plan_digest == plan.plan_digest,
             f"intermediate {group.group_id!r} was built under plan digest {receipt.plan_digest!r}"
@@ -2755,6 +3003,22 @@ def _merge_group_evidence(
     )
 
 
+def _require_reduction_matches_inputs(
+    reduced: _ReducedRun, semantics: Sequence[ChunkSemantics], *, label: str
+) -> None:
+    """The reduced row this merge wrote must be the sum of the semantics it admitted."""
+    expected_quarantined = sum(item.quarantined for item in semantics)
+    expected_blocking = sum(item.blocking_structural for item in semantics)
+    _require(
+        reduced.quarantined == expected_quarantined
+        and reduced.blocking_structural == expected_blocking,
+        f"intermediate {label!r} reduced {reduced.quarantined} quarantined / "
+        f"{reduced.blocking_structural} blocking where its admitted inputs sum to "
+        f"{expected_quarantined} / {expected_blocking}; a reduction that disagrees with the "
+        "semantics it admitted is refused before any receipt exists",
+    )
+
+
 def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa: PLR0915
     """Merge exactly one level-1 group into one immutable intermediate, receipt LAST -- §§8, 9, 26.
 
@@ -2815,6 +3079,9 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
     )
     inputs = select_group_inputs(every, group)
     require_attachable(len(inputs))
+    # Decision 151 Boundary 2: every input's manifest-bound parser-run semantics, read in THIS
+    # process; a blocking or unverifiable input refuses before the attempt directory exists.
+    semantics = require_admissible_chunk_semantics(inputs)
     contract = inputs[0].receipt.execution_contract
     _require_seed_identity(
         label=group.group_id,
@@ -2867,6 +3134,7 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
             counts = table_row_counts(connection)
         finally:
             _detach_all(connection, aliases)
+    _require_reduction_matches_inputs(reduced, semantics, label=group.group_id)
     evidence = _merge_group_evidence(
         attempt_root=attempt_root, inputs=inputs, group=group, plan=plan
     )
@@ -2919,6 +3187,10 @@ def merge_group_body(request: GroupMergeRequest) -> IntermediateReceipt:  # noqa
         first_witness_rows_staged=staged_rows,
         evidence_members_corrected=evidence.evidence_members_corrected,
         evidence_delta=evidence.evidence_delta,
+        observed_run_outcome=reduced.outcome,
+        observed_quarantined=reduced.quarantined,
+        observed_blocking_structural=reduced.blocking_structural,
+        inputs_reached_blocking_terminal=any(item.blocking for item in semantics),
         storage_admission=dict(admission.as_record()),
         earliest_input_started_at_utc=min(item.receipt.started_at_utc for item in inputs),
         attempt=request.attempt,
@@ -3457,6 +3729,7 @@ def run_multipass_f0(  # noqa: PLR0915
     for group in schedule.groups:
         existing = completed_intermediate_receipt(intermediates_root, group.group_id)
         if existing is not None:
+            require_admissible_intermediate_semantics(existing[0])
             receipts.append(existing[0])
             continue
         # Admission BEFORE the child is started, over the same rule the child re-applies before
@@ -6046,6 +6319,59 @@ def _validate_chunk_world_for_deletion(
     return present, already_gone > 0
 
 
+def _require_deletable_chunk_semantics(
+    directory: Path, binding: CheckpointChunkBinding, present: Sequence[str]
+) -> None:
+    """Refuse the exact deletion of a chunk world whose parse reached a blocking terminal, or
+    whose semantics cannot be verified -- Decision 151 Boundary 3, prospective.
+
+    The receipt present in the world is the checkpoint-bound one (its digest was held to the
+    binding by :func:`_validate_chunk_world_for_deletion`); its ``summary.run_outcome`` must map
+    to a non-blocking state, and while the catalog is still present the manifest-bound run row
+    is read and held to the receipt through the accepted :func:`chunk_semantics`. A world whose
+    receipt is already gone is the remainder of an interrupted exact deletion of a world that
+    was admitted whole; its semantics are the ones the bound ``/2`` intermediate observed, which
+    the caller has already required to be non-blocking.
+    """
+    if CHUNK_RECEIPT_FILENAME not in present:
+        return
+    receipt = ChunkReceipt.from_record(
+        read_receipt_document(directory / CHUNK_RECEIPT_FILENAME, contract=CHUNK_RECEIPT_CONTRACT)
+    )
+    outcome = receipt.summary.run_outcome
+    _require(
+        outcome in _STREAMED_PARSER_STATE,
+        f"chunk world {binding.chunk_id!r} records run_outcome {outcome!r}, outside the accepted "
+        "vocabulary; unverifiable semantics never admit a deletion",
+    )
+    _require(
+        _STREAMED_PARSER_STATE[outcome] not in BLOCKING_PARSER_STATES,
+        f"chunk world {binding.chunk_id!r} reached a BLOCKING parser terminal ({outcome!r}); it "
+        "is the primary forensic evidence of that failure and is retained, never exact-deleted, "
+        "pending a separately authorized lifecycle",
+    )
+    if WORKING_CATALOG_FILENAME in present:
+        try:
+            chunk_semantics(
+                ChunkInput(
+                    chunk_id=binding.chunk_id,
+                    ordinal=0,
+                    region=receipt.region,
+                    start=receipt.start,
+                    end=receipt.end,
+                    directory=directory,
+                    tier="internal",
+                    receipt=receipt,
+                )
+            )
+        except ChunkConsolidationError as exc:
+            message = (
+                f"chunk world {binding.chunk_id!r} is not deleted: its manifest-bound parser-run "
+                f"row does not verify against its receipt ({exc})"
+            )
+            raise ChunkMultipassError(message) from exc
+
+
 def delete_calibration_group_chunk_worlds(
     grant: object,
     *,
@@ -6111,11 +6437,18 @@ def delete_calibration_group_chunk_worlds(
     )
     assert found_intermediate is not None  # noqa: S101 - narrowed above
     _require_checkpoint_binds_intermediate(checkpoint, found_intermediate[0], found_intermediate[1])
+    # Decision 151 Boundary 3, prospective retention at the deletion function itself: the
+    # intermediate must be an admissible /2 receipt with NON-blocking observed semantics, and
+    # every chunk world still carrying its receipt must record a non-blocking terminal that its
+    # catalog's own run row agrees with. Blocking or unverifiable semantics refuse here and the
+    # primary forensic world stays exactly as it is, pending a separately authorized lifecycle.
+    require_admissible_intermediate_semantics(found_intermediate[0])
     # Every world validated BEFORE the first deletion.
     worlds: list[tuple[Path, CheckpointChunkBinding, tuple[str, ...], bool]] = []
     for binding in checkpoint.chunks:
         directory = chunk_root / binding.chunk_id / f"attempt-{binding.attempt:03d}"
         present, resumed = _validate_chunk_world_for_deletion(directory, binding)
+        _require_deletable_chunk_semantics(directory, binding, present)
         worlds.append((directory, binding, present, resumed))
     free_before = internal_free_bytes(chunk_root)
     expected_freed = 0
@@ -6241,6 +6574,9 @@ def merge_calibration_subset_group_body(  # noqa: PLR0915
         group,
     )
     require_attachable(len(inputs))
+    # Decision 151 Boundary 2, in the calibration child too: measured here, before the event
+    # is emitted and before the attempt directory exists.
+    semantics = require_admissible_chunk_semantics(inputs)
     contract = inputs[0].receipt.execution_contract
     _require_seed_identity(
         label=group.group_id,
@@ -6303,6 +6639,7 @@ def merge_calibration_subset_group_body(  # noqa: PLR0915
             counts = table_row_counts(connection)
         finally:
             _detach_all(connection, aliases)
+    _require_reduction_matches_inputs(reduced, semantics, label=group.group_id)
     evidence = _merge_group_evidence(
         attempt_root=attempt_root, inputs=inputs, group=group, plan=plan
     )
@@ -6355,6 +6692,10 @@ def merge_calibration_subset_group_body(  # noqa: PLR0915
         first_witness_rows_staged=staged_rows,
         evidence_members_corrected=evidence.evidence_members_corrected,
         evidence_delta=evidence.evidence_delta,
+        observed_run_outcome=reduced.outcome,
+        observed_quarantined=reduced.quarantined,
+        observed_blocking_structural=reduced.blocking_structural,
+        inputs_reached_blocking_terminal=any(item.blocking for item in semantics),
         storage_admission=dict(admission.as_record()),
         earliest_input_started_at_utc=min(item.receipt.started_at_utc for item in inputs),
         attempt=request.attempt,
@@ -7207,6 +7548,7 @@ class _CalibrationLifecycle:
         existing = completed_intermediate_receipt(self.intermediates_root, group.group_id)
         if existing is not None:
             receipt = existing[0]
+            require_admissible_intermediate_semantics(receipt)
             _require(
                 receipt.plan_digest == self.plan.plan_digest,
                 f"intermediate {group.group_id!r} already carries a receipt under plan "
@@ -10359,6 +10701,16 @@ class _WalPreservationGuard:
     boundary's own checkpoint. A session that ends without such a disposition (a conflict, an
     abort before classification) therefore leaves the log exactly as it found it: the guard
     outlives the writer's close, and a read-only handle folds nothing when it closes itself.
+
+    Opening the handle is not enough by itself. Whether a constant-only ``SELECT 1`` ever reaches
+    the database is an incidental property of the SQLite build: it names no table, so nothing in
+    it requires main's schema, and a handle that never reads main starts no read transaction and
+    never joins the log's index -- it is not a reader of THIS database and does not hold the log
+    across the writer's close. The guard therefore performs a real, deterministic,
+    database-backed read of main's own schema before any writer is opened -- the same kind of
+    read the mode=ro pre-state probe already makes, which observes committed WAL content
+    truthfully, folds nothing into main and leaves a preexisting nonzero log untouched. A guard
+    that cannot establish that read fails closed: no writer is opened behind it.
     """
 
     __slots__ = ("_connection", "released")
@@ -10367,7 +10719,26 @@ class _WalPreservationGuard:
         self._connection: sqlite3.Connection | None = sqlite3.connect(
             f"{catalog_path.absolute().as_uri()}?mode=ro", uri=True, isolation_level=None
         )
-        self._connection.execute("SELECT 1").fetchone()
+        try:
+            # A real read: locating ``sqlite_schema`` makes SQLite open the database and join
+            # the write-ahead log's index. A constant-only statement need never do either.
+            row = self._connection.execute("SELECT COUNT(*) FROM main.sqlite_schema").fetchone()
+        except sqlite3.Error as exc:
+            self.close()
+            message = (
+                f"the write-ahead-log preservation guard could not read {catalog_path.name!r}'s "
+                f"own schema through its mode=ro handle ({exc}); STOP -- a writer is never "
+                "opened behind a handle that is not a reader of this database"
+            )
+            raise ChunkMultipassError(message) from exc
+        if row is None:
+            self.close()
+            message = (
+                f"the write-ahead-log preservation guard's schema read of {catalog_path.name!r} "
+                "returned no row; STOP -- a writer is never opened behind a handle that is not "
+                "a reader of this database"
+            )
+            raise ChunkMultipassError(message)
         self.released = False
 
     def release(self) -> None:
@@ -10566,6 +10937,11 @@ def _witness_of(units: Sequence[AppliedUnit], stage_id: str) -> Mapping[str, obj
 
 
 def _reduced_run_from_witness(witness: Mapping[str, object]) -> _ReducedRun:
+    if "blocking_structural" not in witness:
+        _stage_conflict(
+            "the committed S2 witness records no blocking_structural count; material semantics "
+            "that are not witnessed are unverifiable and never read as zero"
+        )
     return _ReducedRun(
         parser_run_id=str(witness["parser_run_id"]),
         parser_id=str(witness["parser_id"]),
@@ -10577,6 +10953,7 @@ def _reduced_run_from_witness(witness: Mapping[str, object]) -> _ReducedRun:
         duplicate_identities=_stored_strings(
             witness["duplicate_identities"], "duplicate_identities"
         ),
+        blocking_structural=_stored_int(witness["blocking_structural"], "blocking_structural"),
     )
 
 
@@ -12092,6 +12469,9 @@ def _stage_reduced_parser_run(
         "quarantined": reduced.quarantined,
         "parser_state": reduced.parser_state,
         "duplicate_identities": list(reduced.duplicate_identities),
+        # Decision 151 Boundary 3: the blocking count the reduction decided the outcome from,
+        # witnessed durably so the row can be re-derived and held to it on every resume.
+        "blocking_structural": reduced.blocking_structural,
         "row_count": instr.count(connection, "census_parser_runs"),
     }
 
@@ -13430,6 +13810,10 @@ def _verify_committed_witness(
         state = _file_state(path)
         if state.lstat_class != "file" or state.sha256 != str(witness["sidecar_sha256"]):
             _stage_conflict("the bound sidecar is absent or its bytes moved since its binding")
+    elif unit.unit_kind == _KIND_REDUCED_RUN:
+        _verify_reduced_run_witness(connection, ctx, witness)
+    elif unit.unit_kind == _KIND_OUTCOME:
+        _verify_outcome_witness(ctx, units, witness)
     if unit.unit_kind in {
         _KIND_SIDECAR,
         _KIND_MARK_PARSED,
@@ -13443,6 +13827,188 @@ def _verify_committed_witness(
             _stage_conflict(
                 f"stage {unit.stage_id!r} has no cross-store binding row or a different one"
             )
+
+
+_REDUCED_RUN_WITNESS_KEYS: Final[tuple[str, ...]] = (
+    "parser_run_id",
+    "parser_id",
+    "parser_version",
+    "outcome",
+    "parsed",
+    "quarantined",
+    "parser_state",
+    "duplicate_identities",
+    "blocking_structural",
+    "row_count",
+)
+
+
+def _verify_reduced_run_witness(
+    connection: sqlite3.Connection, ctx: _StageContext, witness: Mapping[str, object]
+) -> None:
+    """Decision 151 MINOR-1: the committed S2 witness is re-derived from the exact row.
+
+    The row is looked up by the identity the accepted writer derives -- the authenticated
+    plan's source observation with the authenticated execution contract's parser and version
+    -- so the witness's own ``parser_run_id`` never authenticates itself and no arbitrary row
+    is selected. Every field a later stage, the S19 outcome or a restart classification
+    consumes is held to its durable source: identity, parser provenance, outcome, both counts,
+    the blocking count and the duplicate identities from the row's summary, the parser state
+    through the accepted mapping, and the row count. Any disagreement is the existing
+    committed-state conflict; nothing is repaired.
+    """
+    missing = [key for key in _REDUCED_RUN_WITNESS_KEYS if key not in witness]
+    if missing:
+        _stage_conflict(f"the committed S2 witness records no {missing}")
+    expected_id = _stable_id(
+        "parser-run",
+        ctx.plan.source_observation_id,
+        ctx.contract.parser_id,
+        ctx.contract.parser_version,
+    )
+    if str(witness["parser_run_id"]) != expected_id:
+        _stage_conflict(
+            f"the committed S2 witness claims parser run {str(witness['parser_run_id'])[:16]}... "
+            f"where the authenticated plan and contract derive {expected_id[:16]}..."
+        )
+    rows = connection.execute(
+        "SELECT parser_run_id, source_observation_id, parser_id, parser_version, parsed_count, "
+        "quarantined_count, outcome, summary_json FROM main.census_parser_runs "
+        "WHERE parser_run_id = ?",
+        (expected_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        _stage_conflict(
+            f"the world holds {len(rows)} census_parser_runs rows under the derived identity "
+            f"{expected_id[:16]}... where exactly one is the committed S2 evidence"
+        )
+    total = _count(connection, "census_parser_runs")
+    if total != _stored_int(witness["row_count"], "row_count"):
+        _stage_conflict(
+            f"S2 committed {witness['row_count']} census_parser_runs row(s) and the world now "
+            f"holds {total}"
+        )
+    row = rows[0]
+    if (
+        str(row["source_observation_id"]) != ctx.plan.source_observation_id
+        or (str(row["parser_id"]), str(row["parser_version"]))
+        != (ctx.contract.parser_id, ctx.contract.parser_version)
+        or (str(witness["parser_id"]), str(witness["parser_version"]))
+        != (ctx.contract.parser_id, ctx.contract.parser_version)
+    ):
+        _stage_conflict(
+            "the committed S2 row or witness names a parser, version or source observation "
+            "other than the authenticated contract's"
+        )
+    outcome = str(row["outcome"])
+    if outcome not in _STREAMED_PARSER_STATE or outcome != str(witness["outcome"]):
+        _stage_conflict(
+            f"the committed S2 row records outcome {outcome!r} where the witness records "
+            f"{witness['outcome']!r} (accepted vocabulary {sorted(_STREAMED_PARSER_STATE)})"
+        )
+    parsed = int(row["parsed_count"])
+    quarantined = int(row["quarantined_count"])
+    if parsed != _stored_int(witness["parsed"], "parsed") or quarantined != _stored_int(
+        witness["quarantined"], "quarantined"
+    ):
+        _stage_conflict(
+            f"the committed S2 row counts {parsed} parsed / {quarantined} quarantined where the "
+            f"witness records {witness['parsed']} / {witness['quarantined']}"
+        )
+    if _STREAMED_PARSER_STATE[outcome] != str(witness["parser_state"]):
+        _stage_conflict(
+            f"the committed S2 witness records parser_state {witness['parser_state']!r} where "
+            f"outcome {outcome!r} re-derives {_STREAMED_PARSER_STATE[outcome]!r}"
+        )
+    try:
+        summary = json.loads(str(row["summary_json"]))
+    except ValueError as exc:
+        _stage_conflict(f"the committed S2 row's summary is not decodable JSON: {exc}")
+    if not isinstance(summary, Mapping):
+        _stage_conflict("the committed S2 row's summary is not a JSON object")
+    detail = summary.get("structural_detail")
+    counts = summary.get("counts")
+    if not isinstance(detail, Mapping) or not isinstance(counts, Mapping):
+        _stage_conflict("the committed S2 row's summary records no structural_detail or counts")
+    blocking = detail.get("blocking")
+    failures = counts.get("structural_failures")
+    if (
+        isinstance(blocking, bool)
+        or not isinstance(blocking, int)
+        or blocking < 0
+        or blocking != failures
+        or blocking != _stored_int(witness["blocking_structural"], "blocking_structural")
+    ):
+        _stage_conflict(
+            f"the committed S2 row's summary records {blocking!r} blocking structural "
+            f"({failures!r} counted) where the witness records {witness['blocking_structural']!r}"
+        )
+    if counts.get("parsed") != parsed or counts.get("quarantined") != quarantined:
+        _stage_conflict("the committed S2 row's summary counts disagree with its own columns")
+    if (
+        (blocking > 0) != (outcome == "failed")
+        or (blocking == 0 and quarantined > 0) != (outcome == "completed_with_quarantine")
+        or (blocking == 0 and quarantined == 0) != (outcome == "completed")
+    ):
+        _stage_conflict(
+            f"the committed S2 row is self-contradictory: outcome {outcome!r} with {blocking} "
+            f"blocking structural and {quarantined} quarantined"
+        )
+    duplicates = summary.get("duplicate_identities", [])
+    if not isinstance(duplicates, list):
+        _stage_conflict("the committed S2 row's summary duplicate_identities is not a list")
+    rederived = tuple(
+        sorted({str(cast("Sequence[object]", item)[0]) for item in duplicates if item})
+    )
+    if rederived != _stored_strings(witness["duplicate_identities"], "duplicate_identities"):
+        _stage_conflict(
+            "the committed S2 witness's duplicate identities are not the ones its row's summary "
+            "re-derives"
+        )
+
+
+def _verify_outcome_witness(
+    ctx: _StageContext, units: Sequence[AppliedUnit], witness: Mapping[str, object]
+) -> None:
+    """Decision 151 MINOR-1: the committed S19 witness is what the S2 and S18 witnesses derive.
+
+    The published counts and the blocking predicate are both covered: every value S19 published
+    must equal the accepted derivation over the (already verified) S2 and S18 witnesses, and the
+    accepted D140-R12 predicate must still admit that derivation.
+    """
+    outcome = _derived_outcome(ctx, units)
+    expected: dict[str, object] = {
+        "disposition": outcome.outcome.disposition,
+        "parser_run_id": outcome.outcome.parser_run_id,
+        "parser_state_before": outcome.outcome.parser_state_before,
+        "parser_state_after": outcome.outcome.parser_state_after,
+        "parsed_records": outcome.outcome.parsed_records,
+        "quarantined_records": outcome.outcome.quarantined_records,
+        "members": outcome.members,
+        "records": outcome.records,
+        "omitted_field_observations": outcome.omitted_field_observations,
+        "materialized_field_observations": outcome.materialized_field_observations,
+        "completeness_digest": outcome.completeness_digest,
+        "f0_success": True,
+    }
+    observed = {key: witness.get(key) for key in expected}
+    if observed != expected:
+        differing = sorted(key for key in expected if observed[key] != expected[key])
+        _stage_conflict(
+            f"the committed S19 witness does not re-derive from the committed S2 and S18 "
+            f"witnesses on {differing}"
+        )
+    try:
+        require_f0_success(outcome)
+    except SingleSourceCanaryError as exc:
+        _stage_conflict(
+            f"the committed S19 witness claims f0_success over a blocking outcome: {exc}"
+        )
+    if (
+        outcome.outcome.parser_state_after in BLOCKING_PARSER_STATES
+        or outcome.outcome.disposition in BLOCKING_SOURCE_DISPOSITIONS
+    ):  # pragma: no cover - require_f0_success refused first
+        _stage_conflict("the committed S19 witness admits a blocking terminal")
 
 
 def _classify(session: _WorldSession, ctx: _StageContext) -> _Progress:
@@ -13951,6 +14517,73 @@ def _normalize_after_abort(
     instr.publish_abort_record(normalized, outcome, probed_database=ctx.catalog_path.name)
 
 
+def _semantic_refusal_path(receipt_root: Path, stage: L2Stage) -> Path:
+    """The next create-once semantic-refusal record for one refused stage."""
+    ordinal = 0
+    while os.path.lexists(
+        receipt_root / f"semantic-refusal-{stage.stage_id}-attempt-{ordinal:03d}.json"
+    ):
+        ordinal += 1
+    return receipt_root / f"semantic-refusal-{stage.stage_id}-attempt-{ordinal:03d}.json"
+
+
+def _require_reduced_run_admits_continuation(
+    ctx: _StageContext, units: Sequence[AppliedUnit], stage: L2Stage
+) -> None:
+    """Decision 151 Boundary 4 (FailFast-D): no statement of any stage after S2 begins while
+    the committed, authenticated S2 reduced run is a blocking terminal.
+
+    The predicate is the accepted one, called rather than restated: the S2 witness -- already
+    re-derived from its row by :func:`_verify_reduced_run_witness` during classification -- is
+    turned into the accepted outcome object through :func:`derived_f0_outcome` under the
+    StagePlan-sealed plan state, and :func:`require_f0_success` reads
+    ``BLOCKING_PARSER_STATES`` and ``BLOCKING_SOURCE_DISPOSITIONS`` exactly as S19 does. A
+    positive quarantined count alone admits. On refusal a distinct semantic-refusal record is
+    published create-once into the stage receipt root and the accepted refusal is raised; the
+    committed S2 world stays exactly as it is, and an authentic blocking terminal is never a
+    pause eligible to continue. S19 remains the separate, unchanged final assertion.
+    """
+    if stage.ordinal <= ctx.stage_by_id(_STAGE_REDUCED_PARSER_RUN).ordinal:
+        return
+    _require_bound_plan_state(ctx)
+    reduced = _reduced_run_from_witness(_witness_of(units, _STAGE_REDUCED_PARSER_RUN))
+    outcome = derived_f0_outcome(plan=ctx.plan, state=ctx.state, reduced=reduced)
+    try:
+        require_f0_success(outcome)
+    except SingleSourceCanaryError as exc:
+        record: dict[str, object] = {
+            "contract": L2_SEMANTIC_REFUSAL_CONTRACT,
+            "classification": "L2_SEMANTIC_REFUSAL_BLOCKING_REDUCED_RUN",
+            "route": ctx.route,
+            "successor_run_id": ctx.stage_plan.successor_run_id,
+            "stage_plan_identity": ctx.stage_plan.identity,
+            "refused_stage_id": stage.stage_id,
+            "refused_stage_ordinal": stage.ordinal,
+            "reduced_run": {
+                "parser_run_id": reduced.parser_run_id,
+                "outcome": reduced.outcome,
+                "parser_state": reduced.parser_state,
+                "parsed": reduced.parsed,
+                "quarantined": reduced.quarantined,
+                "blocking_structural": reduced.blocking_structural,
+            },
+            "disposition": outcome.outcome.disposition,
+            "blocking_parser_states": sorted(BLOCKING_PARSER_STATES),
+            "blocking_source_dispositions": sorted(BLOCKING_SOURCE_DISPOSITIONS),
+            "detail": str(exc)[:600],
+            "s3_statements_begun": 0,
+            "utc": utc_now(),
+        }
+        record["refusal_identity"] = _identity_of(record)
+        ctx.receipt_root.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+        try:
+            write_once_canonical_json(_semantic_refusal_path(ctx.receipt_root, stage), record)
+        except ChunkExecutionError as inner:
+            message = f"the semantic refusal record could not be published: {inner}"
+            raise ChunkMultipassError(message) from inner
+        raise
+
+
 def _run_stage(
     ctx: _StageContext,
     stage: L2Stage,
@@ -13988,6 +14621,9 @@ def _run_stage(
             and progress.next_stage.ordinal == stage.ordinal,
             f"the world's committed evidence no longer names {stage.stage_id!r} as the next stage",
         )
+        # Decision 151 Boundary 4: BEFORE the residue disposition, the attach and the
+        # transaction -- a blocking committed S2 means no statement of this stage begins.
+        _require_reduced_run_admits_continuation(ctx, progress.units, stage)
         disposition = _dispose_wal_residue(session, ctx, progress)
         if disposition["class"] == _RESIDUE_NONE and carried_disposition is not None:
             disposition = carried_disposition

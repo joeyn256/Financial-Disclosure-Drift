@@ -32,14 +32,20 @@ from disclosure_drift.m3.chunk_evidence import (  # noqa: E402
 from disclosure_drift.m3.working_catalog import WORKING_CATALOG_FILENAME  # noqa: E402
 
 #: SHA-256 of ``inspect.getsource`` of each accepted body at the R19A-C2 baseline (7a1fcf08).
+#:
+#: Decision 151 (Boundaries 2 and 3) re-pinned exactly two of them: the two level-1 GROUP bodies
+#: now admit their inputs' manifest-bound parser-run semantics before the attempt directory
+#: exists and write the ``/2`` intermediate receipt's observed-semantics fields. The two
+#: finalizers, the set-based staging, the whole-F0 counter derivation and the production child
+#: entry are byte-identical to the R19A-C2 baseline still, and the assertion form is unchanged.
 PINNED_SOURCE = {
     "finalize_multipass_body": ("ce71509438ab4a3da99fa089887c75c592acd3c072841a438e03d3dbd84ed733"),
-    "merge_group_body": ("b2b596bff9294a49ae606fecc2ea9155bdb57e4d004ce111b68f59e972a43a92"),
+    "merge_group_body": ("a0090f772a23bc3a8e96d332b46d384447455cafe5e73c5067b6873f91e77e31"),
     "finalize_calibration_subset_body": (
         "1355dd634aba76ac144bec78d206a4d9736ce043660741d56cebf42582df2969"
     ),
     "merge_calibration_subset_group_body": (
-        "b1e63cc5e5010f1fb21619dda45f35c4c0a6a366af15f65f68c0b8232b5991f5"
+        "a203e2f2dd85243ef9a860ebf2e00d1837f32514c694770418b243630072f1f8"
     ),
     "stage_first_witness_corrections": (
         "81e6463b64d17d6ce7eb0023850f302fcdbd4a4f8b56007bc4766e9cc0f11b3d"

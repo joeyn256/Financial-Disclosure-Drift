@@ -179,9 +179,12 @@ def test_i02_the_helper_refuses_every_broken_membership(tmp_path: Path) -> None:
             cm._governed_intermediate_manifest_entries(receipt_with(entries))
     with pytest.raises(cm.ChunkMultipassError, match="complete"):
         cm._governed_intermediate_manifest_entries(receipt_with(base, status="partial"))
+    # An ALIEN contract: since Decision 151 made ``/2`` canonical this fixture names ``/3``, a
+    # version no writer emits, so the refusal it exercises is still a real contract refusal.
+    # Naming it here authorizes no ``/3`` implementation.
     with pytest.raises(cm.ChunkMultipassError, match="complete"):
         cm._governed_intermediate_manifest_entries(
-            receipt_with(base, contract="m3.3-chunked-f0-intermediate-receipt/2")
+            receipt_with(base, contract="m3.3-chunked-f0-intermediate-receipt/3")
         )
     # A directory listing is not membership: an extra file beside the six refuses the RESOLVER,
     # never widens the helper.

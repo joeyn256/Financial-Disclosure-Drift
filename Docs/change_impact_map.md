@@ -1512,3 +1512,65 @@ it is not dead code and must not be removed as though it were. Third, **the `PAT
 scan deliberately excludes the decision records**: Decision 148 recorded the false claim as a
 finding and Decision 149 quotes it while correcting it, so widening that scan to `Docs/Decisions/`
 would fail on the records that exist to document the defect.
+
+## The Decision 151 parser-1.3 and FailFast-D surface (PROPOSED, uncommitted)
+
+[Decision 151](Decisions/decision_151_m3_3_r2c_parser_1_3_and_failfast_d.md) implements the owner's
+frozen rulings R1–R6: parser `submissions-json/1.3` (a valid-CIK document with an absent, null,
+non-string or blank current name is a field-level, non-blocking company-name defect), one new
+reason code, and the FailFast-D boundaries. It is preserved locally and **uncommitted**.
+
+**Its provenance, stated plainly.** The candidate was produced under
+`M3_3_D151_R21_R2C_PARSER13_FAILFAST_ENGINEERING_V3_AUTHORIZED` — a token the owner had **already
+superseded** before that execution. The owner does **not** retroactively ratify it and the
+candidate carries **no owner implementation acceptance**. Its initial independent technical review
+is owner-accepted (zero BLOCKER, zero MAJOR code defects), and that review's five findings were
+corrected under the separate bounded
+`M3_3_D151_R21_R2C_PARSER13_FAILFAST_PROSPECTIVE_CORRECTION_V5_AUTHORIZED`. Nothing here is accepted
+until a fresh independent **correction** review, owner adjudication, a separately authorized
+full-gate closure, and owner implementation acceptance. `FINAL_FULL_GATE = NOT_CLOSED`.
+
+| Change | Nearest affected tests |
+|---|---|
+| `src/disclosure_drift/sec/parsers/submissions.py` | `PARSER_VERSION` `1.2 -> 1.3`; `name` moves from the required set into the recognized optional set; `classify_current_name` (absent / null / non-string / blank by membership, `isinstance` and `strip`); the CIK failure decided alone; a deficient name omitted from the registrant payload and quarantined at `record_path="name"` under `PARSER_REGISTRANT_NAME_DEFICIENT` | `test_decision_151_parser_1_3_failfast_d.py` (proofs 1–9, 23), `test_r2_submissions_structure.py`, `test_d131_historical_shard_dispatch.py`, `test_parser_version_authority.py`, `test_m3_offline_parse.py`, `test_d140_total_pre_canary_hardening.py` |
+| `src/disclosure_drift/reasons.py` | exactly one new code, `PARSER_REGISTRANT_NAME_DEFICIENT` (integrity, review required, NOT release-blocking); registry count 115 | `test_reasons.py`, `test_decision_151_parser_1_3_failfast_d.py` |
+| `src/disclosure_drift/m3/offline_parse.py` | **docstring only** on `_primary_document_declarations`: the MAJOR-1 consistency coverage and the one named residual (a malformed top-level array, contained by `_resolve_shard_parent`'s undeclared-shard refusal). No extraction semantics change; `chunk_plan.py` untouched | `test_decision_151_parser_1_3_failfast_d.py` (proofs 10, 11, 24), `test_d140_total_pre_canary_hardening.py`, `test_d131_historical_shard_dispatch.py` |
+| `src/disclosure_drift/m3/chunk_consolidation.py` | `ChunkSemantics`, `chunk_semantics` (the manifest-bound run row read through `immutable=1`, looked up by the authenticated observation, held to the contract by the accepted `_require_parser_run_truth` and to the receipt summary), `require_admissible_chunk_semantics`; `_ReducedRun.blocking_structural`; `consolidate_chunks` refuses a blocking input before the world exists | `test_decision_151_parser_1_3_failfast_d.py` (12, 13, 22, 25), `test_d151_c3_corrections.py`, `test_d151_c5_precalibration_hardening.py`, `test_d151_c1_equivalence.py`, `test_d151_c1_consolidation.py` |
+| `src/disclosure_drift/m3/chunk_multipass.py` | `INTERMEDIATE_RECEIPT_CONTRACT` `/1 -> /2` with `observed_run_outcome`, `observed_quarantined`, `observed_blocking_structural`, `inputs_reached_blocking_terminal` (mandatory, consistency-checked); `LEGACY_INTERMEDIATE_RECEIPT_CONTRACT` and the read-only `read_legacy_intermediate_receipt` / `LegacyIntermediateReceipt`; `require_admissible_intermediate_semantics` at `resolve_intermediate_inputs`, the lifecycle and orchestrator reuse paths and `delete_calibration_group_chunk_worlds` (plus `_require_deletable_chunk_semantics`); Boundary 2 in both level-1 group bodies before `mkdir`; the S2 witness `blocking_structural`; `_verify_committed_witness` S2 and S19 branches; Boundary 4 `_require_reduced_run_admits_continuation` in `_run_stage` with the `L2_SEMANTIC_REFUSAL_CONTRACT` record | `test_decision_151_parser_1_3_failfast_d.py` (14–21, 26–34), `test_d151_c13_intermediates.py`, `test_d151_c13_multipass_semantics.py`, `test_d151_c29r1_retention_aware_calibration.py`, `test_d151_r19_durable_stages.py`, `test_d151_r19_stage_restart.py`, `test_d151_r19_cross_store_recovery.py`, `test_d151_r19_storage_charge.py`, `test_d151_r19_legacy_compatibility.py`, `test_d151_c19_corrections.py`, `test_d151_c13_multipass_plan.py` |
+| `src/disclosure_drift/m3/chunk_evidence.py`, `src/disclosure_drift/m3/chunk_execution.py` | **docstrings only**: `status="complete"` is artifact and execution completion, never parser success (MINOR-3) | `test_decision_151_parser_1_3_failfast_d.py` (22) |
+| `src/disclosure_drift/m3/rehearsal.py` | scenario A8's "required field missing" variant drops `cik` instead of `name` (a deficient name is non-blocking since R1; the accepted spec names no field). Found at the full gate; the other variants and scenarios are untouched | `test_m3_rehearsal.py`, `tests/integration/test_m3_cli.py` |
+| `tests/unit/test_decision_151_parser_1_3_failfast_d.py` | **new** — the thirty-four packet proofs, over synthetic test-owned worlds only | itself |
+
+**Which tests to run for it.** Direct: `tests/unit/test_decision_151_parser_1_3_failfast_d.py`.
+Always with it: the whole `tests/unit/test_d151_*.py` family (the chunked-F0 contracts it touches,
+including `test_d151_c3_corrections.py::test_r36_the_focused_suite_passes_in_reversed_module_order`,
+which re-runs that family serially in a child), `test_r2_submissions_structure.py`, `test_reasons.py`,
+`test_parser_version_authority.py`, `test_d131_historical_shard_dispatch.py` and
+`test_m3_offline_parse.py`.
+
+**One bounded exception, and it does not survive its own pass.** The
+`M3_3_D151_R21_R2C_PARSER13_FAILFAST_PROSPECTIVE_CORRECTION_V5_AUTHORIZED` correction pass was
+expressly authorized to run only a focused selection — the Decision 151 proof module (with its new
+MINOR-2 / MINOR-3 regressions), `test_reasons.py`, and two named
+`test_d151_c5_precalibration_hardening.py` nodes — **not** the whole family, and expressly **not**
+`test_r36_…`, which launches a child over the broad D151 family. That exception belongs to that
+pass alone. **The later full-gate obligation is undiminished**: `FINAL_FULL_GATE = NOT_CLOSED`, a
+focused green result neither closes nor substitutes for it, and any other change to this surface
+follows the ordinary broader guidance above.
+
+**Four cautions.** First, **a failed chunk never reaches the D140-R12 gate any more** — Boundary 2
+refuses it at admission, before any world — so the accepted gate's load-bearing proofs
+(`test_d151_c3_corrections.py::test_r06…`, `test_d151_c5_precalibration_hardening.py::test_the_sidecar_parity_path…`,
+`test_d151_c13_multipass_semantics.py::test_level_two_stops…`) reach the gate through an
+**injected failed reduction over healthy inputs**, and the D151-C5 INFO-6 "failed consolidated world
+equals the failed monolithic world" parity is re-premised as chunk-level failure evidence equal to the
+monolithic run row. Do not restore the old premise. Second, **two provenance identities move by
+design**: `witness_ledger_identity` for every new `/2` write (the contract literal is folded into the
+digest) and `parser_run_id` (the accepted preimage carries the parser version), which is why the
+`test_d151_c29r1…` committed goldens carry the 1.3 value — every other committed value is unchanged.
+Third, **the two level-1 group bodies are re-pinned by source digest** in
+`test_d151_r19_legacy_compatibility.py`; the two finalizers, the staging, the counters and the child
+entry are byte-identical to the R19A-C2 baseline and stay pinned. Fourth, **a positive quarantined
+count is never blocking**: a gate on the count would refuse exactly the non-blocking field-level
+defect R2 exists to admit; every predicate reads `_STREAMED_PARSER_STATE` and
+`BLOCKING_PARSER_STATES`.

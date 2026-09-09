@@ -454,7 +454,9 @@ def test_p01_the_contract_literals_are_frozen_together() -> None:
     assert cp.CALIBRATION_PLAN_CONTRACT == "m3.3-chunked-f0-calibration-plan/1"
     assert cp.SINGLE_PASS_CHUNK_CAP == 9 == cm.MERGE_FAN_IN
     assert cm.MERGE_SCHEDULE_CONTRACT == "m3.3-chunked-f0-merge-schedule/1"
-    assert cm.INTERMEDIATE_RECEIPT_CONTRACT == "m3.3-chunked-f0-intermediate-receipt/1"
+    # ``/2`` since Decision 151 Boundary 3 (observed-semantics fields); ``/1`` is forensic only.
+    assert cm.INTERMEDIATE_RECEIPT_CONTRACT == "m3.3-chunked-f0-intermediate-receipt/2"
+    assert cm.LEGACY_INTERMEDIATE_RECEIPT_CONTRACT == "m3.3-chunked-f0-intermediate-receipt/1"
     assert cm.MULTIPASS_CONSOLIDATION_CONTRACT == "m3.3-chunked-f0-multipass-consolidation/1"
     assert (
         len({cp.CHUNK_PLAN_CONTRACT, cp.CALIBRATION_PLAN_CONTRACT, cp.MULTIPASS_PLAN_CONTRACT}) == 3

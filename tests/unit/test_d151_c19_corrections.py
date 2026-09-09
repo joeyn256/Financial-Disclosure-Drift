@@ -617,7 +617,7 @@ def test_c1917_no_code_path_writes_the_superseded_contract() -> None:
     assert cp.CALIBRATION_PLAN_CONTRACT == "m3.3-chunked-f0-calibration-plan/1"
     assert cp.MULTIPASS_PLAN_CONTRACT == "m3.3-chunked-f0-multipass-plan/1"
     assert cm.MERGE_SCHEDULE_CONTRACT == "m3.3-chunked-f0-merge-schedule/1"
-    assert cm.INTERMEDIATE_RECEIPT_CONTRACT == "m3.3-chunked-f0-intermediate-receipt/1"
+    assert cm.INTERMEDIATE_RECEIPT_CONTRACT == "m3.3-chunked-f0-intermediate-receipt/2"
     assert cm.MULTIPASS_CONSOLIDATION_CONTRACT == "m3.3-chunked-f0-multipass-consolidation/1"
     assert cev.FINAL_WORLD_RECEIPT_CONTRACT == "m3.3-chunked-f0-final-receipt/2"
 

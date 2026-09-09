@@ -102,7 +102,11 @@ TOPOLOGY_COMMITTED: Mapping[str, object] = {
     "first_witness_rows_staged": 55,
     "evidence_members_corrected": 10,
     "evidence_delta": 50,
-    "parser_run_id": "de12930b099ec6ec3fc72ba6392adbffed0811e8ad4c406e4716646517a73f42",
+    # ``_stable_id("parser-run", "obs-bulk-1", "submissions-json", "submissions-json/1.3")``:
+    # Decision 151 R3 moved the parser version and the accepted preimage carries it, so this
+    # identity moved with it (it was ``de12930b…`` under 1.2). Every other committed value is
+    # unchanged, which is what proves the move is the version string and nothing else.
+    "parser_run_id": "a89638030cbd9afee06234df3ba01ec6a94dd1119f3468a14bedb596f6d4656d",
     "run_outcome": "completed",
     "world_parser_state": "not_started",
     "parser_state_after": "chunk_local",
@@ -139,7 +143,11 @@ SMALL_COMMITTED: Mapping[str, object] = {
     "first_witness_rows_staged": 20,
     "evidence_members_corrected": 3,
     "evidence_delta": 15,
-    "parser_run_id": "de12930b099ec6ec3fc72ba6392adbffed0811e8ad4c406e4716646517a73f42",
+    # ``_stable_id("parser-run", "obs-bulk-1", "submissions-json", "submissions-json/1.3")``:
+    # Decision 151 R3 moved the parser version and the accepted preimage carries it, so this
+    # identity moved with it (it was ``de12930b…`` under 1.2). Every other committed value is
+    # unchanged, which is what proves the move is the version string and nothing else.
+    "parser_run_id": "a89638030cbd9afee06234df3ba01ec6a94dd1119f3468a14bedb596f6d4656d",
     "run_outcome": "completed",
     "world_parser_state": "not_started",
     "parser_state_after": "chunk_local",

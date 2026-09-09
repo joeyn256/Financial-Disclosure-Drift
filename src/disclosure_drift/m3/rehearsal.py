@@ -1285,10 +1285,15 @@ def _run_a8(scenario: _Scenario, workspace: Path) -> ScenarioOutcome:
     #: The four blocking variants: the mutated document, the code the spec names, and the
     #: structural state the accepted parser must reach. `None` means the failure is a top-level
     #: required-field failure rather than a nested structural verdict.
+    #:
+    #: The required-field variant drops ``cik``. It dropped ``name`` until Decision 151 R1 made a
+    #: deficient current name a field-level, NON-blocking company-name defect (parser 1.3); the
+    #: spec names no particular field, only "a required field missing", and the document's CIK is
+    #: the one top-level identity the parser still refuses without.
     variants: tuple[tuple[str, dict[str, object], str, str | None], ...] = (
         (
             "required field missing",
-            _submissions_variant(name=_DROP),
+            _submissions_variant(cik=_DROP),
             "SEC_SCHEMA_REQUIRED_FIELD_MISSING",
             None,
         ),

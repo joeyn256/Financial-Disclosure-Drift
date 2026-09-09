@@ -44,6 +44,26 @@ compact-evidence sidecar is merged and finalized **before** the accepted blockin
 which is where the accepted monolithic F0 finalizes its own -- so a consolidated F0 that reaches a
 blocking terminal leaves the same diagnostic sidecar beside the same diagnostic rows that a
 monolithic one leaves, and still no ledger terminal, no checkpoint and no receipt.
+
+**That parity is narrower than it reads, and Decision 151 is why.** A genuinely blocking or
+unverifiable **input** chunk is refused at Boundary 2 *before an output world exists*, so it never
+reaches the gate and leaves nothing to compare. The retained consolidated-versus-monolithic
+blocking diagnostic parity path above applies only where a **reduction** becomes blocking AFTER
+otherwise-admissible inputs entered consolidation -- which is the only way a blocking terminal is
+still reachable here. The gate, its position and
+:func:`~disclosure_drift.m3.single_source_canary.require_f0_success` are unchanged; what moved is
+which populations can arrive at them (D151-C5 INFO-6, as re-premised).
+
+**A chunk's ``status="complete"`` is artifact completion, never parser success -- Decision 151
+Boundaries 1 and 2.** A chunk that reached a blocking parser terminal still wrote its receipt LAST
+and still verifies; what that receipt says about the parse is its ``summary.run_outcome``, and
+what the chunk's manifest-bound catalog says is the reduced-run row it wrote. Before any merge
+creates an output world, :func:`require_admissible_chunk_semantics` reads that row from every
+admitted chunk through ``immutable=1``, holds it to the receipt's own summary, maps it through the
+accepted outcome vocabulary and refuses a blocking or unverifiable input. The resolvers
+(:func:`resolve_chunk_inputs`, :func:`resolve_contiguous_chunk_inputs`) stay what they are --
+authenticated resolution, usable for read-only inspection of a failed chunk -- and carry no
+success predicate of their own; the refusal sits at admission, in the process about to merge.
 """
 
 from __future__ import annotations
@@ -122,6 +142,7 @@ from disclosure_drift.m3.repository_identity import (
 # accepted monolithic F0 reaches, decided by the SAME predicate, so there is no weaker parallel
 # success rule for a chunked run to pass while a monolithic one would have stopped.
 from disclosure_drift.m3.single_source_canary import (
+    BLOCKING_PARSER_STATES,
     phase_execution_identity,
     require_f0_success,
 )
@@ -147,11 +168,14 @@ __all__ = [
     "CONSOLIDATION_CONTRACT",
     "attachment_limit",
     "ChunkConsolidationError",
+    "ChunkSemantics",
     "ConsolidationResult",
     "FinalWorldReceipt",
+    "chunk_semantics",
     "consolidate_chunks",
     "derived_f0_outcome",
     "derived_f0_payload",
+    "require_admissible_chunk_semantics",
     "require_attachable",
     "require_single_pass_plan",
     "resolve_chunk_inputs",
@@ -519,6 +543,272 @@ def _refuse_foreign_chunk_directories(
                 "Nothing was read, merged, or deleted"
             )
             raise ChunkConsolidationError(message)
+
+
+# --------------------------------------------------------------------------- #
+# Chunk semantics -- Decision 151 Boundaries 1 and 2
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class ChunkSemantics:
+    """What one admitted chunk's parse actually established, read from its manifest-bound row.
+
+    ``run_outcome`` is the chunk's own reduced-run row's ``outcome`` (``failed``,
+    ``completed_with_quarantine`` or ``completed``); ``parser_state`` is that outcome through the
+    accepted ``_STREAMED_PARSER_STATE`` mapping; ``blocking_structural`` is the row summary's
+    ``structural_detail.blocking``, the count the reduction makes ``failed`` from. A positive
+    ``quarantined`` count is **not** blocking: a name-only field-level quarantine reaches
+    ``completed_with_quarantine`` / ``quarantined``, which the accepted vocabulary admits.
+    """
+
+    chunk_id: str
+    parser_run_id: str
+    parser_id: str
+    parser_version: str
+    run_outcome: str
+    parser_state: str
+    parsed: int
+    quarantined: int
+    blocking_structural: int
+
+    @property
+    def blocking(self) -> bool:
+        """Whether this chunk reached a blocking parser terminal by the accepted rule."""
+        return self.parser_state in BLOCKING_PARSER_STATES
+
+    def as_record(self) -> Mapping[str, object]:
+        """A deterministic rendering."""
+        return {
+            "chunk_id": self.chunk_id,
+            "parser_run_id": self.parser_run_id,
+            "parser_id": self.parser_id,
+            "parser_version": self.parser_version,
+            "run_outcome": self.run_outcome,
+            "parser_state": self.parser_state,
+            "parsed": self.parsed,
+            "quarantined": self.quarantined,
+            "blocking_structural": self.blocking_structural,
+            "blocking": self.blocking,
+        }
+
+
+def _summary_int(summary: Mapping[str, object], *path: str, label: str) -> int:
+    """One integer out of a run summary, or a refusal; nothing is defaulted to zero."""
+    node: object = summary
+    for key in path:
+        if not isinstance(node, Mapping) or key not in node:
+            message = (
+                f"{label}: the parser-run summary carries no {'.'.join(path)!r}; semantics that "
+                "are not recorded are unverifiable and are refused rather than read as zero"
+            )
+            raise ChunkConsolidationError(message)
+        node = node[key]
+    if isinstance(node, bool) or not isinstance(node, int) or node < 0:
+        message = f"{label}: the parser-run summary's {'.'.join(path)!r} is not a count; refused"
+        raise ChunkConsolidationError(message)
+    return node
+
+
+def _row_count(row: sqlite3.Row, column: str, *, label: str) -> int:
+    """One nonnegative count out of a DURABLE parser-run column, or a refusal -- D151-C31R2 MINOR-3.
+
+    The sibling of :func:`_summary_int` for the stored columns rather than the JSON summary, and
+    fail-closed in the same way. What the database actually returned decides: a ``NULL``, a
+    boolean, a string, a float or a negative value is unverifiable evidence and is refused. Nothing
+    here parses a string, truncates a float, reads truthiness or defaults to zero -- the schema
+    that normally guarantees these values is the chunk's own, and a reader that trusts a guarantee
+    it did not check is exactly what this module refuses to be.
+    """
+    try:
+        value: object = row[column]
+    except (IndexError, KeyError):
+        message = (
+            f"{label}: the parser-run row carries no {column!r} column; a count that is not "
+            "recorded is unverifiable and is refused rather than read as zero"
+        )
+        raise ChunkConsolidationError(message) from None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        message = (
+            f"{label}: the parser-run row's durable {column!r} is {value!r}, which is not a "
+            "nonnegative integer count; refused rather than coerced"
+        )
+        raise ChunkConsolidationError(message)
+    return value
+
+
+def chunk_semantics(item: ChunkInput) -> ChunkSemantics:
+    """Read one admitted chunk's parser-run semantics from its catalog and hold them to its
+    receipt -- Decision 151 Boundary 1.
+
+    The evidence is the ``census_parser_runs`` row the chunk's own accepted writer wrote into
+    its manifest-bound working catalog, read through ``immutable=1`` (no sidecar, no write) at a
+    URI whose PATH is percent-escaped by ``Path.as_uri()``, so a directory name carrying a '?' or
+    a '#' addresses the chunk's own catalog rather than being truncated into some other file
+    (D151-C31R2 MINOR-2). The row is looked up by the AUTHENTICATED source observation -- the one
+    the plan names and :func:`_admit_chunk_inputs` already held the receipt to -- never by "the
+    only row" and never by a value the receipt claims. Then, in order, each of these refuses:
+
+    * a catalog that cannot be opened read-only or cannot answer the query -- translated here
+      into this module's own error, with its cause, rather than escaping as a raw
+      :class:`sqlite3.Error` or being read as absence;
+    * no row over that observation, or more than one;
+    * a parser id or version other than the execution contract's -- decided by the accepted
+      :func:`_require_parser_run_truth`, which stays the one load-bearing site for that
+      forgery (D151-C5 INFO-2), now asked BEFORE any output world exists;
+    * a ``parser_run_id`` that is not the accepted preimage over the row's own observation,
+      parser and version;
+    * an outcome outside the accepted vocabulary;
+    * a summary that records no blocking count, or one that contradicts the outcome (a
+      positive count without ``failed``, or ``failed`` without one);
+    * a durable ``parsed_count`` or ``quarantined_count`` that is not a nonnegative integer --
+      absent, ``NULL``, boolean, string, float or negative -- refused by :func:`_row_count`
+      rather than coerced by ``int()`` (D151-C31R2 MINOR-3);
+    * a receipt summary whose ``run_outcome``, ``parsed_records`` or ``quarantined_records``
+      disagrees with the row it describes.
+
+    Raises:
+        ChunkConsolidationError: any of them. The chunk is untouched.
+    """
+    label = f"chunk {item.chunk_id!r}"
+    contract = item.receipt.execution_contract
+    observation = item.receipt.source_observation_id
+    # D151-C31R2 MINOR-2: the URI is built by the package's ``Path.as_uri()`` idiom, which
+    # percent-escapes the FILE PATH before the ``immutable=1`` query is appended. A raw
+    # ``file:{path}?immutable=1`` f-string does not: a directory whose name contains '?' or '#'
+    # truncates the path at that character and SQLite silently opens whatever sits at the shorter
+    # path instead -- a DECOY database read as though it were the chunk's own. Only the query is
+    # a query; the path is escaped.
+    catalog = item.catalog_path.resolve()
+    try:
+        connection = sqlite3.connect(f"{catalog.as_uri()}?immutable=1", uri=True)
+    except sqlite3.Error as exc:
+        message = (
+            f"{label}'s working catalog at {catalog} could not be opened read-only through "
+            f"immutable=1: {exc}. An unreadable catalog is unverifiable evidence and is refused"
+        )
+        raise ChunkConsolidationError(message) from exc
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT parser_run_id, source_observation_id, parser_id, parser_version, "
+            "parsed_count, quarantined_count, outcome, summary_json FROM census_parser_runs "
+            "WHERE source_observation_id = ?",
+            (observation,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        message = (
+            f"{label}'s working catalog at {catalog} could not be read for its parser-run row: "
+            f"{exc}. A catalog that cannot answer the question is refused, never defaulted"
+        )
+        raise ChunkConsolidationError(message) from exc
+    finally:
+        connection.close()
+    _require(
+        len(rows) == 1,
+        f"{label} carries {len(rows)} parser-run rows over the authenticated source observation "
+        f"{observation!r}; exactly one is the evidence and anything else is unverifiable",
+    )
+    row = rows[0]
+    parser_id = str(row["parser_id"])
+    parser_version = str(row["parser_version"])
+    # The accepted truth check, asked here over the manifest-bound row -- the same predicate,
+    # the same refusal, before the world rather than after the attach.
+    _require_parser_run_truth(contract=contract, parser_id=parser_id, parser_version=parser_version)
+    expected_run_id = _stable_id("parser-run", observation, parser_id, parser_version)
+    _require(
+        str(row["parser_run_id"]) == expected_run_id,
+        f"{label}'s parser-run row carries identity {str(row['parser_run_id'])[:16]}... where "
+        f"the accepted preimage over its own observation, parser and version derives "
+        f"{expected_run_id[:16]}...; refused",
+    )
+    outcome = str(row["outcome"])
+    _require(
+        outcome in _STREAMED_PARSER_STATE,
+        f"{label}'s parser-run row records outcome {outcome!r}, which is outside the accepted "
+        "vocabulary; an unknown terminal is refused rather than read as success",
+    )
+    try:
+        summary = json.loads(str(row["summary_json"]))
+    except ValueError as exc:
+        message = f"{label}'s parser-run summary is not decodable JSON: {exc}"
+        raise ChunkConsolidationError(message) from exc
+    if not isinstance(summary, Mapping):
+        message = f"{label}'s parser-run summary is not a JSON object; refused"
+        raise ChunkConsolidationError(message)
+    blocking = _summary_int(summary, "structural_detail", "blocking", label=label)
+    failures = _summary_int(summary, "counts", "structural_failures", label=label)
+    parsed = _row_count(row, "parsed_count", label=label)
+    quarantined = _row_count(row, "quarantined_count", label=label)
+    _require(
+        blocking == failures
+        and (blocking > 0) == (outcome == "failed")
+        and (blocking == 0 and quarantined > 0) == (outcome == "completed_with_quarantine")
+        and (blocking == 0 and quarantined == 0) == (outcome == "completed"),
+        f"{label}'s parser-run row is self-contradictory: outcome {outcome!r} with "
+        f"{blocking} blocking structural failure(s) ({failures} counted) and {quarantined} "
+        "quarantined record(s); a row that does not describe itself is refused",
+    )
+    summary_counts = item.receipt.summary
+    _require(
+        summary_counts.run_outcome == outcome
+        and summary_counts.parsed_records == parsed
+        and summary_counts.quarantined_records == quarantined,
+        f"{label}'s receipt summarizes run_outcome {summary_counts.run_outcome!r} with "
+        f"{summary_counts.parsed_records} parsed / {summary_counts.quarantined_records} "
+        f"quarantined, and its manifest-bound parser-run row records {outcome!r} with "
+        f"{parsed} / {quarantined}. A receipt that contradicts the evidence it binds is "
+        "refused; status 'complete' is artifact completion and proves no parser outcome",
+    )
+    return ChunkSemantics(
+        chunk_id=item.chunk_id,
+        parser_run_id=str(row["parser_run_id"]),
+        parser_id=str(row["parser_id"]),
+        parser_version=str(row["parser_version"]),
+        run_outcome=outcome,
+        parser_state=_STREAMED_PARSER_STATE[outcome],
+        parsed=parsed,
+        quarantined=quarantined,
+        blocking_structural=blocking,
+    )
+
+
+def require_admissible_chunk_semantics(inputs: Sequence[ChunkInput]) -> tuple[ChunkSemantics, ...]:
+    """Refuse a merge whose inputs include a blocking or unverifiable chunk -- Decision 151
+    Boundary 2, FailFast-D.
+
+    Called by every merge that creates an output world -- the single-pass consolidator and both
+    level-1 group bodies -- after the inputs are authenticated and BEFORE the output world, the
+    attach, the load or the merge exist. Every input's semantics are read
+    (:func:`chunk_semantics`); a chunk whose accepted terminal is in
+    :data:`~disclosure_drift.m3.single_source_canary.BLOCKING_PARSER_STATES` refuses the whole
+    step, and so does one whose semantics cannot be verified. A chunk that is merely
+    ``quarantined`` is admitted: the accepted vocabulary already permits a quarantined parse to
+    proceed, and a gate on the quarantine count would reject exactly the non-blocking
+    field-level defect Decision 151 R2 exists to admit.
+
+    Returns:
+        Every input's semantics, in input order, so the caller can record what it admitted.
+
+    Raises:
+        ChunkConsolidationError: a blocking or unverifiable input. Nothing was created.
+    """
+    semantics = tuple(chunk_semantics(item) for item in inputs)
+    blocking = [item for item in semantics if item.blocking]
+    if blocking:
+        described = ", ".join(
+            f"{item.chunk_id} (outcome {item.run_outcome!r}, parser_state "
+            f"{item.parser_state!r}, {item.blocking_structural} blocking structural)"
+            for item in blocking
+        )
+        message = (
+            f"{len(blocking)} of {len(semantics)} input chunk(s) reached a BLOCKING parser "
+            f"terminal: {described}. A chunk receipt's status 'complete' is artifact completion, "
+            "not parser success, and a merge over a blocking input would build a world the "
+            "accepted D140-R12 gate could only refuse after the work was done. The step is "
+            "refused HERE, before any output world, attach, load or merge exists; the failed "
+            "chunk is left exactly as it is for diagnosis"
+        )
+        raise ChunkConsolidationError(message)
+    return semantics
 
 
 def _nearest_existing(path: Path) -> Path:
@@ -1277,6 +1567,7 @@ def _reduced_parser_run(
         quarantined=quarantined,
         parser_state=_STREAMED_PARSER_STATE[outcome],
         duplicate_identities=duplicate_identities,
+        blocking_structural=blocking,
     )
 
 
@@ -1286,6 +1577,9 @@ class _ReducedRun:
 
     ``parser_id`` and ``parser_version`` are the pair the chunks' own run rows name -- the
     reduced accepted evidence -- and are already proved equal to the execution contract's.
+    ``blocking_structural`` is the summed blocking count the reduction decided ``outcome`` from
+    (Decision 151 Boundary 3): it is what a level-1 receipt records as its observed blocking
+    evidence and what the level-2 S2 witness is held to.
     """
 
     parser_run_id: str
@@ -1296,6 +1590,7 @@ class _ReducedRun:
     quarantined: int
     parser_state: str
     duplicate_identities: tuple[str, ...]
+    blocking_structural: int = 0
 
 
 def _require_parser_run_truth(
@@ -1954,6 +2249,13 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
     :func:`~disclosure_drift.m3.single_source_canary.require_f0_success` itself rather than by a
     parallel rule stated here.
 
+    **Step 12 is reached by a reduction, never by a blocking input -- Decision 151.**
+    :func:`require_admissible_chunk_semantics` runs immediately after step 2's resolution and
+    refuses a blocking or unverifiable input chunk before step 4 creates the world, so a blocking
+    input produces no world, no rows and no sidecar to dispose of. The diagnostic parity described
+    above therefore applies only where the reduction over otherwise-admissible inputs itself
+    became blocking (D151-C5 INFO-6, as re-premised); the gate itself is untouched.
+
     Args:
         run_id: The run this F0 belongs to. A **name**, not a semantic value: it can say which
             run, never what the run found.
@@ -1977,6 +2279,10 @@ def consolidate_chunks(  # noqa: PLR0915 - one merge, and every predicate it mus
     repository = require_clean_running_repository()
     inputs = resolve_chunk_inputs(plan, internal_root=internal_root, external_root=external_root)
     require_attachable(len(inputs))
+    # Decision 151 Boundary 2: every admitted chunk's manifest-bound parser-run semantics are
+    # read and a blocking or unverifiable input refuses HERE -- before the seed identity is
+    # compared, before the world directory exists and before anything is attached.
+    require_admissible_chunk_semantics(inputs)
     contract = inputs[0].receipt.execution_contract
     _require_consolidation_identity(
         inputs=inputs,

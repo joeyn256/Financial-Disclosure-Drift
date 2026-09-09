@@ -986,7 +986,7 @@ def test_the_parent_map_is_bounded_by_the_shard_population(tmp_path: Path) -> No
 
 
 # ==========================================================================
-# The parser version the correction moves: submissions-json/1.2
+# The parser version the correction moves: submissions-json/1.2 (now 1.3)
 # ==========================================================================
 # Repair C changed what ``parse_submissions_document`` recognizes in ``filings.recent``, so the
 # version stamped on its provenance must say so. There is exactly one declaration — the parser
@@ -997,13 +997,17 @@ def test_the_parent_map_is_bounded_by_the_shard_population(tmp_path: Path) -> No
 # it and are not rewritten, and a future conditional reuse of a 1.1 artifact must refuse
 # compatibility rather than reuse it under a parser that no longer produced it. Migration
 # ``0016`` is not implied — nothing about the persisted schema moves.
+#
+# Decision 151 R3 later moved the same single declaration from 1.2 to 1.3 (the current-name
+# rule), so ``submissions-json/1.2`` is historical in exactly the same way 1.1 is: the chain
+# below is unchanged and its anchor literal is now 1.3.
 def test_the_implementation_declares_one_two_and_the_table_derives_it() -> None:
     from disclosure_drift.sec.parsers.submissions import PARSER_ID, PARSER_VERSION
     from disclosure_drift.sec.parsers.versions import PARSER_VERSIONS, parser_version_for
 
-    assert PARSER_VERSION == "submissions-json/1.2"
-    assert PARSER_VERSIONS[PARSER_ID] == "submissions-json/1.2"
-    assert parser_version_for(PARSER_ID) == "submissions-json/1.2"
+    assert PARSER_VERSION == "submissions-json/1.3"
+    assert PARSER_VERSIONS[PARSER_ID] == "submissions-json/1.3"
+    assert parser_version_for(PARSER_ID) == "submissions-json/1.3"
 
 
 def test_the_live_source_registry_definition_agrees_with_one_two() -> None:
@@ -1011,7 +1015,7 @@ def test_the_live_source_registry_definition_agrees_with_one_two() -> None:
     from disclosure_drift.sec.source_registry import SOURCES
 
     for source_id in ("sec_bulk_submissions", "sec_submissions_entity"):
-        assert SOURCES[source_id].parser_version == "submissions-json/1.2"
+        assert SOURCES[source_id].parser_version == "submissions-json/1.3"
 
 
 def test_parser_output_provenance_carries_one_two() -> None:
@@ -1022,8 +1026,8 @@ def test_parser_output_provenance_carries_one_two() -> None:
         document, RecordLocation("obs", "sec_bulk_submissions", member_name="m.json")
     )
 
-    assert outcome.parser_version == "submissions-json/1.2"
-    assert {record.parser_version for record in outcome.records} == {"submissions-json/1.2"}
+    assert outcome.parser_version == "submissions-json/1.3"
+    assert {record.parser_version for record in outcome.records} == {"submissions-json/1.3"}
 
 
 def test_a_disposable_working_catalog_persists_one_two(tmp_path: Path) -> None:
@@ -1048,7 +1052,7 @@ def test_a_disposable_working_catalog_persists_one_two(tmp_path: Path) -> None:
                 "SELECT parser_id, parser_version, outcome FROM census_parser_runs"
             )
         ]
-    assert runs == [("submissions-json", "submissions-json/1.2", "completed")]
+    assert runs == [("submissions-json", "submissions-json/1.3", "completed")]
 
 
 def test_the_version_move_changes_no_e0_authority_or_state() -> None:

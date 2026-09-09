@@ -23,6 +23,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -696,30 +697,82 @@ def test_a_level_one_intermediate_is_never_a_final_world(tmp_path: Path) -> None
     assert not (partial["multipass_root"] / "final").exists()
 
 
-def test_level_two_stops_at_the_accepted_d140_r12_gate(tmp_path: Path) -> None:
-    """A blocking source: level 1 completes, level 2 refuses, nothing terminal exists."""
+def test_level_one_refuses_a_blocking_chunk_before_any_intermediate_exists(
+    tmp_path: Path,
+) -> None:
+    """A blocking source: level 1 refuses at admission and no intermediate is ever built.
+
+    Until Decision 151 the level-1 merge admitted a failed chunk, level 2 built the whole world
+    and the accepted D140-R12 gate refused it at the end. Boundary 2 (FailFast-D) refuses the
+    failed chunk in the level-1 child before its attempt directory exists, so the multipass never
+    reaches level 2 at all; the monolithic reference still stops at its own gate, and the failed
+    chunks' run rows reduce to that reference's run row exactly.
+    """
     database, tree = c1.build_world(tmp_path, members=9, filings=2, shards=1, malformed=2)
     eq.monolithic_f0(database, tree, tmp_path / "mono", strict=False)
     reference = eq.measure(tmp_path / "mono")
+    assert reference["parser_state"] == "failed"
+    expected = eq.failure_evidence_of_run_row(reference)
+    plan = c13.multipass_plan(tree, database, chunk_members=1)
+    run = c13.execute_in_process(plan, tmp_path / "run", database, tree)
+    with pytest.raises(cc.ChunkConsolidationError, match="BLOCKING parser terminal"):
+        c13.merge_in_process(run, database, finalize=False)
+    multipass_root = run["base"] / "multipass"
+    assert not list(multipass_root.rglob(cm.INTERMEDIATE_RECEIPT_FILENAME))
+    assert not (multipass_root / "intermediates").exists()
+    observed = eq.chunk_failure_evidence(run)
+    assert observed["failed_chunks"]
+    assert {key: observed[key] for key in expected} == expected
+
+
+def test_level_two_stops_at_the_accepted_d140_r12_gate(tmp_path: Path) -> None:
+    """The level-2 gate is still load-bearing: an injected blocking reduction is refused.
+
+    A failed chunk never reaches level 2 since Decision 151, so the blocking reduced run is
+    injected over healthy intermediates (the D151-C3 R06 route, on the multipass path): the
+    gate refuses, the world keeps its diagnostic rows and sidecar and no terminal exists; with
+    the gate neutralised the same intermediates finalize with ``parser_state_after == "failed"``
+    -- the gate is the refusal, and nothing else.
+    """
+    database, tree = c1.build_world(tmp_path, members=9, filings=2, shards=1)
     plan = c13.multipass_plan(tree, database, chunk_members=1)
     run = c13.execute_in_process(plan, tmp_path / "run", database, tree)
     partial = c13.merge_in_process(run, database, finalize=False)
     world = partial["multipass_root"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        cm.finalize_multipass_body(
-            c13.final_request(
-                run,
-                schedule_path=partial["schedule_path"],
-                intermediates_root=partial["intermediates_root"],
-                world_directory=world,
-                database=database,
-                run_id="blocking",
+
+    def inject(patch: pytest.MonkeyPatch) -> None:
+        original = cm._reduced_parser_run
+
+        def failed(
+            connection: Any, aliases: Any, *, contract: Any, statement_runner: Any = None
+        ) -> Any:
+            reduced = original(
+                connection, aliases, contract=contract, statement_runner=statement_runner
             )
-        )
-    # The merge was exact and complete -- the diagnostic rows and sidecar are the monolithic ones.
+            connection.execute(
+                "UPDATE census_parser_runs SET outcome = 'failed' WHERE parser_run_id = ?",
+                (reduced.parser_run_id,),
+            )
+            return replace(reduced, outcome="failed", parser_state="failed")
+
+        patch.setattr(cm, "_reduced_parser_run", failed)
+
+    with pytest.MonkeyPatch.context() as patch:
+        inject(patch)
+        with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+            cm.finalize_multipass_body(
+                c13.final_request(
+                    run,
+                    schedule_path=partial["schedule_path"],
+                    intermediates_root=partial["intermediates_root"],
+                    world_directory=world,
+                    database=database,
+                    run_id="blocking",
+                )
+            )
     candidate = eq.measure(world)
-    eq.assert_equivalent(reference, candidate)
     assert candidate["parser_state"] == "failed"
+    assert candidate["counts"]["census_parsed_records"] > 0
     assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
     ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
     try:
@@ -728,9 +781,8 @@ def test_level_two_stops_at_the_accepted_d140_r12_gate(tmp_path: Path) -> None:
         assert progress is not None and progress.state == "in_progress"
     finally:
         ledger.close()
-    # And with the accepted gate neutralised, the same intermediates finalize -- the gate is the
-    # refusal, and nothing else (the D151-C3 R06 proof, on the multipass path).
     with pytest.MonkeyPatch.context() as patch:
+        inject(patch)
         patch.setattr(cm, "require_f0_success", lambda outcome: outcome)
         bypassed = cm.finalize_multipass_body(
             c13.final_request(

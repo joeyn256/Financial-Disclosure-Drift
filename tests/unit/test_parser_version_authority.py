@@ -99,23 +99,25 @@ def test_both_decision_131_versions_are_pinned_and_derived_end_to_end() -> None:
     so a test that only compared derived surfaces to each other would agree with itself while
     both drifted together. The literal is the anchor; the chain is what is under test.
     """
-    assert PARSER_VERSION == "submissions-json/1.2"
+    # Decision 151 R3 moved the submissions parser from 1.2 to 1.3 (the current-name rule);
+    # the historical shard parser did not move. Both literals stay pinned here as the anchor.
+    assert PARSER_VERSION == "submissions-json/1.3"
     assert HISTORICAL_PARSER_VERSION == "submissions-historical/1.1"
 
-    assert PARSER_VERSIONS[PARSER_ID] == "submissions-json/1.2"
+    assert PARSER_VERSIONS[PARSER_ID] == "submissions-json/1.3"
     assert PARSER_VERSIONS[HISTORICAL_PARSER_ID] == "submissions-historical/1.1"
 
-    assert parser_version_for(PARSER_ID) == "submissions-json/1.2"
+    assert parser_version_for(PARSER_ID) == "submissions-json/1.3"
     assert parser_version_for(HISTORICAL_PARSER_ID) == "submissions-historical/1.1"
 
-    assert SOURCES["sec_bulk_submissions"].parser_version == "submissions-json/1.2"
-    assert SOURCES["sec_submissions_entity"].parser_version == "submissions-json/1.2"
+    assert SOURCES["sec_bulk_submissions"].parser_version == "submissions-json/1.3"
+    assert SOURCES["sec_submissions_entity"].parser_version == "submissions-json/1.3"
     assert SOURCES["sec_submissions_historical"].parser_version == "submissions-historical/1.1"
 
 
 def test_the_previously_drifted_versions_are_now_correct() -> None:
     # The three that had silently fallen behind their implementations.
-    assert SOURCES["sec_bulk_submissions"].parser_version == "submissions-json/1.2"
+    assert SOURCES["sec_bulk_submissions"].parser_version == "submissions-json/1.3"
     assert SOURCES["sec_edgar_filing_calendar"].parser_version == "edgar-calendar/2.0"
     assert (
         SOURCES["sec_edgar_calendar_announcement"].parser_version
@@ -178,7 +180,7 @@ def test_a_registered_source_reports_the_authoritative_version_to_the_catalog() 
     spec = require_registered("sec_bulk_submissions")
     # This is the value the catalog writes into census_parser_runs.parser_version.
     assert spec.parser_version == parser_version_for(spec.parser_id)
-    assert spec.parser_version.endswith("/1.2")
+    assert spec.parser_version.endswith("/1.3")
 
 
 # --------------------------------------------------------------------------- #

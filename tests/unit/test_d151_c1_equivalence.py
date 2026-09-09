@@ -155,16 +155,18 @@ def chunked_f0(
     )
 
 
-def chunked_f0_world(
+def refused_chunked_run(
     root: Path, database: Path, tree: DataTree, *, chunk_members: int, label: str
-) -> Path:
-    """Consolidate a source that reaches a BLOCKING terminal, and return the refused world.
+) -> dict[str, Any]:
+    """Chunk a source that reaches a BLOCKING terminal, and prove consolidation refuses it
+    BEFORE any world exists -- Decision 151 Boundary 2 (FailFast-D).
 
-    The accepted D140-R12 gate stops the consolidation, so there is no
-    :class:`~disclosure_drift.m3.chunk_consolidation.ConsolidationResult` to return -- which is
-    the point. What is returned is the world directory the refusal left behind: its durable
-    diagnostic rows and, since D151-C5 INFO-6, its finalized diagnostic sidecar -- exactly what
-    the accepted monolithic F0 leaves -- so both can be compared against the monolithic ones.
+    Until Decision 151 the consolidator admitted the failed chunks, built the whole world and
+    was refused by the accepted D140-R12 gate at the end (D151-C5 INFO-6 compared that refused
+    world with the monolithic one). A chunk whose parse reached ``failed`` is now refused at
+    admission, so there is no consolidated world at all: the diagnostic evidence of a failed
+    chunked F0 is the failed chunk world itself, retained exactly as it is. What is returned is
+    the chunk run, so its chunk-level evidence can be compared with the monolithic run row.
     """
     run = c1x.run_chunked_f0(
         root,
@@ -176,7 +178,7 @@ def chunked_f0_world(
         repository=c1.PINNED,
     )
     world_directory = run["base"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+    with pytest.raises(cc.ChunkConsolidationError, match="BLOCKING parser terminal"):
         cc.consolidate_chunks(
             plan=run["plan"],
             internal_root=run["chunk_root"],
@@ -184,7 +186,43 @@ def chunked_f0_world(
             world_directory=world_directory,
             run_id="equivalence-run",
         )
-    return world_directory
+    assert not world_directory.exists()
+    return run
+
+
+def _reduced_outcome(blocking: int, quarantined: int) -> str:
+    """The accepted reduction rule, restated for the comparison only."""
+    if blocking:
+        return "failed"
+    return "completed_with_quarantine" if quarantined else "completed"
+
+
+def failure_evidence_of_run_row(measured: dict[str, Any]) -> dict[str, Any]:
+    """What a refused MONOLITHIC world's run row says: outcome and the three counts."""
+    (row,) = measured["runs"]
+    summary = json.loads(str(row["summary_json"]))
+    return {
+        "outcome": str(row["outcome"]),
+        "parsed": int(row["parsed_count"]),
+        "quarantined": int(row["quarantined_count"]),
+        "blocking_structural": int(summary["structural_detail"]["blocking"]),
+    }
+
+
+def chunk_failure_evidence(run: dict[str, Any]) -> dict[str, Any]:
+    """What the refused CHUNKS say, read through the accepted read-only resolution and the
+    Decision 151 semantics reader, and reduced by the accepted rule."""
+    inputs = cc.resolve_chunk_inputs(run["plan"], internal_root=run["chunk_root"])
+    semantics = [cc.chunk_semantics(item) for item in inputs]
+    blocking = sum(item.blocking_structural for item in semantics)
+    quarantined = sum(item.quarantined for item in semantics)
+    return {
+        "outcome": _reduced_outcome(blocking, quarantined),
+        "parsed": sum(item.parsed for item in semantics),
+        "quarantined": quarantined,
+        "blocking_structural": blocking,
+        "failed_chunks": [item.chunk_id for item in semantics if item.blocking],
+    }
 
 
 # ==========================================================================
@@ -193,9 +231,10 @@ def chunked_f0_world(
 def measure(world_directory: Path) -> dict[str, Any]:
     """Everything two F0 worlds are compared on -- a refused blocking-terminal world included.
 
-    A consolidation the accepted D140-R12 gate refused leaves its durable diagnostic rows AND its
-    finalized diagnostic sidecar (D151-C5 INFO-6), exactly as the accepted monolithic F0 does, so
-    the same measurement applies to both outcomes of both paths.
+    A MONOLITHIC F0 the accepted D140-R12 gate refused leaves its durable diagnostic rows and its
+    finalized diagnostic sidecar, and a consolidation refused at the same gate (reachable only
+    through an injected failed reduction since Decision 151 Boundary 2 refuses a failed chunk
+    before the world exists) leaves the same, so the same measurement applies to both.
     """
     measured: dict[str, Any] = {}
     with connect(world_directory / WORKING_CATALOG_FILENAME, writer=False) as connection:
@@ -301,19 +340,23 @@ def test_c32_to_c43_the_chunked_world_equals_the_monolithic_one(
             assert_equivalent(reference, measure(result.world_directory))
             assert result.receipt.status == "complete"
             continue
-        # A source that reaches a BLOCKING terminal. Both paths stop at the accepted D140-R12
-        # gate -- ``monolithic_f0`` was driven with ``strict=False`` precisely because the gate
-        # would refuse it, and the consolidated path is refused by the same predicate. What is
-        # asserted is that the MERGE was exact AND complete (D151-C5 INFO-6): the rows the
-        # refusal left behind for diagnosis are the rows the monolithic run produced, and the
-        # finalized diagnostic sidecar beside them is the monolithic one, member for member.
-        world = chunked_f0_world(
+        # A source that reaches a BLOCKING terminal. The monolithic path stops at the accepted
+        # D140-R12 gate (``monolithic_f0`` was driven with ``strict=False`` for exactly that
+        # reason) and leaves its diagnostic world; the chunked path is refused EARLIER, at
+        # admission, before any world exists (Decision 151 Boundary 2). What is asserted is that
+        # the failure evidence is exact and complete at the chunk level: the failed chunks'
+        # manifest-bound run rows reduce -- by the accepted rule -- to the monolithic run row's
+        # outcome and counts, and every partition names the same failed members.
+        assert reference["parser_state"] == "failed"
+        expected = failure_evidence_of_run_row(reference)
+        assert expected["outcome"] == "failed" and expected["blocking_structural"] > 0
+        run = refused_chunked_run(
             tmp_path, database, tree, chunk_members=size, label=f"{label}-n{size}"
         )
-        candidate = measure(world)
-        assert_equivalent(reference, candidate)
-        assert candidate["parser_state"] == reference["parser_state"] == "failed"
-        assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
+        observed = chunk_failure_evidence(run)
+        assert observed["failed_chunks"]
+        assert {key: observed[key] for key in expected} == expected
+        assert not (run["base"] / "final" / FINAL_WORLD_RECEIPT_FILENAME).exists()
 
 
 def test_the_partition_actually_varied(tmp_path: Path) -> None:

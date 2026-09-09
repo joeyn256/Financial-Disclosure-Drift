@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import test_d151_c1_chunk_execution as c1x  # noqa: E402
 import test_d151_c1_chunk_plan as c1  # noqa: E402
 import test_d151_c1_equivalence as eq  # noqa: E402
+import test_d151_c3_corrections as c3  # noqa: E402
 import test_d151_c3_phase_runner as pr  # noqa: E402
 
 from disclosure_drift.m3 import chunk_consolidation as cc  # noqa: E402
@@ -678,19 +679,12 @@ def test_p02_p04_c516_c518_a10_a11_a12_a_unanimous_forgery_is_refused_by_the_run
     assert "does not describe its own evidence" in str(raised.value)
     assert value in str(raised.value)
     world = run["base"] / "final"
+    # Since Decision 151 Boundary 2 the truth check is asked at ADMISSION, over the manifest-bound
+    # run row of every input, before the world directory exists: nothing was created at all --
+    # no receipt, no sidecar, no run row, no loaded table, no ledger.
+    assert not world.exists()
     assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
     assert not (world / COMPACT_EVIDENCE_SIDECAR_FILENAME).exists()
-    # Refused before the reduced row was written: the transaction rolled back, so the world holds
-    # no run row and no loaded table.
-    with connect(world / WORKING_CATALOG_FILENAME, writer=False) as connection:
-        counts = ce.table_row_counts(connection)
-    assert counts["census_parser_runs"] == 0
-    assert counts["census_parsed_records"] == 0
-    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
-    try:
-        assert read_phase_checkpoint(ledger, PHASE_F0) is None
-    finally:
-        ledger.close()
 
 
 def test_p02_the_truth_check_is_load_bearing(tmp_path: Path) -> None:
@@ -825,27 +819,36 @@ def test_c520_the_accepted_phase_machinery_leaves_a_finalized_sidecar_on_a_faile
         ledger.close()
 
 
-def failed_chunked_world(tmp_path: Path, database: Path, tree: DataTree, *, size: int) -> Path:
-    """A blocking source, chunked, consolidated, and refused by the accepted gate."""
+def failed_chunked_run(
+    tmp_path: Path, database: Path, tree: DataTree, *, size: int
+) -> tuple[Any, Path]:
+    """A blocking source, chunked, and REFUSED AT ADMISSION -- Decision 151 Boundary 2.
+
+    Until Decision 151 this helper consolidated the failed chunks into a world the accepted gate
+    then refused, and INFO-6 compared that world with the monolithic one. A failed chunk is now
+    refused before any world exists, so what is returned is the chunk run and the world path
+    that must NOT exist; the failed chunk worlds are the diagnostic state, retained as they are.
+    """
     run = run_chunks(tmp_path, database, tree, size=size, label=f"failed-n{size}")
     world = run["base"] / "final"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+    with pytest.raises(cc.ChunkConsolidationError, match="BLOCKING parser terminal"):
         consolidate(run, database)
-    return world
+    assert not world.exists()
+    return run, world
 
 
 @pytest.mark.parametrize("size", [1, 2, 3, 10_000])
 def test_c521_a13_a_failed_chunked_f0_leaves_the_monolithic_diagnostic_state(
     tmp_path: Path, size: int
 ) -> None:
-    """C521/A13: failed monolithic diagnostic rows + sidecar == failed chunked ones.
+    """C521/A13: the failed monolithic run row == the failed chunks' rows, reduced.
 
-    Two accepted references, one blocking source, every partition size: the accepted ``_f0``
-    driven directly (its gate raising), and the accepted phase machinery in a fresh process. The
-    consolidated world the gate refused is measured with the SAME instrument the healthy
-    equivalence uses -- every governed table, the run row, the plan terminal, the whole member
-    manifest, the source evidence row, the manifest digest and the sidecar identity -- and every
-    one of them is equal, subject only to the accepted wall-clock columns.
+    One blocking source, every partition size. The accepted ``_f0`` driven directly is refused
+    by its gate and leaves its diagnostic world; the chunked path is refused at admission and
+    leaves its failed chunk worlds. The monolithic run row's outcome, parsed, quarantined and
+    blocking counts equal the failed chunks' manifest-bound run rows reduced by the accepted
+    rule -- read through the accepted read-only resolution -- at every partition size, and
+    nothing on the chunked side reached a ledger, a checkpoint or a receipt.
     """
     database, tree = blocking_world(tmp_path)
     with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
@@ -854,26 +857,26 @@ def test_c521_a13_a_failed_chunked_f0_leaves_the_monolithic_diagnostic_state(
     assert reference["parser_state"] == "failed"
     assert reference["source_evidence"]
     assert reference["members"]
+    expected = eq.failure_evidence_of_run_row(reference)
+    assert expected["outcome"] == "failed" and expected["blocking_structural"] > 0
 
-    world = failed_chunked_world(tmp_path, database, tree, size=size)
-    candidate = eq.measure(world)
-    eq.assert_equivalent(reference, candidate)
-    assert {path.name for path in world.iterdir()} == {
-        path.name for path in (tmp_path / "mono").iterdir()
-    }
-    for directory in (world, tmp_path / "mono"):
-        ledger = RunProgressLedger(directory / PROGRESS_LEDGER_FILENAME)
-        try:
-            progress = ledger.progress(c1.INSTANCE)
-            assert progress is not None
-            assert progress.state == "in_progress"
-            assert read_phase_checkpoint(ledger, PHASE_F0) is None
-        finally:
-            ledger.close()
+    run, world = failed_chunked_run(tmp_path, database, tree, size=size)
+    observed = eq.chunk_failure_evidence(run)
+    assert observed["failed_chunks"]
+    assert {key: observed[key] for key in expected} == expected
+    assert not (world / PROGRESS_LEDGER_FILENAME).exists()
+    ledger = RunProgressLedger(tmp_path / "mono" / PROGRESS_LEDGER_FILENAME)
+    try:
+        progress = ledger.progress(c1.INSTANCE)
+        assert progress is not None
+        assert progress.state == "in_progress"
+        assert read_phase_checkpoint(ledger, PHASE_F0) is None
+    finally:
+        ledger.close()
 
 
 def test_c521_the_phase_machinery_reference_agrees_too(tmp_path: Path) -> None:
-    """C521 against the accepted phase path: the fresh-process F0 world is the same world."""
+    """C521 against the accepted phase path: the fresh-process failed F0 says the same."""
     database, tree = blocking_world(tmp_path)
     mono_root = tmp_path / "mono"
     (mono_root / "work").mkdir(parents=True)
@@ -887,49 +890,51 @@ def test_c521_the_phase_machinery_reference_agrees_too(tmp_path: Path) -> None:
     )
     assert outcome.get("failed")
     reference = eq.measure(mono_root / "work" / "mono-failed")
-    world = failed_chunked_world(tmp_path, database, tree, size=2)
-    eq.assert_equivalent(reference, eq.measure(world))
+    expected = eq.failure_evidence_of_run_row(reference)
+    run, _world = failed_chunked_run(tmp_path, database, tree, size=2)
+    observed = eq.chunk_failure_evidence(run)
+    assert {key: observed[key] for key in expected} == expected
 
 
 def test_c522_a14_a_failed_chunked_f0_still_has_no_terminal(tmp_path: Path) -> None:
-    """C522/A14: the sidecar is there; the terminal is not. Failure remains failure."""
+    """C522/A14: no world, no sidecar, no terminal. Failure remains failure, earlier."""
     database, tree = blocking_world(tmp_path)
-    world = failed_chunked_world(tmp_path, database, tree, size=2)
-    assert (world / COMPACT_EVIDENCE_SIDECAR_FILENAME).is_file()
+    run, world = failed_chunked_run(tmp_path, database, tree, size=2)
+    assert not world.exists()
+    assert not (world / COMPACT_EVIDENCE_SIDECAR_FILENAME).exists()
     assert not (world / FINAL_WORLD_RECEIPT_FILENAME).exists()
     assert not (world / "canary_result.json").exists()
-    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
-    try:
-        progress = ledger.progress(c1.INSTANCE)
-        assert progress is not None
-        assert progress.state == "in_progress"
-        assert read_phase_checkpoint(ledger, PHASE_F0) is None
-        assert read_phase_checkpoint(ledger, PHASE_F1) is None
-    finally:
-        ledger.close()
-    with connect(world / WORKING_CATALOG_FILENAME, writer=False) as connection:
-        row = connection.execute(
-            "SELECT parser_state FROM census_plan_sources WHERE source_instance_id = ?",
-            (c1.INSTANCE,),
-        ).fetchone()
-        counts = ce.table_row_counts(connection)
-    assert str(row["parser_state"]) == "failed"
-    assert counts["census_parsed_records"] > 0
+    # The failed chunk worlds are the diagnostic state: run row ``failed``, receipt ``complete``
+    # (artifact completion), and no source-level terminal of any kind.
+    inputs = cc.resolve_chunk_inputs(run["plan"], internal_root=run["chunk_root"])
+    failed = [item for item in inputs if cc.chunk_semantics(item).blocking]
+    assert failed
+    for item in failed:
+        assert item.receipt.status == "complete"
+        assert item.receipt.summary.run_outcome == "failed"
+        assert not (item.directory / FINAL_WORLD_RECEIPT_FILENAME).exists()
+        ledger = RunProgressLedger(item.directory / PROGRESS_LEDGER_FILENAME)
+        try:
+            assert read_phase_checkpoint(ledger, PHASE_F0) is None
+            assert read_phase_checkpoint(ledger, PHASE_F1) is None
+        finally:
+            ledger.close()
 
 
 def test_c523_a15_a_failed_chunked_f0_still_cannot_admit_f1(tmp_path: Path) -> None:
     """C523/A15: refused by the accepted admission rule directly AND by the accepted machinery.
 
-    The refused world is laid out where the accepted phase path expects it, and F1 is driven
-    through ``_run_phase_locked`` in a fresh process: it attaches the world, finds no durable F0
-    terminal, and refuses for the accepted reason.
+    No world exists where the accepted phase path expects one. The accepted admission rule,
+    asked over a fresh test-owned ledger carrying what a refused run left F1 (nothing), refuses
+    for the accepted reason; and F1 driven through ``_run_phase_locked`` in a fresh process
+    refuses as well -- there is no world to attach and no durable F0 terminal anywhere.
     """
     database, tree = blocking_world(tmp_path)
     root = tmp_path / "chunked"
     (root / "work").mkdir(parents=True)
     run = run_chunks(root, database, tree, label="chunked-failed")
     world = root / "work" / "failed-run"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+    with pytest.raises(cc.ChunkConsolidationError, match="BLOCKING parser terminal"):
         cc.consolidate_chunks(
             plan=run["plan"],
             internal_root=run["chunk_root"],
@@ -937,8 +942,9 @@ def test_c523_a15_a_failed_chunked_f0_still_cannot_admit_f1(tmp_path: Path) -> N
             world_directory=world,
             run_id="failed-run",
         )
-    assert (world / COMPACT_EVIDENCE_SIDECAR_FILENAME).is_file()
-    ledger = RunProgressLedger(world / PROGRESS_LEDGER_FILENAME)
+    assert not world.exists()
+    (tmp_path / "no-world").mkdir()
+    ledger = RunProgressLedger(tmp_path / "no-world" / PROGRESS_LEDGER_FILENAME)
     try:
         with pytest.raises(CanaryPhaseError, match="no durable terminal checkpoint"):
             require_phase_admission(
@@ -964,24 +970,30 @@ def test_c523_a15_a_failed_chunked_f0_still_cannot_admit_f1(tmp_path: Path) -> N
         check=False,
     )
     assert outcome.get("failed")
-    assert "no durable terminal checkpoint" in outcome["stderr"]
+    assert not world.exists()
 
 
 def test_the_sidecar_parity_path_cannot_bypass_the_gate(tmp_path: Path) -> None:
     """M9 stated as a test: merging the sidecar first does not weaken require_f0_success.
 
-    With the accepted gate neutralised the blocking world completes -- the gate is load-bearing
-    -- and with it in place the identical chunks are refused after the sidecar was merged.
+    Since Decision 151 a failed chunk never reaches the gate, so the blocking reduced run is
+    injected over healthy inputs (the C3 R06 route). With the accepted gate neutralised the
+    blocking world completes -- the gate is load-bearing -- and with it in place the identical
+    chunks are refused AFTER the sidecar was merged: the diagnostic sidecar is there, the
+    terminal is not.
     """
-    database, tree = blocking_world(tmp_path)
+    database, tree = healthy_world(tmp_path)
     run = run_chunks(tmp_path, database, tree)
     with pytest.MonkeyPatch.context() as patch:
+        c3.inject_failed_reduction(patch)
         patch.setattr(cc, "require_f0_success", lambda outcome: outcome)
         bypassed = consolidate(run, database, suffix="-bypassed", run_id="bypassed")
     assert bypassed.receipt.status == "complete"
     assert bypassed.receipt.parser_state_after == "failed"
-    with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
-        consolidate(run, database, suffix="-guarded", run_id="guarded")
+    with pytest.MonkeyPatch.context() as patch:
+        c3.inject_failed_reduction(patch)
+        with pytest.raises(canary.SingleSourceCanaryError, match="blocking terminal"):
+            consolidate(run, database, suffix="-guarded", run_id="guarded")
     assert (run["base"] / "final-guarded" / COMPACT_EVIDENCE_SIDECAR_FILENAME).is_file()
     assert not (run["base"] / "final-guarded" / FINAL_WORLD_RECEIPT_FILENAME).exists()
 

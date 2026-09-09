@@ -90,6 +90,7 @@ _D020: Final = "Docs/Decisions/decision_020_m23_s5_4_reserve_architecture.md"
 _D028: Final = "Docs/Decisions/decision_028_m3_1_readiness_corrections.md"
 _D029: Final = "Docs/Decisions/decision_029_m3_1_rehearsal_completeness_and_reason_semantics.md"
 _D040: Final = "Docs/Decisions/decision_040_m3_2_t2_4_implementation_authorization.md"
+_D151: Final = "Docs/Decisions/decision_151_m3_3_r2c_parser_1_3_and_failfast_d.md"
 
 _ALL: Final[tuple[ReasonCode, ...]] = (
     # --- eligibility -------------------------------------------------------- #
@@ -1036,6 +1037,26 @@ _ALL: Final[tuple[ReasonCode, ...]] = (
         blocks_release=True,
         requires_manual_review=True,
         decision_reference=_D040,
+    ),
+    # --- Decision 151 R2-C: the registrant current-name data-quality defect ---------------- #
+    #
+    # Exactly one code is approved (Decision 151 §5). It is the FIELD-LEVEL quarantine a primary
+    # SEC submissions document receives when its CIK is canonically usable and its current
+    # ``name`` is absent, null, not a string, or blank after stripping. Decision 151 R1 rules
+    # that this defect alone never makes an otherwise structurally evaluable document
+    # indeterminate, so it is deliberately non-blocking; it still requires review because no
+    # name may ever be fabricated and ``formerNames`` never substitutes for a current name. It
+    # is not an alias of SEC_SCHEMA_REQUIRED_FIELD_MISSING, which stays blocking and is reserved
+    # for a genuinely unusable document (an unusable CIK, an unusable ``filings`` region).
+    _code(
+        "PARSER_REGISTRANT_NAME_DEFICIENT",
+        "integrity",
+        "A submissions document with a canonically usable CIK carries no usable current "
+        "company name (absent, null, not a string, or blank); registrant identity is persisted "
+        "by CIK, no company-name observation is emitted, no former name substitutes, and the "
+        "filing structure is still evaluated on its own values.",
+        requires_manual_review=True,
+        decision_reference=_D151,
     ),
 )
 

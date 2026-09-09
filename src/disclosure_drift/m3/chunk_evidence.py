@@ -405,6 +405,13 @@ class SemanticSummary:
     Every field is a property of the parse rather than of the write, so a consolidator can
     compare two independently produced chunks and a reviewer can compare a chunked run against
     the accepted monolithic one without opening a database.
+
+    ``run_outcome`` is the chunk's actual parser terminal (``failed``,
+    ``completed_with_quarantine`` or ``completed``). It is a **claim** the receipt carries; the
+    evidence is the reduced-run row inside the chunk's manifest-bound catalog, and Decision 151
+    Boundary 1 holds the two together at merge admission. A chunk receipt's ``status``
+    ``"complete"`` says only that the chunk's artifacts were closed and manifested and the
+    receipt was written LAST -- a chunk whose parse reached ``failed`` is still ``complete``.
     """
 
     members: int
@@ -588,6 +595,13 @@ class ChunkReceipt:
     ``execution_contract`` is the normalized, chunk-independent half of the execution identity:
     the values two chunks of one run must share. ``execution_identity`` remains the full digest,
     which additionally folds ``chunk_id`` and ``cache_bytes`` and is therefore unique per chunk.
+
+    **``status="complete"`` is artifact and execution completion, not parser success --
+    Decision 151 MINOR-3.** It is what makes a receipt a terminal receipt at all: every named
+    artifact was closed, hashed and bound, and nothing was written afterwards. What the parse
+    established is ``summary.run_outcome`` and, authoritatively, the reduced-run row in the
+    chunk's own catalog; a completed chunk whose parse reached a blocking terminal is refused at
+    merge admission, never at receipt discovery.
     """
 
     contract: str

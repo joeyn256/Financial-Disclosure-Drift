@@ -1512,3 +1512,138 @@ it is not dead code and must not be removed as though it were. Third, **the `PAT
 scan deliberately excludes the decision records**: Decision 148 recorded the false claim as a
 finding and Decision 149 quotes it while correcting it, so widening that scan to `Docs/Decisions/`
 would fail on the records that exist to document the defect.
+
+## The Decision 151 parser-1.3 and FailFast-D surface (owner-accepted, published)
+
+[Decision 151](Decisions/decision_151_m3_3_r2c_parser_1_3_and_failfast_d.md) implements the owner's
+frozen rulings R1–R6: parser `submissions-json/1.3` (a valid-CIK document with an absent, null,
+non-string or blank current name is a field-level, non-blocking company-name defect), one new
+reason code, and the FailFast-D boundaries. It is **owner-accepted** and published by one
+governed local commit; the accepted implementation bytes are unchanged by that publication.
+
+**Its provenance, stated plainly.** The candidate was produced under
+`M3_3_D151_R21_R2C_PARSER13_FAILFAST_ENGINEERING_V3_AUTHORIZED` — a token the owner had **already
+superseded** before that execution. The owner does **not** retroactively ratify it, so V3 conferred
+no authority and no acceptance; the owner's implementation acceptance is a separate, later,
+prospective instrument that legitimizes nothing about V3. Its initial independent technical review
+is owner-accepted (zero BLOCKER, zero MAJOR code defects), and that review's five findings were
+corrected under the separate bounded
+`M3_3_D151_R21_R2C_PARSER13_FAILFAST_PROSPECTIVE_CORRECTION_V5_AUTHORIZED`.
+
+**Three later steps then followed, each under its own authority, and none of them accepts anything.**
+First, one **production** correction under
+`M3_3_D151_R21_V5_WAL_PRESERVATION_PRODUCTION_CORRECTION_CI_R2_AUTHORIZED` — a separate instrument,
+**not** V5 and **not** V5's own correction item `C2` — recorded in the `_WalPreservationGuard` row
+below. Second, normal CI on the **exact** corrected candidate tree
+`59e52bb2aedcfcf94cd3282c5ad7e017ccf1d4ca`: GitHub Actions run `34309408051`, attempt 1, both jobs
+successful, `6298 passed, 7 skipped`. That GREEN result is bound to **that tree, that run and that
+attempt only** — it is not a statement about live `main`, which is red independently, and it is not
+full-gate closure; the provisional commit `3178abe0…` is validation evidence only, never enters the
+governed chain, and at that point the governed checkout still carried zero implementation commits — a
+count now measured by the governed-publication boundary of Decision 151 §7d. Third, a fresh Claude
+Opus 5 Maximum independent
+**correction** review ("R3") under `M3_3_D151_R21_V5_WAL_C2_POST_CI_OPUS_R3_READONLY_AUTHORIZED`:
+**COMPLETED**, `POST_CI_C2_CANDIDATE_TECHNICALLY_ACCEPTABLE_FOR_OWNER_ADJUDICATION`, zero BLOCKER and
+zero MAJOR, with the governing owner accepting that **technical** review and its finding
+classification. Review acceptance is never implementation acceptance. R3's two findings were disposed
+of by the owner as `MINOR-1 = DEFERRED_NONBLOCKING` (the family-glob limitation described at the end of
+this section, **not** repaired) and `MINOR-2 = CLOSED_IN_UNCOMMITTED_DOCUMENTATION` — closed by the
+bounded five-surface governance documentation closeout under
+`M3_3_D151_R21_C2_GOVERNANCE_PUBLICATION_CLOSEOUT_R1_AUTHORIZED`, which changed documentation only
+(zero source or test bytes; `DOC_CLOSEOUT_NORMAL_CI = NOT_RUN`), exited uncommitted and unstaged, and
+did not self-accept. **The governing owner has since accepted it**, which is what closed `MINOR-2`.
+`MINOR-1` is unchanged: deferred and **not repaired**.
+
+**The sequence that then remained is complete.** The owner accepted that closeout
+(`GOVERNANCE_CLOSEOUT = OWNER_ACCEPTED`); a separately authorized final local full gate ran on its own
+fresh capacity admission and passed — one `make check-fast` over tree
+`ef0e9e24f39e141191148ec5b282f36003ee343e`, seven `worksteal` workers, all eleven gates `PASS`, `6305`
+collected, `6304` passed, `1` skipped — and the owner accepted it under
+`M3_3_D151_R21_FINAL_LOCAL_FULL_GATE_R1_ACCEPTED`; the owner accepted the implementation under
+`M3_3_D151_R21_IMPLEMENTATION_ACCEPTED`; and one bounded authority,
+`M3_3_D151_R21_FINAL_PUBLICATION_SINGLE_GOVERNED_COMMIT_R1_AUTHORIZED`, carried the result into a
+single governed local commit and was exhausted by it. The remaining storage disposition is recorded
+from the owner's rulings rather than re-established. `FINAL_FULL_GATE = CLOSED`.
+`OWNER_IMPLEMENTATION_ACCEPTED = YES`. Acceptance advances no scientific stage, `C31R2_COMPLETE = NO`,
+and public-`main` reconciliation and CI are not evaluated by that publication.
+
+| Change | Nearest affected tests |
+|---|---|
+| `src/disclosure_drift/sec/parsers/submissions.py` | `PARSER_VERSION` `1.2 -> 1.3`; `name` moves from the required set into the recognized optional set; `classify_current_name` (absent / null / non-string / blank by membership, `isinstance` and `strip`); the CIK failure decided alone; a deficient name omitted from the registrant payload and quarantined at `record_path="name"` under `PARSER_REGISTRANT_NAME_DEFICIENT` | `test_decision_151_parser_1_3_failfast_d.py` (proofs 1–9, 23), `test_r2_submissions_structure.py`, `test_d131_historical_shard_dispatch.py`, `test_parser_version_authority.py`, `test_m3_offline_parse.py`, `test_d140_total_pre_canary_hardening.py` |
+| `src/disclosure_drift/reasons.py` | exactly one new code, `PARSER_REGISTRANT_NAME_DEFICIENT` (integrity, review required, NOT release-blocking); registry count 115 | `test_reasons.py`, `test_decision_151_parser_1_3_failfast_d.py` |
+| `src/disclosure_drift/m3/offline_parse.py` | **docstring only** on `_primary_document_declarations`: the MAJOR-1 consistency coverage and the one named residual (a malformed top-level array, contained by `_resolve_shard_parent`'s undeclared-shard refusal). No extraction semantics change; `chunk_plan.py` untouched | `test_decision_151_parser_1_3_failfast_d.py` (proofs 10, 11, 24), `test_d140_total_pre_canary_hardening.py`, `test_d131_historical_shard_dispatch.py` |
+| `src/disclosure_drift/m3/chunk_consolidation.py` | `ChunkSemantics`, `chunk_semantics` (the manifest-bound run row read through `immutable=1`, looked up by the authenticated observation, held to the contract by the accepted `_require_parser_run_truth` and to the receipt summary), `require_admissible_chunk_semantics`; `_ReducedRun.blocking_structural`; `consolidate_chunks` refuses a blocking input before the world exists | `test_decision_151_parser_1_3_failfast_d.py` (12, 13, 22, 25), `test_d151_c3_corrections.py`, `test_d151_c5_precalibration_hardening.py`, `test_d151_c1_equivalence.py`, `test_d151_c1_consolidation.py` |
+| `src/disclosure_drift/m3/chunk_multipass.py` | `INTERMEDIATE_RECEIPT_CONTRACT` `/1 -> /2` with `observed_run_outcome`, `observed_quarantined`, `observed_blocking_structural`, `inputs_reached_blocking_terminal` (mandatory, consistency-checked); `LEGACY_INTERMEDIATE_RECEIPT_CONTRACT` and the read-only `read_legacy_intermediate_receipt` / `LegacyIntermediateReceipt`; `require_admissible_intermediate_semantics` at `resolve_intermediate_inputs`, the lifecycle and orchestrator reuse paths and `delete_calibration_group_chunk_worlds` (plus `_require_deletable_chunk_semantics`); Boundary 2 in both level-1 group bodies before `mkdir`; the S2 witness `blocking_structural`; `_verify_committed_witness` S2 and S19 branches; Boundary 4 `_require_reduced_run_admits_continuation` in `_run_stage` with the `L2_SEMANTIC_REFUSAL_CONTRACT` record | `test_decision_151_parser_1_3_failfast_d.py` (14–21, 26–34), `test_d151_c13_intermediates.py`, `test_d151_c13_multipass_semantics.py`, `test_d151_c29r1_retention_aware_calibration.py`, `test_d151_r19_durable_stages.py`, `test_d151_r19_stage_restart.py`, `test_d151_r19_cross_store_recovery.py`, `test_d151_r19_storage_charge.py`, `test_d151_r19_legacy_compatibility.py`, `test_d151_c19_corrections.py`, `test_d151_c13_multipass_plan.py` |
+| `src/disclosure_drift/m3/chunk_evidence.py`, `src/disclosure_drift/m3/chunk_execution.py` | **docstrings only**: `status="complete"` is artifact and execution completion, never parser success (MINOR-3) | `test_decision_151_parser_1_3_failfast_d.py` (22) |
+| `src/disclosure_drift/m3/rehearsal.py` | scenario A8's "required field missing" variant drops `cik` instead of `name` (a deficient name is non-blocking since R1; the accepted spec names no field). Found at the full gate; the other variants and scenarios are untouched | `test_m3_rehearsal.py`, `tests/integration/test_m3_cli.py` |
+| `src/disclosure_drift/m3/chunk_multipass.py` — `_WalPreservationGuard` | **a separate, later production correction** (WAL-preservation authority, not V5): the guard's constant-only `SELECT 1` activation becomes `SELECT COUNT(*) FROM main.sqlite_schema`, which must locate a schema table and therefore forces a real database-backed read through the `mode=ro` handle before the production writer opens; activation failure closes the guard and **fails closed**. Guard lifetime, close ordering, `release()` and the preservation boundary are unchanged, and a preexisting nonzero WAL is left byte-identical. `b7f63ec6…` -> `f33b67ab…`. **Not** a test-portability change, **not** a permanently open read transaction, **not** a universal claim about every SQLite build, **not** a new checkpoint mechanism | `test_d151_r19b_wal_watchdog.py` — in particular its `d08` unexplained-committed-mutation node, which is the coverage this correction exists to satisfy and which is **byte-identical** here (`ff6a54ea…`); then `test_d151_r19_durable_stages.py`, `test_d151_r19_stage_restart.py` |
+| `tests/unit/test_decision_151_parser_1_3_failfast_d.py` | **new** — the thirty-four packet proofs, over synthetic test-owned worlds only | itself |
+
+**Which tests to run for it.** Direct: `tests/unit/test_decision_151_parser_1_3_failfast_d.py`.
+Always with it: the whole `tests/unit/test_d151_*.py` family (the chunked-F0 contracts it touches,
+including `test_d151_c3_corrections.py::test_r36_the_focused_suite_passes_in_reversed_module_order`,
+which re-runs that family serially in a child), `test_r2_submissions_structure.py`, `test_reasons.py`,
+`test_parser_version_authority.py`, `test_d131_historical_shard_dispatch.py` and
+`test_m3_offline_parse.py`.
+
+**One bounded exception, and it does not survive its own pass.** The
+`M3_3_D151_R21_R2C_PARSER13_FAILFAST_PROSPECTIVE_CORRECTION_V5_AUTHORIZED` correction pass was
+expressly authorized to run only a focused selection — the Decision 151 proof module (with its new
+MINOR-2 / MINOR-3 regressions), `test_reasons.py`, and two named
+`test_d151_c5_precalibration_hardening.py` nodes — **not** the whole family, and expressly **not**
+`test_r36_…`, which launches a child over the broad D151 family. That exception belongs to that
+pass alone, and it remains historical. **The full-gate obligation it deferred has since been
+discharged in full, not relaxed**: the final local `make check-fast` over tree `ef0e9e24…` ran the
+whole suite and passed, and `FINAL_FULL_GATE = CLOSED`. A focused green result never closed nor
+substituted for it, and any future change to this surface follows the ordinary broader guidance
+above — which is undiminished.
+
+**A second bounded exception, narrower still, and also spent.** The final publication pass under
+`M3_3_D151_R21_FINAL_PUBLICATION_SINGLE_GOVERNED_COMMIT_R1_AUTHORIZED` was a **documentation-only**
+state transition: it edited five governance files, changed **no source or test byte**, and was
+expressly authorized to run only the four repository scanners — `check_markdown_links.py`,
+`check_decision_section_refs.py`, `check_repo_hygiene.py` and `check_no_secrets.py` — plus a content
+and byte-freeze audit. It ran **no** pytest, no `make check` or `check-fast`, no mypy, no Ruff over
+source and no CI, because the implementation bytes it published are byte-identical to the ones the
+final full gate had already run. That exception belongs to that pass alone: it is **not** a revival
+of the V5 exception, it does **not** apply to any change that touches `src/` or `tests/`, and any
+such change follows the ordinary broader guidance above.
+
+**Four cautions.** First, **a failed chunk never reaches the D140-R12 gate any more** — Boundary 2
+refuses it at admission, before any world — so the accepted gate's load-bearing proofs
+(`test_d151_c3_corrections.py::test_r06…`, `test_d151_c5_precalibration_hardening.py::test_the_sidecar_parity_path…`,
+`test_d151_c13_multipass_semantics.py::test_level_two_stops…`) reach the gate through an
+**injected failed reduction over healthy inputs**, and the D151-C5 INFO-6 "failed consolidated world
+equals the failed monolithic world" parity is re-premised as chunk-level failure evidence equal to the
+monolithic run row. Do not restore the old premise. Second, **two provenance identities move by
+design**: `witness_ledger_identity` for every new `/2` write (the contract literal is folded into the
+digest) and `parser_run_id` (the accepted preimage carries the parser version), which is why the
+`test_d151_c29r1…` committed goldens carry the 1.3 value — every other committed value is unchanged.
+Third, **the two level-1 group bodies are re-pinned by source digest** in
+`test_d151_r19_legacy_compatibility.py`; the two finalizers, the staging, the counters and the child
+entry are byte-identical to the R19A-C2 baseline and stay pinned. Fourth, **a positive quarantined
+count is never blocking**: a gate on the count would refuse exactly the non-blocking field-level
+defect R2 exists to admit; every predicate reads `_STREAMED_PARSER_STATE` and
+`BLOCKING_PARSER_STATES`.
+
+**R36, historically and now.** `test_d151_c3_corrections.py::test_r36_the_focused_suite_passes_in_reversed_module_order`
+spawns a child that re-runs the broad `test_d151_*` family serially in reversed module order. Its
+historical GitHub failure on `main` (run `34075716227`) was a **cascade**: the child reported exactly
+one `F`, and that `F` was the `d08` WAL-pathname failure above, not an independent R36 defect. The
+50-GiB storage admission was not implicated and `PRE_F2_MINIMUM_FREE_BYTES` appears nowhere in that
+job. Currently, on the exact candidate tree, both R36 and `d08` pass in CI (run `34309408051`,
+attempt 1). **R36 itself was not modified** by the WAL-preservation correction, and it is not modified
+here. Locally, be aware that R36's child sweep is storage- and memory-hungry: a host under the canary
+free-space floor, or with too little RAM for the parallel gate, will fail it for host reasons rather
+than code reasons.
+
+**One accepted limitation of that sweep, deferred by the owner and NOT repaired.** The Decision 151
+proof module is named `tests/unit/test_decision_151_parser_1_3_failfast_d.py`, whose stem does **not**
+match the `test_d151_*` glob. It therefore lies **outside** several `test_d151_*` family sweeps —
+R36's reversed-order child among them. The R3 independent review raised this as its `MINOR-1` and the
+governing owner classified it **`DEFERRED_NONBLOCKING`**: the file is **not** renamed, R36 is **not**
+edited, the family sweeps are **not** widened, and the limitation is carried as deferred test/CI
+infrastructure hygiene. **No claim is made that it has been repaired.** What preserves the coverage
+meanwhile is the **direct** path, which is stated above and must stay visible: run
+`tests/unit/test_decision_151_parser_1_3_failfast_d.py` **explicitly**, because a `test_d151_*`
+selection alone will silently skip all thirty-four of its proofs.

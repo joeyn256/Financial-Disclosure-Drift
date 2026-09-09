@@ -527,6 +527,13 @@ def completed_chunk_receipt(chunk_root: Path, chunk_id: str) -> tuple[ChunkRecei
     chunk; a chunk with two valid receipts is ambiguous authority and is refused rather than
     resolved by recency, attempt number, or modification time.
 
+    "Completed" here means the chunk's execution reached its terminal and its artifacts are
+    exactly the bound ones -- **not** that its parse succeeded (Decision 151 MINOR-3). A chunk
+    whose ``summary.run_outcome`` is ``failed`` is discovered here like any other, so that a
+    coordinator never re-executes it and a reviewer can still resolve it; whether it may be
+    MERGED is decided at admission, from its catalog's own parser-run row
+    (:func:`~disclosure_drift.m3.chunk_consolidation.require_admissible_chunk_semantics`).
+
     Raises:
         ChunkExecutionError: more than one attempt carries a valid receipt.
     """
